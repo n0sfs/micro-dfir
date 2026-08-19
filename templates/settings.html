@@ -58,45 +58,6 @@
             </div>
         </div>
     </div>
-
-    <!-- YARA RULE IMPORT SECTION -->
-    <div class="row mt-4">
-        <div class="col-12">
-            <div class="card shadow-sm border-secondary bg-dark text-light">
-                <div class="card-header border-secondary">
-                    <h5 class="mb-0"><i class="fa-solid fa-spider"></i> Threat Intel & YARA Rule Sync</h5>
-                </div>
-                <div class="card-body">
-                    <p class="text-muted">Download and extract community YARA repositories directly to the Micro-SOC.</p>
-                    <form method="POST" action="{{ url_for('sync_yara') }}" class="d-flex align-items-center">
-                        <input type="url" class="form-control bg-dark text-light border-secondary me-2" name="repo_url" value="https://github.com/Yara-Rules/rules/archive/refs/heads/master.zip" placeholder="Direct .zip URL to GitHub repository" required>
-                        <button type="submit" class="btn btn-outline-success text-nowrap">
-                            <i class="fa-solid fa-cloud-arrow-down"></i> Import Rules
-                        </button>
-                    </form>
-                    <small class="text-muted mt-2 d-block">
-                        <strong>Note:</strong> Rules will be extracted and saved to <code>/opt/micro-dfir/rules/yara_imported/</code> on the NUC.
-                    </small>
-                    
-                    <!-- LIST OF IMPORTED RULES -->
-                    {% if yara_files %}
-                    <hr class="border-secondary mt-4">
-                    <h6 class="text-info"><i class="fa-solid fa-file-signature"></i> Available YARA Rules ({{ yara_files|length }})</h6>
-                    <div class="bg-dark border border-secondary rounded p-2" style="max-height: 200px; overflow-y: auto;">
-                        <ul class="list-unstyled mb-0">
-                            {% for file in yara_files %}
-                            <li class="text-muted small"><i class="fa-regular fa-file-lines me-2"></i>{{ file }}</li>
-                            {% endfor %}
-                        </ul>
-                    </div>
-                    {% else %}
-                    <hr class="border-secondary mt-4">
-                    <p class="text-muted small mb-0"><i class="fa-solid fa-triangle-exclamation text-warning me-1"></i> No imported rules found.</p>
-                    {% endif %}
-                </div>
-            </div>
-        </div>
-    </div>
 </div>
 
 <script>

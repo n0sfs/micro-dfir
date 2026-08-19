@@ -91,7 +91,10 @@ def webhook():
 @login_required
 def api_ev(): return jsonify([dict(r) for r in get_db().execute("SELECT * FROM events ORDER BY timestamp DESC LIMIT ?", (request.args.get('limit', 50, type=int),)).fetchall()])
 
-# --- 1. THIS LOADS THE PAGE AND HANDLES YARA UPLOADS ---
+
+# ==========================================
+# THREAT HUNT & YARA SCANNER
+# ==========================================
 @app.route('/hunt', methods=['GET', 'POST'])
 @login_required
 def hunt():
@@ -101,7 +104,7 @@ def hunt():
         import yara
     except ImportError:
         flash("yara-python is missing. Run: pip install yara-python", "danger")
-        return render_template('hunt.html', matches=[], current_user=current_user)
+        return render_template('hunt.html', matches=[], yara_files=[], current_user=current_user)
 
     matches = []
     yara_dir = '/opt/micro-dfir/rules/yara_imported'
@@ -128,14 +131,21 @@ def hunt():
                                     pass # Skip broken community rules
                 
                 if compiled_rules == 0:
-                    flash("No valid YARA rules found. Import them via Settings.", "warning")
+                    flash("No valid YARA rules found. Import them first.", "warning")
                 else:
                     flash(f"Scanned {file.filename} against {compiled_rules} active rules.", "info")
 
-    return render_template('hunt.html', matches=matches, current_user=current_user)
+    # Fetch loaded YARA files for the UI
+    yara_files = []
+    if os.path.exists(yara_dir):
+        for root, dirs, files in os.walk(yara_dir):
+            for file_name in files:
+                if file_name.endswith(('.yar', '.yara')):
+                    yara_files.append(os.path.relpath(os.path.join(root, file_name), yara_dir))
+    yara_files.sort()
 
+    return render_template('hunt.html', matches=matches, yara_files=yara_files, current_user=current_user)
 
-# --- 2. THIS HANDLES THE LIVE LOG SEARCH PIPELINE ---
 @app.route('/api/hunt/search')
 @login_required
 def api_hunt():
@@ -198,8 +208,9 @@ def api_yara_scan():
         if os.path.exists(p): os.remove(p)
         return jsonify({"error": str(e)}), 500
 
+
 # ==========================================
-# DYNAMIC SETTINGS & AGENT DEPLOYMENT ROUTES
+# GLOBAL SETTINGS & AGENT DEPLOYMENT ROUTES
 # ==========================================
 def migrate_settings():
     try:
@@ -218,7 +229,7 @@ migrate_settings()
 @app.route('/settings', methods=['GET', 'POST'])
 @login_required
 def settings():
-    import sqlite3, os
+    import sqlite3
     from flask import request, render_template, flash
     
     conn = sqlite3.connect('/opt/micro-dfir/siem.db')
@@ -236,18 +247,7 @@ def settings():
     current_secret = result[0] if result else "YOUR_SECRET_MICRO_SOC_KEY"
     conn.close()
     
-    # Get list of imported YARA files
-    yara_files = []
-    yara_dir = '/opt/micro-dfir/rules/yara_imported'
-    if os.path.exists(yara_dir):
-        for root, dirs, files in os.walk(yara_dir):
-            for file in files:
-                if file.endswith(('.yar', '.yara')):
-                    rel_path = os.path.relpath(os.path.join(root, file), yara_dir)
-                    yara_files.append(rel_path)
-    yara_files.sort()
-    
-    return render_template('settings.html', soc_secret=current_secret, yara_files=yara_files, current_user=current_user)
+    return render_template('settings.html', soc_secret=current_secret, current_user=current_user)
 
 @app.route('/download/agent/<os_type>')
 @login_required
@@ -299,7 +299,8 @@ def sync_yara():
     except Exception as e:
         flash(f'Failed to import rules: {str(e)}', 'danger')
         
-    return redirect(url_for('settings'))
+    # Redirect back to the hunt page instead of settings!
+    return redirect(url_for('hunt'))
 
 if __name__ == '__main__':
     if not os.path.exists(DB_PATH): init_db()
