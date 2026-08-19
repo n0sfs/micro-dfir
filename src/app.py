@@ -91,6 +91,7 @@ def webhook():
 @login_required
 def api_ev(): return jsonify([dict(r) for r in get_db().execute("SELECT * FROM events ORDER BY timestamp DESC LIMIT ?", (request.args.get('limit', 50, type=int),)).fetchall()])
 
+
 # ==========================================
 # THREAT HUNT & YARA SCANNER
 # ==========================================
@@ -113,28 +114,35 @@ def hunt():
             flash("No file uploaded", "danger")
         else:
             file = request.files['scan_file']
-            if file.filename != '':
+            selected_rules = request.form.getlist('selected_rules')
+            
+            if file.filename == '':
+                flash("No file selected for scanning.", "danger")
+            elif not selected_rules:
+                flash("You must select at least one YARA rule to run the scan.", "warning")
+            else:
                 file_data = file.read()
                 compiled_rules = 0
-                if os.path.exists(yara_dir):
-                    for root, dirs, files in os.walk(yara_dir):
-                        for f in files:
-                            if f.endswith(('.yar', '.yara')):
-                                try:
-                                    rule = yara.compile(filepath=os.path.join(root, f))
-                                    compiled_rules += 1
-                                    rule_matches = rule.match(data=file_data)
-                                    for m in rule_matches:
-                                        matches.append({"rule": m.rule, "file": file.filename})
-                                except Exception:
-                                    pass # Skip broken community rules
+                
+                # Scan against ONLY the explicitly selected files
+                for rule_file in selected_rules:
+                    full_path = os.path.join(yara_dir, rule_file)
+                    if os.path.exists(full_path):
+                        try:
+                            rule = yara.compile(filepath=full_path)
+                            compiled_rules += 1
+                            rule_matches = rule.match(data=file_data)
+                            for m in rule_matches:
+                                matches.append({"rule": m.rule, "file": file.filename})
+                        except Exception:
+                            pass # Skip broken community rules
                 
                 if compiled_rules == 0:
-                    flash("No valid YARA rules found. Import them first.", "warning")
+                    flash("None of the selected YARA rules were valid or compiled successfully.", "warning")
                 else:
                     flash(f"Scanned {file.filename} against {compiled_rules} active rules.", "info")
 
-    # Fetch loaded YARA files for the UI
+    # Fetch loaded YARA files for the UI checklist
     yara_files = []
     if os.path.exists(yara_dir):
         for root, dirs, files in os.walk(yara_dir):
@@ -207,6 +215,7 @@ def api_yara_scan():
         if os.path.exists(p): os.remove(p)
         return jsonify({"error": str(e)}), 500
 
+
 # ==========================================
 # REPORTING ENGINE ROUTES
 # ==========================================
@@ -237,6 +246,7 @@ def trigger_report():
     except Exception as e:
         flash(f"Failed to generate report: {str(e)}", "danger")
     return redirect(url_for('reports'))
+
 
 # ==========================================
 # GLOBAL SETTINGS & AGENT DEPLOYMENT ROUTES
@@ -328,7 +338,6 @@ def sync_yara():
     except Exception as e:
         flash(f'Failed to import rules: {str(e)}', 'danger')
         
-    # Redirect back to the hunt page instead of settings!
     return redirect(url_for('hunt'))
 
 if __name__ == '__main__':

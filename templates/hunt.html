@@ -14,25 +14,55 @@
 
     <div class="row">
         <!-- LEFT COLUMN: YARA SCANNER & MANAGEMENT -->
-        <div class="col-md-4 mb-4">
-            <!-- Scanner Card -->
+        <div class="col-md-5 mb-4">
+            
+            <!-- Dynamic Scanner Form -->
             <div class="card shadow-sm border-secondary bg-dark text-light mb-4">
                 <div class="card-header border-secondary text-info">
                     <h5 class="mb-0"><i class="fa-solid fa-spider"></i> Advanced YARA Scanner</h5>
                 </div>
                 <div class="card-body">
-                    <p class="text-muted small">Upload a file to scan against all active rules.</p>
+                    <p class="text-muted small">Upload a file and select the active YARA rules to scan it against.</p>
                     <form method="POST" action="{{ url_for('hunt') }}" enctype="multipart/form-data">
+                        
+                        <!-- File Upload -->
                         <div class="mb-3">
                             <input class="form-control bg-dark text-light border-secondary" type="file" name="scan_file" required>
                         </div>
-                        <button type="submit" class="btn btn-outline-info w-100">
+                        
+                        <!-- Interactive Rule Selection -->
+                        <div class="d-flex justify-content-between align-items-center mb-2 mt-3">
+                            <h6 class="text-success mb-0"><i class="fa-solid fa-file-signature"></i> Active Rules ({{ yara_files|length }})</h6>
+                            <div class="btn-group">
+                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleYara(true)">Select All</button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleYara(false)">Clear</button>
+                            </div>
+                        </div>
+                        
+                        <div class="bg-dark border border-secondary rounded p-2 mb-3" style="max-height: 250px; overflow-y: auto;">
+                            {% if yara_files %}
+                                {% for file in yara_files %}
+                                <div class="form-check">
+                                    <input class="form-check-input yara-checkbox" type="checkbox" name="selected_rules" value="{{ file }}" id="rule_{{ loop.index }}">
+                                    <label class="form-check-label text-muted small" for="rule_{{ loop.index }}" style="word-break: break-all;">
+                                        {{ file }}
+                                    </label>
+                                </div>
+                                {% endfor %}
+                            {% else %}
+                                <p class="text-muted small mb-0"><i class="fa-solid fa-triangle-exclamation text-warning me-1"></i> No rules loaded. Import them below.</p>
+                            {% endif %}
+                        </div>
+
+                        <!-- Submit Button -->
+                        <button type="submit" class="btn btn-outline-info w-100 mb-3">
                             <i class="fa-solid fa-microscope"></i> Run Scan
                         </button>
                     </form>
                     
+                    <!-- Scan Results -->
                     {% if matches %}
-                        <hr class="border-secondary mt-4">
+                        <hr class="border-secondary mt-2">
                         <h6 class="text-danger"><i class="fa-solid fa-triangle-exclamation"></i> Scan Results</h6>
                         <div class="table-responsive">
                             <table class="table table-dark table-hover table-sm">
@@ -48,37 +78,24 @@
                 </div>
             </div>
 
-            <!-- Rule Management Card -->
+            <!-- YARA Rule Importer -->
             <div class="card shadow-sm border-secondary bg-dark text-light h-100">
                 <div class="card-header border-secondary text-success">
-                    <h5 class="mb-0"><i class="fa-solid fa-cloud-arrow-down"></i> YARA Rule Management</h5>
+                    <h5 class="mb-0"><i class="fa-solid fa-cloud-arrow-down"></i> Threat Intel Repository Sync</h5>
                 </div>
                 <div class="card-body">
-                    <form method="POST" action="{{ url_for('sync_yara') }}" class="mb-3">
+                    <form method="POST" action="{{ url_for('sync_yara') }}" class="mb-0">
                         <div class="input-group">
                             <input type="url" class="form-control bg-dark text-light border-secondary form-control-sm" name="repo_url" value="https://github.com/Yara-Rules/rules/archive/refs/heads/master.zip" required>
                             <button type="submit" class="btn btn-sm btn-outline-success">Import</button>
                         </div>
                     </form>
-                    
-                    {% if yara_files %}
-                    <h6 class="text-info mt-3"><i class="fa-solid fa-file-signature"></i> Active Rules ({{ yara_files|length }})</h6>
-                    <div class="bg-dark border border-secondary rounded p-2" style="max-height: 250px; overflow-y: auto;">
-                        <ul class="list-unstyled mb-0">
-                            {% for file in yara_files %}
-                            <li class="text-muted small"><i class="fa-regular fa-file-lines me-2"></i>{{ file }}</li>
-                            {% endfor %}
-                        </ul>
-                    </div>
-                    {% else %}
-                    <p class="text-muted small mb-0"><i class="fa-solid fa-triangle-exclamation text-warning me-1"></i> No rules loaded.</p>
-                    {% endif %}
                 </div>
             </div>
         </div>
 
         <!-- RIGHT COLUMN: LOG SEARCH & CTI -->
-        <div class="col-md-8 mb-4">
+        <div class="col-md-7 mb-4">
             <div class="card shadow-sm border-secondary bg-dark text-light h-100">
                 <div class="card-header border-secondary text-primary">
                     <h5 class="mb-0"><i class="fa-solid fa-server"></i> Log Search & CTI Lookup</h5>
@@ -116,6 +133,11 @@
 
 {% block scripts %}
 <script>
+// Select All / Clear Checkboxes Logic
+function toggleYara(state) {
+    document.querySelectorAll('.yara-checkbox').forEach(cb => cb.checked = state);
+}
+
 const md=new bootstrap.Modal(document.getElementById('cm')); 
 async function s(){
     const r=await(await fetch(`/api/hunt/search?q=${document.getElementById('sq').value}`)).json(); 
