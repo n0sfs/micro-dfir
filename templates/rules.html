@@ -1,3 +1,155 @@
-{% extends "base.html" %}{% block content %}
-<h2>Sigma Rules Engine</h2><input type="text" id="rq" class="form-control bg-dark text-light mb-3" placeholder="Filter rules..." onkeyup="f()"><div style="max-height: 600px; overflow-y: auto;"><table class="table table-dark table-sm"><tbody id="rt"></tbody></table></div>
-{% endblock %}{% block scripts %}<script>async function ld(){const r=await(await fetch('/api/rules')).json(); document.getElementById('rt').innerHTML=r.map(rl=>`<tr><td>${rl.title}</td><td><input type="checkbox" ${rl.enabled?'checked':''} onchange="fetch('/api/rules/${rl.id}/toggle',{method:'PUT'})"></td></tr>`).join('');} function f(){const q=document.getElementById('rq').value.toLowerCase();Array.from(document.getElementById('rt').getElementsByTagName('tr')).forEach(tr=>tr.style.display=tr.innerText.toLowerCase().includes(q)?'':'none');} ld();</script>{% endblock %}
+{% extends "base.html" %}
+{% block content %}
+<div class="container-fluid mt-4">
+    <h2 class="text-primary"><i class="fa-solid fa-file-shield"></i> Sigma Rules Engine</h2>
+    <hr class="border-secondary">
+
+    <div class="card shadow-sm border-secondary bg-dark text-light mb-4">
+        <div class="card-body">
+            
+            <!-- Filters -->
+            <div class="row mb-3">
+                <div class="col-md-4 mb-2">
+                    <input type="text" id="rq" class="form-control bg-dark text-light border-secondary" placeholder="Search rule titles..." onkeyup="f()">
+                </div>
+                <div class="col-md-4 mb-2">
+                    <select id="catFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
+                        <option value="">All Categories</option>
+                    </select>
+                </div>
+                <div class="col-md-4 mb-2">
+                    <select id="mitreFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
+                        <option value="">All MITRE Tags</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Bulk Actions Toolbar -->
+            <div class="d-flex gap-2 mb-3 align-items-center bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
+                <button class="btn btn-sm btn-outline-secondary" onclick="toggleAll(true)">Select All Visible</button>
+                <button class="btn btn-sm btn-outline-secondary" onclick="toggleAll(false)">Clear Selection</button>
+                <div class="ms-auto">
+                    <button class="btn btn-sm btn-outline-success" onclick="bulkAction(true)"><i class="fa-solid fa-play"></i> Enable Selected</button>
+                    <button class="btn btn-sm btn-outline-danger" onclick="bulkAction(false)"><i class="fa-solid fa-stop"></i> Disable Selected</button>
+                </div>
+            </div>
+
+            <!-- Interactive Table -->
+            <div class="table-responsive" style="max-height: 600px; overflow-y: auto;">
+                <table class="table table-dark table-hover table-sm align-middle">
+                    <thead>
+                        <tr>
+                            <th style="width: 40px;"></th>
+                            <th style="width: 80px;">Status</th>
+                            <th>Rule Title</th>
+                            <th>Category</th>
+                            <th>MITRE ATT&CK</th>
+                        </tr>
+                    </thead>
+                    <tbody id="rt"></tbody>
+                </table>
+            </div>
+
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let allRules = [];
+
+async function ld(){
+    allRules = await(await fetch('/api/rules')).json(); 
+    
+    // Parse out unique categories and MITRE tags for our dropdowns
+    const cats = new Set();
+    const mitres = new Set();
+    allRules.forEach(r => {
+        if(r.category) cats.add(r.category);
+        if(r.tags) r.tags.forEach(t => mitres.add(t));
+    });
+    
+    const catSelect = document.getElementById('catFilter');
+    const mitreSelect = document.getElementById('mitreFilter');
+    
+    catSelect.innerHTML = '<option value="">All Categories</option>';
+    mitreSelect.innerHTML = '<option value="">All MITRE Tags</option>';
+    
+    Array.from(cats).sort().forEach(c => catSelect.innerHTML += `<option value="${c}">${c}</option>`);
+    Array.from(mitres).sort().forEach(m => mitreSelect.innerHTML += `<option value="${m}">${m}</option>`);
+
+    renderTable(allRules);
+} 
+
+function renderTable(rules) {
+    document.getElementById('rt').innerHTML = rules.map(rl => `
+        <tr data-cat="${rl.category}" data-tags="${(rl.tags || []).join(',')}">
+            <td><input type="checkbox" class="form-check-input rule-cb bg-dark border-secondary" value="${rl.id}"></td>
+            <td>
+                <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" ${rl.enabled ? 'checked' : ''} onchange="toggleSingle(${rl.id}, this.checked)">
+                </div>
+            </td>
+            <td class="fw-bold text-info">${rl.title}</td>
+            <td><span class="badge bg-secondary">${rl.category}</span></td>
+            <td>${(rl.tags || []).map(t => `<span class="badge bg-primary bg-opacity-25 text-light border border-primary me-1 mb-1">${t}</span>`).join('')}</td>
+        </tr>
+    `).join('');
+}
+
+function f(){
+    const q = document.getElementById('rq').value.toLowerCase();
+    const cat = document.getElementById('catFilter').value;
+    const mitre = document.getElementById('mitreFilter').value;
+    
+    Array.from(document.getElementById('rt').getElementsByTagName('tr')).forEach(tr => {
+        const text = tr.innerText.toLowerCase();
+        const trCat = tr.getAttribute('data-cat');
+        const trTags = tr.getAttribute('data-tags');
+        
+        const matchQ = text.includes(q);
+        const matchCat = cat === "" || trCat === cat;
+        const matchMitre = mitre === "" || trTags.includes(mitre);
+        
+        // Hide row if it doesn't match all active filters
+        tr.style.display = (matchQ && matchCat && matchMitre) ? '' : 'none';
+        
+        // Deselect hidden rows to prevent accidental bulk toggling
+        if (tr.style.display === 'none') {
+            tr.querySelector('.rule-cb').checked = false;
+        }
+    });
+}
+
+function toggleAll(state) {
+    document.querySelectorAll('.rule-cb').forEach(cb => {
+        // Only select checkboxes in rows that are currently visible
+        if (cb.closest('tr').style.display !== 'none') {
+            cb.checked = state;
+        }
+    });
+}
+
+async function toggleSingle(id, state) {
+    await fetch(`/api/rules/${id}/toggle`, {method: 'PUT'});
+}
+
+async function bulkAction(enable) {
+    const ids = Array.from(document.querySelectorAll('.rule-cb:checked')).map(cb => parseInt(cb.value));
+    if (ids.length === 0) return alert("Please select at least one rule.");
+    
+    await fetch('/api/rules/bulk_update', {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ids: ids, enable: enable})
+    });
+    
+    // Refresh the table to show updated status
+    ld(); 
+}
+
+// Initial load
+ld();
+</script>
+{% endblock %}

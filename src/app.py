@@ -185,21 +185,65 @@ def del_drop(rid):
     if current_user.role != 'admin': return jsonify({"error": "Admin required"}), 403
     get_db().execute("DELETE FROM drop_rules WHERE id=?", (rid,)); get_db().commit(); generate_vector_config(); return jsonify({"ok":1})
 
+
+# ==========================================
+# SIGMA RULES ENGINE
+# ==========================================
 @app.route('/api/rules', methods=['GET', 'POST'])
 @login_required
 def api_rules():
     db = get_db()
-    if request.method == 'GET': return jsonify([dict(r) for r in db.execute("SELECT id, title, enabled FROM sigma_rules ORDER BY id DESC").fetchall()])
+    if request.method == 'GET':
+        rules_out = []
+        for r in db.execute("SELECT id, title, rule_yaml, enabled FROM sigma_rules ORDER BY id DESC").fetchall():
+            try:
+                parsed = yaml.safe_load(r['rule_yaml']) or {}
+            except Exception:
+                parsed = {}
+            
+            # Extract tags and category for the frontend
+            tags = parsed.get('tags', [])
+            category = parsed.get('logsource', {}).get('category', 'unknown')
+            
+            rules_out.append({
+                "id": r['id'],
+                "title": r['title'],
+                "enabled": r['enabled'],
+                "tags": tags,
+                "category": category
+            })
+        return jsonify(rules_out)
+        
     if current_user.role != 'admin': return jsonify({"error": "Admin required"}), 403
     ry = request.get_json().get('rule_yaml', '')
     t = yaml.safe_load(ry).get('title', 'Untitled')
-    db.execute("INSERT INTO sigma_rules (title, rule_yaml, enabled) VALUES (?, ?, 1)", (t, ry)); db.commit(); return jsonify({"status": "success"})
+    db.execute("INSERT INTO sigma_rules (title, rule_yaml, enabled) VALUES (?, ?, 1)", (t, ry))
+    db.commit()
+    return jsonify({"status": "success"})
 
 @app.route('/api/rules/<int:rid>/toggle', methods=['PUT'])
 @login_required
 def api_r_tog(rid): 
     if current_user.role != 'admin': return jsonify({"error": "Admin required"}), 403
-    db=get_db(); db.execute("UPDATE sigma_rules SET enabled = CASE WHEN enabled = 1 THEN 0 ELSE 1 END WHERE id=?", (rid,)); db.commit(); return jsonify({"ok":1})
+    db = get_db()
+    db.execute("UPDATE sigma_rules SET enabled = CASE WHEN enabled = 1 THEN 0 ELSE 1 END WHERE id=?", (rid,))
+    db.commit()
+    return jsonify({"ok":1})
+
+@app.route('/api/rules/bulk_update', methods=['PUT'])
+@login_required
+def api_rules_bulk():
+    if current_user.role != 'admin': return jsonify({"error": "Admin required"}), 403
+    data = request.get_json()
+    ids = data.get('ids', [])
+    enable = 1 if data.get('enable') else 0
+    if ids:
+        db = get_db()
+        placeholders = ','.join('?' for _ in ids)
+        db.execute(f"UPDATE sigma_rules SET enabled = ? WHERE id IN ({placeholders})", [enable] + ids)
+        db.commit()
+    return jsonify({"ok": 1})
+
 
 @app.route('/api/yara/scan', methods=['POST'])
 @login_required
