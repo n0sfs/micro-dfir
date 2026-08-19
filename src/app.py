@@ -189,33 +189,54 @@ def del_drop(rid):
 # ==========================================
 # SIGMA RULES ENGINE
 # ==========================================
+RULE_META_CACHE = {}
+
 @app.route('/api/rules', methods=['GET', 'POST'])
 @login_required
 def api_rules():
+    global RULE_META_CACHE
     db = get_db()
+    
     if request.method == 'GET':
+        import re
         rules_out = []
         for r in db.execute("SELECT id, title, rule_yaml, enabled FROM sigma_rules ORDER BY id DESC").fetchall():
-            try:
-                parsed = yaml.safe_load(r['rule_yaml']) or {}
-            except Exception:
-                parsed = {}
+            rid = r['id']
             
-            # Extract tags and category for the frontend
-            tags = parsed.get('tags', [])
-            category = parsed.get('logsource', {}).get('category', 'unknown')
+            # If we haven't parsed this rule yet, extract it with fast regex
+            if rid not in RULE_META_CACHE:
+                ry = r['rule_yaml']
+                cat = 'unknown'
+                tags = []
+                try:
+                    # Extract Category
+                    c_match = re.search(r'category:\s*([^\n\r]+)', ry)
+                    if c_match: 
+                        cat = c_match.group(1).strip().strip("'\"")
+                    
+                    # Extract MITRE Tags
+                    t_match = re.search(r'tags:\s*\n((\s+-\s*[^\n\r]+\n?)+)', ry)
+                    if t_match:
+                        tags = [t.strip().strip('- ') for t in t_match.group(1).split('\n') if t.strip()]
+                    
+                    RULE_META_CACHE[rid] = {"category": cat, "tags": tags}
+                except Exception:
+                    RULE_META_CACHE[rid] = {"category": "unknown", "tags": []}
             
+            # Pull from the lightning-fast memory cache
+            meta = RULE_META_CACHE[rid]
             rules_out.append({
-                "id": r['id'],
+                "id": rid,
                 "title": r['title'],
                 "enabled": r['enabled'],
-                "tags": tags,
-                "category": category
+                "tags": meta['tags'],
+                "category": meta['category']
             })
         return jsonify(rules_out)
         
     if current_user.role != 'admin': return jsonify({"error": "Admin required"}), 403
     ry = request.get_json().get('rule_yaml', '')
+    import yaml
     t = yaml.safe_load(ry).get('title', 'Untitled')
     db.execute("INSERT INTO sigma_rules (title, rule_yaml, enabled) VALUES (?, ?, 1)", (t, ry))
     db.commit()
@@ -225,10 +246,7 @@ def api_rules():
 @login_required
 def api_r_tog(rid): 
     if current_user.role != 'admin': return jsonify({"error": "Admin required"}), 403
-    db = get_db()
-    db.execute("UPDATE sigma_rules SET enabled = CASE WHEN enabled = 1 THEN 0 ELSE 1 END WHERE id=?", (rid,))
-    db.commit()
-    return jsonify({"ok":1})
+    db=get_db(); db.execute("UPDATE sigma_rules SET enabled = CASE WHEN enabled = 1 THEN 0 ELSE 1 END WHERE id=?", (rid,)); db.commit(); return jsonify({"ok":1})
 
 @app.route('/api/rules/bulk_update', methods=['PUT'])
 @login_required
@@ -243,7 +261,6 @@ def api_rules_bulk():
         db.execute(f"UPDATE sigma_rules SET enabled = ? WHERE id IN ({placeholders})", [enable] + ids)
         db.commit()
     return jsonify({"ok": 1})
-
 
 @app.route('/api/yara/scan', methods=['POST'])
 @login_required
