@@ -58,6 +58,7 @@
 {% block scripts %}
 <script>
 let allRules = [];
+let selectedIds = new Set(); // Tracks explicitly checked IDs
 
 async function ld(){
     allRules = await(await fetch('/api/rules')).json(); 
@@ -83,9 +84,10 @@ async function ld(){
 } 
 
 function renderTable(rules) {
+    // Build the string in memory, then inject once. Lightning fast.
     document.getElementById('rt').innerHTML = rules.map(rl => `
-        <tr data-cat="${rl.category}" data-tags="${(rl.tags || []).join(',')}">
-            <td><input type="checkbox" class="form-check-input rule-cb bg-dark border-secondary" value="${rl.id}"></td>
+        <tr>
+            <td><input type="checkbox" class="form-check-input rule-cb bg-dark border-secondary" value="${rl.id}" onchange="updateSelection(this)"></td>
             <td>
                 <div class="form-check form-switch">
                     <input class="form-check-input" type="checkbox" ${rl.enabled ? 'checked' : ''} onchange="toggleSingle(${rl.id}, this.checked)">
@@ -96,6 +98,9 @@ function renderTable(rules) {
             <td>${(rl.tags || []).map(t => `<span class="badge bg-primary bg-opacity-25 text-light border border-primary me-1 mb-1">${t}</span>`).join('')}</td>
         </tr>
     `).join('');
+    
+    // Clear selections whenever the table is fundamentally redrawn
+    selectedIds.clear(); 
 }
 
 function f(){
@@ -103,32 +108,28 @@ function f(){
     const cat = document.getElementById('catFilter').value;
     const mitre = document.getElementById('mitreFilter').value;
     
-    Array.from(document.getElementById('rt').getElementsByTagName('tr')).forEach(tr => {
-        const text = tr.innerText.toLowerCase();
-        const trCat = tr.getAttribute('data-cat');
-        const trTags = tr.getAttribute('data-tags');
-        
-        const matchQ = text.includes(q);
-        const matchCat = cat === "" || trCat === cat;
-        const matchMitre = mitre === "" || trTags.includes(mitre);
-        
-        // Hide row if it doesn't match all active filters
-        tr.style.display = (matchQ && matchCat && matchMitre) ? '' : 'none';
-        
-        // Deselect hidden rows to prevent accidental bulk toggling
-        if (tr.style.display === 'none') {
-            tr.querySelector('.rule-cb').checked = false;
-        }
+    // Filter the array in memory (takes < 1ms)
+    const filtered = allRules.filter(rl => {
+        const matchQ = rl.title.toLowerCase().includes(q);
+        const matchCat = cat === "" || rl.category === cat;
+        const matchMitre = mitre === "" || (rl.tags && rl.tags.includes(mitre));
+        return matchQ && matchCat && matchMitre;
     });
+    
+    // Re-render the table with only the filtered results
+    renderTable(filtered);
 }
 
 function toggleAll(state) {
     document.querySelectorAll('.rule-cb').forEach(cb => {
-        // Only select checkboxes in rows that are currently visible
-        if (cb.closest('tr').style.display !== 'none') {
-            cb.checked = state;
-        }
+        cb.checked = state;
+        updateSelection(cb);
     });
+}
+
+function updateSelection(cb) {
+    if (cb.checked) selectedIds.add(cb.value);
+    else selectedIds.delete(cb.value);
 }
 
 async function toggleSingle(id, state) {
@@ -136,7 +137,7 @@ async function toggleSingle(id, state) {
 }
 
 async function bulkAction(enable) {
-    const ids = Array.from(document.querySelectorAll('.rule-cb:checked')).map(cb => parseInt(cb.value));
+    const ids = Array.from(selectedIds).map(id => parseInt(id));
     if (ids.length === 0) return alert("Please select at least one rule.");
     
     await fetch('/api/rules/bulk_update', {
@@ -145,7 +146,7 @@ async function bulkAction(enable) {
         body: JSON.stringify({ids: ids, enable: enable})
     });
     
-    // Refresh the table to show updated status
+    // Refresh the table data directly from the server to reflect the new state
     ld(); 
 }
 
