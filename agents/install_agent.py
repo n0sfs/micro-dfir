@@ -1,0 +1,11 @@
+import os, sys, platform, subprocess
+AGENT_TEMPLATE = """import os, time, json, socket, urllib.request\nPI_SIEM_URL = "{url}"\nWEBHOOK_SECRET = "{secret}"\nLOG_FILE = r"{logfile}"\nHOSTNAME = socket.gethostname()\ndef send_to_siem(m):\n    try: urllib.request.urlopen(urllib.request.Request(PI_SIEM_URL, data=json.dumps({{"hostname": HOSTNAME, "app_name": "dfir_agent", "severity": "info", "message": m.strip()}}).encode('utf-8'), headers={{'Content-Type': 'application/json', 'Authorization': f'Bearer {{WEBHOOK_SECRET}}'}}), timeout=5)\n    except: pass\ndef tail_file(f):\n    while not os.path.exists(f): time.sleep(5)\n    with open(f, 'r', encoding='utf-8', errors='ignore') as file:\n        file.seek(0, os.SEEK_END)\n        while True:\n            line = file.readline()\n            if not line: time.sleep(0.5); continue\n            send_to_siem(line)\nif __name__ == "__main__": tail_file(LOG_FILE)"""
+def prompt(): return f"http://{input('MicroSOC IP: ').strip()}:5001/api/ingest", input('Secret: ').strip(), input('Log File: ').strip()
+def i_win(c): os.makedirs(r"C:\ProgramData\MicroDFIR", exist_ok=True); open(r"C:\ProgramData\MicroDFIR\agent.py", "w").write(c); subprocess.run(f'schtasks /Create /RU "SYSTEM" /TN "MicroDFIR" /TR "\"{sys.executable.replace("python.exe", "pythonw.exe")}\" \"C:\\ProgramData\\MicroDFIR\\agent.py\"" /SC ONSTART /F', shell=True); subprocess.run('schtasks /Run /TN "MicroDFIR"', shell=True); print("Installed on Windows.")
+def i_lin(c): os.makedirs("/opt/microdfir-agent", exist_ok=True); open("/opt/microdfir-agent/agent.py", "w").write(c); open("/etc/systemd/system/microdfir-agent.service", "w").write(f"[Unit]\nDescription=Micro DFIR Agent\n[Service]\nExecStart={sys.executable} /opt/microdfir-agent/agent.py\nRestart=always\n[Install]\nWantedBy=multi-user.target"); subprocess.run("systemctl daemon-reload && systemctl enable --now microdfir-agent.service", shell=True); print("Installed on Linux.")
+if __name__ == "__main__":
+    if platform.system() == "Windows":
+        import ctypes; sys.exit("Run as Admin") if not ctypes.windll.shell32.IsUserAnAdmin() else None
+    else: sys.exit("Run as root") if os.geteuid() != 0 else None
+    u, s, l = prompt(); c = AGENT_TEMPLATE.format(url=u, secret=s, logfile=l)
+    i_win(c) if platform.system() == "Windows" else i_lin(c)

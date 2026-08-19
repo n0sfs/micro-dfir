@@ -1,0 +1,15 @@
+[Unit]
+Description=Micro DFIR Web Dashboard
+After=network.target vector.service
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/micro-dfir
+Environment="PATH=/opt/micro-dfir/venv/bin:/usr/bin"
+Environment="PYTHONPATH=/opt/micro-dfir/src"
+ExecStart=/opt/micro-dfir/venv/bin/python3 src/app.py
+Restart=always
+RestartSec=5
+MemoryMax=2G
+[Install]
+WantedBy=multi-user.target
