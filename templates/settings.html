@@ -23,8 +23,13 @@
                     <p class="text-muted small">This secret key is used by Vector and deployed log forwarders to authenticate against the ingestion API.</p>
                     <form method="POST" action="{{ url_for('settings') }}">
                         <div class="mb-3">
-                            <label class="form-label text-light">SOC Secret Token</label>
-                            <input type="text" class="form-control bg-dark text-light border-secondary" name="soc_secret" value="{{ soc_secret }}" required>
+                            <label class="form-label text-light d-flex justify-content-between align-items-center">
+                                <span>SOC Secret Token</span>
+                                <button type="button" class="btn btn-sm btn-outline-warning py-0 px-2" onclick="generateToken()">
+                                    <i class="fa-solid fa-wand-magic-sparkles me-1"></i> Generate New
+                                </button>
+                            </label>
+                            <input type="text" id="soc_secret_input" class="form-control bg-dark text-light border-secondary font-monospace" name="soc_secret" value="{{ soc_secret }}" required>
                         </div>
                         <button type="submit" class="btn btn-outline-info">Save Settings</button>
                     </form>
@@ -52,7 +57,7 @@
                     <hr class="border-secondary">
                     
                     <h6 class="text-warning mb-2"><i class="fa-solid fa-terminal me-1"></i> Windows Background Service Management</h6>
-                    <p class="text-muted small mb-2">To run the Windows agent persistently in the background as a system task, open <strong>PowerShell as Administrator</strong> and run:</p>
+                    <p class="text-muted small mb-2">To run the Windows agent persistently in the background, open <strong>PowerShell as Administrator</strong> and run:</p>
                     
                     <div class="bg-black p-2 rounded border border-secondary mb-3">
                         <code class="text-success small">python micro_agent_windows.py install</code>
@@ -67,4 +72,16 @@
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function generateToken() {
+    // Generate a secure random 32-character hex token using browser crypto
+    const array = new Uint8Array(16);
+    window.crypto.getRandomValues(array);
+    const token = Array.from(array, byte => byte.toString(16).padStart(2, '0')).join('');
+    document.getElementById('soc_secret_input').value = token;
+}
+</script>
 {% endblock %}
