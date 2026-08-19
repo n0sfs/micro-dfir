@@ -1,14 +1,22 @@
+cat << 'EOF' > install.sh
 #!/bin/bash
 if [ "$EUID" -ne 0 ]; then echo "Please run as root (sudo bash install.sh)"; exit 1; fi
 
 SOC_DIR="/opt/micro-dfir"
 echo "[*] Deploying Micro DFIR Architecture..."
 
+if [ ! -d "src" ] || [ ! -d "config" ] || [ ! -f "requirements.txt" ]; then
+  echo "[-] Error: Run this script from the root of your cloned 'micro-dfir' repository folder!"
+  echo "    (Current directory: $(pwd))"
+  exit 1
+fi
+
 systemctl stop rsyslog 2>/dev/null
 systemctl disable rsyslog 2>/dev/null
 
+echo "[*] Installing System Dependencies..."
 apt-get update
-apt-get install -y python3-venv python3-pip sqlite3 curl libpango-1.0-0 libpangoft2-1.0-0
+apt-get install -y python3-venv python3-pip sqlite3 curl libpango-1.0-0 libpangoft2-1.0-0 build-essential libssl-dev pkg-config
 
 echo "[*] Installing Vector Ingestion Engine..."
 curl -1sLf 'https://repositories.timber.io/public/vector/cfg/setup/bash.deb.sh' | bash
@@ -22,8 +30,6 @@ chmod +x $SOC_DIR/bin/velociraptor
 echo "[*] Copying application files to $SOC_DIR..."
 mkdir -p $SOC_DIR
 cp -r ./* $SOC_DIR/
-
-# CRITICAL FIX: Change directory AFTER files are copied
 cd $SOC_DIR
 
 echo "[*] Setting up Python virtual environment..."
@@ -34,7 +40,16 @@ pip install -r requirements.txt
 
 echo "[*] Configuring Vector..."
 cp config/vector.toml /etc/vector/vector.toml
-systemctl restart vector
+rm -f /etc/vector/vector.yaml
+echo 'VECTOR_CONFIG="/etc/vector/vector.toml"' > /etc/default/vector
+mkdir -p /etc/systemd/system/vector.service.d
+echo -e "[Service]\nAmbientCapabilities=CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE" > /etc/systemd/system/vector.service.d/override.conf
+chown -R vector:vector /etc/vector/
+
+echo "[*] Configuring Velociraptor..."
+$SOC_DIR/bin/velociraptor config generate > $SOC_DIR/config/server.config.yaml
+sed -i 's/bind_address: 127.0.0.1/bind_address: 0.0.0.0/g' $SOC_DIR/config/server.config.yaml
+$SOC_DIR/bin/velociraptor --config $SOC_DIR/config/server.config.yaml user add admin "Admin123!" --role administrator
 
 echo "[*] Initializing Database & Administrator..."
 venv/bin/python -c "import sys; sys.path.append('src'); from app import init_db; init_db()"
@@ -62,3 +77,4 @@ systemctl enable --now velociraptor.service
 echo "[+] Deployment Complete!"
 echo "[+] Micro DFIR Dashboard: http://<nuc-ip>:5001"
 echo "[+] Velociraptor GUI:      https://<nuc-ip>:8889"
+EOF
