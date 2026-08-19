@@ -5,6 +5,8 @@
         <a href="/hunt"><i class="fa-solid fa-magnifying-glass me-2"></i> Threat Hunt</a>
         <a href="/rules"><i class="fa-solid fa-file-code me-2"></i> Detection Rules</a>
         <a href="/pipeline"><i class="fa-solid fa-filter me-2"></i> Log Pipeline</a>
+        <a href="{{ url_for('settings') }}"><i class="fa-solid fa-cogs me-2"></i> Agents & Settings</a>
+        
         <h6 class="sidebar-heading px-3 mt-4 mb-1 text-muted">EDR / Response</h6>
         <a href="https://{{ request.host.split(':')[0] }}:8889/" target="_blank"><i class="fa-solid fa-spider me-2"></i> Velociraptor GUI</a>
     </div><div class="user-panel text-center"><div class="small text-muted mb-2"><i class="fa-solid fa-user-shield text-success"></i> {{ current_user.username }} ({{ current_user.role }})</div><a href="/logout" class="btn btn-sm btn-outline-danger w-100"><i class="fa-solid fa-arrow-right-from-bracket"></i> Logout</a></div></div>
