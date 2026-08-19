@@ -2,35 +2,44 @@
 {% block content %}
 <div class="container mt-4">
     <h2><i class="fas fa-cogs"></i> SOC Settings & Agent Deployment</h2>
-    <hr>
+    <hr class="border-secondary">
+    
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
         {% for category, message in messages %}
-          <div class="alert alert-{{ 'success' if category == 'message' else category }}">{{ message }}</div>
+          <div class="alert alert-{{ 'success' if category == 'message' else category }} bg-dark text-{{ 'success' if category == 'message' else category }} border-{{ 'success' if category == 'message' else category }}">{{ message }}</div>
         {% endfor %}
       {% endif %}
     {% endwith %}
+
     <div class="row">
+        <!-- Global Config -->
         <div class="col-md-5">
-            <div class="card shadow-sm mb-4">
-                <div class="card-header bg-dark text-white"><h5 class="mb-0">Global Configuration</h5></div>
+            <div class="card shadow-sm border-secondary mb-4 bg-dark text-light">
+                <div class="card-header border-secondary"><h5 class="mb-0">Global Configuration</h5></div>
                 <div class="card-body">
                     <form method="POST" action="{{ url_for('settings') }}">
                         <div class="mb-3">
-                            <label for="soc_secret" class="form-label">Micro-SOC Ingestion Secret Key</label>
-                            <input type="password" class="form-control" id="soc_secret" name="soc_secret" value="{{ soc_secret }}" required>
-                            <div class="form-text">Agents must use this key to authenticate logs sent to the NUC.</div>
+                            <label for="soc_secret" class="form-label">Micro-SOC Ingestion Secret</label>
+                            <div class="input-group">
+                                <input type="password" class="form-control bg-dark text-light border-secondary" id="soc_secret" name="soc_secret" value="{{ soc_secret }}" required>
+                                <button class="btn btn-outline-secondary" type="button" onclick="toggleVisibility()" title="Show/Hide"><i class="fas fa-eye" id="eyeIcon"></i></button>
+                                <button class="btn btn-outline-info" type="button" onclick="generateKey()">Generate</button>
+                            </div>
+                            <div class="form-text text-muted mt-2">Generate a secure 32-character key, then click Save.</div>
                         </div>
                         <button type="submit" class="btn btn-primary">Save Settings</button>
                     </form>
                 </div>
             </div>
         </div>
+
+        <!-- Agent Deployment -->
         <div class="col-md-7">
-            <div class="card shadow-sm">
-                <div class="card-header bg-dark text-white"><h5 class="mb-0">Deploy Python Log Agents</h5></div>
+            <div class="card shadow-sm border-secondary bg-dark text-light">
+                <div class="card-header border-secondary"><h5 class="mb-0">Deploy Python Log Agents</h5></div>
                 <div class="card-body">
-                    <p class="text-muted mb-4">These agent installers are dynamically generated. They already contain this NUC's IP address and your current Secret Key.</p>
+                    <p class="text-muted mb-4">These agents are dynamically generated with your NUC's IP and Secret Key.</p>
                     <div class="row text-center">
                         <div class="col-4">
                             <h2 class="text-primary"><i class="fab fa-windows"></i></h2><h6>Windows</h6>
@@ -49,5 +58,52 @@
             </div>
         </div>
     </div>
+
+    <!-- YARA RULE IMPORT SECTION -->
+    <div class="row mt-4">
+        <div class="col-12">
+            <div class="card shadow-sm border-secondary bg-dark text-light">
+                <div class="card-header border-secondary">
+                    <h5 class="mb-0"><i class="fa-solid fa-spider"></i> Threat Intel & YARA Rule Sync</h5>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted">Download and extract community YARA repositories directly to the Micro-SOC.</p>
+                    <form method="POST" action="{{ url_for('sync_yara') }}" class="d-flex align-items-center">
+                        <input type="url" class="form-control bg-dark text-light border-secondary me-2" name="repo_url" value="https://github.com/Yara-Rules/rules/archive/refs/heads/master.zip" placeholder="Direct .zip URL to GitHub repository" required>
+                        <button type="submit" class="btn btn-outline-success text-nowrap">
+                            <i class="fa-solid fa-cloud-arrow-down"></i> Import Rules
+                        </button>
+                    </form>
+                    <small class="text-muted mt-2 d-block">
+                        <strong>Note:</strong> Rules will be extracted and saved to <code>/opt/micro-dfir/rules/yara_imported/</code> on the NUC.
+                    </small>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
+
+<script>
+    function generateKey() {
+        const array = new Uint8Array(16);
+        window.crypto.getRandomValues(array);
+        const key = Array.from(array, byte => byte.toString(16).padStart(2, '0')).join('');
+        const input = document.getElementById('soc_secret');
+        input.value = key;
+        input.type = 'text'; 
+        document.getElementById('eyeIcon').classList.replace('fa-eye', 'fa-eye-slash');
+    }
+    
+    function toggleVisibility() {
+        const input = document.getElementById('soc_secret');
+        const icon = document.getElementById('eyeIcon');
+        if (input.type === 'password') {
+            input.type = 'text';
+            icon.classList.replace('fa-eye', 'fa-eye-slash');
+        } else {
+            input.type = 'password';
+            icon.classList.replace('fa-eye-slash', 'fa-eye');
+        }
+    }
+</script>
 {% endblock %}

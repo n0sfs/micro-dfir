@@ -225,6 +225,27 @@ def download_agent(os_type):
         headers={"Content-disposition": f"attachment; filename=micro_agent_{os_type}.py"}
     )
     
+@app.route('/settings/yara/sync', methods=['POST'])
+def sync_yara():
+    import urllib.request, zipfile, io, os
+    from flask import request, flash, redirect, url_for
+    
+    repo_url = request.form.get('repo_url')
+    dest_dir = '/opt/micro-dfir/rules/yara_imported'
+    
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        req = urllib.request.Request(repo_url, headers={'User-Agent': 'MicroSOC-Admin/1.0'})
+        with urllib.request.urlopen(req) as response:
+            with zipfile.ZipFile(io.BytesIO(response.read())) as z:
+                z.extractall(dest_dir)
+                
+        flash(f'YARA rules successfully downloaded and extracted to {dest_dir}', 'success')
+    except Exception as e:
+        flash(f'Failed to import rules: {str(e)}', 'danger')
+        
+    return redirect(url_for('settings'))
+  
 if __name__ == '__main__':
     if not os.path.exists(DB_PATH): init_db()
     app.run(host='0.0.0.0', port=5001, debug=True, use_reloader=False)
