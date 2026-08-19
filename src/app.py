@@ -91,7 +91,6 @@ def webhook():
 @login_required
 def api_ev(): return jsonify([dict(r) for r in get_db().execute("SELECT * FROM events ORDER BY timestamp DESC LIMIT ?", (request.args.get('limit', 50, type=int),)).fetchall()])
 
-
 # ==========================================
 # THREAT HUNT & YARA SCANNER
 # ==========================================
@@ -208,6 +207,36 @@ def api_yara_scan():
         if os.path.exists(p): os.remove(p)
         return jsonify({"error": str(e)}), 500
 
+# ==========================================
+# REPORTING ENGINE ROUTES
+# ==========================================
+@app.route('/reports')
+@login_required
+def reports():
+    import os
+    report_dir = '/opt/micro-dfir/reports'
+    os.makedirs(report_dir, exist_ok=True)
+    
+    pdfs = [f for f in os.listdir(report_dir) if f.endswith('.pdf')]
+    pdfs.sort(reverse=True) # Newest first
+    return render_template('reports.html', reports=pdfs, current_user=current_user)
+
+@app.route('/reports/download/<filename>')
+@login_required
+def download_report(filename):
+    from flask import send_from_directory
+    return send_from_directory('/opt/micro-dfir/reports', filename, as_attachment=True)
+    
+@app.route('/reports/generate', methods=['POST'])
+@login_required
+def trigger_report():
+    import subprocess
+    try:
+        subprocess.run(["/opt/micro-dfir/venv/bin/python3", "/opt/micro-dfir/src/generate_report.py"], check=True)
+        flash("Report successfully generated!", "success")
+    except Exception as e:
+        flash(f"Failed to generate report: {str(e)}", "danger")
+    return redirect(url_for('reports'))
 
 # ==========================================
 # GLOBAL SETTINGS & AGENT DEPLOYMENT ROUTES
