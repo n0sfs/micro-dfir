@@ -182,64 +182,10 @@ migrate_settings()
 def settings():
     import sqlite3
     from flask import request, render_template, flash
-    conn = sqlite3.connect('/opt/micro-dfir/siem.db')
-    cursor = conn.cursor()
-    if request.method == 'POST':
-        new_secret = request.form.get('soc_secret')
-        if new_secret:
-            cursor.execute("UPDATE settings SET value = ? WHERE key = 'soc_secret'", (new_secret,))
-            conn.commit()
-            flash('Settings updated successfully!', 'success')
-    cursor.execute("SELECT value FROM settings WHERE key = 'soc_secret'")
-    result = cursor.fetchone()
-    current_secret = result[0] if result else "YOUR_SECRET_MICRO_SOC_KEY"
-    conn.close()
-    return render_template('settings.html', soc_secret=current_secret)
-
-@app.route('/download/agent/<os_type>')
-def download_agent(os_type):
-    import sqlite3
-    from flask import Response, request
-    conn = sqlite3.connect('/opt/micro-dfir/siem.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT value FROM settings WHERE key = 'soc_secret'")
-    result = cursor.fetchone()
-    secret = result[0] if result else "YOUR_SECRET_MICRO_SOC_KEY"
-    conn.close()
-    
-    host_ip = request.host.split(':')[0]
-    try:
-        with open('/opt/micro-dfir/agents/install_agent.py', 'r') as f:
-            script_content = f.read()
-    except FileNotFoundError:
-        return "Agent script not found on server.", 404
-        
-    script_content = script_content.replace('YOUR_SECRET_MICRO_SOC_KEY', secret)
-    script_content = script_content.replace('MICRO_SOC_IP_PLACEHOLDER', host_ip)
-    
-    return Response(
-        script_content,
-        mimetype="text/plain",
-        headers={"Content-disposition": f"attachment; filename=micro_agent_{os_type}.py"}
-    )
-# ==========================================
-# DYNAMIC SETTINGS & AGENT DEPLOYMENT ROUTES
-# ==========================================
-
-@app.route('/settings', methods=['GET', 'POST'])
-def settings():
-    import sqlite3
-    from flask import request, render_template, flash
     
     conn = sqlite3.connect('/opt/micro-dfir/siem.db')
     cursor = conn.cursor()
     
-    # Safely create the settings table if it doesn't exist yet
-    cursor.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
-    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('soc_secret', 'YOUR_SECRET_MICRO_SOC_KEY')")
-    conn.commit()
-    
-    # Handle saving a new secret key
     if request.method == 'POST':
         new_secret = request.form.get('soc_secret')
         if new_secret:
@@ -247,7 +193,6 @@ def settings():
             conn.commit()
             flash('Settings updated successfully!', 'success')
             
-    # Fetch the current secret to display on the page
     cursor.execute("SELECT value FROM settings WHERE key = 'soc_secret'")
     result = cursor.fetchone()
     current_secret = result[0] if result else "YOUR_SECRET_MICRO_SOC_KEY"
@@ -260,7 +205,6 @@ def download_agent(os_type):
     import sqlite3
     from flask import Response, request
     
-    # Fetch the live secret key
     conn = sqlite3.connect('/opt/micro-dfir/siem.db')
     cursor = conn.cursor()
     cursor.execute("SELECT value FROM settings WHERE key = 'soc_secret'")
@@ -268,7 +212,6 @@ def download_agent(os_type):
     secret = result[0] if result else "YOUR_SECRET_MICRO_SOC_KEY"
     conn.close()
     
-    # Get the NUC's IP address dynamically
     host_ip = request.host.split(':')[0]
     
     try:
@@ -277,7 +220,6 @@ def download_agent(os_type):
     except FileNotFoundError:
         return "Agent script not found on server.", 404
         
-    # Inject the IP and Secret into the script automatically
     script_content = script_content.replace('YOUR_SECRET_MICRO_SOC_KEY', secret)
     script_content = script_content.replace('MICRO_SOC_IP_PLACEHOLDER', host_ip)
     
