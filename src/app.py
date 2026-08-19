@@ -157,10 +157,6 @@ def api_yara_scan():
         if os.path.exists(p): os.remove(p)
         return jsonify({"error": str(e)}), 500
 
-if __name__ == '__main__':
-    if not os.path.exists(DB_PATH): init_db()
-    app.run(host='0.0.0.0', port=5001, debug=True, use_reloader=False)
-
 # ==========================================
 # DYNAMIC SETTINGS & AGENT DEPLOYMENT ROUTES
 # ==========================================
@@ -228,3 +224,8 @@ def download_agent(os_type):
         mimetype="text/plain",
         headers={"Content-disposition": f"attachment; filename=micro_agent_{os_type}.py"}
     )
+    
+if __name__ == '__main__':
+    if not os.path.exists(DB_PATH): init_db()
+    app.run(host='0.0.0.0', port=5001, debug=True, use_reloader=False)
+
