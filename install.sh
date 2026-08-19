@@ -19,14 +19,20 @@ mkdir -p $SOC_DIR/bin
 curl -L -o $SOC_DIR/bin/velociraptor https://github.com/Velocidex/velociraptor/releases/download/v0.77.2/velociraptor-v0.77.2-linux-amd64
 chmod +x $SOC_DIR/bin/velociraptor
 
+echo "[*] Copying application files to $SOC_DIR..."
 mkdir -p $SOC_DIR
 cp -r ./* $SOC_DIR/
+
+# CRITICAL FIX: Change directory AFTER files are copied
 cd $SOC_DIR
 
+echo "[*] Setting up Python virtual environment..."
 python3 -m venv venv
 source venv/bin/activate
+pip install --upgrade pip
 pip install -r requirements.txt
 
+echo "[*] Configuring Vector..."
 cp config/vector.toml /etc/vector/vector.toml
 systemctl restart vector
 
@@ -40,6 +46,7 @@ echo "[*] Setting up Automation Cron Jobs..."
 (crontab -l 2>/dev/null | grep -v "taxii_client.py"; echo "0 2 * * * $SOC_DIR/venv/bin/python3 $SOC_DIR/src/taxii_client.py >> /var/log/microdfir-taxii.log 2>&1") | crontab -
 (crontab -l 2>/dev/null | grep -v "generate_report.py"; echo "0 1 1 * * $SOC_DIR/venv/bin/python3 $SOC_DIR/src/generate_report.py >> /var/log/microdfir-report.log 2>&1") | crontab -
 
+echo "[*] Installing Systemd Services..."
 cp config/microsoc-web.service /etc/systemd/system/
 cp config/microsoc-sigma.service /etc/systemd/system/
 cp config/microsoc-soar.service /etc/systemd/system/
