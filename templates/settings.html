@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="container mt-4">
-    <h2><i class="fas fa-cogs"></i> SOC Settings & Agent Deployment</h2>
+<div class="container-fluid mt-4">
+    <h2 class="text-primary"><i class="fa-solid fa-gear"></i> Micro-SOC Settings & Agents</h2>
     <hr class="border-secondary">
     
     {% with messages = get_flashed_messages(with_categories=true) %}
@@ -13,74 +13,58 @@
     {% endwith %}
 
     <div class="row">
-        <!-- Global Config -->
-        <div class="col-md-5">
-            <div class="card shadow-sm border-secondary mb-4 bg-dark text-light">
-                <div class="card-header border-secondary"><h5 class="mb-0">Global Configuration</h5></div>
+        <!-- LEFT: CONFIGURATION -->
+        <div class="col-md-6 mb-4">
+            <div class="card shadow-sm border-secondary bg-dark text-light h-100">
+                <div class="card-header border-secondary text-info">
+                    <h5 class="mb-0"><i class="fa-solid fa-key"></i> Ingestion Security Secret</h5>
+                </div>
                 <div class="card-body">
+                    <p class="text-muted small">This secret key is used by Vector and deployed log forwarders to authenticate against the ingestion API.</p>
                     <form method="POST" action="{{ url_for('settings') }}">
                         <div class="mb-3">
-                            <label for="soc_secret" class="form-label">Micro-SOC Ingestion Secret</label>
-                            <div class="input-group">
-                                <input type="password" class="form-control bg-dark text-light border-secondary" id="soc_secret" name="soc_secret" value="{{ soc_secret }}" required>
-                                <button class="btn btn-outline-secondary" type="button" onclick="toggleVisibility()" title="Show/Hide"><i class="fas fa-eye" id="eyeIcon"></i></button>
-                                <button class="btn btn-outline-info" type="button" onclick="generateKey()">Generate</button>
-                            </div>
-                            <div class="form-text text-muted mt-2">Generate a secure 32-character key, then click Save.</div>
+                            <label class="form-label text-light">SOC Secret Token</label>
+                            <input type="text" class="form-control bg-dark text-light border-secondary" name="soc_secret" value="{{ soc_secret }}" required>
                         </div>
-                        <button type="submit" class="btn btn-primary">Save Settings</button>
+                        <button type="submit" class="btn btn-outline-info">Save Settings</button>
                     </form>
                 </div>
             </div>
         </div>
 
-        <!-- Agent Deployment -->
-        <div class="col-md-7">
-            <div class="card shadow-sm border-secondary bg-dark text-light">
-                <div class="card-header border-secondary"><h5 class="mb-0">Deploy Python Log Agents</h5></div>
+        <!-- RIGHT: AGENT DEPLOYMENT & SERVICE MGMT -->
+        <div class="col-md-6 mb-4">
+            <div class="card shadow-sm border-secondary bg-dark text-light h-100">
+                <div class="card-header border-secondary text-success">
+                    <h5 class="mb-0"><i class="fa-solid fa-download"></i> Log Forwarder Agents</h5>
+                </div>
                 <div class="card-body">
-                    <p class="text-muted mb-4">These agents are dynamically generated with your NUC's IP and Secret Key.</p>
-                    <div class="row text-center">
-                        <div class="col-4">
-                            <h2 class="text-primary"><i class="fab fa-windows"></i></h2><h6>Windows</h6>
-                            <a href="{{ url_for('download_agent', os_type='windows') }}" class="btn btn-sm btn-outline-primary w-100">Download .py</a>
-                        </div>
-                        <div class="col-4">
-                            <h2 class="text-light"><i class="fab fa-linux"></i></h2><h6>Linux</h6>
-                            <a href="{{ url_for('download_agent', os_type='linux') }}" class="btn btn-sm btn-outline-light w-100">Download .py</a>
-                        </div>
-                        <div class="col-4">
-                            <h2 class="text-secondary"><i class="fab fa-apple"></i></h2><h6>macOS</h6>
-                            <a href="{{ url_for('download_agent', os_type='mac') }}" class="btn btn-sm btn-outline-secondary w-100">Download .py</a>
-                        </div>
+                    <p class="text-muted small">Download pre-configured agent scripts embedded with your current SOC secret and server IP.</p>
+                    <div class="d-flex gap-2 mb-4">
+                        <a href="{{ url_for('download_agent', os_type='windows') }}" class="btn btn-outline-success flex-fill">
+                            <i class="fa-brands fa-windows me-1"></i> Download Windows Agent
+                        </a>
+                        <a href="{{ url_for('download_agent', os_type='linux') }}" class="btn btn-outline-secondary flex-fill">
+                            <i class="fa-brands fa-linux me-1"></i> Download Linux Agent
+                        </a>
+                    </div>
+
+                    <hr class="border-secondary">
+                    
+                    <h6 class="text-warning mb-2"><i class="fa-solid fa-terminal me-1"></i> Windows Background Service Management</h6>
+                    <p class="text-muted small mb-2">To run the Windows agent persistently in the background as a system task, open <strong>PowerShell as Administrator</strong> and run:</p>
+                    
+                    <div class="bg-black p-2 rounded border border-secondary mb-3">
+                        <code class="text-success small">python micro_agent_windows.py install</code>
+                    </div>
+
+                    <p class="text-muted small mb-2">To stop and remove the background service:</p>
+                    <div class="bg-black p-2 rounded border border-secondary">
+                        <code class="text-danger small">python micro_agent_windows.py uninstall</code>
                     </div>
                 </div>
             </div>
         </div>
     </div>
 </div>
-
-<script>
-    function generateKey() {
-        const array = new Uint8Array(16);
-        window.crypto.getRandomValues(array);
-        const key = Array.from(array, byte => byte.toString(16).padStart(2, '0')).join('');
-        const input = document.getElementById('soc_secret');
-        input.value = key;
-        input.type = 'text'; 
-        document.getElementById('eyeIcon').classList.replace('fa-eye', 'fa-eye-slash');
-    }
-    
-    function toggleVisibility() {
-        const input = document.getElementById('soc_secret');
-        const icon = document.getElementById('eyeIcon');
-        if (input.type === 'password') {
-            input.type = 'text';
-            icon.classList.replace('fa-eye', 'fa-eye-slash');
-        } else {
-            input.type = 'password';
-            icon.classList.replace('fa-eye-slash', 'fa-eye');
-        }
-    }
-</script>
 {% endblock %}
