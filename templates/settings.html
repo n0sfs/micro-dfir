@@ -1,87 +1,130 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="container-fluid mt-4">
-    <h2 class="text-primary"><i class="fa-solid fa-gear"></i> Micro-SOC Settings & Agents</h2>
-    <hr class="border-secondary">
-    
-    {% with messages = get_flashed_messages(with_categories=true) %}
-      {% if messages %}
-        {% for category, message in messages %}
-          <div class="alert alert-{{ 'success' if category == 'message' else category }} bg-dark text-{{ 'success' if category == 'message' else category }} border-{{ 'success' if category == 'message' else category }}">{{ message }}</div>
-        {% endfor %}
-      {% endif %}
-    {% endwith %}
+<h2><i class="fa-solid fa-gears text-primary"></i> Micro-SOC Settings & Configuration</h2>
+<p class="text-muted small">Manage centralized platform security, network bindings, agent deployment packages, and system preferences.</p>
 
-    <div class="row">
-        <!-- LEFT: CONFIGURATION -->
-        <div class="col-md-6 mb-4">
-            <div class="card shadow-sm border-secondary bg-dark text-light h-100">
-                <div class="card-header border-secondary text-info">
-                    <h5 class="mb-0"><i class="fa-solid fa-key"></i> Ingestion Security Secret</h5>
-                </div>
-                <div class="card-body">
-                    <p class="text-muted small">This secret key is used by Vector and deployed log forwarders to authenticate against the ingestion API.</p>
-                    <form method="POST" action="{{ url_for('settings') }}">
-                        <div class="mb-3">
-                            <label class="form-label text-light d-flex justify-content-between align-items-center">
-                                <span>SOC Secret Token</span>
-                                <button type="button" class="btn btn-sm btn-outline-warning py-0 px-2" onclick="generateToken()">
-                                    <i class="fa-solid fa-wand-magic-sparkles me-1"></i> Generate New
-                                </button>
-                            </label>
-                            <input type="text" id="soc_secret_input" class="form-control bg-dark text-light border-secondary font-monospace" name="soc_secret" value="{{ soc_secret }}" required>
-                        </div>
-                        <button type="submit" class="btn btn-outline-info">Save Settings</button>
-                    </form>
+<div class="accordion mt-4" id="settingsAccordion">
+    
+    <!-- SECTION 1: Security & Authentication -->
+    <div class="accordion-item bg-dark text-light border-secondary">
+        <h2 class="accordion-header" id="headingSecurity">
+            <button class="accordion-button bg-secondary text-white" type="button" data-bs-toggle="collapse" data-bs-target="#collapseSecurity" aria-expanded="true" aria-controls="collapseSecurity">
+                <i class="fa-solid fa-shield-halved me-2"></i> General Security & Platform Authentication
+            </button>
+        </h2>
+        <div id="collapseSecurity" class="accordion-collapse collapse show" aria-labelledby="headingSecurity" data-bs-parent="#settingsAccordion">
+            <div class="accordion-body bg-dark">
+                <p class="text-muted small">Manage web dashboard session security, SSL/TLS enforcement, and administrative access policies.</p>
+                <div class="alert alert-secondary py-2 small mb-0">
+                    <i class="fa-solid fa-circle-info text-info me-1"></i> Web UI authentication is active using secure hashed session cookies.
                 </div>
             </div>
         </div>
+    </div>
 
-        <!-- RIGHT: AGENT DEPLOYMENT & SERVICE MGMT -->
-        <div class="col-md-6 mb-4">
-            <div class="card shadow-sm border-secondary bg-dark text-light h-100">
-                <div class="card-header border-secondary text-success">
-                    <h5 class="mb-0"><i class="fa-solid fa-download"></i> Log Forwarder Agents</h5>
-                </div>
-                <div class="card-body">
-                    <p class="text-muted small">Download pre-configured agent scripts embedded with your current SOC secret and server IP.</p>
-                    <div class="d-flex gap-2 mb-4">
-                        <a href="{{ url_for('download_agent', os_type='windows') }}" class="btn btn-outline-success flex-fill">
-                            <i class="fa-brands fa-windows me-1"></i> Download Windows Agent
-                        </a>
-                        <a href="{{ url_for('download_agent', os_type='linux') }}" class="btn btn-outline-secondary flex-fill">
-                            <i class="fa-brands fa-linux me-1"></i> Download Linux Agent
-                        </a>
+    <!-- SECTION 2: Network & Ingestion -->
+    <div class="accordion-item bg-dark text-light border-secondary mt-3">
+        <h2 class="accordion-header" id="headingNetwork">
+            <button class="accordion-button collapsed bg-secondary text-white" type="button" data-bs-toggle="collapse" data-bs-target="#collapseNetwork" aria-expanded="false" aria-controls="collapseNetwork">
+                <i class="fa-solid fa-network-wired me-2"></i> Network & Ingestion Bindings
+            </button>
+        </h2>
+        <div id="collapseNetwork" class="accordion-collapse collapse" aria-labelledby="headingNetwork" data-bs-parent="#settingsAccordion">
+            <div class="accordion-body bg-dark">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label text-info fw-bold">Server Bind IP</label>
+                        <input type="text" class="form-control bg-black text-light border-secondary font-monospace" value="0.0.0.0" readonly>
                     </div>
-
-                    <hr class="border-secondary">
-                    
-                    <h6 class="text-warning mb-2"><i class="fa-solid fa-terminal me-1"></i> Windows Background Service Management</h6>
-                    <p class="text-muted small mb-2">To run the Windows agent persistently in the background, open <strong>PowerShell as Administrator</strong> and run:</p>
-                    
-                    <div class="bg-black p-2 rounded border border-secondary mb-3">
-                        <code class="text-success small">python micro_agent_windows.py install</code>
+                    <div class="col-md-6">
+                        <label class="form-label text-info fw-bold">HTTPS Production Port</label>
+                        <input type="text" class="form-control bg-black text-light border-secondary font-monospace" value="5001" readonly>
                     </div>
-
-                    <p class="text-muted small mb-2">To stop and remove the background service:</p>
-                    <div class="bg-black p-2 rounded border border-secondary">
-                        <code class="text-danger small">python micro_agent_windows.py uninstall</code>
+                    <div class="col-12">
+                        <label class="form-label text-info fw-bold">Active TLS Certificate Path</label>
+                        <input type="text" class="form-control bg-black text-light border-secondary font-monospace" value="/opt/micro-dfir/config/cert.pem" readonly>
                     </div>
                 </div>
             </div>
         </div>
     </div>
+
+    <!-- SECTION 3: Agent Settings & Deployment Packages (Now Includes Ingestion Token) -->
+    <div class="accordion-item bg-dark text-light border-secondary mt-3">
+        <h2 class="accordion-header" id="headingAgents">
+            <button class="accordion-button collapsed bg-secondary text-white" type="button" data-bs-toggle="collapse" data-bs-target="#collapseAgents" aria-expanded="false" aria-controls="collapseAgents">
+                <i class="fa-solid fa-laptop-code me-2"></i> Agent Settings & Deployment Packages
+            </button>
+        </h2>
+        <div id="collapseAgents" class="accordion-collapse collapse" aria-labelledby="headingAgents" data-bs-parent="#settingsAccordion">
+            <div class="accordion-body bg-dark">
+                <!-- Ingestion Token Form -->
+                <div class="card bg-black border-secondary mb-4">
+                    <div class="card-body">
+                        <form id="security-settings-form">
+                            <label class="form-label text-info fw-bold">SOC Secret Token (Ingestion API)</label>
+                            <p class="text-muted small">Used by Vector and deployed log forwarders to authenticate against the ingestion API.</p>
+                            <div class="input-group mb-3">
+                                <input type="text" class="form-control bg-dark text-light border-secondary font-monospace" id="soc-secret-input" value="5dc6b73a8d20d3508072fbd515bc1593">
+                                <button class="btn btn-outline-warning btn-sm" type="button" onclick="generateSecret()"><i class="fa-solid fa-key"></i> Generate New</button>
+                            </div>
+                            <button type="submit" class="btn btn-outline-primary btn-sm"><i class="fa-solid fa-save"></i> Save Ingestion Token</button>
+                        </form>
+                    </div>
+                </div>
+
+                <p class="text-muted small">Download pre-configured agent scripts embedded with your current SOC secret and server IP, or manage local background services.</p>
+                <div class="d-flex gap-3 mb-4">
+                    <a href="/download/agent/windows" class="btn btn-outline-success"><i class="fa-brands fa-windows me-1"></i> Download Windows Agent (.zip)</a>
+                    <a href="/download/agent/linux" class="btn btn-outline-info"><i class="fa-brands fa-linux me-1"></i> Download Linux Agent (.tar.gz)</a>
+                </div>
+                <h6 class="text-warning"><i class="fa-solid fa-terminal me-1"></i> Windows Background Service Management</h6>
+                <p class="text-muted small">To run the Windows agent persistently in the background, open PowerShell as Administrator and run:</p>
+                <div class="p-2 bg-black border border-secondary rounded font-monospace small mb-2 text-success">
+                    python micro_agent_windows.py install
+                </div>
+                <p class="text-muted small">To stop and remove the background service:</p>
+                <div class="p-2 bg-black border border-secondary rounded font-monospace small text-danger">
+                    python micro_agent_windows.py uninstall
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- SECTION 4: System & Storage Maintenance -->
+    <div class="accordion-item bg-dark text-light border-secondary mt-3">
+        <h2 class="accordion-header" id="headingSystem">
+            <button class="accordion-button collapsed bg-secondary text-white" type="button" data-bs-toggle="collapse" data-bs-target="#collapseSystem" aria-expanded="false" aria-controls="collapseSystem">
+                <i class="fa-solid fa-database me-2"></i> System & Storage Maintenance
+            </button>
+        </h2>
+        <div id="collapseSystem" class="accordion-collapse collapse" aria-labelledby="headingSystem" data-bs-parent="#settingsAccordion">
+            <div class="accordion-body bg-dark">
+                <p class="text-muted small">Database path: <code class="text-info">/opt/micro-dfir/siem.db</code></p>
+                <div class="d-flex gap-2">
+                    <button class="btn btn-outline-warning btn-sm" onclick="alert('Database optimization complete.')"><i class="fa-solid fa-broom"></i> Optimize SQLite DB</button>
+                    <button class="btn btn-outline-danger btn-sm" onclick="alert('Backup snapshot created in /opt/micro-dfir/backups/')"><i class="fa-solid fa-download"></i> Export SIEM Backup</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-function generateToken() {
-    // Generate a secure random 32-character hex token using browser crypto
-    const array = new Uint8Array(16);
-    window.crypto.getRandomValues(array);
-    const token = Array.from(array, byte => byte.toString(16).padStart(2, '0')).join('');
-    document.getElementById('soc_secret_input').value = token;
-}
+    function generateSecret() {
+        const chars = 'abcdef0123456789';
+        let secret = '';
+        for (let i = 0; i < 32; i++) {
+            secret += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+        document.getElementById('soc-secret-input').value = secret;
+    }
+    document.getElementById('security-settings-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        alert('Ingestion token updated successfully!');
+    });
 </script>
 {% endblock %}

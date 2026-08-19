@@ -1,6 +1,24 @@
+# Python & Virtual Environments
 venv/
 __pycache__/
+*.pyc
+*.pyo
+
+# SOC Database & Local Runtime Data
 *.db
+*.sqlite
+*.sqlite3
+logs/
+*.log
 sigma_state.json
 reports/*.pdf
-.env
+bin/
+
+# Sensitive SSL/TLS Configs & Keys
+config/cert.pem
+config/key.pem
+config/*.key
+
+# OS Specific
+.DS_Store
+Thumbs.db

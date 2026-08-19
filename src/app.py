@@ -8,8 +8,8 @@ from ti_engine import lookup_ioc
 from yara_scanner import scan_file
 
 app = Flask(__name__, template_folder='../templates')
-app.secret_key = secrets.token_hex(32)
-DB_PATH = os.path.abspath("siem.db")
+app.secret_key = '0a3e3de8e8ca7ef43a3bb4645178baa03fa4d3612046968dfeeb86b13f19dd09'
+DB_PATH = "/opt/micro-dfir/siem.db"
 app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
 app.config['WEBHOOK_SECRET'] = "YOUR_SECRET_MICRO_SOC_KEY"
 
@@ -39,8 +39,13 @@ def close_conn(e):
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     conn.cursor().executescript(open(os.path.join(os.path.dirname(__file__), "schema.sql")).read())
-    conn.commit(); conn.close()
-
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users")
+    if c.fetchone()[0] == 0:
+        from werkzeug.security import generate_password_hash
+        c.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", ('admin', generate_password_hash('changeme123'), 'admin'))
+    conn.commit()
+    conn.close()
 def generate_vector_config():
     rules = get_db().execute("SELECT * FROM drop_rules WHERE enabled = 1").fetchall()
     stmts = []
@@ -68,6 +73,53 @@ def login():
 @login_required
 def logout(): logout_user(); return redirect(url_for('login'))
 
+@app.route('/api/ingest', methods=['POST'])
+def api_ingest():
+    from flask import request, jsonify
+    import datetime
+    try:
+        data = request.get_json()
+        if not data or 'logs' not in data:
+            return jsonify({'status': 'error', 'message': 'Missing logs payload'}), 400
+            
+        db = get_db()
+        count = 0
+        for log in data['logs']:
+            ts = log.get('time', datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+            hst = log.get('host', 'UNKNOWN')
+            app_n = log.get('app', 'Windows')
+            sev = log.get('severity', 'INFO')
+            eid = log.get('event_id', '-')
+            usr = log.get('username', '-')
+            msg = log.get('message', '')
+            db.execute("INSERT INTO live_logs (timestamp, host, app, severity, event_id, username, message) VALUES (?, ?, ?, ?, ?, ?, ?)", (ts, hst, app_n, sev, eid, usr, msg))
+            count += 1
+            
+            # --- INLINE DETECTION ENGINE ---
+            db.execute('CREATE TABLE IF NOT EXISTS alerts (id INTEGER PRIMARY KEY, timestamp TEXT, rule_name TEXT, severity TEXT, host TEXT, message TEXT)')
+            msg_lower = msg.lower()
+            triggered_rule = None
+            alert_sev = "INFO"
+            
+            if "mimikatz" in msg_lower or "lsass" in msg_lower:
+                triggered_rule = "Credential Dumping Activity"
+                alert_sev = "CRITICAL"
+            elif "powershell" in msg_lower and ("-enc" in msg_lower or "-w hidden" in msg_lower):
+                triggered_rule = "Suspicious PowerShell Execution"
+                alert_sev = "HIGH"
+            elif "whoami" in msg_lower or "net user" in msg_lower or "ipconfig" in msg_lower:
+                triggered_rule = "System Discovery Commands"
+                alert_sev = "LOW"
+                
+            if triggered_rule:
+                db.execute("INSERT INTO alerts (timestamp, rule_name, severity, host, message) VALUES (?, ?, ?, ?, ?)", (ts, triggered_rule, alert_sev, hst, msg))
+            # -------------------------------
+        db.commit()
+        return jsonify({'status': 'success', 'ingested': count}), 200
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 @app.route('/')
 @login_required
 def dash(): return render_template('dashboard.html', current_user=current_user)
@@ -80,12 +132,25 @@ def rules(): return render_template('rules.html', current_user=current_user)
 @login_required
 def pipeline(): return render_template('pipeline.html', current_user=current_user)
 
-@app.route('/api/ingest', methods=['POST'])
-def webhook():
-    if request.headers.get('Authorization') != f"Bearer {app.config['WEBHOOK_SECRET']}": return jsonify({"error": "Auth"}), 401
-    d = request.get_json()
-    get_db().execute("INSERT INTO events (timestamp, source_ip, hostname, app_name, facility, severity, message, raw_json) VALUES (datetime('now'), ?, ?, ?, 'local0', ?, ?, ?)", (request.remote_addr, d.get('hostname'), d.get('app_name', 'webhook'), d.get('severity', 'info'), d.get('message', ''), json.dumps(d)))
-    get_db().commit(); return jsonify({"status": "ok"}), 201
+@app.route('/api/alerts')
+@login_required
+def api_alerts():
+    db = get_db()
+    limit = request.args.get('limit', 30, type=int)
+    try:
+        rows = db.execute("""
+            SELECT a.id, a.timestamp, a.severity, a.acknowledged, 
+                   COALESCE(s.title, 'YARA / Custom Rule Match') as rule_title,
+                   e.message as event_message, e.hostname
+            FROM alerts a
+            LEFT JOIN sigma_rules s ON a.rule_id = s.id
+            LEFT JOIN events e ON a.event_id = e.id
+            ORDER BY a.id DESC LIMIT ?
+        """, (limit,)).fetchall()
+        alerts = [dict(row) for row in rows]
+    except Exception:
+        alerts = []
+    return jsonify(alerts)
 
 @app.route('/api/events')
 @login_required
@@ -191,77 +256,76 @@ def del_drop(rid):
 # ==========================================
 RULE_META_CACHE = {}
 
+RULES_CACHE = None
+
+RULES_CACHE = None
+
+RULES_CACHE = None
+
+def invalidate_rules_cache():
+    invalidate_rules_cache()
+
 @app.route('/api/rules', methods=['GET', 'POST'])
 @login_required
 def api_rules():
-    global RULE_META_CACHE
+    global RULES_CACHE
     db = get_db()
-    
+
     if request.method == 'GET':
+        if RULES_CACHE is not None:
+            return jsonify(RULES_CACHE)
+
         import re
         rules_out = []
         for r in db.execute("SELECT id, title, rule_yaml, enabled FROM sigma_rules ORDER BY id DESC").fetchall():
             rid = r['id']
-            
-            if rid not in RULE_META_CACHE:
-                ry = r['rule_yaml']
-                try:
-                    # Extract Subcategory (e.g., process_creation)
-                    c_match = re.search(r'category:\s*([^\n\r]+)', ry)
-                    cat = c_match.group(1).strip().strip("'\"") if c_match else 'unknown'
-                    
-                    # Extract Platform/Product (e.g., windows, linux)
-                    p_match = re.search(r'product:\s*([^\n\r]+)', ry)
-                    platform = p_match.group(1).strip().strip("'\"").title() if p_match else 'Global'
-                    
-                    # Extract Tags
-                    t_match = re.search(r'tags:\s*\n((\s+-\s*[^\n\r]+\n?)+)', ry)
-                    tags = [t.strip().strip('- ') for t in t_match.group(1).split('\n') if t.strip()] if t_match else []
-                    
-                    # Infer Rule Type based on tags
-                    rule_type = "Generic"
-                    for t in tags:
-                        if t.startswith('compliance'):
-                            rule_type = "Compliance"
-                            break
-                        elif 'hunting' in t or 'threat_hunting' in t:
-                            rule_type = "Threat Hunting"
-                            break
+            ry = r['rule_yaml']
+            try:
+                c_match = re.search(r'category:\s*([^\n\r]+)', ry)
+                cat = c_match.group(1).strip().strip("'\"") if c_match else 'unknown'
 
-                    RULE_META_CACHE[rid] = {
-                        "rule_type": rule_type,
-                        "platform": platform,
-                        "category": cat, 
-                        "tags": tags
-                    }
-                except Exception:
-                    RULE_META_CACHE[rid] = {"rule_type": "Generic", "platform": "Global", "category": "unknown", "tags": []}
-            
-            meta = RULE_META_CACHE[rid]
+                p_match = re.search(r'product:\s*([^\n\r]+)', ry)
+                platform = p_match.group(1).strip().strip("'\"").title() if p_match else 'Global'
+
+                t_match = re.search(r'tags:\s*\n((\s+-\s*[^\n\r]+\n?)+)', ry)
+                tags = [t.strip().strip('- ') for t in t_match.group(1).split('\n') if t.strip()] if t_match else []
+
+                rule_type = "Generic"
+                for t in tags:
+                    if t.startswith('compliance'):
+                        rule_type = "Compliance"
+                        break
+                    elif 'hunting' in t or 'threat_hunting' in t:
+                        rule_type = "Threat Hunting"
+                        break
+            except Exception:
+                rule_type, platform, cat, tags = "Generic", "Global", "unknown", []
+
             rules_out.append({
                 "id": rid,
                 "title": r['title'],
                 "enabled": r['enabled'],
-                "rule_type": meta['rule_type'],
-                "platform": meta['platform'],
-                "category": meta['category'],
-                "tags": meta['tags']
+                "rule_type": rule_type,
+                "platform": platform,
+                "category": cat,
+                "tags": tags
             })
-        return jsonify(rules_out)
-        
+        RULES_CACHE = rules_out
+        return jsonify(RULES_CACHE)
+
     if current_user.role != 'admin': return jsonify({"error": "Admin required"}), 403
     ry = request.get_json().get('rule_yaml', '')
     import yaml
     t = yaml.safe_load(ry).get('title', 'Untitled')
     db.execute("INSERT INTO sigma_rules (title, rule_yaml, enabled) VALUES (?, ?, 1)", (t, ry))
     db.commit()
+    invalidate_rules_cache()
     return jsonify({"status": "success"})
-
 @app.route('/api/rules/<int:rid>/toggle', methods=['PUT'])
 @login_required
 def api_r_tog(rid): 
     if current_user.role != 'admin': return jsonify({"error": "Admin required"}), 403
-    db=get_db(); db.execute("UPDATE sigma_rules SET enabled = CASE WHEN enabled = 1 THEN 0 ELSE 1 END WHERE id=?", (rid,)); db.commit(); return jsonify({"ok":1})
+    db=get_db(); db.execute("UPDATE sigma_rules SET enabled = CASE WHEN enabled = 1 THEN 0 ELSE 1 END WHERE id=?", (rid,)); db.commit(); invalidate_rules_cache(); return jsonify({"ok":1})
 
 @app.route('/api/rules/bulk_update', methods=['PUT'])
 @login_required
@@ -274,8 +338,7 @@ def api_rules_bulk():
         db = get_db()
         placeholders = ','.join('?' for _ in ids)
         db.execute(f"UPDATE sigma_rules SET enabled = ? WHERE id IN ({placeholders})", [enable] + ids)
-        db.commit()
-    return jsonify({"ok": 1})
+        db.commit(); invalidate_rules_cache(); return jsonify({"ok": 1})
 
 @app.route('/api/yara/scan', methods=['POST'])
 @login_required
@@ -364,58 +427,154 @@ def settings():
     
     return render_template('settings.html', soc_secret=current_secret, current_user=current_user)
 
+@app.route('/api/agent/config', methods=['GET'])
+def agent_config():
+    from flask import request, jsonify
+    import datetime
+    db = get_db()
+    ip = request.remote_addr
+    ua = request.headers.get('User-Agent', 'Unknown')
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    db.execute('CREATE TABLE IF NOT EXISTS agent_polls (id INTEGER PRIMARY KEY, timestamp TEXT, ip_address TEXT, user_agent TEXT)')
+    db.execute('INSERT INTO agent_polls (timestamp, ip_address, user_agent) VALUES (?, ?, ?)', (now, ip, ua))
+    db.execute('CREATE TABLE IF NOT EXISTS agent_config_template (id INTEGER PRIMARY KEY, channels TEXT)')
+    db.commit()
+    row = db.execute('SELECT channels FROM agent_config_template WHERE id = 1').fetchone()
+    channels = row['channels'] if row and row['channels'] else 'Security,System,Application,PowerShell'
+    return jsonify({'channels': channels})
+
+@app.route('/api/agent/polls', methods=['GET'])
+def agent_polls():
+    from flask import jsonify
+    db = get_db()
+    try:
+        rows = db.execute('SELECT * FROM agent_polls ORDER BY id DESC LIMIT 20').fetchall()
+        return jsonify([dict(r) for r in rows])
+    except Exception:
+        return jsonify([])
+
+@app.route('/api/agent/templates', methods=['GET', 'POST'])
+def agent_templates():
+    from flask import request, jsonify
+    db = get_db()
+    db.execute('CREATE TABLE IF NOT EXISTS agent_config_template (id INTEGER PRIMARY KEY, channels TEXT)')
+    if request.method == 'POST':
+        channels = ','.join(request.json.get('channels', []))
+        db.execute('INSERT OR REPLACE INTO agent_config_template (id, channels) VALUES (1, ?)', (channels,))
+        db.commit()
+        return jsonify({'status': 'success'})
+    else:
+        row = db.execute('SELECT channels FROM agent_config_template WHERE id = 1').fetchone()
+        ch_list = row['channels'].split(',') if row and row['channels'] else ['Security','System','Application','PowerShell']
+        return jsonify({'channels': ch_list})
+
 @app.route('/download/agent/<os_type>')
-@login_required
+
+@app.route('/download/agent/<os_type>')
+
+@app.route('/download/agent/<os_type>')
 def download_agent(os_type):
-    import sqlite3
-    from flask import Response, request
-    
-    conn = sqlite3.connect('/opt/micro-dfir/siem.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT value FROM settings WHERE key = 'soc_secret'")
-    result = cursor.fetchone()
-    secret = result[0] if result else "YOUR_SECRET_MICRO_SOC_KEY"
-    conn.close()
-    
-    host_ip = request.host.split(':')[0]
-    
+    import io, zipfile, os
+    from flask import request, Response, send_file
     try:
-        with open('/opt/micro-dfir/agents/install_agent.py', 'r') as f:
-            script_content = f.read()
-    except FileNotFoundError:
-        return "Agent script not found on server.", 404
-        
-    script_content = script_content.replace('YOUR_SECRET_MICRO_SOC_KEY', secret)
-    script_content = script_content.replace('MICRO_SOC_IP_PLACEHOLDER', host_ip)
-    
-    return Response(
-        script_content,
-        mimetype="text/plain",
-        headers={"Content-disposition": f"attachment; filename=micro_agent_{os_type}.py"}
-    )
-
-@app.route('/settings/yara/sync', methods=['POST'])
-@login_required
-def sync_yara():
-    import urllib.request, zipfile, io, os
-    from flask import request, flash, redirect, url_for
-    
-    repo_url = request.form.get('repo_url')
-    dest_dir = '/opt/micro-dfir/rules/yara_imported'
-    
-    try:
-        os.makedirs(dest_dir, exist_ok=True)
-        req = urllib.request.Request(repo_url, headers={'User-Agent': 'MicroSOC-Admin/1.0'})
-        with urllib.request.urlopen(req) as response:
-            with zipfile.ZipFile(io.BytesIO(response.read())) as z:
-                z.extractall(dest_dir)
-                
-        flash(f'YARA rules successfully downloaded and extracted to {dest_dir}', 'success')
+        if os_type == 'windows':
+            # We will read a clean template file from disk
+            template_path = os.path.join(os.path.dirname(__file__), '../config/micro_agent_windows.py')
+            if not os.path.exists(template_path):
+                return "Agent template missing on server", 404
+            
+            with open(template_path, 'r', encoding='utf-8') as f:
+                code = f.read()
+            
+            # Inject the correct host URL dynamically
+            code = code.replace('__HOST_URL__', request.host)
+            
+            mem_zip = io.BytesIO()
+            with zipfile.ZipFile(mem_zip, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr('micro_agent_windows.py', code)
+            return Response(mem_zip.getvalue(), mimetype='application/zip', headers={'Content-Disposition': 'attachment; filename=micro_agent_windows.zip'})
     except Exception as e:
-        flash(f'Failed to import rules: {str(e)}', 'danger')
-        
-    return redirect(url_for('hunt'))
+        return str(e), 500
 
-if __name__ == '__main__':
-    if not os.path.exists(DB_PATH): init_db()
-    app.run(host='0.0.0.0', port=5001, debug=True, use_reloader=False)
+@app.route('/api/logs/search', methods=['GET'])
+def api_logs_search():
+    from flask import request, jsonify
+    import datetime
+    try:
+        q = request.args.get('q', '').lower()
+        time_range = request.args.get('range', '24h')
+        app_filter = request.args.get('app', '')
+        severity_filter = request.args.get('severity', '')
+        field_key = request.args.get('fieldKey', '')
+        field_op = request.args.get('fieldOp', 'contains')
+        field_val = request.args.get('fieldVal', '').lower()
+        
+        db = get_db()
+        query = "SELECT * FROM live_logs"
+        params, conditions = [], []
+        
+        if time_range and time_range != 'all':
+            now = datetime.datetime.now()
+            if time_range == '15m': delta = datetime.timedelta(minutes=15)
+            elif time_range == '1h': delta = datetime.timedelta(hours=1)
+            elif time_range == '7d': delta = datetime.timedelta(days=7)
+            else: delta = datetime.timedelta(hours=24)
+            conditions.append("timestamp >= ?")
+            params.append((now - delta).strftime('%Y-%m-%d %H:%M:%S'))
+            
+        if app_filter:
+            conditions.append("app = ?")
+            params.append(app_filter)
+        if severity_filter:
+            conditions.append("severity = ?")
+            params.append(severity_filter)
+            
+        allowed_columns = ['username', 'host', 'event_id', 'source_ip', 'destination_ip', 'email', 'message']
+        if field_key and field_val:
+            col = field_key if field_key in allowed_columns else 'message'
+            if field_op == 'equals':
+                conditions.append(f"LOWER({col}) = ?")
+                params.append(field_val)
+            elif field_op == 'not_equals':
+                conditions.append(f"LOWER({col}) != ?")
+                params.append(field_val)
+            elif field_op == 'starts_with':
+                conditions.append(f"LOWER({col}) LIKE ?")
+                params.append(f'{field_val}%')
+            elif field_op == 'ends_with':
+                conditions.append(f"LOWER({col}) LIKE ?")
+                params.append(f'%{field_val}')
+            elif field_op == 'gt':
+                conditions.append(f"{col} > ?")
+                params.append(field_val)
+            elif field_op == 'lt':
+                conditions.append(f"{col} < ?")
+                params.append(field_val)
+            else:
+                conditions.append(f"LOWER({col}) LIKE ?")
+                params.append(f'%{field_val}%')
+            
+        if q:
+            conditions.append("(LOWER(host) LIKE ? OR LOWER(app) LIKE ? OR LOWER(event_id) LIKE ? OR LOWER(username) LIKE ? OR LOWER(message) LIKE ?)")
+            params.extend([f'%{q}%'] * 5)
+            
+        if conditions:
+            query += " WHERE " + " and ".join(conditions)
+            
+        query += " ORDER BY timestamp DESC LIMIT 300"
+        
+        rows = db.execute(query, params).fetchall()
+        logs = [{
+            'time': r['timestamp'], 
+            'severity': r['severity'], 
+            'host': r['host'], 
+            'app': r['app'], 
+            'event_id': r['event_id'], 
+            'username': r['username'], 
+            'source_ip': r['source_ip'] if 'source_ip' in r.keys() else '-',
+            'destination_ip': r['destination_ip'] if 'destination_ip' in r.keys() else '-',
+            'message': r['message']
+        } for r in rows]
+        return jsonify({'logs': logs, 'count': len(logs)})
+    except Exception as e:
+        return jsonify({'error': str(e), 'logs': [], 'count': 0})

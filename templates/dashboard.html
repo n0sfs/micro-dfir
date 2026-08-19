@@ -1,3 +1,271 @@
-{% extends "base.html" %}{% block content %}
-<h2>SOC Dashboard</h2><div class="grid-stack"><div class="grid-stack-item" gs-w="8" gs-h="6"><div class="grid-stack-item-content p-3 border rounded border-secondary" style="background:#1e2125; overflow-y:auto;"><h5 class="border-bottom border-secondary pb-2"><i class="fa-solid fa-list"></i> Live Event Stream</h5><table class="table table-dark table-sm"><thead><tr><th>Time</th><th>Host</th><th>App</th><th>Message</th></tr></thead><tbody id="logs-body"></tbody></table></div></div><div class="grid-stack-item" gs-x="8" gs-w="4" gs-h="6"><div class="grid-stack-item-content p-3 border rounded border-secondary text-center" style="background:#1e2125;"><h5 class="border-bottom border-secondary pb-2 text-info"><i class="fa-solid fa-file-code"></i> YARA Scanner</h5><form id="yara-form" class="mt-4"><input class="form-control bg-dark text-light mb-3" type="file" id="yf" required><button type="submit" class="btn btn-outline-info w-100" id="sbtn">Run Scan</button></form><div id="yr" class="mt-3 text-start"></div></div></div></div>
-{% endblock %}{% block scripts %}<script>GridStack.init({cellHeight:80,margin:10}); async function fetchLogs(){const res=await fetch('/api/events?limit=30');const logs=await res.json(); document.getElementById('logs-body').innerHTML=logs.map(l=>`<tr><td>${l.timestamp}</td><td>${l.hostname}</td><td>${l.app_name}</td><td>${l.message.substring(0,100)}</td></tr>`).join('');} setInterval(fetchLogs, 3000); fetchLogs(); document.getElementById('yara-form').addEventListener('submit', async(e)=>{e.preventDefault(); const fd=new FormData(); fd.append('file',document.getElementById('yf').files[0]); document.getElementById('yr').innerHTML='Scanning...'; try{const res=await fetch('/api/yara/scan',{method:'POST',body:fd});const d=await res.json(); document.getElementById('yr').innerHTML=d.error?d.error:(d.matches&&d.matches.length>0?`Threats: ${d.matches.map(m=>m.rule_name).join(', ')}`:`Clean.`);}catch(e){document.getElementById('yr').innerHTML='Failed';}});</script>{% endblock %}
+{% extends "base.html" %}
+
+{% block content %}
+<h2 class="mb-4">SOC Dashboard</h2>
+
+
+<!-- UNIFIED ADVANCED SOC TOOLBAR WITH LABELS & TOOLTIPS -->
+<div class="row g-2 mb-3 bg-dark p-3 rounded border border-secondary">
+    
+    <!-- Global Search -->
+    <div class="col-md-2">
+        <label for="searchQuery" class="form-label text-muted small mb-1 fw-bold">Global Search</label>
+        <input type="text" id="searchQuery" class="form-control bg-dark text-light border-secondary form-control-sm" placeholder="Search keyword, ID..." title="Searches across hosts, apps, IDs, users, and messages" onkeyup="if(event.key === 'Enter') loadLogs()">
+    </div>
+
+    <!-- App Filter -->
+    <div class="col-md-2">
+        <label for="appFilter" class="form-label text-muted small mb-1 fw-bold">Log Source / App</label>
+        <select id="appFilter" class="form-select bg-dark text-light border-secondary form-select-sm" title="Filter logs by specific Windows event channel or application">
+            <option value="">All Apps</option>
+            <option value="Security">Security</option>
+            <option value="System">System</option>
+            <option value="Application">Application</option>
+            <option value="Sysmon">Sysmon</option>
+            <option value="PowerShell">PowerShell</option>
+        </select>
+    </div>
+
+    <!-- Severity Filter -->
+    <div class="col-md-1">
+        <label for="sevFilter" class="form-label text-muted small mb-1 fw-bold">Severity</label>
+        <select id="sevFilter" class="form-select bg-dark text-light border-secondary form-select-sm" title="Filter by event severity level (INFO, WARN, ALERT)">
+            <option value="">Sev</option>
+            <option value="INFO">INFO</option>
+            <option value="WARN">WARN</option>
+            <option value="ALERT">ALERT</option>
+        </select>
+    </div>
+
+    <!-- Time Range Filter -->
+    <div class="col-md-1">
+        <label for="timeRange" class="form-label text-muted small mb-1 fw-bold">Time Window</label>
+        <select id="timeRange" class="form-select bg-dark text-light border-secondary form-select-sm" title="Select historical time range for log queries">
+            <option value="15m">15m</option>
+            <option value="1h">1h</option>
+            <option value="24h" selected>24h</option>
+            <option value="7d">7d</option>
+            <option value="all">All</option>
+        </select>
+    </div>
+    
+    <!-- Field Key Picklist & Settings -->
+    <div class="col-md-2">
+        <label for="fieldKey" class="form-label text-muted small mb-1 fw-bold">Target Field</label>
+        <div class="input-group input-group-sm" title="Select a specific database field to target your filter query">
+            <select id="fieldKey" class="form-select bg-dark text-light border-secondary">
+                <option value="">-- Field --</option>
+                <option value="username">User</option>
+                <option value="host">Host</option>
+                <option value="email">Email</option>
+                <option value="event_id">Event ID</option>
+                <option value="source_ip">Src IP</option>
+                <option value="destination_ip">Dest IP</option>
+                <option value="message">Message</option>
+            </select>
+            <button class="btn btn-outline-secondary text-light" type="button" data-bs-toggle="modal" data-bs-target="#fieldManagerModal" title="Manage, add, edit, or delete custom search fields"><i class="fa-solid fa-gear"></i></button>
+        </div>
+    </div>
+
+    <!-- Operator Selection -->
+    <div class="col-md-1 px-1">
+        <label for="fieldOp" class="form-label text-muted small mb-1 fw-bold">Operator</label>
+        <select id="fieldOp" class="form-select bg-dark text-light border-secondary form-select-sm" title="Select conditional operator (contains, equals, starts with, etc.)">
+            <option value="contains" selected>contains</option>
+            <option value="equals">=</option>
+            <option value="not_equals">!=</option>
+            <option value="starts_with">starts</option>
+            <option value="ends_with">ends</option>
+            <option value="gt">&gt;</option>
+            <option value="lt">&lt;</option>
+        </select>
+    </div>
+
+    <!-- Field Value Input -->
+    <div class="col-md-2">
+        <label for="fieldVal" class="form-label text-muted small mb-1 fw-bold">Field Value</label>
+        <input type="text" id="fieldVal" class="form-control bg-dark text-light border-secondary form-control-sm" placeholder="Value..." title="Enter target string or numeric value to match against the selected field" onkeyup="if(event.key === 'Enter') loadLogs()">
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="col-md-1 d-flex align-items-end gap-1">
+        <button class="btn btn-primary btn-sm w-100 h-100" onclick="loadLogs()" title="Execute search query"><i class="fa-solid fa-search"></i></button>
+        <button id="streamToggleBtn" class="btn btn-success btn-sm h-100" title="Toggle Live Streaming Mode (Auto-refresh every 5s)" onclick="toggleStream()"><i class="fa-solid fa-play"></i></button>
+    </div>
+</div>
+
+<!-- LOGS TABLE -->
+
+<div class="card bg-dark border-secondary">
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-dark table-striped table-hover mb-0 align-middle">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Sev</th>
+                        <th>Host</th>
+                        <th>App</th>
+                        <th>Event ID</th>
+                        <th>User</th>
+                        <th>Src IP</th>
+                        <th>Message</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td colspan="8" class="text-center text-muted py-4">Loading logs...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+// Define loadLogs globally first
+window.loadLogs = function() {
+    let q = document.getElementById('searchQuery').value;
+    let app = document.getElementById('appFilter').value;
+    let sev = document.getElementById('sevFilter').value;
+    let range = document.getElementById('timeRange').value;
+    let fieldKey = document.getElementById('fieldKey').value;
+    let fieldOp = document.getElementById('fieldOp').value;
+    let fieldVal = document.getElementById('fieldVal').value;
+
+    fetch(`/api/logs/search?q=${encodeURIComponent(q)}&range=${range}&app=${encodeURIComponent(app)}&severity=${encodeURIComponent(sev)}&fieldKey=${encodeURIComponent(fieldKey)}&fieldOp=${encodeURIComponent(fieldOp)}&fieldVal=${encodeURIComponent(fieldVal)}`)
+        .then(r => r.json())
+        .then(data => {
+            let tbody = document.querySelector('tbody');
+            if (!tbody) return;
+            if (!data.logs || data.logs.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-3">No logs match current filters.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = data.logs.map(log => `
+                <tr>
+                    <td class="text-nowrap">${log.time}</td>
+                    <td><span class="badge bg-${log.severity === 'ALERT' ? 'danger' : log.severity === 'WARN' ? 'warning' : 'info'}">${log.severity}</span></td>
+                    <td class="text-nowrap">${log.host}</td>
+                    <td>${log.app}</td>
+                    <td>${log.event_id}</td>
+                    <td>${log.username}</td>
+                    <td>${log.source_ip}</td>
+                    <td class="text-truncate" style="max-width: 350px;" title="${log.message}">${log.message}</td>
+                </tr>
+            `).join('');
+        })
+        .catch(err => console.error("Error fetching logs:", err));
+};
+
+let isStreaming = true;
+let streamInterval = null;
+
+function toggleStream() {
+    isStreaming = !isStreaming;
+    let btn = document.getElementById('streamToggleBtn');
+    if (isStreaming) {
+        btn.className = "btn btn-success btn-sm";
+        btn.innerHTML = '<i class="fa-solid fa-play"></i>';
+        streamInterval = setInterval(autoStreamLogs, 5000);
+    } else {
+        btn.className = "btn btn-outline-secondary btn-sm";
+        btn.innerHTML = '<i class="fa-solid fa-pause"></i>';
+        clearInterval(streamInterval);
+    }
+}
+
+function autoStreamLogs() {
+    if (isStreaming && typeof loadLogs === 'function') { 
+        loadLogs(); 
+    }
+}
+
+// Field Manager Modal functions
+document.addEventListener("DOMContentLoaded", function() {
+    loadLogs();
+    streamInterval = setInterval(autoStreamLogs, 5000);
+});
+
+function renderFieldList() {
+    let select = document.getElementById('fieldKey');
+    let listGroup = document.getElementById('fieldListGroup');
+    if (!listGroup) return;
+    listGroup.innerHTML = '';
+
+    for (let i = 0; i < select.options.length; i++) {
+        let opt = select.options[i];
+        if (!opt.value) continue;
+
+        let li = document.createElement('li');
+        li.className = "list-group-item bg-dark text-light border-secondary d-flex justify-content-between align-items-center py-1 px-2";
+        li.innerHTML = `
+            <span><strong>${opt.text}</strong> <code class="text-muted small">(${opt.value})</code></span>
+            <div>
+                <button class="btn btn-sm btn-outline-info py-0 px-1 me-1" onclick="editField('${opt.value}', '${opt.text}')"><i class="fa-solid fa-pen"></i></button>
+                <button class="btn btn-sm btn-outline-danger py-0 px-1" onclick="deleteField('${opt.value}')"><i class="fa-solid fa-trash"></i></button>
+            </div>
+        `;
+        listGroup.appendChild(li);
+    }
+}
+
+const modalEl = document.getElementById('fieldManagerModal');
+if (modalEl) {
+    modalEl.addEventListener('show.bs.modal', function () {
+        renderFieldList();
+    });
+}
+
+function editField(key, label) {
+    document.getElementById('modalFormTitle').innerText = "Edit Field";
+    document.getElementById('editOriginalKey').value = key;
+    document.getElementById('customFieldName').value = key;
+    document.getElementById('customFieldLabel').value = label;
+}
+
+function resetFieldForm() {
+    document.getElementById('modalFormTitle').innerText = "Add New Field";
+    document.getElementById('editOriginalKey').value = '';
+    document.getElementById('customFieldName').value = '';
+    document.getElementById('customFieldLabel').value = '';
+}
+
+function saveFieldOption() {
+    let originalKey = document.getElementById('editOriginalKey').value;
+    let keyInput = document.getElementById('customFieldName').value.trim();
+    let labelInput = document.getElementById('customFieldLabel').value.trim();
+    if (!keyInput || !labelInput) return;
+
+    let select = document.getElementById('fieldKey');
+
+    if (originalKey) {
+        for (let i = 0; i < select.options.length; i++) {
+            if (select.options[i].value === originalKey) {
+                select.options[i].value = keyInput;
+                select.options[i].text = labelInput;
+                break;
+            }
+        }
+    } else {
+        let opt = document.createElement('option');
+        opt.value = keyInput;
+        opt.text = labelInput;
+        select.add(opt);
+        select.value = keyInput;
+    }
+
+    renderFieldList();
+    resetFieldForm();
+}
+
+function deleteField(key) {
+    let select = document.getElementById('fieldKey');
+    for (let i = 0; i < select.options.length; i++) {
+        if (select.options[i].value === key) {
+            select.remove(i);
+            break;
+        }
+    }
+    renderFieldList();
+}
+</script>
+{% endblock %}

@@ -1,130 +1,128 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="container-fluid mt-4">
-    <h2 class="text-primary"><i class="fa-solid fa-magnifying-glass"></i> Threat Hunting & CTI</h2>
-    <hr class="border-secondary">
-    
-    {% with messages = get_flashed_messages(with_categories=true) %}
-      {% if messages %}
-        {% for category, message in messages %}
-          <div class="alert alert-{{ 'success' if category == 'message' else category }} bg-dark text-{{ 'success' if category == 'message' else category }} border-{{ 'success' if category == 'message' else category }}">{{ message }}</div>
-        {% endfor %}
-      {% endif %}
-    {% endwith %}
-
-    <div class="row">
-        <!-- LEFT COLUMN: YARA SCANNER & MANAGEMENT -->
-        <div class="col-md-5 mb-4">
-            
-            <!-- Dynamic Scanner Form -->
-            <div class="card shadow-sm border-secondary bg-dark text-light mb-4">
-                <div class="card-header border-secondary text-info">
-                    <h5 class="mb-0"><i class="fa-solid fa-spider"></i> Advanced YARA Scanner</h5>
-                </div>
-                <div class="card-body">
-                    <p class="text-muted small">Upload a file and select the active YARA rules to scan it against.</p>
-                    <form method="POST" action="{{ url_for('hunt') }}" enctype="multipart/form-data">
-                        
-                        <!-- File Upload -->
-                        <div class="mb-3">
-                            <input class="form-control bg-dark text-light border-secondary" type="file" name="scan_file" required>
-                        </div>
-                        
-                        <!-- Interactive Rule Selection -->
-                        <div class="d-flex justify-content-between align-items-center mb-2 mt-3">
-                            <h6 class="text-success mb-0"><i class="fa-solid fa-file-signature"></i> Active Rules ({{ yara_files|length }})</h6>
-                            <div class="btn-group">
-                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleYara(true)">Select All</button>
-                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleYara(false)">Clear</button>
-                            </div>
-                        </div>
-                        
-                        <div class="bg-dark border border-secondary rounded p-2 mb-3" style="max-height: 250px; overflow-y: auto;">
-                            {% if yara_files %}
-                                {% for file in yara_files %}
-                                <div class="form-check">
-                                    <input class="form-check-input yara-checkbox" type="checkbox" name="selected_rules" value="{{ file }}" id="rule_{{ loop.index }}">
-                                    <label class="form-check-label text-muted small" for="rule_{{ loop.index }}" style="word-break: break-all;">
-                                        {{ file }}
-                                    </label>
-                                </div>
-                                {% endfor %}
-                            {% else %}
-                                <p class="text-muted small mb-0"><i class="fa-solid fa-triangle-exclamation text-warning me-1"></i> No rules loaded. Import them below.</p>
-                            {% endif %}
-                        </div>
-
-                        <!-- Submit Button -->
-                        <button type="submit" class="btn btn-outline-info w-100 mb-3">
-                            <i class="fa-solid fa-microscope"></i> Run Scan
-                        </button>
-                    </form>
-                    
-                    <!-- Scan Results -->
-                    {% if matches %}
-                        <hr class="border-secondary mt-2">
-                        <h6 class="text-danger"><i class="fa-solid fa-triangle-exclamation"></i> Scan Results</h6>
-                        <div class="table-responsive">
-                            <table class="table table-dark table-hover table-sm">
-                                <thead><tr><th>Target File</th><th>Rule Matched</th></tr></thead>
-                                <tbody>
-                                    {% for match in matches %}
-                                    <tr><td><code>{{ match.file }}</code></td><td class="text-danger fw-bold">{{ match.rule }}</td></tr>
-                                    {% endfor %}
-                                </tbody>
-                            </table>
-                        </div>
-                    {% endif %}
-                </div>
+<h2>Threat Hunting & CTI</h2>
+<div class="row mt-3">
+    <!-- Left Column: YARA Scanner & Multi-Repo Sync -->
+    <div class="col-md-6">
+        <div class="card bg-dark border-secondary mb-4 shadow">
+            <div class="card-header bg-secondary text-white">
+                <h5 class="mb-0"><i class="fa-solid id="bug"></i> Advanced YARA Scanner</h5>
             </div>
-
-            <!-- YARA Rule Importer -->
-            <div class="card shadow-sm border-secondary bg-dark text-light h-100">
-                <div class="card-header border-secondary text-success">
-                    <h5 class="mb-0"><i class="fa-solid fa-cloud-arrow-down"></i> Threat Intel Repository Sync</h5>
-                </div>
-                <div class="card-body">
-                    <form method="POST" action="{{ url_for('sync_yara') }}" class="mb-0">
-                        <div class="input-group">
-                            <input type="url" class="form-control bg-dark text-light border-secondary form-control-sm" name="repo_url" value="https://github.com/Yara-Rules/rules/archive/refs/heads/master.zip" required>
-                            <button type="submit" class="btn btn-sm btn-outline-success">Import</button>
+            <div class="card-body">
+                <p class="text-muted small">Upload a file and select the active YARA rules to scan it against.</p>
+                <form id="yara-form">
+                    <div class="mb-3">
+                        <input class="form-control bg-dark text-light border-secondary" type="file" id="yf" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label text-info fw-bold">Active Rules (<span id="rule-count">0</span>)</label>
+                        <div class="d-flex justify-content-between mb-2">
+                            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAll(true)">Select All</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAll(false)">Clear</button>
                         </div>
-                    </form>
-                </div>
+                        <div id="rules-list-container" class="border border-secondary rounded p-2 bg-black" style="max-height: 200px; overflow-y: auto;">
+                            <!-- Dynamically loaded rules -->
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-outline-info w-100" id="sbtn"><i class="fa-solid fa-play"></i> Run Scan</button>
+                </form>
+                <div id="yr" class="mt-3 text-start font-monospace small"></div>
             </div>
         </div>
 
-        <!-- RIGHT COLUMN: LOG SEARCH & CTI -->
-        <div class="col-md-7 mb-4">
-            <div class="card shadow-sm border-secondary bg-dark text-light h-100">
-                <div class="card-header border-secondary text-primary">
-                    <h5 class="mb-0"><i class="fa-solid fa-server"></i> Log Search & CTI Lookup</h5>
+        <!-- YARA Repository Sync Box -->
+        <div class="card bg-dark border-secondary shadow">
+            <div class="card-header bg-secondary text-white">
+                <h5 class="mb-0"><i class="fa-solid fa-cloud-arrow-down"></i> YARA Repository Sync</h5>
+            </div>
+            <div class="card-body">
+                <p class="text-muted small">Enter multiple YARA repository archive URLs (.zip), one per line:</p>
+                <div class="mb-3">
+                    <textarea class="form-control bg-dark text-light border-secondary font-monospace small" id="yara-urls-input" rows="3" placeholder="https://github.com/Yara-Rules/rules/archive/refs/heads/master.zip&#10;https://github.com/plusvic/yara-rules/archive/refs/heads/master.zip"></textarea>
                 </div>
-                <div class="card-body">
-                    <div class="d-flex gap-2 mb-3">
-                        <input type="text" id="sq" class="form-control bg-dark text-light border-secondary" placeholder="Search logs...">
-                        <button onclick="s()" class="btn btn-primary text-nowrap"><i class="fa-solid fa-search"></i> Search</button>
-                    </div>
-                    <div class="table-responsive" style="max-height: 600px; overflow-y: auto;">
-                        <table class="table table-dark table-hover table-sm">
-                            <thead><tr><th>Time</th><th>App</th><th>Message</th><th>Action</th></tr></thead>
-                            <tbody id="hr"></tbody>
-                        </table>
-                    </div>
-                </div>
+                <button type="button" class="btn btn-outline-success w-100" onclick="syncMultipleYaraRepos()"><i class="fa-solid fa-sync"></i> Import & Sync Selected Repos</button>
+                <div id="sync-results" class="mt-2 small font-monospace"></div>
             </div>
         </div>
     </div>
 
-    <!-- CTI MODAL -->
-    <div class="modal fade" id="cm" tabindex="-1" data-bs-theme="dark">
-        <div class="modal-dialog">
-            <div class="modal-content bg-dark border-secondary text-light">
-                <div class="modal-header border-secondary">
-                    <h5 class="modal-title">ThreatFox CTI Lookup</h5>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+    <!-- Right Column: Log Search & CTI Lookup & External TI Sources Box -->
+    <div class="col-md-6">
+        <div class="card bg-dark border-secondary mb-4 shadow">
+            <div class="card-header bg-secondary text-white">
+                <h5 class="mb-0"><i class="fa-solid fa-magnifying-glass"></i> Log Search & CTI Lookup</h5>
+            </div>
+            <div class="card-body">
+                <form id="search-form" class="input-group mb-3">
+                    <input type="text" id="query-input" class="form-control bg-dark text-light border-secondary" placeholder="Search logs or IOCs (IP, Hash, Domain)...">
+                    <button class="btn btn-outline-primary" type="submit"><i class="fa-solid fa-search"></i> Search</button>
+                </form>
+                <div class="table-responsive" style="max-height: 350px; overflow-y: auto;">
+                    <table class="table table-dark table-sm table-hover align-middle">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>App</th>
+                                <th>Message</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="search-results-body">
+                            <tr><td colspan="4" class="text-center text-muted">Enter a query to search events or perform CTI enrichment.</td></tr>
+                        </tbody>
+                    </table>
                 </div>
-                <div class="modal-body" id="cb"></div>
+                <div id="cti-result-card" class="mt-3 p-3 border border-info rounded bg-black d-none">
+                    <h6 class="text-info border-bottom border-secondary pb-1"><i class="fa-solid fa-shield-halved"></i> CTI Intelligence Result</h6>
+                    <div id="cti-content" class="small font-monospace"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- External CTI Sources Box (API & STIX/TAXII) -->
+        <div class="card bg-dark border-secondary shadow">
+            <div class="card-header bg-secondary text-white">
+                <h5 class="mb-0"><i class="fa-solid fa-network-wired"></i> Threat Intelligence Sources (API & STIX/TAXII)</h5>
+            </div>
+            <div class="card-body">
+                <p class="text-muted small">Connect external threat intelligence platforms or TAXII servers for automated enrichment.</p>
+                <form id="ti-source-form" class="mb-3">
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-6">
+                            <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="ti-name" placeholder="Source Name (e.g., AlienVault OTX)" required>
+                        </div>
+                        <div class="col-md-6">
+                            <select class="form-select form-select-sm bg-dark text-light border-secondary" id="ti-type">
+                                <option value="API">REST API Key</option>
+                                <option value="STIX_TAXII">STIX / TAXII 2.1</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-7">
+                            <input type="url" class="form-control form-control-sm bg-dark text-light border-secondary" id="ti-url" placeholder="Endpoint URL / TAXII Root" required>
+                        </div>
+                        <div class="col-md-5">
+                            <input type="password" class="form-control form-control-sm bg-dark text-light border-secondary" id="ti-key" placeholder="API Key / Token (Optional)">
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-sm btn-outline-warning w-100"><i class="fa-solid fa-plus"></i> Add Threat Feed Source</button>
+                </form>
+                <div class="table-responsive" style="max-height: 180px; overflow-y: auto;">
+                    <table class="table table-dark table-sm font-monospace small">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                                <th>Endpoint</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ti-sources-body">
+                            <!-- Loaded dynamically -->
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
     </div>
@@ -133,25 +131,138 @@
 
 {% block scripts %}
 <script>
-// Select All / Clear Checkboxes Logic
-function toggleYara(state) {
-    document.querySelectorAll('.yara-checkbox').forEach(cb => cb.checked = state);
-}
+    // Load Rules on startup
+    async function loadRules() {
+        const res = await fetch('/api/rules');
+        const rules = await res.json();
+        const container = document.getElementById('rules-list-container');
+        document.getElementById('rule-count').innerText = rules.length;
+        container.innerHTML = rules.map(r => `
+            <div class="form-check">
+                <input class="form-check-input rule-checkbox" type="checkbox" value="${r.filepath || r.title}" id="rule-${r.id}" checked>
+                <label class="form-check-label text-light small" for="rule-${r.id}">${r.title}</label>
+            </div>
+        `).join('');
+    }
 
-const md=new bootstrap.Modal(document.getElementById('cm')); 
-async function s(){
-    const r=await(await fetch(`/api/hunt/search?q=${document.getElementById('sq').value}`)).json(); 
-    document.getElementById('hr').innerHTML=r.map(l=>{
-        let m=l.message.match(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/);
-        let btn=m?`<button class="btn btn-sm btn-outline-info" onclick="c('${m[0]}')">Check CTI</button>`:'';
-        return `<tr><td>${l.timestamp}</td><td>${l.app_name}</td><td>${l.message}</td><td>${btn}</td></tr>`;
-    }).join('');
-} 
-async function c(ioc){
-    md.show(); 
-    document.getElementById('cb').innerHTML="Checking ThreatFox..."; 
-    const d=await(await fetch('/api/ti/lookup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ioc:ioc})})).json(); 
-    document.getElementById('cb').innerHTML=d.status==='malicious'?`<div class="text-danger"><h5>Malicious!</h5>${d.malware} - ${d.threat_type}</div>`:`<div class="text-success">${d.message}</div>`;
-}
+    function toggleSelectAll(select) {
+        document.querySelectorAll('.rule-checkbox').forEach(cb => cb.checked = select);
+    }
+
+    async function syncMultipleYaraRepos() {
+        const text = document.getElementById('yara-urls-input').value;
+        const urls = text.split('\n').filter(u => u.trim().length > 0);
+        const resDiv = document.getElementById('sync-results');
+        if (urls.length === 0) {
+            resDiv.innerHTML = '<span class="text-danger">Please enter at least one valid repository URL.</span>';
+            return;
+        }
+        resDiv.innerHTML = '<span class="text-warning">Syncing and compiling YARA repositories...</span>';
+        
+        try {
+            const resp = await fetch('/api/yara/sync_multi', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ urls })
+            });
+            const data = await resp.json();
+            resDiv.innerHTML = data.results.map(r => `<div class="${r.status === 'Success' ? 'text-success' : 'text-danger'}">${r.url}: ${r.status}</div>`).join('');
+            loadRules();
+        } catch (e) {
+            resDiv.innerHTML = '<span class="text-danger">Sync failed due to network error.</span>';
+        }
+    }
+
+    // Load TI Sources
+    async function loadTiSources() {
+        try {
+            const res = await fetch('/api/ti/sources');
+            const sources = await res.json();
+            const tbody = document.getElementById('ti-sources-body');
+            if (sources.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No external TI sources configured.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = sources.map(s => `
+                <tr>
+                    <td>${s.name}</td>
+                    <td><span class="badge bg-secondary">${s.source_type}</span></td>
+                    <td class="text-truncate" style="max-width: 150px;" title="${s.endpoint_url}">${s.endpoint_url}</td>
+                    <td><button class="btn btn-xs btn-outline-danger py-0 px-1" onclick="deleteTiSource(${s.id})"><i class="fa-solid fa-trash"></i></button></td>
+                </tr>
+            `).join('');
+        } catch (e) {
+            console.error('Error loading TI sources:', e);
+        }
+    }
+
+    document.getElementById('ti-source-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const payload = {
+            name: document.getElementById('ti-name').value,
+            source_type: document.getElementById('ti-type').value,
+            endpoint_url: document.getElementById('ti-url').value,
+            api_key: document.getElementById('ti-key').value
+        };
+        await fetch('/api/ti/sources', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        document.getElementById('ti-source-form').reset();
+        loadTiSources();
+    });
+
+    async function deleteTiSource(id) {
+        await fetch(`/api/ti/sources?id=${id}`, { method: 'DELETE' });
+        loadTiSources();
+    }
+
+    // Log Search & CTI lookup handler
+    document.getElementById('search-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const query = document.getElementById('query-input').value;
+        const res = await fetch(`/api/hunt/search?q=${encodeURIComponent(query)}`);
+        const data = await res.json();
+        const tbody = document.getElementById('search-results-body');
+        
+        // Also perform CTI lookup check
+        const ctiRes = await fetch('/api/ti/lookup', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ indicator: query })
+        });
+        const ctiData = await ctiRes.json();
+        const ctiCard = document.getElementById('cti-result-card');
+        const ctiContent = document.getElementById('cti-content');
+        
+        if (ctiData && Object.keys(ctiData).length > 0) {
+            ctiCard.classList.remove('d-none');
+            ctiContent.innerText = JSON.stringify(ctiData, null, 2);
+        } else {
+            ctiCard.classList.add('d-none');
+        }
+
+        if (!data || data.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No matching events found.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = data.map(l => `
+            <tr>
+                <td>${l.timestamp}</td>
+                <td>${l.app_name}</td>
+                <td class="text-truncate" style="max-width: 250px;" title="${l.message}">${l.message}</td>
+                <td><button class="btn btn-sm btn-outline-info py-0" onclick="lookupIOC('${l.message}')">Analyze IOC</button></td>
+            </tr>
+        `).join('');
+    });
+
+    function lookupIOC(text) {
+        document.getElementById('query-input').value = text;
+        document.getElementById('search-form').dispatchEvent(new Event('submit'));
+    }
+
+    loadRules();
+    loadTiSources();
 </script>
 {% endblock %}

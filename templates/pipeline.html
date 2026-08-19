@@ -1,5 +1,232 @@
-{% extends "base.html" %}{% block content %}
-<h2><i class="fa-solid fa-filter text-primary"></i> Log Pipeline Management</h2>
-<div class="card bg-dark border-secondary mb-4 shadow-sm"><div class="card-body"><form id="arf" class="row g-3 align-items-end"><div class="col-md-2"><label class="text-muted small">Field</label><select id="rf" class="form-select bg-dark text-light"><option value="app_name">App Name</option><option value="hostname">Hostname</option><option value="severity">Severity</option><option value="message">Raw Message</option></select></div><div class="col-md-2"><label class="text-muted small">Operator</label><select id="ro" class="form-select bg-dark text-light"><option value="equals">Equals</option><option value="contains">Contains</option></select></div><div class="col-md-3"><label class="text-muted small">Value</label><input type="text" id="rv" class="form-control bg-dark text-light" required></div><div class="col-md-3"><label class="text-muted small">Description</label><input type="text" id="rd" class="form-control bg-dark text-light" required></div><div class="col-md-2"><button type="submit" class="btn btn-primary w-100" id="srb">Apply Drop Rule</button></div></form></div></div>
-<div class="card bg-dark border-secondary shadow-sm"><div class="card-body p-0"><table class="table table-dark mb-0"><thead><tr><th>ID</th><th>Condition</th><th>Description</th><th class="text-center">Status</th><th></th></tr></thead><tbody id="rtb"></tbody></table></div></div>
-{% endblock %}{% block scripts %}<script>async function lr(){const r=await(await fetch('/api/droprules')).json(); document.getElementById('rtb').innerHTML=r.map(rl=>`<tr><td>#${rl.id}</td><td>${rl.field} ${rl.operator} "${rl.value}"</td><td>${rl.description}</td><td class="text-center"><input class="form-check-input" type="checkbox" ${rl.enabled?'checked':''} onchange="fetch('/api/droprules/${rl.id}/toggle',{method:'PUT'}).then(lr)"></td><td><button class="btn btn-sm btn-outline-danger" onclick="fetch('/api/droprules/${rl.id}',{method:'DELETE'}).then(lr)"><i class="fa-solid fa-trash"></i></button></td></tr>`).join('');} document.getElementById('arf').addEventListener('submit',async(e)=>{e.preventDefault(); await fetch('/api/droprules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({field:document.getElementById('rf').value,operator:document.getElementById('ro').value,value:document.getElementById('rv').value,description:document.getElementById('rd').value})}); document.getElementById('arf').reset(); lr();}); lr();</script>{% endblock %}
+{% extends "base.html" %}
+{% block content %}
+<h2><i class="fa-solid fa-filter text-primary"></i> Log Pipeline & Routing Management</h2>
+<p class="text-muted small">Manage real-time log ingestion filtering rules and global endpoint log collection channel templates.</p>
+
+<div class="row mt-4">
+    <!-- Left Column: Drop & Filter Rules -->
+    <div class="col-md-7">
+        <div class="card bg-dark border-secondary mb-4 shadow">
+            <div class="card-header bg-secondary text-white">
+                <h5 class="mb-0"><i class="fa-solid fa-ban"></i> Active Drop / Filter Rules</h5>
+            </div>
+            <div class="card-body">
+                <form id="arf" class="row g-2 align-items-end mb-3">
+                    <div class="col-md-3">
+                        <label class="text-muted small">Field</label>
+                        <select id="rf" class="form-select form-select-sm bg-dark text-light border-secondary">
+                            <option value="app_name">App Name</option>
+                            <option value="hostname">Hostname</option>
+                            <option value="severity">Severity</option>
+                            <option value="message">Raw Message</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="text-muted small">Operator</label>
+                        <select id="ro" class="form-select form-select-sm bg-dark text-light border-secondary">
+                            <option value="equals">Equals</option>
+                            <option value="contains">Contains</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="text-muted small">Value</label>
+                        <input type="text" id="rv" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Match value..." required>
+                    </div>
+                    <div class="col-md-10">
+                        <label class="text-muted small">Description</label>
+                        <input type="text" id="rd" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Rule purpose..." required>
+                    </div>
+                    <div class="col-md-2">
+                        <button type="submit" class="btn btn-sm btn-primary w-100" id="srb">Add Rule</button>
+                    </div>
+                </form>
+
+                <div class="table-responsive" style="max-height: 280px; overflow-y: auto;">
+                    <table class="table table-dark table-sm table-hover align-middle font-monospace small">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Condition</th>
+                                <th>Description</th>
+                                <th class="text-center">Active</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="rtb"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Right Column: Endpoint Windows Log Channel Templates -->
+    <div class="col-md-5">
+        <div class="card bg-dark border-secondary shadow mb-4">
+            <div class="card-header bg-secondary text-white">
+                <h5 class="mb-0"><i class="fa-solid fa-sliders"></i> Agent Windows Log Channels</h5>
+            </div>
+            <div class="card-body">
+                <p class="text-muted small">Select event channels to enforce across all deployed endpoint collector agents:</p>
+                <form id="agent-template-form">
+                    <div class="mb-3 font-monospace small">
+                        <div class="form-check mb-2">
+                            <input class="form-check-input chan-cb" type="checkbox" value="Security" id="chan-security">
+                            <label class="form-check-label text-light" for="chan-security">Security (Logon / Process creation)</label>
+                        </div>
+                        <div class="form-check mb-2">
+                            <input class="form-check-input chan-cb" type="checkbox" value="System" id="chan-system">
+                            <label class="form-check-label text-light" for="chan-system">System (Hardware & service events)</label>
+                        </div>
+                        <div class="form-check mb-2">
+                            <input class="form-check-input chan-cb" type="checkbox" value="Application" id="chan-app">
+                            <label class="form-check-label text-light" for="chan-app">Application (App crashes & errors)</label>
+                        </div>
+                        <div class="form-check mb-2">
+                            <input class="form-check-input chan-cb" type="checkbox" value="PowerShell" id="chan-ps">
+                            <label class="form-check-label text-light" for="chan-ps">PowerShell (Script block execution)</label>
+                        </div>
+                        <div class="form-check mb-2">
+                            <input class="form-check-input chan-cb" type="checkbox" value="Sysmon" id="chan-sysmon">
+                            <label class="form-check-label text-light" for="chan-sysmon">Sysmon (Advanced telemetry)</label>
+                        </div>
+                        <div class="form-check mb-2">
+                            <input class="form-check-input chan-cb" type="checkbox" value="Windows Defender" id="chan-def">
+                            <label class="form-check-label text-light" for="chan-def">Windows Defender (Threat quarantines)</label>
+                        </div>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-outline-info w-100" onclick="saveAgentTemplate()"><i class="fa-solid fa-save"></i> Save & Push Channel Template</button>
+                    <div id="template-save-msg" class="mt-2 text-center small"></div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Active Endpoint Polls Section -->
+<div class="row">
+    <div class="col-12">
+        <div class="card bg-dark border-secondary shadow">
+            <div class="card-header bg-secondary text-white d-flex justify-content-between align-items-center">
+                <h5 class="mb-0"><i class="fa-solid fa-laptop-code"></i> Active Endpoint Check-ins & Template Validation</h5>
+                <button class="btn btn-sm btn-outline-light" onclick="loadAgentPolls()"><i class="fa-solid fa-sync"></i> Refresh List</button>
+            </div>
+            <div class="card-body">
+                <p class="text-muted small">Endpoints checking in periodically to validate and pull their active Windows log channel configurations:</p>
+                <div class="table-responsive" style="max-height: 220px; overflow-y: auto;">
+                    <table class="table table-dark table-sm table-hover align-middle font-monospace small">
+                        <thead>
+                            <tr>
+                                <th>Check-in Time</th>
+                                <th>Endpoint IP</th>
+                                <th>Client / Agent Info</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="agent-polls-body">
+                            <tr><td colspan="4" class="text-center text-muted">No endpoints have checked in yet.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    async function lr() {
+        const res = await fetch('/api/droprules');
+        const r = await res.json();
+        const tbody = document.getElementById('rtb');
+        if (r.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No drop rules configured.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = r.map(rl => `
+            <tr>
+                <td>#${rl.id}</td>
+                <td>${rl.field} ${rl.operator} "${rl.value}"</td>
+                <td>${rl.description}</td>
+                <td class="text-center"><input class="form-check-input" type="checkbox" ${rl.enabled ? 'checked' : ''} onchange="fetch('/api/droprules/${rl.id}/toggle',{method:'PUT'}).then(lr)"></td>
+                <td><button class="btn btn-xs btn-outline-danger py-0 px-1" onclick="fetch('/api/droprules/${rl.id}',{method:'DELETE'}).then(lr)"><i class="fa-solid fa-trash"></i></button></td>
+            </tr>
+        `).join('');
+    }
+
+    document.getElementById('arf').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        await fetch('/api/droprules', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                field: document.getElementById('rf').value,
+                operator: document.getElementById('ro').value,
+                value: document.getElementById('rv').value,
+                description: document.getElementById('rd').value
+            })
+        });
+        document.getElementById('arf').reset();
+        lr();
+    });
+
+    async function loadAgentTemplate() {
+        try {
+            const res = await fetch('/api/agent/templates');
+            const data = await res.json();
+            if (data.channels) {
+                document.querySelectorAll('.chan-cb').forEach(cb => {
+                    cb.checked = data.channels.includes(cb.value);
+                });
+            }
+        } catch (e) {
+            console.error('Error loading agent template:', e);
+        }
+    }
+
+    async function saveAgentTemplate() {
+        const selected = [];
+        document.querySelectorAll('.chan-cb:checked').forEach(cb => selected.push(cb.value));
+        const msg = document.getElementById('template-save-msg');
+        
+        try {
+            await fetch('/api/agent/templates', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ channels: selected })
+            });
+            msg.innerHTML = '<span class="text-success">Template updated successfully!</span>';
+            setTimeout(() => msg.innerHTML = '', 3000);
+        } catch (e) {
+            msg.innerHTML = '<span class="text-danger">Failed to save template.</span>';
+        }
+    }
+
+    async function loadAgentPolls() {
+        try {
+            const res = await fetch('/api/agent/polls');
+            const polls = await res.json();
+            const tbody = document.getElementById('agent-polls-body');
+            if (polls.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No endpoints have checked in yet.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = polls.map(p => `
+                <tr>
+                    <td>${p.timestamp}</td>
+                    <td class="text-info">${p.ip_address}</td>
+                    <td class="text-truncate" style="max-width: 300px;" title="${p.user_agent}">${p.user_agent}</td>
+                    <td><span class="badge bg-success">Template Synced</span></td>
+                </tr>
+            `).join('');
+        } catch (e) {
+            console.error('Error loading polls:', e);
+        }
+    }
+
+    lr();
+    loadAgentTemplate();
+    loadAgentPolls();
+    setInterval(loadAgentPolls, 30000);
+</script>
+{% endblock %}
