@@ -160,3 +160,65 @@ def api_yara_scan():
 if __name__ == '__main__':
     if not os.path.exists(DB_PATH): init_db()
     app.run(host='0.0.0.0', port=5001, debug=True, use_reloader=False)
+
+# ==========================================
+# DYNAMIC SETTINGS & AGENT DEPLOYMENT ROUTES
+# ==========================================
+def migrate_settings():
+    try:
+        import sqlite3
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db')
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('soc_secret', 'YOUR_SECRET_MICRO_SOC_KEY')")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+migrate_settings()
+
+@app.route('/settings', methods=['GET', 'POST'])
+def settings():
+    import sqlite3
+    from flask import request, render_template, flash
+    conn = sqlite3.connect('/opt/micro-dfir/siem.db')
+    cursor = conn.cursor()
+    if request.method == 'POST':
+        new_secret = request.form.get('soc_secret')
+        if new_secret:
+            cursor.execute("UPDATE settings SET value = ? WHERE key = 'soc_secret'", (new_secret,))
+            conn.commit()
+            flash('Settings updated successfully!', 'success')
+    cursor.execute("SELECT value FROM settings WHERE key = 'soc_secret'")
+    result = cursor.fetchone()
+    current_secret = result[0] if result else "YOUR_SECRET_MICRO_SOC_KEY"
+    conn.close()
+    return render_template('settings.html', soc_secret=current_secret)
+
+@app.route('/download/agent/<os_type>')
+def download_agent(os_type):
+    import sqlite3
+    from flask import Response, request
+    conn = sqlite3.connect('/opt/micro-dfir/siem.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM settings WHERE key = 'soc_secret'")
+    result = cursor.fetchone()
+    secret = result[0] if result else "YOUR_SECRET_MICRO_SOC_KEY"
+    conn.close()
+    
+    host_ip = request.host.split(':')[0]
+    try:
+        with open('/opt/micro-dfir/agents/install_agent.py', 'r') as f:
+            script_content = f.read()
+    except FileNotFoundError:
+        return "Agent script not found on server.", 404
+        
+    script_content = script_content.replace('YOUR_SECRET_MICRO_SOC_KEY', secret)
+    script_content = script_content.replace('MICRO_SOC_IP_PLACEHOLDER', host_ip)
+    
+    return Response(
+        script_content,
+        mimetype="text/plain",
+        headers={"Content-disposition": f"attachment; filename=micro_agent_{os_type}.py"}
+    )
