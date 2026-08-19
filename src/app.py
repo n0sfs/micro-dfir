@@ -203,34 +203,49 @@ def api_rules():
         for r in db.execute("SELECT id, title, rule_yaml, enabled FROM sigma_rules ORDER BY id DESC").fetchall():
             rid = r['id']
             
-            # If we haven't parsed this rule yet, extract it with fast regex
             if rid not in RULE_META_CACHE:
                 ry = r['rule_yaml']
-                cat = 'unknown'
-                tags = []
                 try:
-                    # Extract Category
+                    # Extract Subcategory (e.g., process_creation)
                     c_match = re.search(r'category:\s*([^\n\r]+)', ry)
-                    if c_match: 
-                        cat = c_match.group(1).strip().strip("'\"")
+                    cat = c_match.group(1).strip().strip("'\"") if c_match else 'unknown'
                     
-                    # Extract MITRE Tags
+                    # Extract Platform/Product (e.g., windows, linux)
+                    p_match = re.search(r'product:\s*([^\n\r]+)', ry)
+                    platform = p_match.group(1).strip().strip("'\"").title() if p_match else 'Global'
+                    
+                    # Extract Tags
                     t_match = re.search(r'tags:\s*\n((\s+-\s*[^\n\r]+\n?)+)', ry)
-                    if t_match:
-                        tags = [t.strip().strip('- ') for t in t_match.group(1).split('\n') if t.strip()]
+                    tags = [t.strip().strip('- ') for t in t_match.group(1).split('\n') if t.strip()] if t_match else []
                     
-                    RULE_META_CACHE[rid] = {"category": cat, "tags": tags}
+                    # Infer Rule Type based on tags
+                    rule_type = "Generic"
+                    for t in tags:
+                        if t.startswith('compliance'):
+                            rule_type = "Compliance"
+                            break
+                        elif 'hunting' in t or 'threat_hunting' in t:
+                            rule_type = "Threat Hunting"
+                            break
+
+                    RULE_META_CACHE[rid] = {
+                        "rule_type": rule_type,
+                        "platform": platform,
+                        "category": cat, 
+                        "tags": tags
+                    }
                 except Exception:
-                    RULE_META_CACHE[rid] = {"category": "unknown", "tags": []}
+                    RULE_META_CACHE[rid] = {"rule_type": "Generic", "platform": "Global", "category": "unknown", "tags": []}
             
-            # Pull from the lightning-fast memory cache
             meta = RULE_META_CACHE[rid]
             rules_out.append({
                 "id": rid,
                 "title": r['title'],
                 "enabled": r['enabled'],
-                "tags": meta['tags'],
-                "category": meta['category']
+                "rule_type": meta['rule_type'],
+                "platform": meta['platform'],
+                "category": meta['category'],
+                "tags": meta['tags']
             })
         return jsonify(rules_out)
         

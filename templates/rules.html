@@ -9,15 +9,25 @@
             
             <!-- Filters -->
             <div class="row mb-3">
-                <div class="col-md-4 mb-2">
-                    <input type="text" id="rq" class="form-control bg-dark text-light border-secondary" placeholder="Search rule titles..." onkeyup="f()">
+                <div class="col-md-3 mb-2">
+                    <input type="text" id="rq" class="form-control bg-dark text-light border-secondary" placeholder="Search titles..." onkeyup="f()">
                 </div>
-                <div class="col-md-4 mb-2">
-                    <select id="catFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
-                        <option value="">All Categories</option>
+                <div class="col-md-2 mb-2">
+                    <select id="typeFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
+                        <option value="">All Types</option>
                     </select>
                 </div>
-                <div class="col-md-4 mb-2">
+                <div class="col-md-2 mb-2">
+                    <select id="platformFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
+                        <option value="">All Platforms</option>
+                    </select>
+                </div>
+                <div class="col-md-2 mb-2">
+                    <select id="catFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
+                        <option value="">All Subcategories</option>
+                    </select>
+                </div>
+                <div class="col-md-3 mb-2">
                     <select id="mitreFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
                         <option value="">All MITRE Tags</option>
                     </select>
@@ -42,7 +52,8 @@
                             <th style="width: 40px;"></th>
                             <th style="width: 80px;">Status</th>
                             <th>Rule Title</th>
-                            <th>Category</th>
+                            <th>Platform</th>
+                            <th>Subcategory</th>
                             <th>MITRE ATT&CK</th>
                         </tr>
                     </thead>
@@ -58,25 +69,36 @@
 {% block scripts %}
 <script>
 let allRules = [];
-let selectedIds = new Set(); // Tracks explicitly checked IDs
+let selectedIds = new Set();
 
 async function ld(){
     allRules = await(await fetch('/api/rules')).json(); 
     
-    // Parse out unique categories and MITRE tags for our dropdowns
+    // Parse out unique filters
+    const types = new Set();
+    const platforms = new Set();
     const cats = new Set();
     const mitres = new Set();
+    
     allRules.forEach(r => {
+        if(r.rule_type) types.add(r.rule_type);
+        if(r.platform) platforms.add(r.platform);
         if(r.category) cats.add(r.category);
         if(r.tags) r.tags.forEach(t => mitres.add(t));
     });
     
+    const typeSelect = document.getElementById('typeFilter');
+    const platSelect = document.getElementById('platformFilter');
     const catSelect = document.getElementById('catFilter');
     const mitreSelect = document.getElementById('mitreFilter');
     
-    catSelect.innerHTML = '<option value="">All Categories</option>';
+    typeSelect.innerHTML = '<option value="">All Types</option>';
+    platSelect.innerHTML = '<option value="">All Platforms</option>';
+    catSelect.innerHTML = '<option value="">All Subcategories</option>';
     mitreSelect.innerHTML = '<option value="">All MITRE Tags</option>';
     
+    Array.from(types).sort().forEach(t => typeSelect.innerHTML += `<option value="${t}">${t}</option>`);
+    Array.from(platforms).sort().forEach(p => platSelect.innerHTML += `<option value="${p}">${p}</option>`);
     Array.from(cats).sort().forEach(c => catSelect.innerHTML += `<option value="${c}">${c}</option>`);
     Array.from(mitres).sort().forEach(m => mitreSelect.innerHTML += `<option value="${m}">${m}</option>`);
 
@@ -84,7 +106,6 @@ async function ld(){
 } 
 
 function renderTable(rules) {
-    // Build the string in memory, then inject once. Lightning fast.
     document.getElementById('rt').innerHTML = rules.map(rl => `
         <tr>
             <td><input type="checkbox" class="form-check-input rule-cb bg-dark border-secondary" value="${rl.id}" onchange="updateSelection(this)"></td>
@@ -93,30 +114,34 @@ function renderTable(rules) {
                     <input class="form-check-input" type="checkbox" ${rl.enabled ? 'checked' : ''} onchange="toggleSingle(${rl.id}, this.checked)">
                 </div>
             </td>
-            <td class="fw-bold text-info">${rl.title}</td>
+            <td>
+                <span class="badge ${rl.rule_type === 'Generic' ? 'bg-secondary' : (rl.rule_type === 'Compliance' ? 'bg-primary' : 'bg-danger')} me-2">${rl.rule_type}</span>
+                <span class="fw-bold text-info">${rl.title}</span>
+            </td>
+            <td><span class="text-light"><i class="fa-solid fa-display me-1"></i>${rl.platform}</span></td>
             <td><span class="badge bg-secondary">${rl.category}</span></td>
             <td>${(rl.tags || []).map(t => `<span class="badge bg-primary bg-opacity-25 text-light border border-primary me-1 mb-1">${t}</span>`).join('')}</td>
         </tr>
     `).join('');
-    
-    // Clear selections whenever the table is fundamentally redrawn
     selectedIds.clear(); 
 }
 
 function f(){
     const q = document.getElementById('rq').value.toLowerCase();
+    const type = document.getElementById('typeFilter').value;
+    const plat = document.getElementById('platformFilter').value;
     const cat = document.getElementById('catFilter').value;
     const mitre = document.getElementById('mitreFilter').value;
     
-    // Filter the array in memory (takes < 1ms)
     const filtered = allRules.filter(rl => {
         const matchQ = rl.title.toLowerCase().includes(q);
+        const matchType = type === "" || rl.rule_type === type;
+        const matchPlat = plat === "" || rl.platform === plat;
         const matchCat = cat === "" || rl.category === cat;
         const matchMitre = mitre === "" || (rl.tags && rl.tags.includes(mitre));
-        return matchQ && matchCat && matchMitre;
+        return matchQ && matchType && matchPlat && matchCat && matchMitre;
     });
     
-    // Re-render the table with only the filtered results
     renderTable(filtered);
 }
 
@@ -146,11 +171,9 @@ async function bulkAction(enable) {
         body: JSON.stringify({ids: ids, enable: enable})
     });
     
-    // Refresh the table data directly from the server to reflect the new state
     ld(); 
 }
 
-// Initial load
 ld();
 </script>
 {% endblock %}
