@@ -1,3 +1,107 @@
-{% extends "base.html" %}{% block content %}
-<h2>Threat Hunting & CTI</h2><input type="text" id="sq" class="form-control bg-dark text-light border-secondary mb-3" placeholder="Search logs..."><button onclick="s()" class="btn btn-primary mb-3">Search Database</button><table class="table table-dark"><tbody id="hr"></tbody></table><div class="modal fade" id="cm" tabindex="-1" data-bs-theme="dark"><div class="modal-dialog"><div class="modal-content bg-dark"><div class="modal-body" id="cb"></div></div></div></div>
-{% endblock %}{% block scripts %}<script>const md=new bootstrap.Modal(document.getElementById('cm')); async function s(){const r=await(await fetch(`/api/hunt/search?q=${document.getElementById('sq').value}`)).json(); document.getElementById('hr').innerHTML=r.map(l=>{let m=l.message.match(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/);let btn=m?`<button class="btn btn-sm btn-info" onclick="c('${m[0]}')">Check CTI</button>`:'';return `<tr><td>${l.timestamp}</td><td>${l.app_name}</td><td>${l.message}</td><td>${btn}</td></tr>`;}).join('');} async function c(ioc){md.show(); document.getElementById('cb').innerHTML="Checking ThreatFox..."; const d=await(await fetch('/api/ti/lookup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ioc:ioc})})).json(); document.getElementById('cb').innerHTML=d.status==='malicious'?`<div class="text-danger"><h5>Malicious!</h5>${d.malware} - ${d.threat_type}</div>`:`<div class="text-success">${d.message}</div>`;}</script>{% endblock %}
+{% extends "base.html" %}
+{% block content %}
+<div class="container-fluid mt-4">
+    <h2 class="text-primary"><i class="fa-solid fa-magnifying-glass"></i> Threat Hunting & CTI</h2>
+    <hr class="border-secondary">
+    
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="alert alert-{{ 'success' if category == 'message' else category }} bg-dark text-{{ 'success' if category == 'message' else category }} border-{{ 'success' if category == 'message' else category }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <div class="row">
+        <!-- YARA SCANNER -->
+        <div class="col-md-4 mb-4">
+            <div class="card shadow-sm border-secondary bg-dark text-light h-100">
+                <div class="card-header border-secondary text-info">
+                    <h5 class="mb-0"><i class="fa-solid fa-spider"></i> Advanced YARA Scanner</h5>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted small">Upload a suspicious file to scan against imported community YARA rules.</p>
+                    <form method="POST" action="{{ url_for('hunt') }}" enctype="multipart/form-data">
+                        <div class="mb-3">
+                            <input class="form-control bg-dark text-light border-secondary" type="file" name="scan_file" required>
+                        </div>
+                        <button type="submit" class="btn btn-outline-info w-100">
+                            <i class="fa-solid fa-microscope"></i> Run Scan
+                        </button>
+                    </form>
+                    
+                    <!-- SCAN RESULTS -->
+                    {% if matches %}
+                        <hr class="border-secondary mt-4">
+                        <h6 class="text-danger"><i class="fa-solid fa-triangle-exclamation"></i> Scan Results</h6>
+                        <div class="table-responsive">
+                            <table class="table table-dark table-hover table-sm">
+                                <thead><tr><th>Target File</th><th>Rule Matched</th></tr></thead>
+                                <tbody>
+                                    {% for match in matches %}
+                                    <tr><td><code>{{ match.file }}</code></td><td class="text-danger fw-bold">{{ match.rule }}</td></tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <!-- LOG SEARCH & CTI LOOKUP -->
+        <div class="col-md-8 mb-4">
+            <div class="card shadow-sm border-secondary bg-dark text-light h-100">
+                <div class="card-header border-secondary text-primary">
+                    <h5 class="mb-0"><i class="fa-solid fa-server"></i> Log Search & CTI Lookup</h5>
+                </div>
+                <div class="card-body">
+                    <div class="d-flex gap-2 mb-3">
+                        <input type="text" id="sq" class="form-control bg-dark text-light border-secondary" placeholder="Search logs...">
+                        <button onclick="s()" class="btn btn-primary text-nowrap"><i class="fa-solid fa-search"></i> Search</button>
+                    </div>
+                    <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
+                        <table class="table table-dark table-hover table-sm">
+                            <thead><tr><th>Time</th><th>App</th><th>Message</th><th>Action</th></tr></thead>
+                            <tbody id="hr"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- CTI MODAL -->
+    <div class="modal fade" id="cm" tabindex="-1" data-bs-theme="dark">
+        <div class="modal-dialog">
+            <div class="modal-content bg-dark border-secondary text-light">
+                <div class="modal-header border-secondary">
+                    <h5 class="modal-title">ThreatFox CTI Lookup</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body" id="cb"></div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const md=new bootstrap.Modal(document.getElementById('cm')); 
+async function s(){
+    const r=await(await fetch(`/api/hunt/search?q=${document.getElementById('sq').value}`)).json(); 
+    document.getElementById('hr').innerHTML=r.map(l=>{
+        let m=l.message.match(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/);
+        let btn=m?`<button class="btn btn-sm btn-outline-info" onclick="c('${m[0]}')">Check CTI</button>`:'';
+        return `<tr><td>${l.timestamp}</td><td>${l.app_name}</td><td>${l.message}</td><td>${btn}</td></tr>`;
+    }).join('');
+} 
+async function c(ioc){
+    md.show(); 
+    document.getElementById('cb').innerHTML="Checking ThreatFox..."; 
+    const d=await(await fetch('/api/ti/lookup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ioc:ioc})})).json(); 
+    document.getElementById('cb').innerHTML=d.status==='malicious'?`<div class="text-danger"><h5>Malicious!</h5>${d.malware} - ${d.threat_type}</div>`:`<div class="text-success">${d.message}</div>`;
+}
+</script>
+{% endblock %}

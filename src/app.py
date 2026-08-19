@@ -95,6 +95,50 @@ def webhook():
 @login_required
 def api_ev(): return jsonify([dict(r) for r in get_db().execute("SELECT * FROM events ORDER BY timestamp DESC LIMIT ?", (request.args.get('limit', 50, type=int),)).fetchall()])
 
+# --- 1. THIS LOADS THE PAGE AND HANDLES YARA UPLOADS ---
+@app.route('/hunt', methods=['GET', 'POST'])
+def hunt():
+    import os
+    from flask import request, render_template, flash
+    try:
+        import yara
+    except ImportError:
+        flash("yara-python is missing. Run: pip install yara-python", "danger")
+        return render_template('hunt.html', matches=[])
+
+    matches = []
+    yara_dir = '/opt/micro-dfir/rules/yara_imported'
+
+    if request.method == 'POST':
+        if 'scan_file' not in request.files:
+            flash("No file uploaded", "danger")
+        else:
+            file = request.files['scan_file']
+            if file.filename != '':
+                file_data = file.read()
+                compiled_rules = 0
+                if os.path.exists(yara_dir):
+                    for root, dirs, files in os.walk(yara_dir):
+                        for f in files:
+                            if f.endswith(('.yar', '.yara')):
+                                try:
+                                    rule = yara.compile(filepath=os.path.join(root, f))
+                                    compiled_rules += 1
+                                    rule_matches = rule.match(data=file_data)
+                                    for m in rule_matches:
+                                        matches.append({"rule": m.rule, "file": file.filename})
+                                except Exception:
+                                    pass # Skip broken community rules
+                
+                if compiled_rules == 0:
+                    flash("No valid YARA rules found. Import them via Settings.", "warning")
+                else:
+                    flash(f"Scanned {file.filename} against {compiled_rules} active rules.", "info")
+
+    return render_template('hunt.html', matches=matches)
+
+
+# --- 2. THIS HANDLES THE LIVE LOG SEARCH PIPELINE ---
 @app.route('/api/hunt/search')
 @login_required
 def api_hunt():
