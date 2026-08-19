@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container mt-4">
+    <h2><i class="fas fa-cogs"></i> SOC Settings & Agent Deployment</h2>
+    <hr>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="alert alert-{{ 'success' if category == 'message' else category }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endfor %}
+    <div class="row">
+        <div class="col-md-5">
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-dark text-white"><h5 class="mb-0">Global Configuration</h5></div>
+                <div class="card-body">
+                    <form method="POST" action="{{ url_for('settings') }}">
+                        <div class="mb-3">
+                            <label for="soc_secret" class="form-label">Micro-SOC Ingestion Secret Key</label>
+                            <input type="password" class="form-control" id="soc_secret" name="soc_secret" value="{{ soc_secret }}" required>
+                            <div class="form-text">Agents must use this key to authenticate logs sent to the NUC.</div>
+                        </div>
+                        <button type="submit" class="btn btn-primary">Save Settings</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-7">
+            <div class="card shadow-sm">
+                <div class="card-header bg-dark text-white"><h5 class="mb-0">Deploy Python Log Agents</h5></div>
+                <div class="card-body">
+                    <p class="text-muted mb-4">These agent installers are dynamically generated. They already contain this NUC's IP address and your current Secret Key.</p>
+                    <div class="row text-center">
+                        <div class="col-4">
+                            <h2 class="text-primary"><i class="fab fa-windows"></i></h2><h6>Windows</h6>
+                            <a href="{{ url_for('download_agent', os_type='windows') }}" class="btn btn-sm btn-outline-primary w-100">Download .py</a>
+                        </div>
+                        <div class="col-4">
+                            <h2 class="text-dark"><i class="fab fa-linux"></i></h2><h6>Linux</h6>
+                            <a href="{{ url_for('download_agent', os_type='linux') }}" class="btn btn-sm btn-outline-dark w-100">Download .py</a>
+                        </div>
+                        <div class="col-4">
+                            <h2 class="text-secondary"><i class="fab fa-apple"></i></h2><h6>macOS</h6>
+                            <a href="{{ url_for('download_agent', os_type='mac') }}" class="btn btn-sm btn-outline-secondary w-100">Download .py</a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
