@@ -72,10 +72,6 @@ def logout(): logout_user(); return redirect(url_for('login'))
 @login_required
 def dash(): return render_template('dashboard.html', current_user=current_user)
 
-@app.route('/hunt')
-@login_required
-def hunt(): return render_template('hunt.html', current_user=current_user)
-
 @app.route('/rules')
 @login_required
 def rules(): return render_template('rules.html', current_user=current_user)
@@ -97,6 +93,7 @@ def api_ev(): return jsonify([dict(r) for r in get_db().execute("SELECT * FROM e
 
 # --- 1. THIS LOADS THE PAGE AND HANDLES YARA UPLOADS ---
 @app.route('/hunt', methods=['GET', 'POST'])
+@login_required
 def hunt():
     import os
     from flask import request, render_template, flash
@@ -104,7 +101,7 @@ def hunt():
         import yara
     except ImportError:
         flash("yara-python is missing. Run: pip install yara-python", "danger")
-        return render_template('hunt.html', matches=[])
+        return render_template('hunt.html', matches=[], current_user=current_user)
 
     matches = []
     yara_dir = '/opt/micro-dfir/rules/yara_imported'
@@ -135,7 +132,7 @@ def hunt():
                 else:
                     flash(f"Scanned {file.filename} against {compiled_rules} active rules.", "info")
 
-    return render_template('hunt.html', matches=matches)
+    return render_template('hunt.html', matches=matches, current_user=current_user)
 
 
 # --- 2. THIS HANDLES THE LIVE LOG SEARCH PIPELINE ---
@@ -219,6 +216,7 @@ def migrate_settings():
 migrate_settings()
 
 @app.route('/settings', methods=['GET', 'POST'])
+@login_required
 def settings():
     import sqlite3, os
     from flask import request, render_template, flash
@@ -249,9 +247,10 @@ def settings():
                     yara_files.append(rel_path)
     yara_files.sort()
     
-    return render_template('settings.html', soc_secret=current_secret, yara_files=yara_files)
+    return render_template('settings.html', soc_secret=current_secret, yara_files=yara_files, current_user=current_user)
 
 @app.route('/download/agent/<os_type>')
+@login_required
 def download_agent(os_type):
     import sqlite3
     from flask import Response, request
@@ -281,6 +280,7 @@ def download_agent(os_type):
     )
 
 @app.route('/settings/yara/sync', methods=['POST'])
+@login_required
 def sync_yara():
     import urllib.request, zipfile, io, os
     from flask import request, flash, redirect, url_for
@@ -302,9 +302,5 @@ def sync_yara():
     return redirect(url_for('settings'))
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5001, debug=True)
-  
-if __name__ == '__main__':
     if not os.path.exists(DB_PATH): init_db()
     app.run(host='0.0.0.0', port=5001, debug=True, use_reloader=False)
-
