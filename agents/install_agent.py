@@ -53,7 +53,6 @@ def get_windows_events():
     return []
 
 def find_system_python():
-    # Look for a global system-wide Python installation that SYSTEM can access
     candidates = [
         r"C:\Program Files\Python312\pythonw.exe",
         r"C:\Program Files\Python311\pythonw.exe",
@@ -65,7 +64,6 @@ def find_system_python():
     for path in candidates:
         if os.path.exists(path):
             return path
-    # Fallback to current executable if it's not trapped in a user profile
     if "Users" not in sys.executable:
         return sys.executable.replace("python.exe", "pythonw.exe")
     return None
@@ -75,12 +73,10 @@ def install_service():
     python_path = find_system_python()
     
     if not python_path:
-        print("[-] ERROR: A system-wide Python installation (e.g., C:\\Python311\\ or C:\\Program Files\\...) was not found.")
-        print("[-] The SYSTEM account cannot access Python when installed inside a user's AppData folder.")
-        print("[-] Please install Python for 'All Users' or use PyInstaller to compile this script into an .exe.")
+        print("[-] ERROR: A system-wide Python installation was not found.")
+        print("[-] Please install Python for 'All Users' or use a global path.")
         return
 
-    # Create a system-wide startup task running under the SYSTEM account
     cmd = [
         "schtasks", "/create", "/tn", TASK_NAME,
         "/tr", f'"{python_path}" "{script_path}"',
