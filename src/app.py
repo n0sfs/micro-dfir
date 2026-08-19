@@ -176,7 +176,7 @@ migrate_settings()
 
 @app.route('/settings', methods=['GET', 'POST'])
 def settings():
-    import sqlite3
+    import sqlite3, os
     from flask import request, render_template, flash
     
     conn = sqlite3.connect('/opt/micro-dfir/siem.db')
@@ -194,7 +194,18 @@ def settings():
     current_secret = result[0] if result else "YOUR_SECRET_MICRO_SOC_KEY"
     conn.close()
     
-    return render_template('settings.html', soc_secret=current_secret)
+    # Get list of imported YARA files
+    yara_files = []
+    yara_dir = '/opt/micro-dfir/rules/yara_imported'
+    if os.path.exists(yara_dir):
+        for root, dirs, files in os.walk(yara_dir):
+            for file in files:
+                if file.endswith(('.yar', '.yara')):
+                    rel_path = os.path.relpath(os.path.join(root, file), yara_dir)
+                    yara_files.append(rel_path)
+    yara_files.sort()
+    
+    return render_template('settings.html', soc_secret=current_secret, yara_files=yara_files)
 
 @app.route('/download/agent/<os_type>')
 def download_agent(os_type):
@@ -224,7 +235,7 @@ def download_agent(os_type):
         mimetype="text/plain",
         headers={"Content-disposition": f"attachment; filename=micro_agent_{os_type}.py"}
     )
-    
+
 @app.route('/settings/yara/sync', methods=['POST'])
 def sync_yara():
     import urllib.request, zipfile, io, os
@@ -245,6 +256,9 @@ def sync_yara():
         flash(f'Failed to import rules: {str(e)}', 'danger')
         
     return redirect(url_for('settings'))
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5001, debug=True)
   
 if __name__ == '__main__':
     if not os.path.exists(DB_PATH): init_db()
