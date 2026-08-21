@@ -50,6 +50,19 @@ app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
 login_manager = LoginManager()
 login_manager.init_app(app); login_manager.login_view = 'login'
 
+@login_manager.unauthorized_handler
+def unauthorized():
+    # Flask-Login's default @login_required response is a redirect to the login page
+    # regardless of what kind of request triggered it. For a page load that's correct,
+    # but every fetch() call in this app follows redirects by default, so a fetch to
+    # any /api/* route with an expired session was silently ending up with the login
+    # page's HTML as its "JSON" body — surfacing as a baffling "Unexpected token '<'"
+    # parse error in whatever UI triggered it, with no indication the real problem was
+    # just an expired session. API routes get a real 401 they can actually handle.
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'Session expired. Please log in again.'}), 401
+    return redirect(url_for('login'))
+
 def csrf_token():
     from flask import session
     if 'csrf_token' not in session:
