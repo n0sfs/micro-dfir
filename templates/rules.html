@@ -33,42 +33,26 @@
         </div>
     </div>
 
+    <style>
+        #rulesTable{table-layout:fixed;}
+        #rulesTable .rule-th{position:relative; white-space:nowrap; padding-right:10px; vertical-align:middle;}
+        #rulesTable .th-inner{display:flex; align-items:center; justify-content:space-between; gap:4px;}
+        #rulesTable .th-label{cursor:pointer; user-select:none;}
+        #rulesTable .th-label:hover{color:var(--text-primary);}
+        #rulesTable .th-icon-btn{background:none; border:none; color:var(--text-muted); padding:0 2px; font-size:.72rem; cursor:pointer; line-height:1;}
+        #rulesTable .th-icon-btn:hover{color:var(--text-secondary);}
+        #rulesTable .th-icon-btn.active-filter{color:var(--accent);}
+        #rulesTable .sort-ic{font-size:.66rem; margin-left:3px; color:var(--text-muted);}
+        #rulesTable .sort-ic.active-sort{color:var(--accent);}
+        #rulesTable .col-resizer{position:absolute; right:0; top:0; bottom:0; width:5px; cursor:col-resize; z-index:2;}
+        #rulesTable .col-resizer:hover, #rulesTable .col-resizer.resizing{background:var(--accent);}
+        #rulesTable td{overflow:hidden;}
+        #rulesTable .rule-tags-row{white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+        #rulesTable #titleSearchBox{position:absolute; top:100%; left:0; right:0; z-index:5;}
+    </style>
+
     <div class="card shadow-sm border-secondary bg-dark text-light mb-4">
         <div class="card-body">
-
-            <!-- Filters -->
-            <div class="row mb-3">
-                <div class="col-md-4 mb-2">
-                    <input type="text" id="rq" class="form-control bg-dark text-light border-secondary" placeholder="Search rule names..." onkeyup="f()">
-                </div>
-                <div class="col-md-2 mb-2">
-                    <select id="sourceFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
-                        <option value="">All Sources</option>
-                        <option value="sigma">Sigma</option>
-                        <option value="custom">Custom</option>
-                    </select>
-                </div>
-                <div class="col-md-2 mb-2">
-                    <select id="platformFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
-                        <option value="">All Platforms</option>
-                    </select>
-                </div>
-                <div class="col-md-2 mb-2">
-                    <select id="levelFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
-                        <option value="">All Levels</option>
-                        <option value="critical">Critical</option>
-                        <option value="high">High</option>
-                        <option value="medium">Medium</option>
-                        <option value="low">Low</option>
-                        <option value="informational">Informational</option>
-                    </select>
-                </div>
-                <div class="col-md-2 mb-2">
-                    <select id="statusFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
-                        <option value="">All Statuses</option>
-                    </select>
-                </div>
-            </div>
 
             <!-- Bulk Actions Toolbar -->
             <div class="d-flex gap-2 mb-3 align-items-center bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
@@ -84,18 +68,70 @@
 
             <!-- Interactive Table -->
             <div class="table-responsive" style="max-height: 600px; overflow-y: auto;">
-                <table class="table table-dark table-hover table-sm align-middle">
+                <table class="table table-dark table-hover table-sm align-middle" id="rulesTable">
                     <thead>
                         <tr>
-                            <th style="width: 40px;"></th>
-                            <th style="width: 80px;">Source</th>
-                            <th>Rule Name</th>
-                            <th>Platform</th>
-                            <th style="width: 110px;">Level</th>
-                            <th style="width: 110px;">Status</th>
-                            <th style="width: 140px;">Last Update</th>
-                            <th style="width: 70px;">Enabled</th>
-                            <th style="width: 50px;"></th>
+                            <th style="width: 32px;"></th>
+                            <th class="rule-th" data-col="source" style="width: 92px;">
+                                <div class="th-inner">
+                                    <span>Source</span>
+                                    <div class="dropdown">
+                                        <button type="button" class="th-icon-btn" id="filterBtnSource" data-bs-toggle="dropdown"><i class="fa-solid fa-filter"></i></button>
+                                        <ul class="dropdown-menu dropdown-menu-dark p-1" id="filterMenuSource" style="min-width:150px;"></ul>
+                                    </div>
+                                </div>
+                                <span class="col-resizer"></span>
+                            </th>
+                            <th class="rule-th" data-col="title" style="width: 320px;">
+                                <div class="th-inner">
+                                    <span class="th-label" onclick="toggleSort('title')">Rule Name <i class="fa-solid fa-sort sort-ic" id="sortIc-title"></i></span>
+                                    <button type="button" class="th-icon-btn" onclick="toggleTitleSearch()"><i class="fa-solid fa-magnifying-glass"></i></button>
+                                </div>
+                                <input type="text" id="titleSearchBox" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Search rule names..." style="display:none;" oninput="colFilters.q=this.value.toLowerCase(); f();">
+                                <span class="col-resizer"></span>
+                            </th>
+                            <th class="rule-th" data-col="platform" style="width: 150px;">
+                                <div class="th-inner">
+                                    <span class="th-label" onclick="toggleSort('platform')">Platform <i class="fa-solid fa-sort sort-ic" id="sortIc-platform"></i></span>
+                                    <div class="dropdown">
+                                        <button type="button" class="th-icon-btn" id="filterBtnPlatform" data-bs-toggle="dropdown"><i class="fa-solid fa-filter"></i></button>
+                                        <ul class="dropdown-menu dropdown-menu-dark p-1" id="filterMenuPlatform" style="min-width:170px; max-height:260px; overflow-y:auto;"></ul>
+                                    </div>
+                                </div>
+                                <span class="col-resizer"></span>
+                            </th>
+                            <th class="rule-th" data-col="level" style="width: 115px;">
+                                <div class="th-inner">
+                                    <span class="th-label" onclick="toggleSort('level')">Level <i class="fa-solid fa-sort sort-ic" id="sortIc-level"></i></span>
+                                    <div class="dropdown">
+                                        <button type="button" class="th-icon-btn" id="filterBtnLevel" data-bs-toggle="dropdown"><i class="fa-solid fa-filter"></i></button>
+                                        <ul class="dropdown-menu dropdown-menu-dark p-1" id="filterMenuLevel" style="min-width:150px;"></ul>
+                                    </div>
+                                </div>
+                                <span class="col-resizer"></span>
+                            </th>
+                            <th class="rule-th" data-col="status" style="width: 115px;">
+                                <div class="th-inner">
+                                    <span class="th-label" onclick="toggleSort('status')">Status <i class="fa-solid fa-sort sort-ic" id="sortIc-status"></i></span>
+                                    <div class="dropdown">
+                                        <button type="button" class="th-icon-btn" id="filterBtnStatus" data-bs-toggle="dropdown"><i class="fa-solid fa-filter"></i></button>
+                                        <ul class="dropdown-menu dropdown-menu-dark p-1" id="filterMenuStatus" style="min-width:150px;"></ul>
+                                    </div>
+                                </div>
+                                <span class="col-resizer"></span>
+                            </th>
+                            <th class="rule-th" data-col="last_update" style="width: 130px;">
+                                <div class="th-inner">
+                                    <span class="th-label" onclick="toggleSort('last_update')">Last Update <i class="fa-solid fa-sort sort-ic" id="sortIc-last_update"></i></span>
+                                </div>
+                                <span class="col-resizer"></span>
+                            </th>
+                            <th class="rule-th" data-col="enabled" style="width: 80px;">
+                                <div class="th-inner">
+                                    <span class="th-label" onclick="toggleSort('enabled')">Enabled <i class="fa-solid fa-sort sort-ic" id="sortIc-enabled"></i></span>
+                                </div>
+                            </th>
+                            <th style="width: 44px;"></th>
                         </tr>
                     </thead>
                     <tbody id="rt"></tbody>
@@ -419,26 +455,111 @@ const STATUS_BADGE = {
     deprecated: 'bg-warning text-dark', unsupported: 'bg-danger'
 };
 
+// ---- Per-column filters, sorting, resize ----
+let colFilters = { source: '', platform: '', level: '', status: '', q: '' };
+let sortState = { key: null, dir: 'asc' };
+
+function buildFilterMenu(menuId, colKey, options, allLabel) {
+    const menu = document.getElementById(menuId);
+    let html = `<li><button type="button" class="dropdown-item small" onclick="setColFilter('${colKey}','')">${allLabel}</button></li>`;
+    if (options.length) html += '<li><hr class="dropdown-divider my-1"></li>';
+    options.forEach(o => {
+        html += `<li><button type="button" class="dropdown-item small" onclick="setColFilter('${colKey}', '${o.value.replace(/'/g, "\\'")}')">${o.label}</button></li>`;
+    });
+    menu.innerHTML = html;
+}
+
+function setColFilter(key, val) {
+    colFilters[key] = val;
+    const btn = document.getElementById('filterBtn' + key.charAt(0).toUpperCase() + key.slice(1));
+    if (btn) btn.classList.toggle('active-filter', !!val);
+    f();
+}
+
+function toggleTitleSearch() {
+    const box = document.getElementById('titleSearchBox');
+    const show = box.style.display === 'none';
+    box.style.display = show ? 'block' : 'none';
+    if (show) box.focus();
+}
+
+function toggleSort(key) {
+    if (sortState.key === key) {
+        sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+        sortState.key = key;
+        sortState.dir = 'asc';
+    }
+    document.querySelectorAll('.sort-ic').forEach(ic => { ic.className = 'fa-solid fa-sort sort-ic'; });
+    const ic = document.getElementById('sortIc-' + key);
+    if (ic) ic.className = `fa-solid fa-sort-${sortState.dir === 'asc' ? 'up' : 'down'} sort-ic active-sort`;
+    f();
+}
+
+function applySort(rows) {
+    if (!sortState.key) return rows;
+    const key = sortState.key;
+    const dir = sortState.dir === 'asc' ? 1 : -1;
+    return [...rows].sort((a, b) => {
+        let av = a[key], bv = b[key];
+        if (key === 'enabled') { av = av ? 1 : 0; bv = bv ? 1 : 0; }
+        else { av = (av || '').toString().toLowerCase(); bv = (bv || '').toString().toLowerCase(); }
+        if (av < bv) return -1 * dir;
+        if (av > bv) return 1 * dir;
+        return 0;
+    });
+}
+
+function initColResize() {
+    document.querySelectorAll('#rulesTable .col-resizer').forEach(handle => {
+        handle.addEventListener('mousedown', function(e) {
+            e.preventDefault();
+            const th = handle.closest('th');
+            const startX = e.clientX;
+            const startWidth = th.offsetWidth;
+            handle.classList.add('resizing');
+            function onMove(ev) {
+                th.style.width = Math.max(50, startWidth + (ev.clientX - startX)) + 'px';
+            }
+            function onUp() {
+                handle.classList.remove('resizing');
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+                saveColWidths();
+            }
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
+    });
+}
+
+function saveColWidths() {
+    const widths = {};
+    document.querySelectorAll('#rulesTable thead th[data-col]').forEach(th => { widths[th.dataset.col] = th.style.width || null; });
+    try { localStorage.setItem('microdfir_rules_col_widths', JSON.stringify(widths)); } catch (e) {}
+}
+
+function restoreColWidths() {
+    try {
+        const widths = JSON.parse(localStorage.getItem('microdfir_rules_col_widths') || '{}');
+        document.querySelectorAll('#rulesTable thead th[data-col]').forEach(th => { if (widths[th.dataset.col]) th.style.width = widths[th.dataset.col]; });
+    } catch (e) {}
+}
+
 async function ld(){
     allRules = await(await fetch('/api/rules')).json();
 
-    // Parse out unique filters
     const platforms = new Set();
     const statuses = new Set();
-
     allRules.forEach(r => {
         if(r.platform) platforms.add(r.platform);
         if(r.status) statuses.add(r.status);
     });
 
-    const platSelect = document.getElementById('platformFilter');
-    const statusSelect = document.getElementById('statusFilter');
-
-    platSelect.innerHTML = '<option value="">All Platforms</option>';
-    statusSelect.innerHTML = '<option value="">All Statuses</option>';
-
-    Array.from(platforms).sort().forEach(p => platSelect.innerHTML += `<option value="${p}">${p}</option>`);
-    Array.from(statuses).sort().forEach(s => statusSelect.innerHTML += `<option value="${s}">${s.charAt(0).toUpperCase() + s.slice(1)}</option>`);
+    buildFilterMenu('filterMenuSource', 'source', [{value: 'sigma', label: 'Sigma'}, {value: 'custom', label: 'Custom'}], 'All Sources');
+    buildFilterMenu('filterMenuPlatform', 'platform', Array.from(platforms).sort().map(p => ({value: p, label: p})), 'All Platforms');
+    buildFilterMenu('filterMenuLevel', 'level', ['critical', 'high', 'medium', 'low', 'informational'].map(l => ({value: l, label: l.charAt(0).toUpperCase() + l.slice(1)})), 'All Levels');
+    buildFilterMenu('filterMenuStatus', 'status', Array.from(statuses).sort().map(s => ({value: s, label: s.charAt(0).toUpperCase() + s.slice(1)})), 'All Statuses');
 
     const enabledCount = allRules.filter(r => r.enabled).length;
     document.getElementById('statTotalRules').innerText = allRules.length;
@@ -446,12 +567,14 @@ async function ld(){
     document.getElementById('statDisabledRules').innerText = allRules.length - enabledCount;
     document.getElementById('statPlatforms').innerText = platforms.size;
 
-    renderTable(allRules);
+    f();
 }
 
 function renderTable(rules) {
     document.getElementById('rt').innerHTML = rules.map(rl => {
         const mitreTags = (rl.tags || []).filter(t => /^attack\./i.test(t));
+        const shownTags = mitreTags.slice(0, 2);
+        const extra = mitreTags.length - shownTags.length;
         return `
         <tr>
             <td><input type="checkbox" class="form-check-input rule-cb bg-dark border-secondary" value="${rl.id}" onchange="updateSelection(this)"></td>
@@ -459,10 +582,10 @@ function renderTable(rules) {
                 <span class="badge ${rl.source === 'custom' ? 'bg-info text-dark' : 'bg-secondary'}" title="${rl.cloned_from ? 'Cloned from rule #' + rl.cloned_from : ''}">${rl.source === 'custom' ? 'Custom' : 'Sigma'}</span>
             </td>
             <td>
-                <span class="fw-bold text-info">${rl.title}</span>
-                ${mitreTags.length ? `<div>${mitreTags.map(t => `<span class="badge bg-primary bg-opacity-25 text-light border border-primary me-1 mt-1" style="font-size:.68rem;">${t}</span>`).join('')}</div>` : ''}
+                <div class="fw-bold text-info text-truncate">${rl.title}</div>
+                ${mitreTags.length ? `<div class="rule-tags-row">${shownTags.map(t => `<span class="badge bg-primary bg-opacity-25 text-light border border-primary me-1" style="font-size:.65rem;">${t}</span>`).join('')}${extra > 0 ? `<span class="badge bg-secondary" style="font-size:.65rem;" title="${mitreTags.slice(2).join(', ')}">+${extra}</span>` : ''}</div>` : ''}
             </td>
-            <td><span class="text-light"><i class="fa-solid fa-display me-1"></i>${rl.platform}</span></td>
+            <td class="text-truncate"><span class="text-light"><i class="fa-solid fa-display me-1"></i>${rl.platform}</span></td>
             <td><span class="badge ${LEVEL_BADGE[rl.level] || 'bg-secondary'}">${rl.level || 'medium'}</span></td>
             <td><span class="badge ${STATUS_BADGE[rl.status] || 'bg-secondary'}">${rl.status || 'unknown'}</span></td>
             <td class="text-nowrap small text-muted">${rl.last_update || '—'}</td>
@@ -495,11 +618,11 @@ function renderTable(rules) {
 }
 
 function f(){
-    const q = document.getElementById('rq').value.toLowerCase();
-    const source = document.getElementById('sourceFilter').value;
-    const plat = document.getElementById('platformFilter').value;
-    const level = document.getElementById('levelFilter').value;
-    const status = document.getElementById('statusFilter').value;
+    const q = colFilters.q;
+    const source = colFilters.source;
+    const plat = colFilters.platform;
+    const level = colFilters.level;
+    const status = colFilters.status;
 
     const filtered = allRules.filter(rl => {
         const matchQ = rl.title.toLowerCase().includes(q);
@@ -510,7 +633,7 @@ function f(){
         return matchQ && matchSource && matchPlat && matchLevel && matchStatus;
     });
 
-    renderTable(filtered);
+    renderTable(applySort(filtered));
 }
 
 function toggleAll(state) {
@@ -746,6 +869,8 @@ async function deleteRule(id, title) {
     ld();
 }
 
+restoreColWidths();
+initColResize();
 ld();
 </script>
 {% endblock %}
