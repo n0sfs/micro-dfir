@@ -210,6 +210,10 @@ def rules(): return render_template('rules.html', current_user=current_user)
 @login_required
 def pipeline(): return render_template('pipeline.html', current_user=current_user, channels=get_agent_channels())
 
+@app.route('/agents')
+@login_required
+def agents(): return render_template('agents.html', current_user=current_user)
+
 @app.route('/api/alerts')
 @login_required
 def api_alerts():
