@@ -60,12 +60,19 @@ $hash = (Get-FileHash $p -Algorithm SHA256).Hash
 @{{ path=$p; size=$size; sha256=$hash; content_b64=$b64 }} | ConvertTo-Json -Compress
 """
 
+# Progress records (e.g. from Get-FileHash on multiple files in collect_triage) get
+# serialized as CLIXML and mixed straight into stdout when PowerShell runs
+# non-interactively with its output captured — confirmed in production, where a
+# collect_triage result had a "#< CLIXML" progress blob appended after the real JSON.
+# Silencing progress up front keeps every template's stdout clean.
+_PROGRESS_SILENT = "$ProgressPreference = 'SilentlyContinue'\n"
+
 # label -> (builder, required param names)
 TEMPLATES = {
-    'list_processes': (lambda params: list_processes(), []),
-    'kill_process': (lambda params: kill_process(params['pid']), ['pid']),
-    'isolate_host': (lambda params: isolate_host(params['soc_ip']), ['soc_ip']),
-    'restore_network': (lambda params: restore_network(), []),
-    'collect_triage': (lambda params: collect_triage(), []),
-    'collect_file': (lambda params: collect_file(params['path']), ['path']),
+    'list_processes': (lambda params: _PROGRESS_SILENT + list_processes(), []),
+    'kill_process': (lambda params: _PROGRESS_SILENT + kill_process(params['pid']), ['pid']),
+    'isolate_host': (lambda params: _PROGRESS_SILENT + isolate_host(params['soc_ip']), ['soc_ip']),
+    'restore_network': (lambda params: _PROGRESS_SILENT + restore_network(), []),
+    'collect_triage': (lambda params: _PROGRESS_SILENT + collect_triage(), []),
+    'collect_file': (lambda params: _PROGRESS_SILENT + collect_file(params['path']), ['path']),
 }
