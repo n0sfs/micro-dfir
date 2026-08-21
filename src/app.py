@@ -429,7 +429,57 @@ def threat_intel():
 
     return render_template('threat_intel.html', matches=matches, yara_files=yara_files, active_tab=active_tab, current_user=current_user)
 
-TI_FEED_TYPES = ('taxii', 'threatfox', 'otx', 'urlhaus', 'feodotracker')
+TI_FEED_TYPES = ('taxii', 'threatfox', 'otx', 'urlhaus', 'feodotracker', 'csv')
+
+_CSV_VALUE_COLS = ('value', 'indicator', 'ioc', 'pattern', 'ip', 'url', 'domain', 'hash', 'ioc_value')
+_CSV_TYPE_COLS = ('type', 'ioc_type')
+_CSV_NAME_COLS = ('name', 'description', 'desc', 'notes')
+_CSV_IPV4_RE = re.compile(r'^\d{1,3}(\.\d{1,3}){3}$')
+_CSV_HASH_RE = re.compile(r'^[a-fA-F0-9]{32}$|^[a-fA-F0-9]{40}$|^[a-fA-F0-9]{64}$')
+_CSV_DOMAIN_RE = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$')
+
+def _guess_csv_ioc_type(value):
+    v = value.strip()
+    if _CSV_IPV4_RE.match(v):
+        return 'ip'
+    if v.lower().startswith(('http://', 'https://')):
+        return 'url'
+    if _CSV_HASH_RE.match(v):
+        return {32: 'md5', 40: 'sha1', 64: 'sha256'}[len(v)]
+    if _CSV_DOMAIN_RE.match(v):
+        return 'domain'
+    return 'other'
+
+def _parse_csv_iocs(text):
+    import csv, io
+    reader = csv.DictReader(io.StringIO(text))
+    # DictReader keys preserve the header's original casing/spacing; match against a
+    # lowercased copy so "IP Address" and "ip" both resolve the same column.
+    orig_by_lower = {(h or '').strip().lower(): h for h in (reader.fieldnames or [])}
+    value_col = next((h for h in _CSV_VALUE_COLS if h in orig_by_lower), None)
+
+    results = []
+    if value_col:
+        type_col = next((h for h in _CSV_TYPE_COLS if h in orig_by_lower), None)
+        name_col = next((h for h in _CSV_NAME_COLS if h in orig_by_lower), None)
+        for row in reader:
+            raw_val = (row.get(orig_by_lower[value_col]) or '').strip()
+            if not raw_val:
+                continue
+            ioc_type = (row.get(orig_by_lower[type_col]) or '').strip().lower() if type_col else ''
+            name = (row.get(orig_by_lower[name_col]) or '').strip() if name_col else ''
+            results.append({'value': raw_val, 'ioc_type': ioc_type or _guess_csv_ioc_type(raw_val), 'name': name})
+    else:
+        # No recognizable header — treat the file as one bare IOC value per line (this
+        # also covers a genuinely headerless file, since re-reading from the start below
+        # includes what would otherwise have been silently consumed as a header row).
+        for row in csv.reader(io.StringIO(text)):
+            if not row:
+                continue
+            raw_val = row[0].strip()
+            if raw_val:
+                results.append({'value': raw_val, 'ioc_type': _guess_csv_ioc_type(raw_val), 'name': ''})
+    return results
 
 def _parse_sync_interval(d):
     val = d.get('sync_interval_minutes')
@@ -460,6 +510,8 @@ def api_ti_feeds():
     feed_type = d.get('feed_type')
     if not name or feed_type not in TI_FEED_TYPES:
         return jsonify({'error': f'name and a valid feed_type ({"/".join(TI_FEED_TYPES)}) are required'}), 400
+    if feed_type == 'csv':
+        return jsonify({'error': 'CSV feeds are created by uploading a file — use the CSV upload option instead'}), 400
     if feed_type == 'taxii' and not (d.get('discovery_url') and d.get('collection_id')):
         return jsonify({'error': 'TAXII feeds require a discovery_url and collection_id'}), 400
     if feed_type == 'otx' and not d.get('api_key'):
@@ -504,6 +556,56 @@ def api_ti_feed_sync(fid):
         return jsonify({'error': 'Admin required'}), 403
     result = ti_sync_one(fid)
     return jsonify(result), (200 if result.get('status') == 'success' else 502)
+
+@app.route('/api/ti/feeds/upload_csv', methods=['POST'])
+@login_required
+def api_ti_feeds_upload_csv():
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    if not validate_csrf():
+        return jsonify({'error': 'Your session expired or the form was submitted from an unexpected origin. Please refresh and try again.'}), 400
+
+    name = (request.form.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'A feed name is required'}), 400
+    f = request.files.get('csv_file')
+    if not f or not f.filename:
+        return jsonify({'error': 'A CSV file is required'}), 400
+    if not f.filename.lower().endswith('.csv'):
+        return jsonify({'error': 'Only .csv files are supported'}), 400
+
+    raw = f.read(5 * 1024 * 1024 + 1)  # cap at 5MB; the +1 lets us detect an oversized file below
+    if len(raw) > 5 * 1024 * 1024:
+        return jsonify({'error': 'CSV file is too large (5MB max)'}), 400
+    try:
+        text = raw.decode('utf-8-sig', errors='replace')
+    except Exception:
+        return jsonify({'error': 'Could not read the file as text'}), 400
+
+    iocs = _parse_csv_iocs(text)
+    if not iocs:
+        return jsonify({'error': 'No IOC values found in the CSV (expected a value/indicator/ioc column, or one IOC per line)'}), 400
+    if len(iocs) > 50000:
+        return jsonify({'error': f'CSV has {len(iocs)} rows; the limit is 50,000 per upload'}), 400
+
+    import datetime
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO ti_feeds (name, feed_type, discovery_url, collection_id, username, password, api_key, "
+        "sync_interval_minutes, enabled, last_sync, last_status, last_count) "
+        "VALUES (?, 'csv', '', '', '', '', '', NULL, 1, ?, 'success', ?)",
+        (name, now, len(iocs))
+    )
+    feed_id = cur.lastrowid
+    db.executemany(
+        "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) "
+        "VALUES (?, 'indicator', ?, ?, '', ?, ?, 0, ?)",
+        [(f"csv--{feed_id}--{i}", ioc['ioc_type'], ioc['name'] or ioc['value'], ioc['value'], now, feed_id)
+         for i, ioc in enumerate(iocs)]
+    )
+    db.commit()
+    return jsonify({'status': 'success', 'feed_id': feed_id, 'count': len(iocs)})
 
 @app.route('/api/ti/iocs', methods=['GET'])
 @login_required

@@ -152,6 +152,11 @@ def sync_feed(feed):
         return sync_feodotracker(feed)
     elif feed["feed_type"] == "otx":
         return sync_otx(feed)
+    elif feed["feed_type"] == "csv":
+        # CSV feeds are a one-time snapshot uploaded through /api/ti/feeds/upload_csv —
+        # there's no remote source to re-fetch from, so "Sync Now" / sync_all_feeds()
+        # can't do anything for one. Re-upload a fresh CSV (as a new feed) to update it.
+        raise ValueError("CSV feeds can't be re-synced — upload a new CSV to refresh the list")
     raise ValueError(f"Unknown feed_type: {feed['feed_type']}")
 
 def sync_one(feed_id):

@@ -189,7 +189,16 @@
                 <option value="feodotracker">Feodo Tracker Botnet C2 IPs (public, no auth)</option>
                 <option value="otx">AlienVault OTX Subscribed Pulses (API key required)</option>
                 <option value="taxii">STIX / TAXII 2.1 Server</option>
+                <option value="csv">CSV File Upload</option>
             </select>
+        </div>
+        <div id="csvFields" style="display:none;">
+            <div class="mb-3">
+                <label class="form-label">CSV File</label>
+                <input type="file" id="feedCsvFile" accept=".csv" class="form-control bg-dark text-light border-secondary">
+                <div class="form-text text-muted">A column named <code>value</code>/<code>indicator</code>/<code>ioc</code> (plus optional <code>type</code> and <code>name</code> columns), or one IOC per line with no header. IOC type is auto-detected when not given. This is a one-time snapshot — it won't auto-resync, so re-upload as a new feed to refresh it.</div>
+            </div>
+            <input type="hidden" id="feedCsrfToken" value="{{ csrf_token() }}">
         </div>
         <div id="taxiiFields" style="display:none;">
             <div class="mb-3">
@@ -219,7 +228,7 @@
                 <div id="apiKeyStatus" class="form-text text-muted"></div>
             </div>
         </div>
-        <div class="mb-3">
+        <div id="syncIntervalField" class="mb-3">
             <label class="form-label">Auto-Sync Interval</label>
             <select id="feedSyncInterval" class="form-select bg-dark text-light border-secondary">
                 <option value="">Manual only (no auto-sync)</option>
@@ -307,8 +316,13 @@ const FEED_TYPES_WITH_API_KEY = ['taxii', 'otx'];
 
 function toggleFeedTypeFields() {
     const type = document.getElementById('feedType').value;
-    document.getElementById('taxiiFields').style.display = type === 'taxii' ? 'block' : 'none';
-    document.getElementById('apiKeyField').style.display = FEED_TYPES_WITH_API_KEY.includes(type) ? 'block' : 'none';
+    const isCsv = type === 'csv';
+    document.getElementById('csvFields').style.display = isCsv ? 'block' : 'none';
+    document.getElementById('taxiiFields').style.display = (!isCsv && type === 'taxii') ? 'block' : 'none';
+    document.getElementById('apiKeyField').style.display = (!isCsv && FEED_TYPES_WITH_API_KEY.includes(type)) ? 'block' : 'none';
+    // A CSV upload is a one-time snapshot with no remote source to poll, so auto-sync
+    // scheduling doesn't apply to it (see the 'csv' branch in taxii_client.sync_feed).
+    document.getElementById('syncIntervalField').style.display = isCsv ? 'none' : 'block';
 }
 
 function openFeedModal(feed) {
@@ -329,9 +343,36 @@ function openFeedModal(feed) {
 }
 
 async function saveFeed() {
+    const errBox = document.getElementById('feedModalError');
+    const feedType = document.getElementById('feedType').value;
+
+    // CSV feeds are a file upload, not JSON — they always create a new feed (there's
+    // nothing to "edit" on one after the fact, see toggleFeedTypeFields()'s comment).
+    if (feedType === 'csv') {
+        const name = document.getElementById('feedName').value.trim();
+        const fileInput = document.getElementById('feedCsvFile');
+        const file = fileInput.files[0];
+        if (!name) { errBox.innerText = 'A feed name is required.'; errBox.style.display = 'block'; return; }
+        if (!file) { errBox.innerText = 'Choose a CSV file to upload.'; errBox.style.display = 'block'; return; }
+        const form = new FormData();
+        form.append('name', name);
+        form.append('csv_file', file);
+        form.append('csrf_token', document.getElementById('feedCsrfToken').value);
+        try {
+            const res = await fetch('/api/ti/feeds/upload_csv', {method: 'POST', body: form});
+            const data = await res.json();
+            if (!res.ok) { errBox.innerText = data.error || 'Failed to upload CSV.'; errBox.style.display = 'block'; return; }
+            feedModal.hide();
+            loadFeeds(); loadIocs();
+        } catch (e) {
+            errBox.innerText = 'Error: ' + e; errBox.style.display = 'block';
+        }
+        return;
+    }
+
     const payload = {
         name: document.getElementById('feedName').value.trim(),
-        feed_type: document.getElementById('feedType').value,
+        feed_type: feedType,
         discovery_url: document.getElementById('feedUrl').value.trim(),
         collection_id: document.getElementById('feedCollection').value.trim(),
         username: document.getElementById('feedUsername').value.trim(),
@@ -342,7 +383,6 @@ async function saveFeed() {
     };
     const url = editingFeedId ? `/api/ti/feeds/${editingFeedId}` : '/api/ti/feeds';
     const method = editingFeedId ? 'PUT' : 'POST';
-    const errBox = document.getElementById('feedModalError');
     try {
         const res = await fetch(url, {method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
         const data = await res.json();
@@ -413,11 +453,12 @@ function statusBadge(status) {
 
 const FEED_TYPE_LABELS = {
     threatfox: 'ThreatFox', taxii: 'STIX/TAXII 2.1', otx: 'AlienVault OTX',
-    urlhaus: 'URLhaus', feodotracker: 'Feodo Tracker'
+    urlhaus: 'URLhaus', feodotracker: 'Feodo Tracker', csv: 'CSV Upload'
 };
 const FEED_TYPE_SOURCES = {
     threatfox: 'threatfox.abuse.ch (public)', urlhaus: 'urlhaus.abuse.ch (public)',
-    feodotracker: 'feodotracker.abuse.ch (public)', otx: 'otx.alienvault.com (API key)'
+    feodotracker: 'feodotracker.abuse.ch (public)', otx: 'otx.alienvault.com (API key)',
+    csv: 'Uploaded file (one-time snapshot)'
 };
 
 function syncIntervalLabel(mins) {
@@ -457,8 +498,12 @@ function loadFeeds() {
                     <td>${f.last_count ?? 0}</td>
                     <td class="text-nowrap">
                         ${isAdmin ? `
+                        ${f.feed_type !== 'csv' ? `
                         <button class="btn btn-sm btn-outline-secondary py-0 px-2 me-1" title="Sync Now" onclick="syncFeedNow(${f.id}, this)"><i class="fa-solid fa-rotate"></i></button>
                         <button class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="Edit" onclick='openFeedModal(${JSON.stringify(f).replace(/'/g, "&#39;")})'><i class="fa-solid fa-pen"></i></button>
+                        ` : `
+                        <span class="text-muted small me-1" title="CSV feeds are a one-time snapshot — re-upload as a new feed to refresh"><i class="fa-solid fa-circle-info"></i></span>
+                        `}
                         <button class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete" onclick="deleteFeed(${f.id}, '${f.name.replace(/'/g, "\\'")}')"><i class="fa-solid fa-trash"></i></button>
                         ` : ''}
                     </td>
