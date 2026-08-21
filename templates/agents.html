@@ -79,9 +79,13 @@
     <div class="grid-stack-item" gs-id="checkins" gs-x="0" gs-y="4" gs-w="12" gs-h="14">
         <div class="grid-stack-item-content">
             <div class="card bg-dark border-secondary">
-                <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+                <div class="card-header border-secondary d-flex justify-content-between align-items-center flex-wrap gap-2">
                     <h5 class="card-title text-light mb-0"><i class="fa-solid fa-grip-vertical grid-drag-handle me-2" title="Drag to move"></i><i class="fa-solid fa-laptop-medical me-2"></i>Active Endpoint Check-ins & Response Actions</h5>
-                    <button class="btn btn-outline-secondary btn-sm" onclick="loadUniqueEndpoints()"><i class="fa-solid fa-rotate me-1"></i> Refresh List</button>
+                    <div class="d-flex align-items-center gap-2">
+                        <input type="text" id="endpointSearchBox" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width: 220px;" placeholder="Search hostname or IP..." oninput="renderEndpoints()">
+                        <span class="text-muted small text-nowrap" id="endpointCountLabel"></span>
+                        <button class="btn btn-outline-secondary btn-sm" onclick="loadUniqueEndpoints()"><i class="fa-solid fa-rotate me-1"></i> Refresh List</button>
+                    </div>
                 </div>
                 <div class="card-body p-0">
                     <div class="table-responsive">
@@ -215,22 +219,49 @@ function rowHost(el) {
     return el.closest('tr').dataset.hostname;
 }
 
+let allEndpoints = [];
+
 function loadUniqueEndpoints() {
     fetch('/api/agent/checkins')
         .then(r => r.json())
         .then(data => {
-            document.getElementById('statEndpoints').innerText = Array.isArray(data) ? data.length : 0;
-            let tbody = document.getElementById('endpointsTableBody');
-            if (!tbody) return;
-            if (!Array.isArray(data) || data.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No active agent endpoints detected.</td></tr>';
-                return;
-            }
-            // Hostname/IP/etc. come from client-supplied agent headers — never interpolate them
-            // directly into onclick strings (JS-context injection). Everything rendered here goes
-            // through escHtml(), and actions read the target host from a data-hostname attribute
-            // instead of a string-built function call.
-            tbody.innerHTML = data.map(dev => `
+            allEndpoints = Array.isArray(data) ? data : [];
+            document.getElementById('statEndpoints').innerText = allEndpoints.length;
+            renderEndpoints();
+        });
+}
+
+function renderEndpoints() {
+    let tbody = document.getElementById('endpointsTableBody');
+    if (!tbody) return;
+
+    if (allEndpoints.length === 0) {
+        document.getElementById('endpointCountLabel').innerText = '';
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No active agent endpoints detected.</td></tr>';
+        return;
+    }
+
+    const q = (document.getElementById('endpointSearchBox').value || '').trim().toLowerCase();
+    const filtered = q ? allEndpoints.filter(dev =>
+        (dev.hostname || '').toLowerCase().includes(q) ||
+        (dev.endpoint_ip || '').toLowerCase().includes(q) ||
+        (dev.client_info || '').toLowerCase().includes(q)
+    ) : allEndpoints;
+
+    document.getElementById('endpointCountLabel').innerText = q
+        ? `${filtered.length} of ${allEndpoints.length} endpoints`
+        : `${allEndpoints.length} endpoint${allEndpoints.length === 1 ? '' : 's'}`;
+
+    if (filtered.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No endpoints match your search.</td></tr>';
+        return;
+    }
+
+    // Hostname/IP/etc. come from client-supplied agent headers — never interpolate them
+    // directly into onclick strings (JS-context injection). Everything rendered here goes
+    // through escHtml(), and actions read the target host from a data-hostname attribute
+    // instead of a string-built function call.
+    tbody.innerHTML = filtered.map(dev => `
                 <tr data-hostname="${escHtml(dev.hostname)}">
                     <td><strong>${escHtml(dev.hostname)}</strong></td>
                     <td><span class="text-info">${escHtml(dev.endpoint_ip)}</span></td>
@@ -261,13 +292,12 @@ function loadUniqueEndpoints() {
                     </td>
                 </tr>
             `).join("");
-            // Dropdowns default to absolute positioning, which gets visually clipped by this
-            // table's own scroll container once the endpoint list outgrows the box. Force
-            // fixed-strategy positioning so the full "Respond" menu always renders in view.
-            tbody.querySelectorAll('[data-bs-toggle="dropdown"]').forEach(el => {
-                bootstrap.Dropdown.getOrCreateInstance(el, { popperConfig: { strategy: 'fixed' } });
-            });
-        });
+    // Dropdowns default to absolute positioning, which gets visually clipped by this
+    // table's own scroll container once the endpoint list outgrows the box. Force
+    // fixed-strategy positioning so the full "Respond" menu always renders in view.
+    tbody.querySelectorAll('[data-bs-toggle="dropdown"]').forEach(el => {
+        bootstrap.Dropdown.getOrCreateInstance(el, { popperConfig: { strategy: 'fixed' } });
+    });
 }
 
 function removeEndpoint(hostname) {
