@@ -450,6 +450,19 @@ def _guess_csv_ioc_type(value):
         return 'domain'
     return 'other'
 
+def _guess_legacy_ioc_type(pattern):
+    p = (pattern or '').strip()
+    if not p:
+        return 'other'
+    if p.startswith('['):
+        # A raw generic-TAXII STIX pattern, e.g. "[domain-name:value = 'x']" — pull the
+        # leading object-type token the same way taxii_client._guess_stix_pattern_type does.
+        m = re.match(r'\[\s*([a-zA-Z0-9\-]+):', p)
+        return m.group(1) if m else 'stix-pattern'
+    if not p.lower().startswith(('http://', 'https://')):
+        p = re.sub(r':\d+$', '', p)  # strip a ThreatFox-style "ip:port" suffix
+    return _guess_csv_ioc_type(p)
+
 def _parse_csv_iocs(text):
     import csv, io
     reader = csv.DictReader(io.StringIO(text))
@@ -1317,6 +1330,33 @@ def migrate_stix_indicators():
         if 'feed_id' not in cols:
             conn.execute("ALTER TABLE stix_indicators ADD COLUMN feed_id INTEGER")
         conn.commit()
+
+        # One-time backfill for rows synced before ioc_type/feed_id existed. A resync
+        # only INSERT OR REPLACEs whatever's still in a feed's *current* export, so an
+        # indicator that's since rotated out of ThreatFox/URLhaus/etc.'s rolling window
+        # never gets touched again — without this, it shows a blank Type and "Unknown"
+        # Source in the Indicator Browser forever. Best-effort infer feed_id from the
+        # stix_id's own "<feed_type>--..." prefix (every feed type but generic TAXII
+        # stamps one) and ioc_type from the pattern's shape.
+        blank_rows = conn.execute(
+            "SELECT stix_id, pattern FROM stix_indicators WHERE ioc_type IS NULL OR ioc_type = ''"
+        ).fetchall()
+        if blank_rows:
+            feed_id_by_type = {}
+            for fid, ftype in conn.execute("SELECT id, feed_type FROM ti_feeds ORDER BY id").fetchall():
+                feed_id_by_type.setdefault(ftype, fid)
+            prefix_to_type = (('threatfox--', 'threatfox'), ('urlhaus--', 'urlhaus'),
+                               ('feodotracker--', 'feodotracker'), ('otx--', 'otx'), ('csv--', 'csv'))
+            updates = []
+            for stix_id, pattern in blank_rows:
+                feed_type = next((t for p, t in prefix_to_type if stix_id.startswith(p)), None)
+                feed_id = feed_id_by_type.get(feed_type) if feed_type else None
+                updates.append((_guess_legacy_ioc_type(pattern), feed_id, stix_id))
+            conn.executemany(
+                "UPDATE stix_indicators SET ioc_type = ?, feed_id = COALESCE(feed_id, ?) WHERE stix_id = ?",
+                updates
+            )
+            conn.commit()
         conn.close()
     except Exception:
         pass
