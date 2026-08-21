@@ -58,6 +58,7 @@
             <div class="d-flex gap-2 mb-3 align-items-center bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
                 <button class="btn btn-sm btn-outline-secondary" onclick="toggleAll(true)">Select All Visible</button>
                 <button class="btn btn-sm btn-outline-secondary" onclick="toggleAll(false)">Clear Selection</button>
+                <input type="text" id="titleSearchBox" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width: 260px;" placeholder="Search rule names..." oninput="colFilters.q = this.value.toLowerCase(); f();">
                 <div class="ms-auto d-flex gap-2">
                     <button class="btn btn-sm btn-outline-success" onclick="bulkAction(true)"><i class="fa-solid fa-play"></i> Enable Selected</button>
                     <button class="btn btn-sm btn-outline-danger" onclick="bulkAction(false)"><i class="fa-solid fa-stop"></i> Disable Selected</button>
@@ -82,20 +83,28 @@
                                 </div>
                                 <span class="col-resizer"></span>
                             </th>
-                            <th class="rule-th" data-col="title" style="width: 320px;">
+                            <th class="rule-th" data-col="title" style="width: 260px;">
                                 <div class="th-inner">
                                     <span class="th-label" onclick="toggleSort('title')">Rule Name <i class="fa-solid fa-sort sort-ic" id="sortIc-title"></i></span>
-                                    <button type="button" class="th-icon-btn" onclick="toggleTitleSearch()"><i class="fa-solid fa-magnifying-glass"></i></button>
                                 </div>
-                                <input type="text" id="titleSearchBox" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Search rule names..." style="display:none;" oninput="colFilters.q=this.value.toLowerCase(); f();">
                                 <span class="col-resizer"></span>
                             </th>
-                            <th class="rule-th" data-col="platform" style="width: 150px;">
+                            <th class="rule-th" data-col="platform" style="width: 130px;">
                                 <div class="th-inner">
                                     <span class="th-label" onclick="toggleSort('platform')">Platform <i class="fa-solid fa-sort sort-ic" id="sortIc-platform"></i></span>
                                     <div class="dropdown">
                                         <button type="button" class="th-icon-btn" id="filterBtnPlatform" data-bs-toggle="dropdown"><i class="fa-solid fa-filter"></i></button>
                                         <ul class="dropdown-menu dropdown-menu-dark p-1" id="filterMenuPlatform" style="min-width:170px; max-height:260px; overflow-y:auto;"></ul>
+                                    </div>
+                                </div>
+                                <span class="col-resizer"></span>
+                            </th>
+                            <th class="rule-th" data-col="mitre" style="width: 160px;">
+                                <div class="th-inner">
+                                    <span>MITRE ATT&amp;CK</span>
+                                    <div class="dropdown">
+                                        <button type="button" class="th-icon-btn" id="filterBtnMitre" data-bs-toggle="dropdown"><i class="fa-solid fa-filter"></i></button>
+                                        <ul class="dropdown-menu dropdown-menu-dark p-1" id="filterMenuMitre" style="min-width:180px; max-height:260px; overflow-y:auto;"></ul>
                                     </div>
                                 </div>
                                 <span class="col-resizer"></span>
@@ -126,9 +135,13 @@
                                 </div>
                                 <span class="col-resizer"></span>
                             </th>
-                            <th class="rule-th" data-col="enabled" style="width: 80px;">
+                            <th class="rule-th" data-col="enabled" style="width: 100px;">
                                 <div class="th-inner">
                                     <span class="th-label" onclick="toggleSort('enabled')">Enabled <i class="fa-solid fa-sort sort-ic" id="sortIc-enabled"></i></span>
+                                    <div class="dropdown">
+                                        <button type="button" class="th-icon-btn" id="filterBtnEnabled" data-bs-toggle="dropdown"><i class="fa-solid fa-filter"></i></button>
+                                        <ul class="dropdown-menu dropdown-menu-dark p-1" id="filterMenuEnabled" style="min-width:140px;"></ul>
+                                    </div>
                                 </div>
                             </th>
                             <th style="width: 44px;"></th>
@@ -456,7 +469,7 @@ const STATUS_BADGE = {
 };
 
 // ---- Per-column filters, sorting, resize ----
-let colFilters = { source: '', platform: '', level: '', status: '', q: '' };
+let colFilters = { source: '', platform: '', mitre: '', level: '', status: '', enabled: '', q: '' };
 let sortState = { key: null, dir: 'asc' };
 
 function buildFilterMenu(menuId, colKey, options, allLabel) {
@@ -474,13 +487,6 @@ function setColFilter(key, val) {
     const btn = document.getElementById('filterBtn' + key.charAt(0).toUpperCase() + key.slice(1));
     if (btn) btn.classList.toggle('active-filter', !!val);
     f();
-}
-
-function toggleTitleSearch() {
-    const box = document.getElementById('titleSearchBox');
-    const show = box.style.display === 'none';
-    box.style.display = show ? 'block' : 'none';
-    if (show) box.focus();
 }
 
 function toggleSort(key) {
@@ -551,15 +557,19 @@ async function ld(){
 
     const platforms = new Set();
     const statuses = new Set();
+    const mitres = new Set();
     allRules.forEach(r => {
         if(r.platform) platforms.add(r.platform);
         if(r.status) statuses.add(r.status);
+        (r.tags || []).forEach(t => { if (/^attack\./i.test(t)) mitres.add(t); });
     });
 
     buildFilterMenu('filterMenuSource', 'source', [{value: 'sigma', label: 'Sigma'}, {value: 'custom', label: 'Custom'}], 'All Sources');
     buildFilterMenu('filterMenuPlatform', 'platform', Array.from(platforms).sort().map(p => ({value: p, label: p})), 'All Platforms');
+    buildFilterMenu('filterMenuMitre', 'mitre', Array.from(mitres).sort().map(m => ({value: m, label: m})), 'All MITRE Tags');
     buildFilterMenu('filterMenuLevel', 'level', ['critical', 'high', 'medium', 'low', 'informational'].map(l => ({value: l, label: l.charAt(0).toUpperCase() + l.slice(1)})), 'All Levels');
     buildFilterMenu('filterMenuStatus', 'status', Array.from(statuses).sort().map(s => ({value: s, label: s.charAt(0).toUpperCase() + s.slice(1)})), 'All Statuses');
+    buildFilterMenu('filterMenuEnabled', 'enabled', [{value: '1', label: 'Enabled'}, {value: '0', label: 'Disabled'}], 'All');
 
     const enabledCount = allRules.filter(r => r.enabled).length;
     document.getElementById('statTotalRules').innerText = allRules.length;
@@ -583,9 +593,11 @@ function renderTable(rules) {
             </td>
             <td>
                 <div class="fw-bold text-info text-truncate">${rl.title}</div>
-                ${mitreTags.length ? `<div class="rule-tags-row">${shownTags.map(t => `<span class="badge bg-primary bg-opacity-25 text-light border border-primary me-1" style="font-size:.65rem;">${t}</span>`).join('')}${extra > 0 ? `<span class="badge bg-secondary" style="font-size:.65rem;" title="${mitreTags.slice(2).join(', ')}">+${extra}</span>` : ''}</div>` : ''}
             </td>
             <td class="text-truncate"><span class="text-light"><i class="fa-solid fa-display me-1"></i>${rl.platform}</span></td>
+            <td>
+                ${mitreTags.length ? `<div class="rule-tags-row">${shownTags.map(t => `<span class="badge bg-primary bg-opacity-25 text-light border border-primary me-1" style="font-size:.65rem;">${t}</span>`).join('')}${extra > 0 ? `<span class="badge bg-secondary" style="font-size:.65rem;" title="${mitreTags.slice(2).join(', ')}">+${extra}</span>` : ''}</div>` : '<span class="text-muted">—</span>'}
+            </td>
             <td><span class="badge ${LEVEL_BADGE[rl.level] || 'bg-secondary'}">${rl.level || 'medium'}</span></td>
             <td><span class="badge ${STATUS_BADGE[rl.status] || 'bg-secondary'}">${rl.status || 'unknown'}</span></td>
             <td class="text-nowrap small text-muted">${rl.last_update || '—'}</td>
@@ -621,16 +633,20 @@ function f(){
     const q = colFilters.q;
     const source = colFilters.source;
     const plat = colFilters.platform;
+    const mitre = colFilters.mitre;
     const level = colFilters.level;
     const status = colFilters.status;
+    const enabled = colFilters.enabled;
 
     const filtered = allRules.filter(rl => {
         const matchQ = rl.title.toLowerCase().includes(q);
         const matchSource = source === "" || rl.source === source;
         const matchPlat = plat === "" || rl.platform === plat;
+        const matchMitre = mitre === "" || (rl.tags && rl.tags.includes(mitre));
         const matchLevel = level === "" || rl.level === level;
         const matchStatus = status === "" || rl.status === status;
-        return matchQ && matchSource && matchPlat && matchLevel && matchStatus;
+        const matchEnabled = enabled === "" || String(rl.enabled ? 1 : 0) === enabled;
+        return matchQ && matchSource && matchPlat && matchMitre && matchLevel && matchStatus && matchEnabled;
     });
 
     renderTable(applySort(filtered));
