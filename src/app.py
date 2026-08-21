@@ -206,6 +206,10 @@ def dash(): return render_template('dashboard.html', current_user=current_user)
 @login_required
 def rules(): return render_template('rules.html', current_user=current_user)
 
+@app.route('/rules/tuning')
+@login_required
+def detection_tuning(): return render_template('detection_tuning.html', current_user=current_user)
+
 @app.route('/pipeline')
 @login_required
 def pipeline(): return render_template('pipeline.html', current_user=current_user, channels=get_agent_channels())
@@ -429,10 +433,13 @@ def del_drop(rid):
 RULES_CACHE = None
 RULES_CACHE_TIME = 0
 RULES_CACHE_TTL = 30  # seconds; bounds staleness against out-of-process writers like import_sigmahq.py
+TUNING_CACHE = None
+TUNING_CACHE_TIME = 0
 
 def invalidate_rules_cache():
-    global RULES_CACHE
+    global RULES_CACHE, TUNING_CACHE
     RULES_CACHE = None
+    TUNING_CACHE = None
 
 @app.route('/api/rules', methods=['GET', 'POST'])
 @login_required
@@ -642,6 +649,129 @@ def api_rules_bulk():
         db.execute(f"UPDATE sigma_rules SET enabled = ? WHERE id IN ({placeholders})", [enable] + ids)
         db.commit(); invalidate_rules_cache()
     return jsonify({"ok": 1})
+
+# ==========================================
+# DETECTION TUNING — rule performance, exclusions, severity overrides
+# ==========================================
+@app.route('/api/rules/tuning')
+@login_required
+def api_rules_tuning():
+    global TUNING_CACHE, TUNING_CACHE_TIME
+    import time, re
+    if TUNING_CACHE is not None and (time.time() - TUNING_CACHE_TIME) < RULES_CACHE_TTL:
+        return jsonify(TUNING_CACHE)
+
+    db = get_db()
+    rows = db.execute("""
+        SELECT sr.id, sr.title, sr.source, sr.enabled, sr.rule_yaml, sr.severity_override,
+               COALESCE(c7.cnt, 0) as alerts_7d,
+               COALESCE(c30.cnt, 0) as alerts_30d,
+               COALESCE(ctot.cnt, 0) as alerts_total,
+               lt.last_triggered,
+               COALESCE(ec.cnt, 0) as exclusion_count
+        FROM sigma_rules sr
+        LEFT JOIN (SELECT rule_id, COUNT(*) cnt FROM alerts WHERE timestamp >= datetime('now', '-7 days') GROUP BY rule_id) c7 ON c7.rule_id = sr.id
+        LEFT JOIN (SELECT rule_id, COUNT(*) cnt FROM alerts WHERE timestamp >= datetime('now', '-30 days') GROUP BY rule_id) c30 ON c30.rule_id = sr.id
+        LEFT JOIN (SELECT rule_id, COUNT(*) cnt FROM alerts GROUP BY rule_id) ctot ON ctot.rule_id = sr.id
+        LEFT JOIN (SELECT rule_id, MAX(timestamp) last_triggered FROM alerts GROUP BY rule_id) lt ON lt.rule_id = sr.id
+        LEFT JOIN (SELECT rule_id, COUNT(*) cnt FROM rule_exclusions WHERE enabled = 1 GROUP BY rule_id) ec ON ec.rule_id = sr.id
+        ORDER BY alerts_30d DESC, sr.title ASC
+    """).fetchall()
+
+    out = []
+    for r in rows:
+        ry = r['rule_yaml'] or ''
+        lv_match = re.search(r'level:\s*([^\n\r]+)', ry)
+        level = lv_match.group(1).strip().strip("'\"").lower() if lv_match else 'medium'
+        out.append({
+            "id": r['id'], "title": r['title'], "source": r['source'] or 'sigma',
+            "enabled": r['enabled'], "level": level, "severity_override": r['severity_override'],
+            "alerts_7d": r['alerts_7d'], "alerts_30d": r['alerts_30d'], "alerts_total": r['alerts_total'],
+            "last_triggered": r['last_triggered'], "exclusion_count": r['exclusion_count']
+        })
+    TUNING_CACHE = out
+    TUNING_CACHE_TIME = time.time()
+    return jsonify(TUNING_CACHE)
+
+@app.route('/api/rules/<int:rid>/severity', methods=['PUT'])
+@login_required
+def api_rule_severity(rid):
+    if current_user.role != 'admin':
+        return jsonify({"error": "Admin required"}), 403
+    sev = (request.get_json() or {}).get('severity') or None
+    if sev and sev not in ('critical', 'high', 'medium', 'low', 'informational'):
+        return jsonify({"error": "Invalid severity"}), 400
+    db = get_db()
+    if not db.execute("SELECT 1 FROM sigma_rules WHERE id = ?", (rid,)).fetchone():
+        return jsonify({"error": "Rule not found"}), 404
+    db.execute("UPDATE sigma_rules SET severity_override = ? WHERE id = ?", (sev, rid))
+    db.commit()
+    invalidate_rules_cache()
+    return jsonify({"status": "success"})
+
+@app.route('/api/rules/<int:rid>/exclusions', methods=['GET', 'POST'])
+@login_required
+def api_rule_exclusions(rid):
+    db = get_db()
+    if request.method == 'GET':
+        rows = db.execute(
+            "SELECT id, rule_id, field, operator, value, description, enabled, created_by, created_at "
+            "FROM rule_exclusions WHERE rule_id = ? ORDER BY id DESC", (rid,)
+        ).fetchall()
+        return jsonify([dict(row) for row in rows])
+
+    if current_user.role != 'admin':
+        return jsonify({"error": "Admin required"}), 403
+    data = request.get_json() or {}
+    field = (data.get('field') or '').strip()
+    operator = (data.get('operator') or 'contains').strip()
+    value = (data.get('value') or '').strip()
+    description = (data.get('description') or '').strip()
+    if not field or not value:
+        return jsonify({"error": "Field and value are required"}), 400
+    if operator not in ('equals', 'contains', 'startswith', 'endswith'):
+        return jsonify({"error": "Invalid operator"}), 400
+    if not db.execute("SELECT 1 FROM sigma_rules WHERE id = ?", (rid,)).fetchone():
+        return jsonify({"error": "Rule not found"}), 404
+    db.execute(
+        "INSERT INTO rule_exclusions (rule_id, field, operator, value, description, enabled, created_by, created_at) "
+        "VALUES (?, ?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP)",
+        (rid, field, operator, value, description, current_user.username)
+    )
+    db.commit()
+    invalidate_rules_cache()
+    return jsonify({"status": "success"})
+
+@app.route('/api/rules/exclusions/<int:eid>', methods=['PUT', 'DELETE'])
+@login_required
+def api_rule_exclusion_detail(eid):
+    if current_user.role != 'admin':
+        return jsonify({"error": "Admin required"}), 403
+    db = get_db()
+    if not db.execute("SELECT 1 FROM rule_exclusions WHERE id = ?", (eid,)).fetchone():
+        return jsonify({"error": "Exclusion not found"}), 404
+
+    if request.method == 'DELETE':
+        db.execute("DELETE FROM rule_exclusions WHERE id = ?", (eid,))
+        db.commit()
+        invalidate_rules_cache()
+        return jsonify({"ok": 1})
+
+    data = request.get_json() or {}
+    if 'enabled' in data:
+        db.execute("UPDATE rule_exclusions SET enabled = ? WHERE id = ?", (1 if data['enabled'] else 0, eid))
+    else:
+        operator = (data.get('operator') or 'contains').strip()
+        if operator not in ('equals', 'contains', 'startswith', 'endswith'):
+            return jsonify({"error": "Invalid operator"}), 400
+        db.execute(
+            "UPDATE rule_exclusions SET field = ?, operator = ?, value = ?, description = ? WHERE id = ?",
+            ((data.get('field') or '').strip(), operator, (data.get('value') or '').strip(),
+             (data.get('description') or '').strip(), eid)
+        )
+    db.commit()
+    invalidate_rules_cache()
+    return jsonify({"status": "success"})
 
 @app.route('/api/yara/scan', methods=['POST'])
 @login_required
@@ -892,6 +1022,32 @@ def migrate_sigma_rules_columns():
     except Exception:
         pass
 
+def migrate_rule_tuning():
+    # Detection Tuning needs a per-rule severity override and a table of per-rule
+    # exclusion filters — neither existed when sigma_rules/rule_exclusions were first
+    # deployed, so ALTER TABLE / CREATE TABLE IF NOT EXISTS catch already-deployed DBs up.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(sigma_rules)").fetchall()}
+        if 'severity_override' not in cols:
+            conn.execute("ALTER TABLE sigma_rules ADD COLUMN severity_override TEXT")
+        conn.execute('''CREATE TABLE IF NOT EXISTS rule_exclusions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_id INTEGER NOT NULL,
+            field TEXT NOT NULL,
+            operator TEXT NOT NULL DEFAULT 'contains',
+            value TEXT NOT NULL,
+            description TEXT,
+            enabled BOOLEAN DEFAULT 1,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rule_exclusions_rule ON rule_exclusions(rule_id)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def _run_sigmahq_import():
     import urllib.request, zipfile, tempfile, shutil, socket, sqlite3
     import yaml as _yaml
@@ -952,6 +1108,7 @@ migrate_ti_feeds()
 migrate_agent_commands()
 migrate_alerts_columns()
 migrate_sigma_rules_columns()
+migrate_rule_tuning()
 
 @app.route('/settings', methods=['GET', 'POST'])
 @login_required
