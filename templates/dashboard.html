@@ -49,9 +49,14 @@ function updateFilters() {
                 <span id="sevFilterLabel" class="text-truncate">Sev</span>
             </button>
             <ul class="dropdown-menu dropdown-menu-dark shadow">
-                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input sev-chk" type="checkbox" value="INFO" id="sev_info" onchange="updateFilters()"><label class="form-check-label w-100" for="sev_info"><span class="badge bg-info">INFO</span></label></div></li>
-                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input sev-chk" type="checkbox" value="WARN" id="sev_warn" onchange="updateFilters()"><label class="form-check-label w-100" for="sev_warn"><span class="badge bg-warning">WARN</span></label></div></li>
+                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input sev-chk" type="checkbox" value="CRITICAL" id="sev_critical" onchange="updateFilters()"><label class="form-check-label w-100" for="sev_critical"><span class="badge bg-danger">CRITICAL</span></label></div></li>
+                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input sev-chk" type="checkbox" value="HIGH" id="sev_high" onchange="updateFilters()"><label class="form-check-label w-100" for="sev_high"><span class="badge bg-danger">HIGH</span></label></div></li>
                 <li class="px-2 py-1"><div class="form-check"><input class="form-check-input sev-chk" type="checkbox" value="ALERT" id="sev_alert" onchange="updateFilters()"><label class="form-check-label w-100" for="sev_alert"><span class="badge bg-danger">ALERT</span></label></div></li>
+                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input sev-chk" type="checkbox" value="MEDIUM" id="sev_medium" onchange="updateFilters()"><label class="form-check-label w-100" for="sev_medium"><span class="badge bg-warning text-dark">MEDIUM</span></label></div></li>
+                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input sev-chk" type="checkbox" value="WARN" id="sev_warn" onchange="updateFilters()"><label class="form-check-label w-100" for="sev_warn"><span class="badge bg-warning text-dark">WARN</span></label></div></li>
+                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input sev-chk" type="checkbox" value="LOW" id="sev_low" onchange="updateFilters()"><label class="form-check-label w-100" for="sev_low"><span class="badge bg-secondary">LOW</span></label></div></li>
+                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input sev-chk" type="checkbox" value="INFORMATIONAL" id="sev_informational" onchange="updateFilters()"><label class="form-check-label w-100" for="sev_informational"><span class="badge bg-info text-dark">INFORMATIONAL</span></label></div></li>
+                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input sev-chk" type="checkbox" value="INFO" id="sev_info" onchange="updateFilters()"><label class="form-check-label w-100" for="sev_info"><span class="badge bg-info text-dark">INFO</span></label></div></li>
             </ul>
         </div>
     </div>
@@ -76,7 +81,6 @@ function updateFilters() {
                 <option value="">-- Field --</option>
                 <option value="username">User</option>
                 <option value="host">Host</option>
-                <option value="email">Email</option>
                 <option value="event_id">Event ID</option>
                 <option value="source_ip">Src IP</option>
                 <option value="destination_ip">Dest IP</option>
@@ -119,7 +123,7 @@ function updateFilters() {
     </div>
     <div class="col-6 col-lg-3">
         <div class="stat-tile">
-            <div class="stat-label">Alerts (this page)</div>
+            <div class="stat-label">Alerts/Anomalies (this page)</div>
             <div class="stat-value" id="statAlertCount">—</div>
         </div>
     </div>
@@ -191,6 +195,19 @@ function updateFilters() {
   </div>
 </div>
 
+<!-- LOG DETAIL MODAL -->
+<div class="modal fade" id="logDetailModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title"><i class="fa-solid fa-file-lines me-2"></i>Log Detail</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body" id="logDetailBody"></div>
+    </div>
+  </div>
+</div>
+
 <!-- LOGS TABLE -->
 <div class="card bg-dark border-secondary">
     <div class="card-body p-0">
@@ -199,6 +216,7 @@ function updateFilters() {
                 <thead>
                     <tr>
                         <th>Time</th>
+                        <th>Type</th>
                         <th>Sev</th>
                         <th>Host</th>
                         <th>App</th>
@@ -209,7 +227,7 @@ function updateFilters() {
                     </tr>
                 </thead>
                 <tbody>
-                    <tr><td colspan="8" class="text-center text-muted py-4">Loading logs...</td></tr>
+                    <tr><td colspan="9" class="text-center text-muted py-4">Loading logs...</td></tr>
                 </tbody>
             </table>
         </div>
@@ -268,6 +286,47 @@ window.loadDashboardData = function() {
     loadTimeline();
 };
 
+let currentLogs = [];
+
+function escHtml(s) {
+    return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function severityBadgeClass(sev) {
+    const s = (sev || '').toUpperCase();
+    if (s === 'CRITICAL' || s === 'HIGH' || s === 'ALERT') return 'bg-danger';
+    if (s === 'MEDIUM' || s === 'WARN') return 'bg-warning text-dark';
+    if (s === 'LOW') return 'bg-secondary';
+    return 'bg-info text-dark'; // INFO, INFORMATIONAL, and anything unrecognized
+}
+
+function typeBadge(t) {
+    if (t === 'alert') return '<span class="badge bg-danger" title="Detection rule alert"><i class="fa-solid fa-triangle-exclamation me-1"></i>Alert</span>';
+    if (t === 'anomaly') return '<span class="badge bg-info text-dark" title="UEBA anomaly detection"><i class="fa-solid fa-user-secret me-1"></i>Anomaly</span>';
+    return '<span class="badge bg-secondary" title="Raw ingested log">Log</span>';
+}
+
+function showLogDetail(idx) {
+    const log = currentLogs[idx];
+    if (!log) return;
+    document.getElementById('logDetailBody').innerHTML = `
+        <dl class="row mb-2 small">
+            <dt class="col-3">Time</dt><dd class="col-9">${escHtml(log.time)}</dd>
+            <dt class="col-3">Type</dt><dd class="col-9">${typeBadge(log.type)}</dd>
+            <dt class="col-3">Severity</dt><dd class="col-9"><span class="badge ${severityBadgeClass(log.severity)}">${escHtml((log.severity || '').toUpperCase())}</span></dd>
+            <dt class="col-3">Host</dt><dd class="col-9">${escHtml(log.host)}</dd>
+            <dt class="col-3">App / Rule</dt><dd class="col-9">${escHtml(log.app)}</dd>
+            <dt class="col-3">Event ID</dt><dd class="col-9">${escHtml(log.event_id)}</dd>
+            <dt class="col-3">User</dt><dd class="col-9">${escHtml(log.username)}</dd>
+            <dt class="col-3">Src IP</dt><dd class="col-9">${escHtml(log.source_ip)}</dd>
+            <dt class="col-3">Dest IP</dt><dd class="col-9">${escHtml(log.destination_ip)}</dd>
+        </dl>
+        <label class="form-label small text-muted mb-1">Full Message</label>
+        <pre class="bg-black border border-secondary rounded p-2 small mb-0" style="white-space:pre-wrap; word-break:break-word; max-height:400px; overflow-y:auto;">${escHtml(log.message)}</pre>
+    `;
+    new bootstrap.Modal(document.getElementById('logDetailModal')).show();
+}
+
 window.loadLogs = function() {
     let q = document.getElementById('searchQuery').value;
     let app = Array.from(document.querySelectorAll('.app-chk:checked')).map(c=>c.value).join(',');
@@ -286,27 +345,29 @@ window.loadLogs = function() {
             }
 
             const logs = data.logs || [];
+            currentLogs = logs;
             document.getElementById('statTotalMatches').innerText = data.total_matches !== undefined ? data.total_matches : data.count;
-            document.getElementById('statAlertCount').innerText = logs.filter(l => l.severity === 'ALERT').length;
+            document.getElementById('statAlertCount').innerText = logs.filter(l => l.type === 'alert' || l.type === 'anomaly').length;
             document.getElementById('statUniqueHosts').innerText = new Set(logs.map(l => l.host)).size;
             document.getElementById('statTimeWindow').innerText = document.getElementById('timeRange').value;
 
             let tbody = document.querySelector('tbody');
             if (!tbody) return;
             if (!data.logs || data.logs.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-3">No logs match current filters.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-3">No logs match current filters.</td></tr>';
                 return;
             }
-            tbody.innerHTML = data.logs.map(log => `
+            tbody.innerHTML = data.logs.map((log, idx) => `
                 <tr>
-                    <td class="text-nowrap">${log.time}</td>
-                    <td><span class="badge bg-${log.severity === 'ALERT' ? 'danger' : log.severity === 'WARN' ? 'warning' : 'info'}">${log.severity}</span></td>
-                    <td class="text-nowrap">${log.host}</td>
-                    <td>${log.app}</td>
-                    <td>${log.event_id}</td>
-                    <td>${log.username}</td>
-                    <td>${log.source_ip}</td>
-                    <td class="text-truncate" style="max-width: 350px;" title="${log.message}">${log.message}</td>
+                    <td class="text-nowrap">${escHtml(log.time)}</td>
+                    <td>${typeBadge(log.type)}</td>
+                    <td><span class="badge ${severityBadgeClass(log.severity)}">${escHtml((log.severity || '').toUpperCase())}</span></td>
+                    <td class="text-nowrap">${escHtml(log.host)}</td>
+                    <td>${escHtml(log.app)}</td>
+                    <td>${escHtml(log.event_id)}</td>
+                    <td>${escHtml(log.username)}</td>
+                    <td>${escHtml(log.source_ip)}</td>
+                    <td class="text-truncate log-msg-cell" style="max-width: 350px; cursor: pointer;" onclick="showLogDetail(${idx})" title="Click to view full message">${escHtml(log.message)}</td>
                 </tr>
             `).join('');
         })

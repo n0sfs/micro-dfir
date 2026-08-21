@@ -236,7 +236,10 @@ def api_ingest():
             eid = log.get('event_id', '-')
             usr = log.get('username', '-')
             msg = log.get('message', '')
-            sip = log.get('source_ip') or _extract_source_ip(msg)
+            # Fall back to the IP the ingest request actually came from — an event with no
+            # network-address text in its message (most Sysmon/System events) still comes
+            # from a real endpoint, and request.remote_addr is that endpoint's address.
+            sip = log.get('source_ip') or _extract_source_ip(msg) or request.remote_addr
             db.execute("INSERT INTO live_logs (timestamp, host, app, severity, event_id, username, source_ip, message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (ts, hst, app_n, sev, eid, usr, sip, msg))
             count += 1
 
@@ -1146,6 +1149,35 @@ def migrate_alerts_columns():
         for col in ('rule_name', 'host', 'message'):
             if col not in cols:
                 conn.execute(f"ALTER TABLE alerts ADD COLUMN {col} TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_alerts_enrichment():
+    # sigma_engine's alert path only ever stored rule_id/event_id/severity, leaving host/
+    # message to be looked up via a live join to live_logs whenever an alert needed to be
+    # displayed — fine for one alert at a time, but expensive for Log Search's unified
+    # view once it has to UNION against multi-million-row live_logs on every query.
+    # sigma_engine.py now writes host/message/username/source_ip/destination_ip directly
+    # onto the alert row at insert time; this backfills existing rows once so historical
+    # alerts don't show blank/UNKNOWN after the join is removed from that query.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(alerts)").fetchall()}
+        for col in ('username', 'source_ip', 'destination_ip'):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE alerts ADD COLUMN {col} TEXT")
+        conn.execute("""
+            UPDATE alerts SET
+                host = COALESCE(host, (SELECT host FROM live_logs WHERE live_logs.id = alerts.event_id)),
+                message = COALESCE(message, (SELECT message FROM live_logs WHERE live_logs.id = alerts.event_id)),
+                username = COALESCE(username, (SELECT username FROM live_logs WHERE live_logs.id = alerts.event_id)),
+                source_ip = COALESCE(source_ip, (SELECT source_ip FROM live_logs WHERE live_logs.id = alerts.event_id)),
+                destination_ip = COALESCE(destination_ip, (SELECT destination_ip FROM live_logs WHERE live_logs.id = alerts.event_id))
+            WHERE event_id IS NOT NULL AND (host IS NULL OR message IS NULL)
+        """)
         conn.commit()
         conn.close()
     except Exception:
@@ -1551,99 +1583,121 @@ def agent_config():
 
     return jsonify({'channels': channels, 'ingest_url': dynamic_ingest_url})
 
+# Log Search spans three tables that were previously siloed from each other: raw
+# ingested events (live_logs), Sigma/custom detection-rule hits (alerts), and UEBA
+# behavioral anomalies (events, app_name='duckdb_ueba') — an analyst investigating an
+# incident needs all three in one searchable timeline, not three separate pages.
+# Every branch is normalized to the same column shape so the existing filter/search
+# logic (built for live_logs alone) works unchanged against the union.
+UNIFIED_LOGS_SQL = """(
+SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type
+FROM live_logs
+UNION ALL
+SELECT a.timestamp, a.severity,
+       COALESCE(a.host, 'UNKNOWN') as host,
+       COALESCE(s.title, a.rule_name, 'Custom/YARA Rule') as app,
+       '-' as event_id,
+       COALESCE(a.username, '-') as username,
+       a.source_ip as source_ip,
+       a.destination_ip as destination_ip,
+       COALESCE(a.message, '') as message,
+       'alert' as log_type
+FROM alerts a
+LEFT JOIN sigma_rules s ON a.rule_id = s.id
+UNION ALL
+SELECT timestamp, severity, hostname as host, 'UEBA Anomaly' as app, '-' as event_id, '-' as username,
+       NULL as source_ip, NULL as destination_ip, message, 'anomaly' as log_type
+FROM events
+WHERE app_name = 'duckdb_ueba'
+) AS unified_logs"""
+
+def _build_log_filters(args):
+    import datetime
+    q = args.get('q', '').lower()
+    time_range = args.get('range', '24h')
+    app_filter = args.get('app', '')
+    severity_filter = args.get('severity', '')
+    field_key = args.get('fieldKey', '')
+    field_op = args.get('fieldOp', 'contains')
+    field_val = args.get('fieldVal', '').lower()
+
+    params, conditions = [], []
+
+    if time_range and time_range.lower() != 'all':
+        now = datetime.datetime.now()
+        if time_range == '5m': delta = datetime.timedelta(minutes=5)
+        elif time_range == '15m': delta = datetime.timedelta(minutes=15)
+        elif time_range == '1h': delta = datetime.timedelta(hours=1)
+        elif time_range == '12h': delta = datetime.timedelta(hours=12)
+        elif time_range == '7d': delta = datetime.timedelta(days=7)
+        else: delta = datetime.timedelta(hours=24)
+        conditions.append("timestamp >= ?")
+        params.append((now - delta).strftime('%Y-%m-%d %H:%M:%S'))
+
+    if app_filter:
+        apps = [a.strip() for a in app_filter.split(',') if a.strip()]
+        if apps:
+            conditions.append(f"app IN ({','.join(['?']*len(apps))})")
+            params.extend(apps)
+
+    if severity_filter:
+        # Sigma/UEBA severities are Title-case (Critical/High/Medium), live_logs and the
+        # legacy inline-heuristic alerts are upper-case (INFO/CRITICAL/HIGH) — normalize
+        # both sides so one filter list matches every source's casing.
+        sevs = [s.strip().upper() for s in severity_filter.split(',') if s.strip()]
+        if sevs:
+            conditions.append(f"UPPER(severity) IN ({','.join(['?']*len(sevs))})")
+            params.extend(sevs)
+
+    allowed_columns = ['username', 'host', 'event_id', 'source_ip', 'destination_ip', 'message', 'log_type']
+    if field_key and field_val:
+        col = field_key if field_key in allowed_columns else 'message'
+        if field_op == 'equals':
+            conditions.append(f"LOWER({col}) = ?"); params.append(field_val)
+        elif field_op == 'not_equals':
+            conditions.append(f"LOWER({col}) != ?"); params.append(field_val)
+        elif field_op == 'starts_with':
+            conditions.append(f"LOWER({col}) LIKE ?"); params.append(f'{field_val}%')
+        elif field_op == 'ends_with':
+            conditions.append(f"LOWER({col}) LIKE ?"); params.append(f'%{field_val}')
+        elif field_op == 'gt':
+            conditions.append(f"{col} > ?"); params.append(field_val)
+        elif field_op == 'lt':
+            conditions.append(f"{col} < ?"); params.append(field_val)
+        else:
+            conditions.append(f"LOWER({col}) LIKE ?"); params.append(f'%{field_val}%')
+
+    if q:
+        conditions.append("(LOWER(host) LIKE ? OR LOWER(app) LIKE ? OR LOWER(event_id) LIKE ? OR LOWER(username) LIKE ? OR LOWER(message) LIKE ?)")
+        params.extend([f'%{q}%'] * 5)
+
+    where_clause = (" WHERE " + " and ".join(conditions)) if conditions else ""
+    return where_clause, params
+
 @app.route('/api/logs/search', methods=['GET'])
 @login_required
 def api_logs_search():
     from flask import request, jsonify
-    import datetime
     try:
-        q = request.args.get('q', '').lower()
-        time_range = request.args.get('range', '24h')
-        app_filter = request.args.get('app', '')
-        severity_filter = request.args.get('severity', '')
-        field_key = request.args.get('fieldKey', '')
-        field_op = request.args.get('fieldOp', 'contains')
-        field_val = request.args.get('fieldVal', '').lower()
-        
         db = get_db()
-        base_query = "FROM live_logs"
-        params, conditions = [], []
-        
-        if time_range and time_range.lower() != 'all':
-            now = datetime.datetime.now()
-            if time_range == '5m': delta = datetime.timedelta(minutes=5)
-            elif time_range == '15m': delta = datetime.timedelta(minutes=15)
-            elif time_range == '1h': delta = datetime.timedelta(hours=1)
-            elif time_range == '12h': delta = datetime.timedelta(hours=12)
-            elif time_range == '7d': delta = datetime.timedelta(days=7)
-            else: delta = datetime.timedelta(hours=24)
-            conditions.append("timestamp >= ?")
-            params.append((now - delta).strftime('%Y-%m-%d %H:%M:%S'))
-            
-        if app_filter:
-            apps = [a.strip() for a in app_filter.split(',') if a.strip()]
-            if apps:
-                conditions.append(f"app IN ({','.join(['?']*len(apps))})")
-                params.extend(apps)
-        if severity_filter:
-            sevs = [s.strip() for s in severity_filter.split(',') if s.strip()]
-            if sevs:
-                conditions.append(f"severity IN ({','.join(['?']*len(sevs))})")
-                params.extend(sevs)
-            
-        allowed_columns = ['username', 'host', 'event_id', 'source_ip', 'destination_ip', 'email', 'message']
-        if field_key and field_val:
-            col = field_key if field_key in allowed_columns else 'message'
-            if field_op == 'equals':
-                conditions.append(f"LOWER({col}) = ?")
-                params.append(field_val)
-            elif field_op == 'not_equals':
-                conditions.append(f"LOWER({col}) != ?")
-                params.append(field_val)
-            elif field_op == 'starts_with':
-                conditions.append(f"LOWER({col}) LIKE ?")
-                params.append(f'{field_val}%')
-            elif field_op == 'ends_with':
-                conditions.append(f"LOWER({col}) LIKE ?")
-                params.append(f'%{field_val}')
-            elif field_op == 'gt':
-                conditions.append(f"{col} > ?")
-                params.append(field_val)
-            elif field_op == 'lt':
-                conditions.append(f"{col} < ?")
-                params.append(field_val)
-            else:
-                conditions.append(f"LOWER({col}) LIKE ?")
-                params.append(f'%{field_val}%')
-            
-        if q:
-            conditions.append("(LOWER(host) LIKE ? OR LOWER(app) LIKE ? OR LOWER(event_id) LIKE ? OR LOWER(username) LIKE ? OR LOWER(message) LIKE ?)")
-            params.extend([f'%{q}%'] * 5)
-            
-        where_clause = ""
-        if conditions:
-            where_clause = " WHERE " + " and ".join(conditions)
-            
-        # Get true total count
-        count_query = f"SELECT COUNT(*) {base_query}{where_clause}"
-        total_count = db.execute(count_query, params).fetchone()[0]
-        
-        # Get limited rows for display
-        data_query = f"SELECT * {base_query}{where_clause} ORDER BY timestamp DESC LIMIT 300"
-        rows = db.execute(data_query, params).fetchall()
-        
+        where_clause, params = _build_log_filters(request.args)
+
+        total_count = db.execute(f"SELECT COUNT(*) FROM {UNIFIED_LOGS_SQL}{where_clause}", params).fetchone()[0]
+        rows = db.execute(f"SELECT * FROM {UNIFIED_LOGS_SQL}{where_clause} ORDER BY timestamp DESC LIMIT 300", params).fetchall()
+
         logs = [{
-            'time': r['timestamp'], 
-            'severity': r['severity'], 
-            'host': r['host'], 
-            'app': r['app'], 
-            'event_id': r['event_id'], 
-            'username': r['username'], 
-            'source_ip': r['source_ip'] if 'source_ip' in r.keys() else '-',
-            'destination_ip': r['destination_ip'] if 'destination_ip' in r.keys() else '-',
-            'message': r['message']
+            'time': r['timestamp'],
+            'severity': r['severity'],
+            'host': r['host'],
+            'app': r['app'],
+            'event_id': r['event_id'],
+            'username': r['username'],
+            'source_ip': r['source_ip'] if r['source_ip'] is not None else '-',
+            'destination_ip': r['destination_ip'] if r['destination_ip'] is not None else '-',
+            'message': r['message'],
+            'type': r['log_type']
         } for r in rows]
-        
+
         return jsonify({'logs': logs, 'count': len(logs), 'total_matches': total_count})
     except Exception as e:
         return jsonify({'error': str(e), 'logs': [], 'count': 0, 'total_matches': 0})
@@ -1652,102 +1706,28 @@ def api_logs_search():
 @login_required
 def export_logs_csv():
     from flask import request, Response
-    import datetime, csv, io
+    import csv, io
     try:
-        q = request.args.get('q', '').lower()
-        time_range = request.args.get('range', '24h')
-        app_filter = request.args.get('app', '')
-        severity_filter = request.args.get('severity', '')
-        field_key = request.args.get('fieldKey', '')
-        field_op = request.args.get('fieldOp', 'contains')
-        field_val = request.args.get('fieldVal', '').lower()
-        
         db = get_db()
-        query = "SELECT * FROM live_logs"
-        params, conditions = [], []
-        
-        if time_range and time_range.lower() != 'all':
-            now = datetime.datetime.now()
-            if time_range == '5m': delta = datetime.timedelta(minutes=5)
-            elif time_range == '15m': delta = datetime.timedelta(minutes=15)
-            elif time_range == '1h': delta = datetime.timedelta(hours=1)
-            elif time_range == '12h': delta = datetime.timedelta(hours=12)
-            elif time_range == '7d': delta = datetime.timedelta(days=7)
-            else: delta = datetime.timedelta(hours=24)
-            conditions.append("timestamp >= ?")
-            params.append((now - delta).strftime('%Y-%m-%d %H:%M:%S'))
-            
-        if app_filter:
-            apps = [a.strip() for a in app_filter.split(',') if a.strip()]
-            if apps:
-                conditions.append(f"app IN ({','.join(['?']*len(apps))})")
-                params.extend(apps)
-        if severity_filter:
-            sevs = [s.strip() for s in severity_filter.split(',') if s.strip()]
-            if sevs:
-                conditions.append(f"severity IN ({','.join(['?']*len(sevs))})")
-                params.extend(sevs)
-            
-        allowed_columns = ['username', 'host', 'event_id', 'source_ip', 'destination_ip', 'email', 'message']
-        if field_key and field_val:
-            col = field_key if field_key in allowed_columns else 'message'
-            if field_op == 'equals':
-                conditions.append(f"LOWER({col}) = ?")
-                params.append(field_val)
-            elif field_op == 'not_equals':
-                conditions.append(f"LOWER({col}) != ?")
-                params.append(field_val)
-            elif field_op == 'starts_with':
-                conditions.append(f"LOWER({col}) LIKE ?")
-                params.append(f'{field_val}%')
-            elif field_op == 'ends_with':
-                conditions.append(f"LOWER({col}) LIKE ?")
-                params.append(f'%{field_val}')
-            elif field_op == 'gt':
-                conditions.append(f"{col} > ?")
-                params.append(field_val)
-            elif field_op == 'lt':
-                conditions.append(f"{col} < ?")
-                params.append(field_val)
-            else:
-                conditions.append(f"LOWER({col}) LIKE ?")
-                params.append(f'%{field_val}%')
-            
-        if q:
-            conditions.append("(LOWER(host) LIKE ? OR LOWER(app) LIKE ? OR LOWER(event_id) LIKE ? OR LOWER(username) LIKE ? OR LOWER(message) LIKE ?)")
-            params.extend([f'%{q}%'] * 5)
-            
-        if conditions:
-            query += " WHERE " + " and ".join(conditions)
-            
-        # Increase export limit to 10,000 records for deep incident analysis
-        query += " ORDER BY timestamp DESC LIMIT 10000"
-        
+        where_clause, params = _build_log_filters(request.args)
+
+        # Increased export limit (10,000 records) for deep incident analysis.
+        query = f"SELECT * FROM {UNIFIED_LOGS_SQL}{where_clause} ORDER BY timestamp DESC LIMIT 10000"
         cursor = db.execute(query, params)
         rows = cursor.fetchall()
-        
-        # Dynamically extract all available column names from the sqlite cursor description
+
         column_names = [description[0] for description in cursor.description] if cursor.description else [
-            'timestamp', 'severity', 'host', 'app', 'event_id', 'username', 'source_ip', 'destination_ip', 'message'
+            'timestamp', 'severity', 'host', 'app', 'event_id', 'username', 'source_ip', 'destination_ip', 'message', 'log_type'
         ]
-        
+
         si = io.StringIO()
         cw = csv.writer(si)
-        
-        # Write clean header row
         cw.writerow(column_names)
-        
-        # Write full untruncated rows
         for r in rows:
-            row_data = []
-            for col in column_names:
-                val = r[col] if col in r.keys() else ''
-                row_data.append(str(val) if val is not None else '')
-            cw.writerow(row_data)
-            
-        output = si.getvalue()
+            cw.writerow([str(r[col]) if r[col] is not None else '' for col in column_names])
+
         return Response(
-            output,
+            si.getvalue(),
             mimetype="text/csv",
             headers={"Content-Disposition": "attachment;filename=micro_soc_complete_export.csv"}
         )
@@ -1758,55 +1738,21 @@ def export_logs_csv():
 @login_required
 def api_logs_timeline():
     from flask import request, jsonify
-    import datetime
     try:
-        time_range = request.args.get('range', '24h')
-        app_filter = request.args.get('app', '')
-        severity_filter = request.args.get('severity', '')
-        
         db = get_db()
-        params, conditions = [], []
-        
-        if time_range and time_range.lower() != 'all':
-            now = datetime.datetime.now()
-            if time_range == '5m': delta = datetime.timedelta(minutes=5)
-            elif time_range == '15m': delta = datetime.timedelta(minutes=15)
-            elif time_range == '1h': delta = datetime.timedelta(hours=1)
-            elif time_range == '12h': delta = datetime.timedelta(hours=12)
-            elif time_range == '7d': delta = datetime.timedelta(days=7)
-            else: delta = datetime.timedelta(hours=24)
-            conditions.append("timestamp >= ?")
-            params.append((now - delta).strftime('%Y-%m-%d %H:%M:%S'))
-            
-        if app_filter:
-            apps = [a.strip() for a in app_filter.split(',') if a.strip()]
-            if apps:
-                conditions.append(f"app IN ({','.join(['?']*len(apps))})")
-                params.extend(apps)
-        if severity_filter:
-            sevs = [s.strip() for s in severity_filter.split(',') if s.strip()]
-            if sevs:
-                conditions.append(f"severity IN ({','.join(['?']*len(sevs))})")
-                params.extend(sevs)
-            
-        where_clause = ""
-        if conditions:
-            where_clause = " WHERE " + " and ".join(conditions)
-            
-        # Group by minute or hour depending on range
+        where_clause, params = _build_log_filters(request.args)
+        time_range = request.args.get('range', '24h')
+
         if time_range in ['5m', '15m', '1h']:
-            # Group by minute: YYYY-MM-DD HH:MM
             time_format = "strftime('%Y-%m-%d %H:%M', timestamp)"
         elif time_range in ['7d']:
-            # Group by day: YYYY-MM-DD
             time_format = "strftime('%Y-%m-%d', timestamp)"
         else:
-            # Default 24h/12h: Group by hour: YYYY-MM-DD HH:00
             time_format = "strftime('%Y-%m-%d %H:00', timestamp)"
-            
-        query = f"SELECT {time_format} as t_bucket, COUNT(*) as count FROM live_logs {where_clause} GROUP BY t_bucket ORDER BY t_bucket ASC"
+
+        query = f"SELECT {time_format} as t_bucket, COUNT(*) as count FROM {UNIFIED_LOGS_SQL}{where_clause} GROUP BY t_bucket ORDER BY t_bucket ASC"
         rows = db.execute(query, params).fetchall()
-        
+
         timeline = [{'time': r['t_bucket'], 'count': r['count']} for r in rows]
         return jsonify({'timeline': timeline})
     except Exception as e:
@@ -2158,6 +2104,7 @@ migrate_settings()
 migrate_ti_feeds()
 migrate_agent_commands()
 migrate_alerts_columns()
+migrate_alerts_enrichment()
 migrate_sigma_rules_columns()
 migrate_rule_tuning()
 migrate_compliance_tags()
