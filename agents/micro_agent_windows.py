@@ -1,12 +1,14 @@
 # Micro DFIR Windows Agent
-import urllib.request, json, time, sys, os, subprocess, socket, random, ssl
+import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, base64
 
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
 SERVER_URL = 'https://__HOST_URL__/api/agent/config'
 INGEST_URL = 'https://__HOST_URL__/api/ingest'
+RESULT_URL = 'https://__HOST_URL__/api/agent/result'
 SOC_TOKEN = '__SOC_TOKEN__'
 POLL_INTERVAL = 10
+SCRIPT_TIMEOUT_SECONDS = 90
 
 def install_agent():
     try:
@@ -26,6 +28,36 @@ def install_agent():
 def uninstall_agent():
     subprocess.run(f'schtasks /delete /tn "{TASK_NAME}" /f', shell=True, capture_output=True)
 
+def run_remote_script(context, cmd_id, script):
+    print(f"[*] Executing remote command #{cmd_id}...", flush=True)
+    encoded = base64.b64encode(script.encode('utf-16-le')).decode('ascii')
+    exit_code, stdout, stderr = 1, '', ''
+    try:
+        proc = subprocess.run(
+            ['powershell', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+            capture_output=True, encoding='utf-8', errors='ignore', timeout=SCRIPT_TIMEOUT_SECONDS
+        )
+        exit_code, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired:
+        stderr = f"Command timed out after {SCRIPT_TIMEOUT_SECONDS}s"
+    except Exception as e:
+        stderr = f"Failed to execute command: {e}"
+
+    try:
+        payload = json.dumps({'id': cmd_id, 'exit_code': exit_code, 'stdout': stdout, 'stderr': stderr}).encode('utf-8')
+        req = urllib.request.Request(RESULT_URL, data=payload, headers={'Content-Type': 'application/json', 'X-Agent-Token': SOC_TOKEN})
+        urllib.request.urlopen(req, context=context, timeout=10)
+        print(f"[+] Result for command #{cmd_id} reported (exit {exit_code}).", flush=True)
+    except Exception as e:
+        print(f"[-] Failed to report result for command #{cmd_id}: {e}", flush=True)
+
+_sent_event_sigs = set()
+_SENT_SIG_CAP = 5000
+
+def _event_signature(host, base, e):
+    msg = str(e.get('Message', ''))
+    return f"{host}|{base}|{e.get('TimeCreated','')}|{e.get('Id','')}|{msg[:80]}"
+
 def fetch_windows_logs(channels, last_seconds):
     logs = []
     host = socket.gethostname()
@@ -40,6 +72,12 @@ def fetch_windows_logs(channels, last_seconds):
                 events = json.loads(out)
                 if isinstance(events, dict): events = [events]
                 for e in events:
+                    sig = _event_signature(host, base, e)
+                    if sig in _sent_event_sigs:
+                        continue  # already sent this exact event in a prior cycle — skip
+                    _sent_event_sigs.add(sig)
+                    if len(_sent_event_sigs) > _SENT_SIG_CAP:
+                        _sent_event_sigs.pop()
                     logs.append({"time": str(e.get('TimeCreated', '')), "host": host, "app": base, "severity": "ALERT" if e.get('LevelDisplayName') in ['Error', 'Critical'] else "WARN" if e.get('LevelDisplayName') == 'Warning' else "INFO", "event_id": str(e.get('Id', '-')), "username": str(e.get('User', 'SYSTEM')).split('\\')[-1], "message": str(e.get('Message', ''))[:1000]})
         except: pass
     return logs
@@ -71,6 +109,11 @@ def run_agent():
                             print("[*] Uninstall command received. Removing agent...", flush=True)
                             uninstall_agent()
                             return
+
+                        # Server pushed a response-action script (process list, isolate, triage collection, etc.)
+                        if data.get('run_script'):
+                            rs = data['run_script']
+                            run_remote_script(context, rs.get('id'), rs.get('script', ''))
 
                         # Update Channels
                         if data.get('channels'):
