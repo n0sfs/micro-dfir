@@ -80,6 +80,7 @@
                                 <tr>
                                     <th>Indicator</th>
                                     <th>Name</th>
+                                    <th>Description</th>
                                     <th class="ioc-th">
                                         <div class="d-flex align-items-center justify-content-between">
                                             <span>Type</span>
@@ -111,7 +112,7 @@
                                 </tr>
                             </thead>
                             <tbody id="iocTableBody">
-                                <tr><td colspan="6" class="text-center text-muted py-4">Loading indicators...</td></tr>
+                                <tr><td colspan="7" class="text-center text-muted py-4">Loading indicators...</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -608,13 +609,14 @@ function loadIocs() {
                 : `Showing ${data.iocs.length} of ${data.total} indicators`;
             const tbody = document.getElementById('iocTableBody');
             if (!data.iocs || data.iocs.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="6" class="text-center text-muted py-4">${filtered ? 'No indicators match your filters.' : 'No indicators ingested yet. Add or sync a feed above.'}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-4">${filtered ? 'No indicators match your filters.' : 'No indicators ingested yet. Add or sync a feed above.'}</td></tr>`;
                 return;
             }
             tbody.innerHTML = data.iocs.map(i => `
                 <tr>
                     <td class="font-monospace small">${escHtml(i.pattern)}</td>
                     <td>${escHtml(i.name || '')}</td>
+                    <td class="text-muted small text-truncate" style="max-width:220px;" title="${escHtml(i.description || '')}">${escHtml(i.description || '—')}</td>
                     <td>${ioTypeBadge(i.ioc_type)}</td>
                     <td class="text-muted small">${escHtml(i.source_name || 'Unknown')}</td>
                     <td class="text-nowrap small text-muted">${escHtml(i.valid_from || '')}</td>
