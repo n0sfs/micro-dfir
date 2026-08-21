@@ -4,6 +4,34 @@
     <h2><i class="fa-solid fa-crosshairs me-2"></i>Threat Hunt</h2>
     <p>Scan files against imported YARA rules and enrich indicators with threat intelligence.</p>
 </div>
+
+<div class="row g-3 mb-4">
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label">YARA Rules Loaded</div>
+            <div class="stat-value">{{ yara_files|length }}</div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label">Last Scan Matches</div>
+            <div class="stat-value">{{ matches|length }}</div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label">CTI Source</div>
+            <div class="stat-value" style="font-size:1.05rem;">ThreatFox</div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label">Ingested IOCs</div>
+            <div class="stat-value" id="statHuntIocs">—</div>
+        </div>
+    </div>
+</div>
+
 <div class="row">
     <!-- Left Column: YARA Scanner -->
     <div class="col-md-6">
@@ -90,6 +118,11 @@
     function toggleSelectAll(select) {
         document.querySelectorAll('.rule-checkbox').forEach(cb => cb.checked = select);
     }
+
+    fetch('/api/ti/iocs?limit=1')
+        .then(r => r.json())
+        .then(data => { document.getElementById('statHuntIocs').innerText = data.total ?? 0; })
+        .catch(() => { document.getElementById('statHuntIocs').innerText = '0'; });
 
     // Log Search & CTI lookup handler
     document.getElementById('search-form').addEventListener('submit', async (e) => {

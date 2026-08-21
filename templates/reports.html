@@ -5,6 +5,27 @@
     <p>Generate and download monthly SOC and compliance PDF reports.</p>
 </div>
 
+<div class="row g-3 mb-4">
+    <div class="col-6 col-lg-4">
+        <div class="stat-tile">
+            <div class="stat-label">Total Reports</div>
+            <div class="stat-value">{{ reports|length }}</div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-4">
+        <div class="stat-tile">
+            <div class="stat-label">Latest Report</div>
+            <div class="stat-value" style="font-size:1.05rem;">{{ reports[0].replace('Security_Report_', '').replace('.pdf', '').replace('_', '-') if reports else 'None yet' }}</div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-4">
+        <div class="stat-tile">
+            <div class="stat-label">Auto-Generation</div>
+            <div class="stat-value" style="font-size:1.05rem;">1st of month</div>
+        </div>
+    </div>
+</div>
+
     <div class="card shadow-sm border-secondary bg-dark text-light mb-4">
         <div class="card-header border-secondary d-flex justify-content-between align-items-center">
             <h5 class="mb-0 text-info"><i class="fa-solid fa-folder-open"></i> Generated PDF Reports</h5>

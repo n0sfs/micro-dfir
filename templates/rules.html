@@ -6,6 +6,33 @@
         <p>Manage Sigma detection rules — enable, disable, and import from SigmaHQ.</p>
     </div>
 
+    <div class="row g-3 mb-4">
+        <div class="col-6 col-lg-3">
+            <div class="stat-tile">
+                <div class="stat-label">Total Rules</div>
+                <div class="stat-value" id="statTotalRules">—</div>
+            </div>
+        </div>
+        <div class="col-6 col-lg-3">
+            <div class="stat-tile">
+                <div class="stat-label">Enabled</div>
+                <div class="stat-value" id="statEnabledRules">—</div>
+            </div>
+        </div>
+        <div class="col-6 col-lg-3">
+            <div class="stat-tile">
+                <div class="stat-label">Disabled</div>
+                <div class="stat-value" id="statDisabledRules">—</div>
+            </div>
+        </div>
+        <div class="col-6 col-lg-3">
+            <div class="stat-tile">
+                <div class="stat-label">Platforms Covered</div>
+                <div class="stat-value" id="statPlatforms">—</div>
+            </div>
+        </div>
+    </div>
+
     <div class="card shadow-sm border-secondary bg-dark text-light mb-4">
         <div class="card-body">
 
@@ -127,8 +154,14 @@ async function ld(){
     Array.from(cats).sort().forEach(c => catSelect.innerHTML += `<option value="${c}">${c}</option>`);
     Array.from(mitres).sort().forEach(m => mitreSelect.innerHTML += `<option value="${m}">${m}</option>`);
 
+    const enabledCount = allRules.filter(r => r.enabled).length;
+    document.getElementById('statTotalRules').innerText = allRules.length;
+    document.getElementById('statEnabledRules').innerText = enabledCount;
+    document.getElementById('statDisabledRules').innerText = allRules.length - enabledCount;
+    document.getElementById('statPlatforms').innerText = platforms.size;
+
     renderTable(allRules);
-} 
+}
 
 function renderTable(rules) {
     document.getElementById('rt').innerHTML = rules.map(rl => `
