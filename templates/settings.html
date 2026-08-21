@@ -2,7 +2,7 @@
 {% block content %}
 <div class="page-header">
     <h2><i class="fa-solid fa-gear me-2"></i>Settings</h2>
-    <p>Platform security, network bindings, agent deployment packages, and system preferences.</p>
+    <p>Platform security, network bindings, and system preferences.</p>
 </div>
 
 <div class="accordion accordion-flush border border-secondary rounded" id="settingsAccordion">
@@ -78,44 +78,7 @@
         </div>
     </div>
 
-    <!-- 3. AGENT SETTINGS & PACKAGES (RESTORED) -->
-    <div class="accordion-item bg-dark border-secondary">
-        <h2 class="accordion-header" id="headingThree">
-            <button class="accordion-button bg-dark text-light" type="button" data-bs-toggle="collapse" data-bs-target="#collapseThree">
-                <i class="fa-solid fa-box-archive me-2"></i> Agent Settings & Deployment Packages
-            </button>
-        </h2>
-        <div id="collapseThree" class="accordion-collapse collapse show" data-bs-parent="#settingsAccordion">
-            <div class="accordion-body text-light border-top border-secondary">
-                
-                <div class="card bg-black border-info mb-4">
-                    <div class="card-body">
-                        <h6 class="text-info fw-bold">SOC Secret Token (Ingestion API)</h6>
-                        <p class="text-muted small">Used by Vector and deployed log forwarders to authenticate against the ingestion API.</p>
-                        <div class="input-group mb-3">
-                            <input type="text" class="form-control bg-dark text-light border-secondary" id="socToken" value="{{ soc_token }}">
-                            <button class="btn btn-outline-warning" type="button" onclick="generateToken()"><i class="fa-solid fa-key me-1"></i> Generate New</button>
-                        </div>
-                        <button class="btn btn-outline-primary btn-sm" onclick="saveToken()"><i class="fa-solid fa-lock me-1"></i> Save Ingestion Token</button>
-                    </div>
-                </div>
-                
-                <p class="text-muted small mb-3">Download pre-configured agent scripts embedded with your current SOC secret and server IP, or manage local background services.</p>
-                <div class="mb-4">
-                    <a href="/api/agent/download/windows" class="btn btn-outline-success btn-sm me-2"><i class="fa-brands fa-windows me-1"></i> Download Windows Agent (.zip)</a>
-                    <a href="/api/agent/download/linux" class="btn btn-outline-info btn-sm"><i class="fa-brands fa-linux me-1"></i> Download Linux Agent (.tar.gz)</a>
-                </div>
-                
-                <h6 class="text-warning mt-4 font-monospace"><i class="fa-solid fa-greater-than me-2"></i>Windows Background Service Management</h6>
-                <p class="text-muted small mb-2">To run the Windows agent persistently in the background, open PowerShell as Administrator and run:</p>
-                <div class="bg-black p-2 rounded mb-3 font-monospace text-success small border border-secondary">python micro_agent_windows.py install</div>
-                <p class="text-muted small mb-2">To stop and remove the background service:</p>
-                <div class="bg-black p-2 rounded font-monospace text-danger small border border-secondary">python micro_agent_windows.py uninstall</div>
-            </div>
-        </div>
-    </div>
-
-    <!-- 4. SYSTEM & STORAGE -->
+    <!-- 3. SYSTEM & STORAGE -->
     <div class="accordion-item bg-dark border-secondary">
         <h2 class="accordion-header" id="headingFour">
             <button class="accordion-button collapsed bg-dark text-light" type="button" data-bs-toggle="collapse" data-bs-target="#collapseFour">
@@ -337,25 +300,6 @@ function deleteUser(id, username) {
     }
 }
 
-// Token & DB Original Logic (Placeholders to ensure buttons work if backend routes exist)
-function generateToken() {
-    const chars = 'abcdef0123456789';
-    let token = '';
-    for(let i=0; i<32; i++) token += chars[Math.floor(Math.random() * chars.length)];
-    document.getElementById('socToken').value = token;
-}
-function saveToken() {
-    let token = document.getElementById('socToken').value.trim();
-    if (!token) { alert('Token cannot be empty.'); return; }
-    fetch('/api/settings/token', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({token: token})
-    }).then(r => r.json()).then(res => {
-        if (res.status === 'success') alert('Token saved. Re-download agent packages to pick up the new token.');
-        else alert(res.error || 'Failed to save token.');
-    }).catch(err => alert('Error saving token: ' + err));
-}
 function backupDB() { window.location.href = '/api/settings/backup'; }
 function vacuumDB() {
     if (!confirm('Vacuum the database now? This rebuilds the file to reclaim disk space and can take a while on a large database — the app may be briefly slower while it runs.')) return;
