@@ -1029,5 +1029,10 @@ restoreColWidths();
 initColResize();
 initFilterDropdowns();
 ld();
+
+// Deep link from Log Search's alert detail modal ("View Rule" button) — opens straight
+// to the rule that fired instead of leaving the user to search for it by name.
+const _deepLinkRuleId = new URLSearchParams(window.location.search).get('rule_id');
+if (_deepLinkRuleId) openRuleModal(parseInt(_deepLinkRuleId, 10));
 </script>
 {% endblock %}

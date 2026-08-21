@@ -306,13 +306,67 @@ function typeBadge(t) {
     return '<span class="badge bg-secondary" title="Raw ingested log">Log</span>';
 }
 
+// Distinguishes *what kind* of alert/anomaly this is — a Sigma rule, a hand-written
+// custom rule, the legacy built-in keyword heuristics (rule_id is null for those, there's
+// no rule row to point to), or a UEBA anomaly, optionally sub-typed from its raw detail.
+function detectionSourceLabel(log) {
+    if (log.type === 'alert') {
+        if (log.rule_source === 'sigma') return 'Sigma Rule';
+        if (log.rule_source === 'custom') return 'Custom Rule';
+        return 'Built-in Heuristic';
+    }
+    if (log.type === 'anomaly') {
+        let detail = null;
+        try { detail = log.raw_json ? JSON.parse(log.raw_json) : null; } catch (e) {}
+        if (detail && detail.detection_type === 'new_source_ip') return 'UEBA Anomaly — First-Time-Seen Source IP';
+        if (detail && detail.detection_type === 'volume_baseline') return 'UEBA Anomaly — Volume Baseline';
+        return 'UEBA Anomaly';
+    }
+    return null;
+}
+
+function anomalyDetailHtml(log) {
+    let d = null;
+    try { d = log.raw_json ? JSON.parse(log.raw_json) : null; } catch (e) {}
+    if (!d) return '';
+    if (d.detection_type === 'new_source_ip') {
+        return `
+            <label class="form-label small text-muted mb-1">Detection Basis</label>
+            <dl class="row mb-2 small">
+                <dt class="col-4">Source IP</dt><dd class="col-8">${escHtml(d.source_ip)}</dd>
+                <dt class="col-4">Events Today</dt><dd class="col-8">${escHtml(d.count)}</dd>
+            </dl>`;
+    }
+    if ('baseline_avg' in d) {
+        return `
+            <label class="form-label small text-muted mb-1">Detection Basis</label>
+            <dl class="row mb-2 small">
+                <dt class="col-4">Current Count</dt><dd class="col-8">${escHtml(d.current_count)}</dd>
+                <dt class="col-4">Baseline Avg</dt><dd class="col-8">${escHtml(d.baseline_avg)}</dd>
+                <dt class="col-4">Baseline Spread</dt><dd class="col-8">${escHtml(d.baseline_stddev)}</dd>
+                <dt class="col-4">Threshold</dt><dd class="col-8">${escHtml(d.threshold)}</dd>
+                ${d.days_seen !== undefined ? `<dt class="col-4">Samples</dt><dd class="col-8">${escHtml(d.days_seen)} (${escHtml(d.baseline_mode || 'flat')})</dd>` : ''}
+            </dl>`;
+    }
+    return '';
+}
+
 function showLogDetail(idx) {
     const log = currentLogs[idx];
     if (!log) return;
+    const srcLabel = detectionSourceLabel(log);
+    // For alert rows the "Event ID"/"App" columns show the RULE (title/source), so the
+    // triggering event's own Windows Event ID and channel are surfaced separately here.
+    const showTriggeringEvent = log.type === 'alert' && (log.log_event_id || log.log_app);
+    const viewRuleBtn = (log.type === 'alert' && log.rule_id)
+        ? `<a href="/rules?rule_id=${encodeURIComponent(log.rule_id)}" target="_blank" class="btn btn-sm btn-outline-primary mb-2"><i class="fa-solid fa-file-shield me-1"></i>View Rule</a>`
+        : '';
+
     document.getElementById('logDetailBody').innerHTML = `
         <dl class="row mb-2 small">
             <dt class="col-3">Time</dt><dd class="col-9">${escHtml(log.time)}</dd>
             <dt class="col-3">Type</dt><dd class="col-9">${typeBadge(log.type)}</dd>
+            ${srcLabel ? `<dt class="col-3">Detection Source</dt><dd class="col-9"><span class="badge bg-secondary">${escHtml(srcLabel)}</span></dd>` : ''}
             <dt class="col-3">Severity</dt><dd class="col-9"><span class="badge ${severityBadgeClass(log.severity)}">${escHtml((log.severity || '').toUpperCase())}</span></dd>
             <dt class="col-3">Host</dt><dd class="col-9">${escHtml(log.host)}</dd>
             <dt class="col-3">App / Rule</dt><dd class="col-9">${escHtml(log.app)}</dd>
@@ -321,6 +375,14 @@ function showLogDetail(idx) {
             <dt class="col-3">Src IP</dt><dd class="col-9">${escHtml(log.source_ip)}</dd>
             <dt class="col-3">Dest IP</dt><dd class="col-9">${escHtml(log.destination_ip)}</dd>
         </dl>
+        ${viewRuleBtn}
+        ${showTriggeringEvent ? `
+        <label class="form-label small text-muted mb-1">Triggering Log Event</label>
+        <dl class="row mb-2 small">
+            <dt class="col-3">Event ID</dt><dd class="col-9">${escHtml(log.log_event_id || '-')}</dd>
+            <dt class="col-3">Channel</dt><dd class="col-9">${escHtml(log.log_app || '-')}</dd>
+        </dl>` : ''}
+        ${anomalyDetailHtml(log)}
         <label class="form-label small text-muted mb-1">Full Message</label>
         <pre class="bg-black border border-secondary rounded p-2 small mb-0" style="white-space:pre-wrap; word-break:break-word; max-height:400px; overflow-y:auto;">${escHtml(log.message)}</pre>
     `;

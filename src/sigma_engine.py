@@ -107,17 +107,22 @@ def run_detection_cycle():
                 for m in cursor.execute(q).fetchall():
                     if any(_exclusion_matches(e, m) for e in rule_exclusions):
                         continue
-                    # host/message/username/source_ip are duplicated onto the alert row itself
-                    # (not just left as a join back to the triggering live_logs row) so Log
-                    # Search can list alerts without joining against the multi-million-row
-                    # live_logs table on every query.
+                    # host/message/username/source_ip/log_event_id/log_app are duplicated onto
+                    # the alert row itself (not just left as a join back to the triggering
+                    # live_logs row) so Log Search can list alerts without joining against the
+                    # multi-million-row live_logs table on every query. log_event_id/log_app
+                    # preserve the original event's own Windows Event ID and channel, distinct
+                    # from the rule that fired — both shown in the alert's detail view.
                     m_keys = m.keys()
                     cursor.execute(
-                        "INSERT INTO alerts (rule_id, event_id, severity, host, message, username, source_ip, destination_ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO alerts (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (r['id'], m['id'], severity, m['host'], m['message'],
                          m['username'] if 'username' in m_keys else None,
                          m['source_ip'] if 'source_ip' in m_keys else None,
-                         m['destination_ip'] if 'destination_ip' in m_keys else None)
+                         m['destination_ip'] if 'destination_ip' in m_keys else None,
+                         m['event_id'] if 'event_id' in m_keys else None,
+                         m['app'] if 'app' in m_keys else None)
                     )
                     try:
                         if soar_api_key:
