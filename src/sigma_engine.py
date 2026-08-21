@@ -9,19 +9,34 @@ DB_PATH = "/opt/micro-dfir/siem.db"
 STATE_FILE = os.path.join(os.path.dirname(DB_PATH), "sigma_state.json")
 
 # live_logs/recent_events is a flat SIEM-style table (timestamp, host, app, severity,
-# event_id, username, message) with no per-field structured data — there's no CommandLine,
-# Image, TargetFilename, etc. column to map Sigma's field names onto. Rather than silently
-# failing to match anything (the previous behavior), every Sigma field reference is mapped
-# onto the free-text `message` column, turning field-scoped conditions into substring
-# search across the raw event text. This trades field-level precision for actually working:
-# a rule like `CommandLine|contains: mimikatz` becomes `message LIKE '%mimikatz%'`, which
-# will still catch it if that text appears anywhere in the logged event, at the cost of
-# being less precise than genuine structured-field matching.
+# event_id, username, source_ip, destination_ip, message) with no per-field structured data
+# for most Sigma fields — there's no CommandLine, Image, TargetFilename, etc. column to map
+# onto. Field names with a known, high-confidence correspondence to an actual column (host,
+# event ID, username, source/destination IP, log channel) are mapped onto that column for a
+# precise match; everything else falls back onto the free-text `message` column, turning
+# field-scoped conditions into substring search across the raw event text. That fallback
+# trades field-level precision for actually working: a rule like `CommandLine|contains:
+# mimikatz` becomes `message LIKE '%mimikatz%'`, which will still catch it if that text
+# appears anywhere in the logged event, at the cost of being less precise than genuine
+# structured-field matching.
+_FIELD_COLUMN_ALIASES = {
+    'host': 'host', 'hostname': 'host', 'computername': 'host', 'computer': 'host', 'dvc': 'host',
+    'channel': 'app', 'app': 'app', 'application': 'app', 'source': 'app',
+    'eventid': 'event_id', 'event_id': 'event_id',
+    'username': 'username', 'user': 'username', 'targetusername': 'username',
+    'subjectusername': 'username', 'accountname': 'username', 'user_id': 'username',
+    'sourceip': 'source_ip', 'source_ip': 'source_ip', 'src_ip': 'source_ip',
+    'srcip': 'source_ip', 'clientip': 'source_ip', 'ipaddress': 'source_ip', 'src': 'source_ip',
+    'destinationip': 'destination_ip', 'destination_ip': 'destination_ip', 'dst_ip': 'destination_ip',
+    'dstip': 'destination_ip', 'dst': 'destination_ip',
+    'message': 'message',
+}
+
 @dataclass
-class MapAllFieldsToMessage(FieldMappingTransformation):
+class MapFieldsToColumns(FieldMappingTransformation):
     mapping: dict = dc_field(default_factory=dict)
     def get_mapping(self, field_name):
-        return "message"
+        return _FIELD_COLUMN_ALIASES.get((field_name or '').lower(), 'message')
 
 # Many older SigmaHQ rules predate the spec settling on strict ISO 8601 (yyyy-mm-dd) for
 # date/modified fields and still use yyyy/mm/dd, which pysigma's SigmaRule validation
@@ -32,7 +47,7 @@ def _normalize_rule_dates(rule_yaml):
     return _SLASH_DATE_RE.sub(lambda m: f"{m.group(1)}: {m.group(2)}-{m.group(3)}-{m.group(4)}", rule_yaml)
 
 def _make_backend():
-    pipeline = ProcessingPipeline(items=[ProcessingItem(transformation=MapAllFieldsToMessage())])
+    pipeline = ProcessingPipeline(items=[ProcessingItem(transformation=MapFieldsToColumns())])
     backend = sqliteBackend(processing_pipeline=pipeline)
     backend.table = "recent_events"  # the backend's default table is a literal "<TABLE_NAME>" placeholder
     return backend
