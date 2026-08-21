@@ -30,6 +30,10 @@ _FIELD_COLUMN_ALIASES = {
     'destinationip': 'destination_ip', 'destination_ip': 'destination_ip', 'dst_ip': 'destination_ip',
     'dstip': 'destination_ip', 'dst': 'destination_ip',
     'message': 'message',
+    # IOC-match builder fields (see _substitute_ioc_placeholder) map onto the same
+    # source_ip/destination_ip columns as their plain counterparts — the only
+    # difference is the *value* side, a live list instead of a single typed-in value.
+    'sourceipioc': 'source_ip', 'destinationipioc': 'destination_ip',
 }
 
 @dataclass
@@ -79,6 +83,48 @@ def _get_soar_api_key(cursor):
     row = cursor.execute("SELECT value FROM settings WHERE key = 'soar_api_key'").fetchone()
     return row['value'] if row and row['value'] else None
 
+# The guided rule builder's "Source IP / Destination IP — matches live IOC list"
+# fields emit this literal token as an unquoted YAML scalar (e.g. `SourceIp:
+# __IOC_IP_LIST__`) rather than a typed-in value. Substituting it with a real
+# flow-sequence YAML list *before* parsing — instead of baking a static list into the
+# stored rule at save time — means the match set is always whatever's currently in
+# stix_indicators, including anything ingested since the rule was created.
+IOC_IP_PLACEHOLDER = "__IOC_IP_LIST__"
+_PORT_SUFFIX_RE = re.compile(r':\d+$')
+
+def _get_ioc_ip_list_yaml(cursor):
+    # ioc_type vocabulary varies a lot by feed (ip, ipv4-addr, IPv4, ip:port, ...) —
+    # nothing in this codebase normalizes it to one taxonomy, so a substring match is
+    # the pragmatic way to catch all of them without also catching unrelated types
+    # (domain, url, md5_hash, FileHash-SHA256, ...), none of which contain "ip".
+    rows = cursor.execute(
+        "SELECT DISTINCT pattern FROM stix_indicators WHERE revoked = 0 "
+        "AND pattern IS NOT NULL AND pattern != '' AND LOWER(ioc_type) LIKE '%ip%'"
+    ).fetchall()
+    values = set()
+    for r in rows:
+        # ThreatFox stores some IPs as "ip:port" in the pattern itself — strip the
+        # port suffix so it can still match a plain source_ip/destination_ip column.
+        v = _PORT_SUFFIX_RE.sub('', (r['pattern'] or '').strip())
+        if v:
+            values.add(v)
+    if not values:
+        # An empty `field: []` is invalid Sigma/YAML (and `IN ()` is invalid SQL) — a
+        # sentinel that can never appear in real traffic keeps the rule syntactically
+        # valid and simply match-nothing until IOCs exist.
+        return "['__NO_IOCS_YET__']"
+    escaped = sorted(v.replace("'", "''") for v in values)
+    return '[' + ', '.join(f"'{v}'" for v in escaped) + ']'
+
+def _substitute_ioc_placeholder(rule_yaml_text, cursor, cache):
+    if IOC_IP_PLACEHOLDER not in rule_yaml_text:
+        return rule_yaml_text
+    if 'value' not in cache:
+        # Computed at most once per detection cycle (cached across every rule that
+        # references it), not once per rule — this is the only place the query runs.
+        cache['value'] = _get_ioc_ip_list_yaml(cursor)
+    return rule_yaml_text.replace(IOC_IP_PLACEHOLDER, cache['value'])
+
 def run_detection_cycle():
     if not os.path.exists(DB_PATH): return
     conn = sqlite3.connect(DB_PATH, timeout=30); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
@@ -111,11 +157,13 @@ def run_detection_cycle():
     # only the writes shrinks the lock-held window to milliseconds without changing
     # anything about which alerts get created.
     pending_alerts = []
+    ioc_ip_cache = {}
     for r in rules:
         try:
             rule_exclusions = exclusions_by_rule.get(r['id'], [])
             severity = (r['severity_override'] or '').capitalize() or _extract_level(r['rule_yaml']) or 'High'
-            for q in backend.convert(SigmaCollection.from_yaml(_normalize_rule_dates(r['rule_yaml']))):
+            rule_yaml_text = _substitute_ioc_placeholder(_normalize_rule_dates(r['rule_yaml']), cursor, ioc_ip_cache)
+            for q in backend.convert(SigmaCollection.from_yaml(rule_yaml_text)):
                 for m in cursor.execute(q).fetchall():
                     if any(_exclusion_matches(e, m) for e in rule_exclusions):
                         continue
