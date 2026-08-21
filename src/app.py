@@ -1620,6 +1620,23 @@ FROM events
 WHERE app_name = 'duckdb_ueba'
 ) AS unified_logs"""
 
+_RANGE_DELTAS = {
+    '5m': ('minutes', 5), '15m': ('minutes', 15), '30m': ('minutes', 30),
+    '1h': ('hours', 1), '4h': ('hours', 4), '12h': ('hours', 12), '24h': ('hours', 24),
+    '3d': ('days', 3), '7d': ('days', 7), '30d': ('days', 30),
+}
+
+def _parse_datetime_local(s):
+    # <input type="datetime-local"> yields "YYYY-MM-DDTHH:MM" (seconds omitted when the
+    # user doesn't set them) — normalize to the "YYYY-MM-DD HH:MM:SS" format timestamp
+    # comparisons use elsewhere in this file.
+    if not s:
+        return None
+    s = s.strip().replace('T', ' ')
+    if len(s) == 16:  # no seconds
+        s += ':00'
+    return s
+
 def _build_log_filters(args):
     import datetime
     q = args.get('q', '').lower()
@@ -1632,14 +1649,19 @@ def _build_log_filters(args):
 
     params, conditions = [], []
 
-    if time_range and time_range.lower() != 'all':
+    if time_range == 'custom':
+        start = _parse_datetime_local(args.get('start', ''))
+        end = _parse_datetime_local(args.get('end', ''))
+        if start:
+            conditions.append("timestamp >= ?")
+            params.append(start)
+        if end:
+            conditions.append("timestamp <= ?")
+            params.append(end)
+    elif time_range and time_range.lower() != 'all':
         now = datetime.datetime.now()
-        if time_range == '5m': delta = datetime.timedelta(minutes=5)
-        elif time_range == '15m': delta = datetime.timedelta(minutes=15)
-        elif time_range == '1h': delta = datetime.timedelta(hours=1)
-        elif time_range == '12h': delta = datetime.timedelta(hours=12)
-        elif time_range == '7d': delta = datetime.timedelta(days=7)
-        else: delta = datetime.timedelta(hours=24)
+        unit, amount = _RANGE_DELTAS.get(time_range, ('hours', 24))
+        delta = datetime.timedelta(**{unit: amount})
         conditions.append("timestamp >= ?")
         params.append((now - delta).strftime('%Y-%m-%d %H:%M:%S'))
 
@@ -1752,17 +1774,37 @@ def export_logs_csv():
 @login_required
 def api_logs_timeline():
     from flask import request, jsonify
+    import datetime
     try:
         db = get_db()
         where_clause, params = _build_log_filters(request.args)
         time_range = request.args.get('range', '24h')
 
-        if time_range in ['5m', '15m', '1h']:
+        if time_range in ('5m', '15m', '30m', '1h'):
             time_format = "strftime('%Y-%m-%d %H:%M', timestamp)"
-        elif time_range in ['7d']:
-            time_format = "strftime('%Y-%m-%d', timestamp)"
-        else:
+        elif time_range in ('4h', '12h', '24h'):
             time_format = "strftime('%Y-%m-%d %H:00', timestamp)"
+        elif time_range == 'custom':
+            # Bucket width scales with the span the user actually picked instead of a
+            # single fixed granularity, since a custom range could be 10 minutes or 10 years.
+            start = _parse_datetime_local(request.args.get('start', ''))
+            end = _parse_datetime_local(request.args.get('end', ''))
+            span = None
+            try:
+                if start and end:
+                    span = (datetime.datetime.strptime(end, '%Y-%m-%d %H:%M:%S') -
+                            datetime.datetime.strptime(start, '%Y-%m-%d %H:%M:%S'))
+            except ValueError:
+                span = None
+            if span and span <= datetime.timedelta(hours=2):
+                time_format = "strftime('%Y-%m-%d %H:%M', timestamp)"
+            elif span and span <= datetime.timedelta(days=3):
+                time_format = "strftime('%Y-%m-%d %H:00', timestamp)"
+            else:
+                time_format = "strftime('%Y-%m-%d', timestamp)"
+        else:
+            # 3d/7d/30d/all
+            time_format = "strftime('%Y-%m-%d', timestamp)"
 
         query = f"SELECT {time_format} as t_bucket, COUNT(*) as count FROM {UNIFIED_LOGS_SQL}{where_clause} GROUP BY t_bucket ORDER BY t_bucket ASC"
         rows = db.execute(query, params).fetchall()

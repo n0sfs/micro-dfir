@@ -13,6 +13,10 @@ function updateFilters() {
     if (typeof loadDashboardData === 'function') { loadDashboardData(); }
 }
 </script>
+<style>
+    .time-preset-btn.active-filter{background-color:var(--accent); border-color:var(--accent); color:#fff;}
+</style>
+
 <div class="page-header">
     <h2><i class="fa-solid fa-magnifying-glass-chart me-2"></i>Log Search</h2>
     <p>Search, filter, and analyze ingested log volume across all connected SIEM sources.</p>
@@ -61,19 +65,44 @@ function updateFilters() {
         </div>
     </div>
 
-    <div class="col-md-1">
-        <label for="timeRange" class="form-label text-muted small mb-1 fw-bold">Time Window</label>
-        <select id="timeRange" class="form-select bg-dark text-light border-secondary form-select-sm" title="Select historical time range for log queries" onchange="loadDashboardData()">
-            <option value="5m" selected>5m</option>
-            <option value="15m">15m</option>
-            <option value="1h">1h</option>
-            <option value="12h">12h</option>
-            <option value="24h">24h</option>
-            <option value="7d">7d</option>
-            <option value="all">All</option>
-        </select>
+    <div class="col-md-2">
+        <label for="timeRangeBtn" class="form-label text-muted small mb-1 fw-bold">Time Window</label>
+        <div class="dropdown">
+            <button id="timeRangeBtn" class="btn btn-sm bg-dark text-light border-secondary text-start d-flex justify-content-between align-items-center dropdown-toggle w-100" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" title="Pick a relative window, an exact date/time range, or a saved favorite">
+                <span id="timeRangeLabel" class="text-truncate">Last 5m</span>
+            </button>
+            <div class="dropdown-menu dropdown-menu-dark shadow p-2" style="min-width: 300px;">
+                <div class="small text-muted fw-bold mb-1">Quick Ranges</div>
+                <div class="d-flex flex-wrap gap-1 mb-2">
+                    <button type="button" class="btn btn-sm btn-outline-secondary time-preset-btn" data-range="5m" onclick="selectTimePreset('5m')">5m</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary time-preset-btn" data-range="15m" onclick="selectTimePreset('15m')">15m</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary time-preset-btn" data-range="30m" onclick="selectTimePreset('30m')">30m</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary time-preset-btn" data-range="1h" onclick="selectTimePreset('1h')">1h</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary time-preset-btn" data-range="4h" onclick="selectTimePreset('4h')">4h</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary time-preset-btn" data-range="12h" onclick="selectTimePreset('12h')">12h</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary time-preset-btn" data-range="24h" onclick="selectTimePreset('24h')">24h</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary time-preset-btn" data-range="3d" onclick="selectTimePreset('3d')">3d</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary time-preset-btn" data-range="7d" onclick="selectTimePreset('7d')">7d</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary time-preset-btn" data-range="30d" onclick="selectTimePreset('30d')">30d</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary time-preset-btn" data-range="all" onclick="selectTimePreset('all')">All</button>
+                </div>
+                <hr class="border-secondary my-2">
+                <div class="small text-muted fw-bold mb-1">Custom Date/Time Range</div>
+                <label class="form-label small mb-1">Start</label>
+                <input type="datetime-local" id="customStart" class="form-control form-control-sm bg-dark text-light border-secondary mb-1">
+                <label class="form-label small mb-1">End</label>
+                <input type="datetime-local" id="customEnd" class="form-control form-control-sm bg-dark text-light border-secondary mb-2">
+                <button type="button" class="btn btn-sm btn-primary w-100" onclick="applyCustomRange()">Apply Custom Range</button>
+                <hr class="border-secondary my-2">
+                <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="small text-muted fw-bold">Favorites</span>
+                    <button type="button" class="btn btn-link btn-sm p-0 small" onclick="saveCurrentAsFavorite()" title="Save the current time window for quick reuse"><i class="fa-solid fa-star me-1"></i>Save Current</button>
+                </div>
+                <div id="favoritesList" class="small"></div>
+            </div>
+        </div>
     </div>
-    
+
     <div class="col-md-2">
         <label for="fieldKey" class="form-label text-muted small mb-1 fw-bold">Target Field</label>
         <div class="input-group input-group-sm" title="Select a specific database field to target your filter query">
@@ -237,8 +266,113 @@ function updateFilters() {
 <script>
 let timelineChart = null;
 
+// ---- Time Window: presets, custom absolute range, favorites (saved in localStorage) ----
+let timeRangeState = { range: '5m', start: '', end: '' };
+const RANGE_LABELS = {
+    '5m': 'Last 5m', '15m': 'Last 15m', '30m': 'Last 30m', '1h': 'Last 1h', '4h': 'Last 4h',
+    '12h': 'Last 12h', '24h': 'Last 24h', '3d': 'Last 3d', '7d': 'Last 7d', '30d': 'Last 30d', 'all': 'All Time'
+};
+
+function setTimeRangeLabel() {
+    const label = document.getElementById('timeRangeLabel');
+    if (!label) return;
+    if (timeRangeState.range === 'custom') {
+        label.innerText = (timeRangeState.start || '…') + ' → ' + (timeRangeState.end || '…');
+    } else {
+        label.innerText = RANGE_LABELS[timeRangeState.range] || timeRangeState.range;
+    }
+}
+
+function markActivePresetBtn(range) {
+    document.querySelectorAll('.time-preset-btn').forEach(b => b.classList.toggle('active-filter', b.dataset.range === range));
+}
+
+function selectTimePreset(range) {
+    timeRangeState = { range, start: '', end: '' };
+    setTimeRangeLabel();
+    markActivePresetBtn(range);
+    loadDashboardData();
+}
+
+function applyCustomRange() {
+    const start = document.getElementById('customStart').value;
+    const end = document.getElementById('customEnd').value;
+    if (!start && !end) { alert('Pick at least a start or end date/time.'); return; }
+    if (start && end && start > end) { alert('Start must be before end.'); return; }
+    timeRangeState = { range: 'custom', start, end };
+    setTimeRangeLabel();
+    markActivePresetBtn(null);
+    loadDashboardData();
+}
+
+function timeRangeQuery() {
+    if (timeRangeState.range === 'custom') {
+        return `range=custom&start=${encodeURIComponent(timeRangeState.start)}&end=${encodeURIComponent(timeRangeState.end)}`;
+    }
+    return `range=${encodeURIComponent(timeRangeState.range)}`;
+}
+
+function loadFavorites() {
+    try { return JSON.parse(localStorage.getItem('microdfir_search_favorites') || '[]'); } catch (e) { return []; }
+}
+
+function saveFavoritesList(favs) {
+    try { localStorage.setItem('microdfir_search_favorites', JSON.stringify(favs)); } catch (e) {}
+}
+
+function renderFavorites() {
+    const favs = loadFavorites();
+    const list = document.getElementById('favoritesList');
+    if (!list) return;
+    if (!favs.length) {
+        list.innerHTML = '<div class="text-muted">No favorites saved yet.</div>';
+        return;
+    }
+    list.innerHTML = favs.map((f, i) => `
+        <div class="d-flex justify-content-between align-items-center py-1">
+            <a href="#" class="text-light text-decoration-none text-truncate" style="max-width: 220px;" onclick="applyFavorite(${i}); return false;" title="${escHtml(f.name)}"><i class="fa-solid fa-star text-warning me-1"></i>${escHtml(f.name)}</a>
+            <button type="button" class="btn btn-link btn-sm p-0 text-danger" onclick="deleteFavorite(${i})" title="Delete favorite"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+    `).join('');
+}
+
+function saveCurrentAsFavorite() {
+    const defaultName = timeRangeState.range === 'custom'
+        ? `${timeRangeState.start || '…'} to ${timeRangeState.end || '…'}`
+        : (RANGE_LABELS[timeRangeState.range] || timeRangeState.range);
+    const name = prompt('Name this time window:', defaultName);
+    if (!name) return;
+    const favs = loadFavorites();
+    favs.push({ name, range: timeRangeState.range, start: timeRangeState.start, end: timeRangeState.end });
+    saveFavoritesList(favs);
+    renderFavorites();
+}
+
+function applyFavorite(i) {
+    const f = loadFavorites()[i];
+    if (!f) return;
+    timeRangeState = { range: f.range, start: f.start || '', end: f.end || '' };
+    if (f.range === 'custom') {
+        document.getElementById('customStart').value = f.start || '';
+        document.getElementById('customEnd').value = f.end || '';
+    }
+    setTimeRangeLabel();
+    markActivePresetBtn(f.range);
+    loadDashboardData();
+}
+
+function deleteFavorite(i) {
+    const favs = loadFavorites();
+    favs.splice(i, 1);
+    saveFavoritesList(favs);
+    renderFavorites();
+}
+
 document.addEventListener("DOMContentLoaded", function() {
     initChart();
+    setTimeRangeLabel();
+    markActivePresetBtn(timeRangeState.range);
+    renderFavorites();
     loadDashboardData();
     // streamInterval = setInterval(autoStreamLogs, 5000); // Disabled on load
 });
@@ -393,12 +527,11 @@ window.loadLogs = function() {
     let q = document.getElementById('searchQuery').value;
     let app = Array.from(document.querySelectorAll('.app-chk:checked')).map(c=>c.value).join(',');
     let sev = Array.from(document.querySelectorAll('.sev-chk:checked')).map(c=>c.value).join(',');
-    let range = document.getElementById('timeRange').value;
     let fieldKey = document.getElementById('fieldKey').value;
     let fieldOp = document.getElementById('fieldOp').value;
     let fieldVal = document.getElementById('fieldVal').value;
 
-    fetch(`/api/logs/search?q=${encodeURIComponent(q)}&range=${range}&app=${encodeURIComponent(app)}&severity=${encodeURIComponent(sev)}&fieldKey=${encodeURIComponent(fieldKey)}&fieldOp=${encodeURIComponent(fieldOp)}&fieldVal=${encodeURIComponent(fieldVal)}`)
+    fetch(`/api/logs/search?q=${encodeURIComponent(q)}&${timeRangeQuery()}&app=${encodeURIComponent(app)}&severity=${encodeURIComponent(sev)}&fieldKey=${encodeURIComponent(fieldKey)}&fieldOp=${encodeURIComponent(fieldOp)}&fieldVal=${encodeURIComponent(fieldVal)}`)
         .then(r => r.json())
         .then(data => {
             let badge = document.getElementById('logCountBadge');
@@ -411,7 +544,7 @@ window.loadLogs = function() {
             document.getElementById('statTotalMatches').innerText = data.total_matches !== undefined ? data.total_matches : data.count;
             document.getElementById('statAlertCount').innerText = logs.filter(l => l.type === 'alert' || l.type === 'anomaly').length;
             document.getElementById('statUniqueHosts').innerText = new Set(logs.map(l => l.host)).size;
-            document.getElementById('statTimeWindow').innerText = document.getElementById('timeRange').value;
+            document.getElementById('statTimeWindow').innerText = timeRangeState.range === 'custom' ? 'Custom' : (RANGE_LABELS[timeRangeState.range] || timeRangeState.range);
 
             let tbody = document.querySelector('tbody');
             if (!tbody) return;
@@ -439,9 +572,8 @@ window.loadLogs = function() {
 function loadTimeline() {
     let app = Array.from(document.querySelectorAll('.app-chk:checked')).map(c=>c.value).join(',');
     let sev = Array.from(document.querySelectorAll('.sev-chk:checked')).map(c=>c.value).join(',');
-    let range = document.getElementById('timeRange').value;
 
-    fetch(`/api/logs/timeline?range=${range}&app=${encodeURIComponent(app)}&severity=${encodeURIComponent(sev)}`)
+    fetch(`/api/logs/timeline?${timeRangeQuery()}&app=${encodeURIComponent(app)}&severity=${encodeURIComponent(sev)}`)
         .then(r => r.json())
         .then(data => {
             if (!timelineChart || !data.timeline) return;
@@ -459,12 +591,11 @@ window.exportCSV = function() {
     let q = document.getElementById('searchQuery').value;
     let app = Array.from(document.querySelectorAll('.app-chk:checked')).map(c=>c.value).join(',');
     let sev = Array.from(document.querySelectorAll('.sev-chk:checked')).map(c=>c.value).join(',');
-    let range = document.getElementById('timeRange').value;
     let fieldKey = document.getElementById('fieldKey').value;
     let fieldOp = document.getElementById('fieldOp').value;
     let fieldVal = document.getElementById('fieldVal').value;
 
-    let exportUrl = `/api/logs/export?q=${encodeURIComponent(q)}&range=${range}&app=${encodeURIComponent(app)}&severity=${encodeURIComponent(sev)}&fieldKey=${encodeURIComponent(fieldKey)}&fieldOp=${encodeURIComponent(fieldOp)}&fieldVal=${encodeURIComponent(fieldVal)}`;
+    let exportUrl = `/api/logs/export?q=${encodeURIComponent(q)}&${timeRangeQuery()}&app=${encodeURIComponent(app)}&severity=${encodeURIComponent(sev)}&fieldKey=${encodeURIComponent(fieldKey)}&fieldOp=${encodeURIComponent(fieldOp)}&fieldVal=${encodeURIComponent(fieldVal)}`;
     window.location.href = exportUrl;
 };
 
