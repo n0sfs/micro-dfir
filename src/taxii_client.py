@@ -29,16 +29,16 @@ def sync_threatfox(feed):
     res.raise_for_status()
     data = res.json()
     conn = _connect(); c = 0
-    entries = data.values() if isinstance(data, dict) else []
-    for group in entries:
+    items = data.items() if isinstance(data, dict) else []
+    for ioc_id, group in items:
         for e in group:
-            stix_id = f"threatfox--{e.get('id')}"
+            stix_id = f"threatfox--{ioc_id}"
             malware = e.get('malware_printable') or e.get('malware') or 'Unknown'
             name = f"{malware} ({e.get('threat_type', 'ioc')})"
             desc = f"ioc_type={e.get('ioc_type')}, confidence={e.get('confidence_level')}"
             conn.execute(
                 "INSERT OR REPLACE INTO stix_indicators (stix_id, type, name, description, pattern, valid_from, revoked) VALUES (?, ?, ?, ?, ?, ?, 0)",
-                (stix_id, "indicator", name, desc, e.get("ioc", ""), e.get("first_seen", ""))
+                (stix_id, "indicator", name, desc, e.get("ioc_value", ""), e.get("first_seen_utc", ""))
             )
             c += 1
     conn.commit(); conn.close()
