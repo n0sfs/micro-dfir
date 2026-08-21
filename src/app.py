@@ -436,6 +436,11 @@ RULES_CACHE_TTL = 30  # seconds; bounds staleness against out-of-process writers
 TUNING_CACHE = None
 TUNING_CACHE_TIME = 0
 
+# Sigma rules carry no compliance-framework metadata (SigmaHQ tags are almost entirely
+# MITRE ATT&CK technique IDs) — there's no authoritative source to auto-map a rule to a
+# framework, so these are assigned by hand per rule and just validated against this set.
+COMPLIANCE_FRAMEWORKS = {'pci_dss', 'hipaa', 'nist_800_53', 'nist_csf', 'iso_27001', 'soc2', 'cis_controls', 'gdpr'}
+
 def invalidate_rules_cache():
     global RULES_CACHE, TUNING_CACHE
     RULES_CACHE = None
@@ -455,7 +460,7 @@ def api_rules():
         import re
         rules_out = []
         for r in db.execute(
-            "SELECT id, title, rule_yaml, enabled, source, cloned_from, created_by, created_at, updated_by, updated_at "
+            "SELECT id, title, rule_yaml, enabled, source, cloned_from, created_by, created_at, updated_by, updated_at, compliance_tags "
             "FROM sigma_rules ORDER BY id DESC"
         ).fetchall():
             rid = r['id']
@@ -508,7 +513,8 @@ def api_rules():
                 "created_at": r['created_at'],
                 "updated_by": r['updated_by'],
                 "updated_at": r['updated_at'],
-                "last_update": r['updated_at'] or rule_date or r['created_at']
+                "last_update": r['updated_at'] or rule_date or r['created_at'],
+                "compliance_tags": [t for t in (r['compliance_tags'] or '').split(',') if t]
             })
         RULES_CACHE = rules_out
         RULES_CACHE_TIME = time.time()
@@ -536,12 +542,14 @@ def api_rule_detail(rid):
 
     if request.method == 'GET':
         r = db.execute(
-            "SELECT id, title, rule_yaml, enabled, source, cloned_from, created_by, created_at, updated_by, updated_at "
+            "SELECT id, title, rule_yaml, enabled, source, cloned_from, created_by, created_at, updated_by, updated_at, compliance_tags "
             "FROM sigma_rules WHERE id = ?", (rid,)
         ).fetchone()
         if not r:
             return jsonify({"error": "Rule not found"}), 404
-        return jsonify(dict(r))
+        out = dict(r)
+        out['compliance_tags'] = [t for t in (r['compliance_tags'] or '').split(',') if t]
+        return jsonify(out)
 
     if current_user.role != 'admin':
         return jsonify({"error": "Admin required"}), 403
@@ -617,6 +625,25 @@ def api_rule_history(rid):
         ))
         out.append({"changed_by": row['changed_by'], "changed_at": row['changed_at'], "diff": diff})
     return jsonify(out)
+
+@app.route('/api/rules/<int:rid>/compliance', methods=['PUT'])
+@login_required
+def api_rule_compliance(rid):
+    # Compliance-framework tags are metadata layered on top of a rule, independent of
+    # whether the rule's own YAML is Sigma-sourced (read-only) or custom — an admin can
+    # tag either one without needing to clone a Sigma rule first.
+    if current_user.role != 'admin':
+        return jsonify({"error": "Admin required"}), 403
+    tags = (request.get_json() or {}).get('tags') or []
+    if not isinstance(tags, list) or any(t not in COMPLIANCE_FRAMEWORKS for t in tags):
+        return jsonify({"error": "Invalid compliance framework"}), 400
+    db = get_db()
+    if not db.execute("SELECT 1 FROM sigma_rules WHERE id = ?", (rid,)).fetchone():
+        return jsonify({"error": "Rule not found"}), 404
+    db.execute("UPDATE sigma_rules SET compliance_tags = ? WHERE id = ?", (','.join(sorted(set(tags))), rid))
+    db.commit()
+    invalidate_rules_cache()
+    return jsonify({"status": "success"})
 
 @app.route('/api/rules/import/sigmahq', methods=['POST'])
 @login_required
@@ -1048,6 +1075,19 @@ def migrate_rule_tuning():
     except Exception:
         pass
 
+def migrate_compliance_tags():
+    # Compliance-framework tagging is manual (Sigma rules carry no such metadata), so this
+    # just needs a column to hold an admin-assigned, comma-separated list of framework keys.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(sigma_rules)").fetchall()}
+        if 'compliance_tags' not in cols:
+            conn.execute("ALTER TABLE sigma_rules ADD COLUMN compliance_tags TEXT")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def _run_sigmahq_import():
     import urllib.request, zipfile, tempfile, shutil, socket, sqlite3
     import yaml as _yaml
@@ -1109,6 +1149,7 @@ migrate_agent_commands()
 migrate_alerts_columns()
 migrate_sigma_rules_columns()
 migrate_rule_tuning()
+migrate_compliance_tags()
 
 @app.route('/settings', methods=['GET', 'POST'])
 @login_required

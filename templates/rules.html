@@ -108,6 +108,16 @@
                                 </div>
                                 <span class="col-resizer"></span>
                             </th>
+                            <th class="rule-th" data-col="compliance" style="width: 150px;">
+                                <div class="th-inner">
+                                    <span>Compliance</span>
+                                    <div class="dropdown">
+                                        <button type="button" class="th-icon-btn" id="filterBtnCompliance" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                        <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuCompliance" style="min-width:210px;"></div>
+                                    </div>
+                                </div>
+                                <span class="col-resizer"></span>
+                            </th>
                             <th class="rule-th" data-col="level" style="width: 115px;">
                                 <div class="th-inner">
                                     <span class="th-label" onclick="toggleSort('level')">Level <i class="fa-solid fa-sort sort-ic" id="sortIc-level"></i></span>
@@ -171,6 +181,13 @@
       <div class="modal-body">
         <div id="ruleMetaBox" class="small text-muted mb-2" style="display:none;"></div>
         <div id="ruleReadonlyNotice" class="alert alert-secondary py-2 small" style="display:none;"><i class="fa-solid fa-lock me-1"></i>Sigma-sourced rules are read-only. Clone this rule to create an editable custom copy.</div>
+
+        <div id="ruleComplianceBox" class="mb-3" style="display:none;">
+            <label class="form-label small text-muted mb-1">Compliance Frameworks <span class="text-muted">— manually tag which frameworks this detection helps satisfy</span></label>
+            <div id="complianceChecklist" class="d-flex flex-wrap gap-3 mb-2"></div>
+            <button type="button" class="btn btn-sm btn-outline-primary" id="complianceSaveBtn" onclick="saveComplianceTags()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Compliance Tags</button>
+            <span id="complianceSaveMsg" class="small text-success ms-2" style="display:none;">Saved.</span>
+        </div>
 
         <ul class="nav nav-tabs border-secondary mb-3" id="ruleEditorTabs">
             <li class="nav-item"><button type="button" class="nav-link active" id="tabBtnBuilder" onclick="switchRuleTab('builder')">Guided Builder</button></li>
@@ -256,8 +273,21 @@
 
 {% block scripts %}
 <script>
+const IS_ADMIN = {{ 'true' if current_user.role == 'admin' else 'false' }};
 let allRules = [];
 let selectedIds = new Set();
+
+const COMPLIANCE_FRAMEWORKS = [
+    {value: 'pci_dss', label: 'PCI DSS'},
+    {value: 'hipaa', label: 'HIPAA'},
+    {value: 'nist_800_53', label: 'NIST 800-53'},
+    {value: 'nist_csf', label: 'NIST CSF'},
+    {value: 'iso_27001', label: 'ISO 27001'},
+    {value: 'soc2', label: 'SOC 2'},
+    {value: 'cis_controls', label: 'CIS Controls'},
+    {value: 'gdpr', label: 'GDPR'}
+];
+const COMPLIANCE_LABELS = Object.fromEntries(COMPLIANCE_FRAMEWORKS.map(f => [f.value, f.label]));
 
 // ---- Guided rule builder ----
 const BUILDER_FIELDS = [
@@ -467,8 +497,46 @@ const STATUS_BADGE = {
     deprecated: 'bg-warning text-dark', unsupported: 'bg-danger'
 };
 
+function complianceTagsHtml(tags) {
+    tags = tags || [];
+    if (!tags.length) return '<span class="text-muted">—</span>';
+    const shown = tags.slice(0, 2);
+    const extra = tags.length - shown.length;
+    const rest = tags.slice(2).map(t => COMPLIANCE_LABELS[t] || t).join(', ');
+    return `<div class="rule-tags-row">${shown.map(t => `<span class="badge bg-success bg-opacity-25 text-light border border-success me-1" style="font-size:.65rem;">${COMPLIANCE_LABELS[t] || t}</span>`).join('')}${extra > 0 ? `<span class="badge bg-secondary" style="font-size:.65rem;" title="${rest}">+${extra}</span>` : ''}</div>`;
+}
+
+function renderComplianceChecklist(selected) {
+    selected = selected || [];
+    document.getElementById('complianceChecklist').innerHTML = COMPLIANCE_FRAMEWORKS.map(f => `
+        <div class="form-check">
+            <input class="form-check-input compliance-chk" type="checkbox" value="${f.value}" id="compl_${f.value}" ${selected.includes(f.value) ? 'checked' : ''} ${IS_ADMIN ? '' : 'disabled'}>
+            <label class="form-check-label small" for="compl_${f.value}">${f.label}</label>
+        </div>
+    `).join('');
+    document.getElementById('complianceSaveBtn').style.display = IS_ADMIN ? 'inline-block' : 'none';
+}
+
+async function saveComplianceTags() {
+    if (!editingRuleId) return;
+    const tags = Array.from(document.querySelectorAll('.compliance-chk:checked')).map(cb => cb.value);
+    try {
+        const res = await fetch(`/api/rules/${editingRuleId}/compliance`, {
+            method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({tags})
+        });
+        const data = await res.json();
+        if (!res.ok) { alert(data.error || 'Failed to save compliance tags.'); return; }
+        const msg = document.getElementById('complianceSaveMsg');
+        msg.style.display = 'inline';
+        setTimeout(() => { msg.style.display = 'none'; }, 3000);
+        ld();
+    } catch (e) {
+        alert('Error saving compliance tags: ' + e);
+    }
+}
+
 // ---- Per-column filters (multi-select with in-menu search), sorting, resize ----
-let colFilters = { source: [], platform: [], mitre: [], level: [], status: [], enabled: [], q: '' };
+let colFilters = { source: [], platform: [], mitre: [], compliance: [], level: [], status: [], enabled: [], q: '' };
 let sortState = { key: null, dir: 'asc' };
 
 function buildMultiFilterMenu(menuId, colKey, options) {
@@ -614,6 +682,7 @@ async function ld(){
     buildMultiFilterMenu('filterMenuSource', 'source', [{value: 'sigma', label: 'Sigma'}, {value: 'custom', label: 'Custom'}]);
     buildMultiFilterMenu('filterMenuPlatform', 'platform', Array.from(platforms).sort().map(p => ({value: p, label: p})));
     buildMultiFilterMenu('filterMenuMitre', 'mitre', Array.from(mitres).sort().map(m => ({value: m, label: m})));
+    buildMultiFilterMenu('filterMenuCompliance', 'compliance', COMPLIANCE_FRAMEWORKS);
     buildMultiFilterMenu('filterMenuLevel', 'level', ['critical', 'high', 'medium', 'low', 'informational'].map(l => ({value: l, label: l.charAt(0).toUpperCase() + l.slice(1)})));
     buildMultiFilterMenu('filterMenuStatus', 'status', Array.from(statuses).sort().map(s => ({value: s, label: s.charAt(0).toUpperCase() + s.slice(1)})));
     buildMultiFilterMenu('filterMenuEnabled', 'enabled', [{value: '1', label: 'Enabled'}, {value: '0', label: 'Disabled'}]);
@@ -644,6 +713,9 @@ function renderTable(rules) {
             <td class="text-truncate"><span class="text-light"><i class="fa-solid fa-display me-1"></i>${rl.platform}</span></td>
             <td>
                 ${mitreTags.length ? `<div class="rule-tags-row">${shownTags.map(t => `<span class="badge bg-primary bg-opacity-25 text-light border border-primary me-1" style="font-size:.65rem;">${t}</span>`).join('')}${extra > 0 ? `<span class="badge bg-secondary" style="font-size:.65rem;" title="${mitreTags.slice(2).join(', ')}">+${extra}</span>` : ''}</div>` : '<span class="text-muted">—</span>'}
+            </td>
+            <td>
+                ${complianceTagsHtml(rl.compliance_tags)}
             </td>
             <td><span class="badge ${LEVEL_BADGE[rl.level] || 'bg-secondary'}">${rl.level || 'medium'}</span></td>
             <td><span class="badge ${STATUS_BADGE[rl.status] || 'bg-secondary'}">${rl.status || 'unknown'}</span></td>
@@ -681,6 +753,7 @@ function f(){
     const source = colFilters.source;
     const plat = colFilters.platform;
     const mitre = colFilters.mitre;
+    const compliance = colFilters.compliance;
     const level = colFilters.level;
     const status = colFilters.status;
     const enabled = colFilters.enabled;
@@ -690,10 +763,11 @@ function f(){
         const matchSource = source.length === 0 || source.includes(rl.source);
         const matchPlat = plat.length === 0 || plat.includes(rl.platform);
         const matchMitre = mitre.length === 0 || (rl.tags && rl.tags.some(t => mitre.includes(t)));
+        const matchCompliance = compliance.length === 0 || (rl.compliance_tags && rl.compliance_tags.some(t => compliance.includes(t)));
         const matchLevel = level.length === 0 || level.includes(rl.level);
         const matchStatus = status.length === 0 || status.includes(rl.status);
         const matchEnabled = enabled.length === 0 || enabled.includes(String(rl.enabled ? 1 : 0));
-        return matchQ && matchSource && matchPlat && matchMitre && matchLevel && matchStatus && matchEnabled;
+        return matchQ && matchSource && matchPlat && matchMitre && matchCompliance && matchLevel && matchStatus && matchEnabled;
     });
 
     renderTable(applySort(filtered));
@@ -758,6 +832,7 @@ async function openRuleModal(id) {
     document.getElementById('ruleYamlInput').readOnly = false;
     document.getElementById('ruleMetaBox').style.display = 'none';
     document.getElementById('ruleReadonlyNotice').style.display = 'none';
+    document.getElementById('ruleComplianceBox').style.display = 'none';
     document.getElementById('ruleHistoryBox').style.display = 'none';
     document.getElementById('ruleHistoryBtn').style.display = 'none';
     document.getElementById('ruleCloneBtn').style.display = 'none';
@@ -782,6 +857,9 @@ async function openRuleModal(id) {
             if (data.cloned_from) metaParts.push(`Cloned from rule #${data.cloned_from}`);
             document.getElementById('ruleMetaBox').innerHTML = metaParts.join(' &middot; ');
             document.getElementById('ruleMetaBox').style.display = 'block';
+
+            document.getElementById('ruleComplianceBox').style.display = 'block';
+            renderComplianceChecklist(data.compliance_tags);
 
             if (isSigma) {
                 document.getElementById('ruleYamlInput').readOnly = true;
