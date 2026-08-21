@@ -14,6 +14,7 @@
             <div class="card-body">
                 <p class="text-muted small">Upload a file and select the imported YARA rules to scan it against.</p>
                 <form method="POST" action="{{ url_for('hunt') }}" enctype="multipart/form-data">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <div class="mb-3">
                         <input class="form-control bg-dark text-light border-secondary" type="file" name="scan_file" required>
                     </div>

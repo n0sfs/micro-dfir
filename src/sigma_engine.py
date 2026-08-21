@@ -37,10 +37,15 @@ def _make_backend():
     backend.table = "recent_events"  # the backend's default table is a literal "<TABLE_NAME>" placeholder
     return backend
 
+def _get_soar_api_key(cursor):
+    row = cursor.execute("SELECT value FROM settings WHERE key = 'soar_api_key'").fetchone()
+    return row['value'] if row and row['value'] else None
+
 def run_detection_cycle():
     if not os.path.exists(DB_PATH): return
     conn = sqlite3.connect(DB_PATH, timeout=30); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
     last_id = json.load(open(STATE_FILE)).get("last_id", 0) if os.path.exists(STATE_FILE) else 0
+    soar_api_key = _get_soar_api_key(cursor)
 
     try: current_max = cursor.execute("SELECT MAX(id) as m FROM live_logs").fetchone()['m'] or 0
     except Exception as e:
@@ -58,7 +63,8 @@ def run_detection_cycle():
                 for m in cursor.execute(q).fetchall():
                     cursor.execute("INSERT INTO alerts (rule_id, event_id, severity) VALUES (?, ?, ?)", (r['id'], m['id'], 'High'))
                     try:
-                        requests.post("http://127.0.0.1:8000/webhook/alert", json={"rule_title": r['title'], "severity": "High", "hostname": m['host'], "agent_id": m['host'], "raw_log": m['message']}, headers={"Authorization": "Bearer SUPER_SECRET_SOAR_KEY_123"}, timeout=2)
+                        if soar_api_key:
+                            requests.post("http://127.0.0.1:8000/webhook/alert", json={"rule_title": r['title'], "severity": "High", "hostname": m['host'], "agent_id": m['host'], "raw_log": m['message']}, headers={"Authorization": f"Bearer {soar_api_key}"}, timeout=2)
                     except Exception as e:
                         print(f"[-] SOAR webhook failed for rule '{r['title']}': {e}")
         except Exception as e:

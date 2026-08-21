@@ -1,0 +1,13 @@
+[Unit]
+Description=Micro DFIR Web Dashboard & Ingestion (Gunicorn Production)
+After=network.target vector.service
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/micro-dfir
+ExecStart=/opt/micro-dfir/venv/bin/gunicorn --bind 0.0.0.0:5001 --certfile /opt/micro-dfir/config/cert.pem --keyfile /opt/micro-dfir/config/key.pem --workers 3 --threads 2 --pythonpath src app:app
+Restart=always
+RestartSec=5
+MemoryMax=2G
+[Install]
+WantedBy=multi-user.target

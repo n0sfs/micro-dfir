@@ -16,7 +16,7 @@ systemctl disable rsyslog 2>/dev/null
 
 echo "[*] Installing System Dependencies..."
 apt-get update
-apt-get install -y python3-venv python3-pip sqlite3 curl libpango-1.0-0 libpangoft2-1.0-0 build-essential libssl-dev pkg-config
+apt-get install -y python3-venv python3-pip sqlite3 curl openssl libpango-1.0-0 libpangoft2-1.0-0 build-essential libssl-dev pkg-config
 
 echo "[*] Installing Vector Ingestion Engine..."
 curl -1sLf 'https://repositories.timber.io/public/vector/cfg/setup/bash.deb.sh' | bash
@@ -32,6 +32,11 @@ python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
+
+echo "[*] Generating self-signed TLS certificate for the web dashboard and ingestion API..."
+if [ ! -f "config/cert.pem" ] || [ ! -f "config/key.pem" ]; then
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout config/key.pem -out config/cert.pem -days 3650 -subj "/CN=micro-dfir"
+fi
 
 echo "[*] Configuring Vector..."
 cp config/vector.toml /etc/vector/vector.toml
@@ -63,5 +68,5 @@ systemctl enable --now microsoc-sigma.service
 systemctl enable --now microsoc-soar.service
 
 echo "[+] Deployment Complete!"
-echo "[+] Micro DFIR Dashboard: http://<nuc-ip>:5001"
+echo "[+] Micro DFIR Dashboard: https://<nuc-ip>:5001"
 EOF

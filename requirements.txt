@@ -1,6 +1,7 @@
 Flask==3.0.0
 Flask-Login==0.6.3
 werkzeug==3.0.1
+gunicorn==23.0.0
 pysigma>=0.10.10,<0.12.0
 pysigma-backend-sqlite>=0.1.1
 yara-python>=4.5.1

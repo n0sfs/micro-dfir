@@ -1,0 +1,30 @@
+[sources.windows_agent_https]
+type = "http_server"
+address = "0.0.0.0:5000"
+path = "/api/ingest"
+encoding = "json"
+
+[sources.windows_agent_https.tls]
+enabled = true
+crt_file = "/opt/micro-dfir/config/cert.pem"
+key_file = "/opt/micro-dfir/config/key.pem"
+
+[transforms.shape_logs]
+type = "remap"
+inputs = ["windows_agent_https"]
+source = '''
+  .received_at = to_string!(now())
+'''
+
+[sinks.microsoc_local_ingest]
+type = "http"
+inputs = ["shape_logs"]
+uri = "https://127.0.0.1:5001/api/ingest"
+encoding.codec = "json"
+compression = "gzip"
+tls.enabled = true
+tls.verify_certificate = false
+
+[sinks.microsoc_local_ingest.batch]
+max_events = 100
+timeout_secs = 2.0
