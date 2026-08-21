@@ -686,9 +686,27 @@ def migrate_agent_commands():
     except Exception:
         pass
 
+def migrate_alerts_columns():
+    # alerts predates the wider schema (rule_name/host/message added alongside the
+    # rule_id/event_id FK columns for the inline keyword-detection path) — on any database
+    # where the table already existed, `CREATE TABLE IF NOT EXISTS` in schema.sql is a no-op
+    # and never adds the new columns. ALTER TABLE here catches already-deployed databases up.
+    try:
+        import sqlite3
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(alerts)").fetchall()}
+        for col in ('rule_name', 'host', 'message'):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE alerts ADD COLUMN {col} TEXT")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 migrate_settings()
 migrate_ti_feeds()
 migrate_agent_commands()
+migrate_alerts_columns()
 
 @app.route('/settings', methods=['GET', 'POST'])
 @login_required
