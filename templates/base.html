@@ -58,19 +58,51 @@ hr{border-color:var(--border);}
   border-right:1px solid var(--border);
   display:flex;flex-direction:column;
   z-index:1000;
+  transition:width .15s ease;
 }
 .sidebar-header{
   padding:22px 20px 18px;
   border-bottom:1px solid var(--border);
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
 }
 .sidebar-header .brand{
   display:flex;align-items:center;gap:10px;
   font-weight:700;font-size:1.05rem;color:var(--text-primary);
   text-decoration:none;letter-spacing:-.01em;
+  overflow:hidden;
 }
 .sidebar-header .brand i{
-  color:var(--accent);font-size:1.15rem;
+  color:var(--accent);font-size:1.15rem;flex-shrink:0;
 }
+.sidebar-toggle-btn{
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;
+  width:26px;height:26px;padding:0;
+  background:transparent;color:var(--text-muted);
+  border:1px solid var(--border-light);border-radius:6px;
+  cursor:pointer;transition:color .12s ease, border-color .12s ease, background-color .12s ease;
+}
+.sidebar-toggle-btn:hover{color:var(--text-primary);background-color:var(--bg-card-alt);}
+.sidebar-toggle-btn i{font-size:.75rem;transition:transform .15s ease;}
+
+/* ---------- Collapsed sidebar (icon-only) ---------- */
+body.sidebar-collapsed .sidebar{width:68px;}
+body.sidebar-collapsed .main-content{margin-left:68px;}
+body.sidebar-collapsed .sidebar-header{flex-direction:column;gap:10px;padding:18px 8px;}
+body.sidebar-collapsed .sidebar-header .brand{justify-content:center;}
+body.sidebar-collapsed .sidebar-toggle-btn i{transform:rotate(180deg);}
+body.sidebar-collapsed .sidebar-nav{padding:16px 8px 8px;}
+body.sidebar-collapsed .nav-block,
+body.sidebar-collapsed .nav-link{justify-content:center;padding-left:0;padding-right:0;gap:0;}
+body.sidebar-collapsed .sidebar-bottom{padding:8px 8px 4px;}
+body.sidebar-collapsed .user-panel{padding:14px 8px;}
+body.sidebar-collapsed .user-panel .user-row{justify-content:center;margin-bottom:8px;}
+body.sidebar-collapsed .btn-logout{padding:7px 0;}
+body.sidebar-collapsed .brand span,
+body.sidebar-collapsed .nav-block span,
+body.sidebar-collapsed .nav-link span,
+body.sidebar-collapsed .user-row span,
+body.sidebar-collapsed .role-badge,
+body.sidebar-collapsed .btn-logout span{display:none;}
 .sidebar-nav{
   flex:1 1 auto;overflow-y:auto;padding:16px 12px 8px;
 }
@@ -141,7 +173,7 @@ hr{border-color:var(--border);}
 .btn-logout:hover{color:var(--danger);border-color:var(--danger);background:rgba(239,68,68,.08);}
 
 /* ---------- Main content ---------- */
-.main-content{margin-left:246px;padding:26px 30px 40px;min-height:100vh;}
+.main-content{margin-left:246px;padding:26px 30px 40px;min-height:100vh;transition:margin-left .15s ease;}
 .page-header{margin-bottom:22px;}
 .page-header h2{margin:0;font-size:1.4rem;color:var(--text-primary);}
 .page-header p{margin:4px 0 0;color:var(--text-secondary);font-size:.85rem;}
@@ -226,25 +258,37 @@ hr{border-color:var(--border);}
 </style>
 </head>
 <body>
+    <script>
+        // Applied before the sidebar renders so a previously-collapsed sidebar doesn't
+        // flash full-width on every page load (this is a traditional multi-page app —
+        // base.html re-renders fresh on every navigation, so the state has to be
+        // restored this early, not after the DOM is built).
+        try {
+            if (localStorage.getItem('microdfir_sidebar_collapsed') === '1') {
+                document.body.classList.add('sidebar-collapsed');
+            }
+        } catch (e) {}
+    </script>
     <div class="sidebar">
         <div class="sidebar-header">
-            <a href="/" class="brand"><i class="fa-solid fa-shield-halved"></i> Micro DFIR</a>
+            <a href="/" class="brand" title="Micro DFIR"><i class="fa-solid fa-shield-halved"></i> <span>Micro DFIR</span></a>
+            <button type="button" id="sidebarToggleBtn" class="sidebar-toggle-btn" onclick="toggleSidebar()" title="Collapse sidebar"><i class="fa-solid fa-angles-left"></i></button>
         </div>
         <nav class="sidebar-nav">
-            <a href="/" class="nav-block {{ 'active' if request.endpoint in ['dash','pipeline','rules','detection_tuning','reports','download_report','trigger_report'] else '' }}"><i class="fa-solid fa-shield-halved"></i><span>SIEM</span></a>
-            <a href="/ueba" class="nav-block {{ 'active' if request.endpoint in ['ueba', 'ueba_tuning'] else '' }}"><i class="fa-solid fa-user-secret"></i><span>UEBA</span></a>
-            <a href="/agents" class="nav-block {{ 'active' if request.endpoint == 'agents' else '' }}"><i class="fa-solid fa-laptop-medical"></i><span>EDR</span></a>
-            <a href="/threat-intel" class="nav-block {{ 'active' if request.endpoint in ['threat_intel', 'hunt'] else '' }}"><i class="fa-solid fa-globe"></i><span>Threat Intel &amp; Hunting</span></a>
+            <a href="/" class="nav-block {{ 'active' if request.endpoint in ['dash','pipeline','rules','detection_tuning','reports','download_report','trigger_report'] else '' }}" title="SIEM"><i class="fa-solid fa-shield-halved"></i><span>SIEM</span></a>
+            <a href="/ueba" class="nav-block {{ 'active' if request.endpoint in ['ueba', 'ueba_tuning'] else '' }}" title="UEBA"><i class="fa-solid fa-user-secret"></i><span>UEBA</span></a>
+            <a href="/agents" class="nav-block {{ 'active' if request.endpoint == 'agents' else '' }}" title="EDR"><i class="fa-solid fa-laptop-medical"></i><span>EDR</span></a>
+            <a href="/threat-intel" class="nav-block {{ 'active' if request.endpoint in ['threat_intel', 'hunt'] else '' }}" title="Threat Intel &amp; Hunting"><i class="fa-solid fa-globe"></i><span>Threat Intel &amp; Hunting</span></a>
         </nav>
 
         <div class="sidebar-bottom">
             <div class="sidebar-divider"></div>
-            <a href="{{ url_for('settings') }}" class="nav-link {{ 'active' if request.endpoint in ['settings','settings_network'] else '' }}"><i class="fa-solid fa-gear"></i><span>Settings</span></a>
+            <a href="{{ url_for('settings') }}" class="nav-link {{ 'active' if request.endpoint in ['settings','settings_network'] else '' }}" title="Settings"><i class="fa-solid fa-gear"></i><span>Settings</span></a>
         </div>
 
         <div class="user-panel">
-            <div class="user-row"><i class="fa-solid fa-circle-user"></i> {{ current_user.username }} <span class="role-badge">{{ current_user.role }}</span></div>
-            <a href="/logout" class="btn-logout"><i class="fa-solid fa-arrow-right-from-bracket"></i> Logout</a>
+            <div class="user-row" title="{{ current_user.username }} ({{ current_user.role }})"><i class="fa-solid fa-circle-user"></i> <span>{{ current_user.username }}</span> <span class="role-badge">{{ current_user.role }}</span></div>
+            <a href="/logout" class="btn-logout" title="Logout"><i class="fa-solid fa-arrow-right-from-bracket"></i> <span>Logout</span></a>
         </div>
     </div>
     <div class="main-content">
@@ -257,5 +301,18 @@ hr{border-color:var(--border);}
         {% endwith %}
         {% block content %}{% endblock %}
     </div>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script><script src="https://cdn.jsdelivr.net/npm/gridstack@8.2.1/dist/gridstack-all.js"></script>{% block scripts %}{% endblock %}
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script><script src="https://cdn.jsdelivr.net/npm/gridstack@8.2.1/dist/gridstack-all.js"></script>
+    <script>
+        function toggleSidebar() {
+            const collapsed = document.body.classList.toggle('sidebar-collapsed');
+            try { localStorage.setItem('microdfir_sidebar_collapsed', collapsed ? '1' : '0'); } catch (e) {}
+            const btn = document.getElementById('sidebarToggleBtn');
+            if (btn) btn.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+        }
+        (function() {
+            const btn = document.getElementById('sidebarToggleBtn');
+            if (btn && document.body.classList.contains('sidebar-collapsed')) btn.title = 'Expand sidebar';
+        })();
+    </script>
+    {% block scripts %}{% endblock %}
 </body></html>
