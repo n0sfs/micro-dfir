@@ -20,6 +20,7 @@ from flask_login import LoginManager, UserMixin, login_user, login_required, log
 from ti_engine import lookup_ioc
 from yara_scanner import scan_file
 from taxii_client import sync_one as ti_sync_one
+import agent_scripts
 
 app = Flask(__name__, template_folder='../templates')
 app.secret_key = '0a3e3de8e8ca7ef43a3bb4645178baa03fa4d3612046968dfeeb86b13f19dd09'
@@ -662,8 +663,32 @@ def migrate_ti_feeds():
     except Exception:
         pass
 
+def migrate_agent_commands():
+    try:
+        import sqlite3
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS agent_commands (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hostname TEXT NOT NULL,
+            label TEXT NOT NULL,
+            script TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            queued_by TEXT,
+            queued_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            completed_at DATETIME,
+            exit_code INTEGER,
+            stdout TEXT,
+            stderr TEXT
+        )''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_commands_host_status ON agent_commands(hostname, status)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 migrate_settings()
 migrate_ti_feeds()
+migrate_agent_commands()
 
 @app.route('/settings', methods=['GET', 'POST'])
 @login_required
@@ -795,13 +820,18 @@ def agent_config():
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     db.execute('CREATE TABLE IF NOT EXISTS agent_polls (id INTEGER PRIMARY KEY, timestamp TEXT, ip_address TEXT, user_agent TEXT)')
     db.execute('INSERT INTO agent_polls (timestamp, ip_address, user_agent) VALUES (?, ?, ?)', (now, ip, ua))
-    db.execute('CREATE TABLE IF NOT EXISTS pending_commands (hostname TEXT PRIMARY KEY, command TEXT)')
     db.commit()
-    cmd_row = db.execute('SELECT command FROM pending_commands WHERE hostname = ?', (ua,)).fetchone()
-    if cmd_row and cmd_row['command'] == 'uninstall':
-        db.execute('DELETE FROM pending_commands WHERE hostname = ?', (ua,))
+
+    cmd_row = db.execute(
+        "SELECT id, label, script FROM agent_commands WHERE hostname = ? AND status = 'pending' ORDER BY id LIMIT 1",
+        (ua,)
+    ).fetchone()
+    if cmd_row:
+        db.execute("UPDATE agent_commands SET status = 'sent' WHERE id = ?", (cmd_row['id'],))
         db.commit()
-        return jsonify({'command': 'uninstall'})
+        if cmd_row['label'] == 'uninstall':
+            return jsonify({'command': 'uninstall'})
+        return jsonify({'run_script': {'id': cmd_row['id'], 'script': cmd_row['script']}})
 
     channels = ','.join(k for k, v in get_agent_channels().items() if v) or 'Security,System,Application,PowerShell'
 
@@ -1265,6 +1295,7 @@ def api_download_agent(os_type):
 
         # Dynamically inject the IP, Ports, and agent auth token!
         script_data = script_data.replace('https://__HOST_URL__/api/agent/config', f'https://{server_ip}:{ui_port}/api/agent/config')
+        script_data = script_data.replace('https://__HOST_URL__/api/agent/result', f'https://{server_ip}:{ui_port}/api/agent/result')
         script_data = script_data.replace('https://__HOST_URL__/api/ingest', f'https://{server_ip}:{ingest_port}/api/ingest')
         script_data = script_data.replace('__SOC_TOKEN__', soc_token)
 
@@ -1283,6 +1314,7 @@ def api_download_agent(os_type):
             script_data = f.read()
 
         script_data = script_data.replace('https://__HOST_URL__/api/agent/config', f'https://{server_ip}:{ui_port}/api/agent/config')
+        script_data = script_data.replace('https://__HOST_URL__/api/agent/result', f'https://{server_ip}:{ui_port}/api/agent/result')
         script_data = script_data.replace('https://__HOST_URL__/api/ingest', f'https://{server_ip}:{ingest_port}/api/ingest')
         script_data = script_data.replace('__SOC_TOKEN__', soc_token)
 
@@ -1318,6 +1350,86 @@ def agent_checkins():
         print("Checkins error:", e)
         return jsonify([])
 
+@app.route('/api/agent/commands', methods=['GET', 'POST'])
+@login_required
+def api_agent_commands():
+    db = get_db()
+
+    if request.method == 'GET':
+        hostname = request.args.get('hostname', '')
+        limit = request.args.get('limit', 30, type=int)
+        if hostname:
+            rows = db.execute(
+                "SELECT id, hostname, label, status, queued_by, queued_at, completed_at, exit_code, stdout, stderr FROM agent_commands WHERE hostname = ? ORDER BY id DESC LIMIT ?",
+                (hostname, limit)
+            ).fetchall()
+        else:
+            rows = db.execute(
+                "SELECT id, hostname, label, status, queued_by, queued_at, completed_at, exit_code, stdout, stderr FROM agent_commands ORDER BY id DESC LIMIT ?",
+                (limit,)
+            ).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    d = request.json or {}
+    hostname = (d.get('hostname') or '').strip()
+    label = d.get('label')
+    if not hostname or not label:
+        return jsonify({'error': 'hostname and label are required'}), 400
+
+    if label == 'custom':
+        script = d.get('script', '')
+        if not script.strip():
+            return jsonify({'error': 'script is required for a custom command'}), 400
+    elif label in agent_scripts.TEMPLATES:
+        builder, required = agent_scripts.TEMPLATES[label]
+        params = d.get('params', {}) or {}
+        if label == 'isolate_host' and not params.get('soc_ip'):
+            s = {r[0]: r[1] for r in db.execute("SELECT key, value FROM settings").fetchall()}
+            soc_ip = s.get('ingest_bind_ip', '0.0.0.0')
+            if soc_ip == '0.0.0.0':
+                soc_ip = request.host.split(':')[0]
+            params['soc_ip'] = soc_ip
+        missing = [p for p in required if not params.get(p)]
+        if missing:
+            return jsonify({'error': f"Missing required parameter(s): {', '.join(missing)}"}), 400
+        try:
+            script = builder(params)
+        except Exception as e:
+            return jsonify({'error': f'Failed to build script: {e}'}), 400
+    else:
+        return jsonify({'error': f'Unknown command label: {label}'}), 400
+
+    db.execute(
+        "INSERT INTO agent_commands (hostname, label, script, queued_by) VALUES (?, ?, ?, ?)",
+        (hostname, label, script, current_user.username)
+    )
+    db.commit()
+    return jsonify({'status': 'success'})
+
+@app.route('/api/agent/result', methods=['POST'])
+def api_agent_result():
+    import datetime
+    db = get_db()
+    expected_token = get_soc_secret(db)
+    if expected_token and request.headers.get('X-Agent-Token') != expected_token:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    d = request.json or {}
+    cmd_id = d.get('id')
+    if not cmd_id:
+        return jsonify({'error': 'id is required'}), 400
+
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    status = 'done' if d.get('exit_code', 1) == 0 else 'failed'
+    db.execute(
+        "UPDATE agent_commands SET status = ?, completed_at = ?, exit_code = ?, stdout = ?, stderr = ? WHERE id = ?",
+        (status, now, d.get('exit_code'), str(d.get('stdout', ''))[:20000], str(d.get('stderr', ''))[:5000], cmd_id)
+    )
+    db.commit()
+    return jsonify({'status': 'success'})
+
 @app.route('/api/agent/<hostname>', methods=['DELETE'])
 @login_required
 def delete_agent(hostname):
@@ -1326,7 +1438,9 @@ def delete_agent(hostname):
         return jsonify({'error': 'Admin required'}), 403
     db = get_db()
     db.execute('DELETE FROM agent_polls WHERE user_agent = ?', (hostname,))
-    db.execute('CREATE TABLE IF NOT EXISTS pending_commands (hostname TEXT PRIMARY KEY, command TEXT)')
-    db.execute('INSERT OR REPLACE INTO pending_commands (hostname, command) VALUES (?, ?)', (hostname, 'uninstall'))
+    db.execute(
+        "INSERT INTO agent_commands (hostname, label, script, queued_by) VALUES (?, 'uninstall', '', ?)",
+        (hostname, current_user.username)
+    )
     db.commit()
     return jsonify({"status": "success"})
