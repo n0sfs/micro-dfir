@@ -868,21 +868,87 @@ def api_ueba_detections():
     db = get_db()
     limit = request.args.get('limit', 100, type=int)
     rows = db.execute(
-        "SELECT timestamp, hostname, severity, message FROM events WHERE app_name = 'duckdb_ueba' ORDER BY id DESC LIMIT ?",
+        "SELECT timestamp, hostname, entity_type, severity, message FROM events WHERE app_name = 'duckdb_ueba' ORDER BY id DESC LIMIT ?",
         (limit,)
     ).fetchall()
     detections = [dict(r) for r in rows]
     total = db.execute("SELECT COUNT(*) FROM events WHERE app_name = 'duckdb_ueba'").fetchone()[0]
     today = db.execute("SELECT COUNT(*) FROM events WHERE app_name = 'duckdb_ueba' AND date(timestamp) = date('now')").fetchone()[0]
-    hosts_flagged = db.execute("SELECT COUNT(DISTINCT hostname) FROM events WHERE app_name = 'duckdb_ueba'").fetchone()[0]
+    entities_flagged = db.execute("SELECT COUNT(DISTINCT hostname || '|' || COALESCE(entity_type, '')) FROM events WHERE app_name = 'duckdb_ueba'").fetchone()[0]
     latest = detections[0]['timestamp'] if detections else None
     return jsonify({
         'detections': detections,
         'total': total,
         'today': today,
-        'hosts_flagged': hosts_flagged,
+        'entities_flagged': entities_flagged,
         'latest': latest
     })
+
+@app.route('/api/ueba/baselines')
+@login_required
+def api_ueba_baselines():
+    db = get_db()
+    entity_type = request.args.get('type')
+    if entity_type and entity_type not in ('host', 'user'):
+        return jsonify({"error": "Invalid entity type"}), 400
+    query = "SELECT entity_type, entity_id, current_count, baseline_avg, baseline_stddev, threshold, is_anomalous, excluded, computed_at FROM ueba_entity_baselines"
+    params = ()
+    if entity_type:
+        query += " WHERE entity_type = ?"
+        params = (entity_type,)
+    query += " ORDER BY (CAST(current_count AS REAL) / MAX(baseline_avg, 1)) DESC"
+    try:
+        rows = [dict(r) for r in db.execute(query, params).fetchall()]
+    except Exception:
+        rows = []
+    computed_at = rows[0]['computed_at'] if rows else None
+    return jsonify({'baselines': rows, 'computed_at': computed_at})
+
+@app.route('/api/ueba/exclusions', methods=['GET', 'POST'])
+@login_required
+def api_ueba_exclusions():
+    db = get_db()
+    if request.method == 'GET':
+        rows = db.execute(
+            "SELECT id, entity_type, entity_id, description, enabled, created_by, created_at FROM ueba_exclusions ORDER BY id DESC"
+        ).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+    if current_user.role != 'admin':
+        return jsonify({"error": "Admin required"}), 403
+    data = request.get_json() or {}
+    entity_type = (data.get('entity_type') or '').strip()
+    entity_id = (data.get('entity_id') or '').strip()
+    description = (data.get('description') or '').strip()
+    if entity_type not in ('host', 'user'):
+        return jsonify({"error": "Invalid entity type"}), 400
+    if not entity_id:
+        return jsonify({"error": "Entity ID is required"}), 400
+    db.execute(
+        "INSERT INTO ueba_exclusions (entity_type, entity_id, description, enabled, created_by, created_at) VALUES (?, ?, ?, 1, ?, CURRENT_TIMESTAMP)",
+        (entity_type, entity_id, description, current_user.username)
+    )
+    db.commit()
+    return jsonify({"status": "success"})
+
+@app.route('/api/ueba/exclusions/<int:eid>', methods=['PUT', 'DELETE'])
+@login_required
+def api_ueba_exclusion_detail(eid):
+    if current_user.role != 'admin':
+        return jsonify({"error": "Admin required"}), 403
+    db = get_db()
+    if not db.execute("SELECT 1 FROM ueba_exclusions WHERE id = ?", (eid,)).fetchone():
+        return jsonify({"error": "Exclusion not found"}), 404
+
+    if request.method == 'DELETE':
+        db.execute("DELETE FROM ueba_exclusions WHERE id = ?", (eid,))
+        db.commit()
+        return jsonify({"ok": 1})
+
+    data = request.get_json() or {}
+    db.execute("UPDATE ueba_exclusions SET enabled = ? WHERE id = ?", (1 if data.get('enabled') else 0, eid))
+    db.commit()
+    return jsonify({"status": "success"})
 
 UEBA_CONFIG_DEFAULTS = {'ueba_lookback_days': '30', 'ueba_stddev_multiplier': '3', 'ueba_min_baseline': '50'}
 
@@ -1075,6 +1141,44 @@ def migrate_rule_tuning():
     except Exception:
         pass
 
+def migrate_ueba_entities():
+    # UEBA originally modeled hosts only, with a fixed 'HIGH' severity and no way to
+    # quiet a legitimately bursty entity. Adds: entity_type on events (host vs user,
+    # column reused for either kind of entity id), an exclusions table (mirrors
+    # rule_exclusions), and a baseline snapshot table so every modeled entity's current
+    # numbers are visible, not just the ones that fired.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
+        if 'entity_type' not in cols:
+            conn.execute("ALTER TABLE events ADD COLUMN entity_type TEXT")
+        conn.execute('''CREATE TABLE IF NOT EXISTS ueba_exclusions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            description TEXT,
+            enabled BOOLEAN DEFAULT 1,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ueba_exclusions_entity ON ueba_exclusions(entity_type, entity_id)")
+        conn.execute('''CREATE TABLE IF NOT EXISTS ueba_entity_baselines (
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            current_count INTEGER,
+            baseline_avg REAL,
+            baseline_stddev REAL,
+            threshold REAL,
+            is_anomalous BOOLEAN DEFAULT 0,
+            excluded BOOLEAN DEFAULT 0,
+            computed_at DATETIME,
+            PRIMARY KEY (entity_type, entity_id)
+        )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_compliance_tags():
     # Compliance-framework tagging is manual (Sigma rules carry no such metadata), so this
     # just needs a column to hold an admin-assigned, comma-separated list of framework keys.
@@ -1150,6 +1254,7 @@ migrate_alerts_columns()
 migrate_sigma_rules_columns()
 migrate_rule_tuning()
 migrate_compliance_tags()
+migrate_ueba_entities()
 
 @app.route('/settings', methods=['GET', 'POST'])
 @login_required
