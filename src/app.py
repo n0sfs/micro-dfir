@@ -1375,8 +1375,13 @@ try:
     # drop rule or the Network settings form to trigger a regeneration.
     with app.app_context():
         generate_vector_config()
-except Exception as e:
-    print(f"Could not regenerate vector.toml at startup: {e}")
+    print("[startup] vector.toml regenerated", flush=True)
+except Exception:
+    import traceback
+    print("[startup] Could not regenerate vector.toml:", flush=True)
+    traceback.print_exc()
+    import sys as _sys
+    _sys.stdout.flush(); _sys.stderr.flush()
 
 @app.route('/settings', methods=['GET', 'POST'])
 @login_required
