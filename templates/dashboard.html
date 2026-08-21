@@ -2,30 +2,81 @@
 
 {% block content %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<script>
-function updateFilters() {
-    let apps = Array.from(document.querySelectorAll('.app-chk:checked')).map(c => c.value);
-    document.getElementById('appFilterLabel').innerText = apps.length > 0 ? apps.join(', ') : 'All Apps';
-
-    let sevs = Array.from(document.querySelectorAll('.sev-chk:checked')).map(c => c.value);
-    document.getElementById('sevFilterLabel').innerText = sevs.length > 0 ? sevs.join(', ') : 'Sev';
-
-    if (typeof loadDashboardData === 'function') { loadDashboardData(); }
-}
-</script>
 <style>
     .time-preset-btn.active-filter{background-color:var(--accent); border-color:var(--accent); color:#fff;}
     mark.search-highlight{background-color:var(--accent); color:#fff; padding:0 2px; border-radius:2px;}
+
+    #rulesTable{table-layout:fixed;}
+    #rulesTable .rule-th{position:relative; white-space:nowrap; padding-right:10px; vertical-align:middle;}
+    #rulesTable .th-inner{display:flex; align-items:center; justify-content:space-between; gap:4px;}
+    #rulesTable .th-label{cursor:pointer; user-select:none;}
+    #rulesTable .th-label:hover{color:var(--text-primary);}
+    #rulesTable .th-icon-btn{background:none; border:none; color:var(--text-muted); padding:0 2px; font-size:.72rem; cursor:pointer; line-height:1;}
+    #rulesTable .th-icon-btn:hover{color:var(--text-secondary);}
+    #rulesTable .th-icon-btn.active-filter{color:var(--accent);}
+    #rulesTable .sort-ic{font-size:.66rem; margin-left:3px; color:var(--text-muted);}
+    #rulesTable .sort-ic.active-sort{color:var(--accent);}
+    #rulesTable .col-resizer{position:absolute; right:0; top:0; bottom:0; width:5px; cursor:col-resize; z-index:2;}
+    #rulesTable .col-resizer:hover, #rulesTable .col-resizer.resizing{background:var(--accent);}
+    #rulesTable td{overflow:hidden;}
+    #rulesTable .rule-tags-row{white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+
+    #ruleEditorTabs .nav-link{color:var(--text-muted); border-color:transparent; background:transparent;}
+    #ruleEditorTabs .nav-link:hover{color:var(--text-secondary); border-color:transparent;}
+    #ruleEditorTabs .nav-link.active{color:var(--text-primary); background-color:var(--bg-card-alt); border-color:var(--border) var(--border) var(--bg-card-alt);}
+
+    .quick-filter-btn.active-filter{background-color:var(--accent); border-color:var(--accent); color:#fff;}
+    #tuningTable .th-label:hover{color:var(--text-primary);}
+    #tuningTable .sort-ic{font-size:.66rem; margin-left:3px; color:var(--text-muted);}
+    #tuningTable .sort-ic.active-sort{color:var(--accent);}
 </style>
 
 <div class="page-header">
-    <h2><i class="fa-solid fa-magnifying-glass-chart me-2"></i>Log Search</h2>
-    <p>Search, filter, and analyze ingested log volume across all connected SIEM sources.</p>
+    <h2><i class="fa-solid fa-shield-halved me-2"></i>SIEM</h2>
+    <p>Search logs, manage ingestion pipelines, tune detection rules, and generate reports.</p>
 </div>
+
+<div class="row g-3 mb-3">
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label" id="statLabel0">&nbsp;</div>
+            <div class="stat-value" id="statValue0">—</div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label" id="statLabel1">&nbsp;</div>
+            <div class="stat-value" id="statValue1">—</div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label" id="statLabel2">&nbsp;</div>
+            <div class="stat-value" id="statValue2">—</div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label" id="statLabel3">&nbsp;</div>
+            <div class="stat-value" id="statValue3">—</div>
+        </div>
+    </div>
+</div>
+
+<ul class="nav nav-tabs border-secondary mb-3" id="siemTabs">
+    <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'search' else '' }}" id="tabBtnSearch" onclick="switchSiemTab('search')"><i class="fa-solid fa-magnifying-glass-chart me-1"></i>Log Search</button></li>
+    <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'pipeline' else '' }}" id="tabBtnPipeline" onclick="switchSiemTab('pipeline')"><i class="fa-solid fa-filter me-1"></i>Log Pipeline</button></li>
+    <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'rules' else '' }}" id="tabBtnRules" onclick="switchSiemTab('rules')"><i class="fa-solid fa-file-shield me-1"></i>Detection Rules</button></li>
+    <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'tuning' else '' }}" id="tabBtnTuning" onclick="switchSiemTab('tuning')"><i class="fa-solid fa-sliders me-1"></i>Detection Tuning</button></li>
+    <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'reports' else '' }}" id="tabBtnReports" onclick="switchSiemTab('reports')"><i class="fa-solid fa-file-pdf me-1"></i>Reports</button></li>
+</ul>
+
+<!-- ============================= LOG SEARCH PANE ============================= -->
+<div id="paneSearch" style="display: {{ 'block' if active_tab == 'search' else 'none' }};">
 
 <!-- UNIFIED ADVANCED SOC TOOLBAR -->
 <div class="row g-2 mb-3 bg-dark p-3 rounded border border-secondary">
-    
+
     <div class="col-md-2">
         <label for="searchQuery" class="form-label text-muted small mb-1 fw-bold">Global Search</label>
         <input type="text" id="searchQuery" class="form-control bg-dark text-light border-secondary form-control-sm" placeholder="Search keyword, ID..." title="Searches across hosts, apps, IDs, users, and messages" onkeyup="if(event.key === 'Enter') loadDashboardData()">
@@ -146,33 +197,6 @@ function updateFilters() {
     </div>
 </div>
 
-<div class="row g-3 mb-3">
-    <div class="col-6 col-lg-3">
-        <div class="stat-tile">
-            <div class="stat-label">Total Matches</div>
-            <div class="stat-value" id="statTotalMatches">—</div>
-        </div>
-    </div>
-    <div class="col-6 col-lg-3">
-        <div class="stat-tile">
-            <div class="stat-label">Alerts/Anomalies (this page)</div>
-            <div class="stat-value" id="statAlertCount">—</div>
-        </div>
-    </div>
-    <div class="col-6 col-lg-3">
-        <div class="stat-tile">
-            <div class="stat-label">Unique Hosts (this page)</div>
-            <div class="stat-value" id="statUniqueHosts">—</div>
-        </div>
-    </div>
-    <div class="col-6 col-lg-3">
-        <div class="stat-tile">
-            <div class="stat-label">Time Window</div>
-            <div class="stat-value" id="statTimeWindow" style="font-size:1.05rem;">—</div>
-        </div>
-    </div>
-</div>
-
 <!-- TIME-SERIES TIMELINE CHART CARD -->
 <div class="card bg-dark border-secondary mb-3">
     <div class="card-body py-2 px-3">
@@ -191,7 +215,335 @@ function updateFilters() {
     <button class="btn btn-outline-success btn-sm" onclick="exportCSV()" title="Export current filtered logs to CSV"><i class="fa-solid fa-file-excel me-1"></i> Export CSV</button>
 </div>
 
-<!-- FIELD MANAGER MODAL -->
+<!-- LOGS TABLE -->
+<div class="card bg-dark border-secondary">
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-dark table-striped table-hover mb-0 align-middle">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Type</th>
+                        <th>Sev</th>
+                        <th>Host</th>
+                        <th>App</th>
+                        <th>Event ID</th>
+                        <th>User</th>
+                        <th>Src IP</th>
+                        <th>Message</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td colspan="9" class="text-center text-muted py-4">Loading logs...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+</div>
+<!-- =========================== END LOG SEARCH PANE =========================== -->
+
+<!-- ============================= LOG PIPELINE PANE ============================= -->
+<div id="panePipeline" style="display: {{ 'block' if active_tab == 'pipeline' else 'none' }};">
+<div class="row g-4 mb-4">
+    <!-- Active Drop / Filter Rules -->
+    <div class="col-lg-6">
+        <div class="card bg-dark border-secondary h-100">
+            <div class="card-body">
+                <h5 class="card-title text-light mb-3"><i class="fa-solid fa-filter me-2"></i>Active Drop / Filter Rules</h5>
+                <label class="form-label text-muted small mb-3">Configure ingestion drop rules to filter noisy telemetry at the edge.</label>
+
+                <div class="row g-2 mb-3">
+                    <div class="col-md-4">
+                        <label class="form-label text-muted small mb-1">Field</label>
+                        <select id="dropField" class="form-select bg-dark text-light border-secondary form-select-sm">
+                            <option value="app">App Name</option>
+                            <option value="event_id">Event ID</option>
+                            <option value="host">Host</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label text-muted small mb-1">Operator</label>
+                        <select id="dropOp" class="form-select bg-dark text-light border-secondary form-select-sm">
+                            <option value="equals">Equals</option>
+                            <option value="contains">Contains</option>
+                        </select>
+                    </div>
+                    <div class="col-md-5">
+                        <label class="form-label text-muted small mb-1">Value</label>
+                        <input type="text" id="dropVal" class="form-control bg-dark text-light border-secondary form-control-sm" placeholder="Match value...">
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label text-muted small mb-1">Description</label>
+                    <input type="text" id="dropDesc" class="form-control bg-dark text-light border-secondary form-control-sm" placeholder="Rule purpose...">
+                </div>
+                <button type="button" class="btn btn-primary btn-sm w-100 mb-3" onclick="addDropRule()">Add Rule</button>
+
+                <div class="table-responsive">
+                    <table class="table table-dark table-striped table-hover mb-0 align-middle small">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Condition</th>
+                                <th>Description</th>
+                                <th>Active</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="dropRulesTableBody">
+                            <tr><td colspan="5" class="text-center text-muted py-3">No drop rules configured.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Agent Windows Log Channels -->
+    <div class="col-lg-6">
+        <div class="card bg-dark border-secondary h-100">
+            <div class="card-body">
+                <h5 class="card-title text-light mb-3"><i class="fa-solid fa-sliders me-2"></i>Agent Windows Log Channels</h5>
+                <p class="text-muted small mb-3">Select event channels to enforce across all deployed endpoint collector agents:</p>
+
+                <div class="mb-2 form-check">
+                    <input class="form-check-input" type="checkbox" id="chk_security" {% if channels.Security %}checked{% endif %}>
+                    <label class="form-check-label text-light" for="chk_security">Security (Logon / Process creation)</label>
+                </div>
+                <div class="mb-2 form-check">
+                    <input class="form-check-input" type="checkbox" id="chk_system" {% if channels.System %}checked{% endif %}>
+                    <label class="form-check-label text-light" for="chk_system">System (Hardware & service events)</label>
+                </div>
+                <div class="mb-2 form-check">
+                    <input class="form-check-input" type="checkbox" id="chk_app" {% if channels.Application %}checked{% endif %}>
+                    <label class="form-check-label text-light" for="chk_app">Application (App crashes & errors)</label>
+                </div>
+                <div class="mb-2 form-check">
+                    <input class="form-check-input" type="checkbox" id="chk_ps" {% if channels.PowerShell %}checked{% endif %}>
+                    <label class="form-check-label text-light" for="chk_ps">PowerShell (Script block execution)</label>
+                </div>
+                <div class="mb-2 form-check">
+                    <input class="form-check-input" type="checkbox" id="chk_sysmon" {% if channels.Sysmon %}checked{% endif %}>
+                    <label class="form-check-label text-light" for="chk_sysmon">Sysmon (Advanced telemetry)</label>
+                </div>
+                <div class="mb-3 form-check">
+                    <input class="form-check-input" type="checkbox" id="chk_def" {% if channels.WindowsDefender %}checked{% endif %}>
+                    <label class="form-check-label text-light" for="chk_def">Windows Defender (Threat quarantines)</label>
+                </div>
+
+                <button type="button" class="btn btn-primary btn-sm w-100" onclick="saveChannels()">
+                    <i class="fa-solid fa-floppy-disk me-1"></i> Save & Push Channel Template
+                </button>
+                <div id="saveSuccessMsg" class="text-success small mt-3 text-center fw-bold" style="display: none;"><i class="fa-solid fa-circle-check me-1"></i>Saved and push completed.</div>
+            </div>
+        </div>
+    </div>
+</div>
+</div>
+<!-- =========================== END LOG PIPELINE PANE =========================== -->
+
+<!-- ============================= DETECTION RULES PANE ============================= -->
+<div id="paneRules" style="display: {{ 'block' if active_tab == 'rules' else 'none' }};">
+<div class="card shadow-sm border-secondary bg-dark text-light mb-4">
+    <div class="card-body">
+
+        <!-- Bulk Actions Toolbar -->
+        <div class="d-flex gap-2 mb-3 align-items-center bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
+            <button class="btn btn-sm btn-outline-secondary" onclick="toggleAll(true)">Select All Visible</button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="toggleAll(false)">Clear Selection</button>
+            <input type="text" id="titleSearchBox" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width: 260px;" placeholder="Search rule names..." oninput="colFilters.q = this.value.toLowerCase(); f();">
+            <div class="ms-auto d-flex gap-2">
+                <button class="btn btn-sm btn-outline-success" onclick="bulkAction(true)"><i class="fa-solid fa-play"></i> Enable Selected</button>
+                <button class="btn btn-sm btn-outline-danger" onclick="bulkAction(false)"><i class="fa-solid fa-stop"></i> Disable Selected</button>
+                <button class="btn btn-sm btn-outline-info" id="importSigmaBtn" onclick="importSigmaHQ()"><i class="fa-solid fa-cloud-arrow-down"></i> Import SigmaHQ Rules</button>
+                <button class="btn btn-sm btn-primary" onclick="openRuleModal()"><i class="fa-solid fa-plus"></i> New Rule</button>
+            </div>
+        </div>
+
+        <!-- Interactive Table -->
+        <div class="table-responsive" style="max-height: 600px; overflow-y: auto;">
+            <table class="table table-dark table-hover table-sm align-middle" id="rulesTable">
+                <thead>
+                    <tr>
+                        <th style="width: 32px;"></th>
+                        <th class="rule-th" data-col="source" style="width: 92px;">
+                            <div class="th-inner">
+                                <span>Source</span>
+                                <div class="dropdown">
+                                    <button type="button" class="th-icon-btn" id="filterBtnSource" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                    <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuSource" style="min-width:190px;"></div>
+                                </div>
+                            </div>
+                            <span class="col-resizer"></span>
+                        </th>
+                        <th class="rule-th" data-col="title" style="width: 260px;">
+                            <div class="th-inner">
+                                <span class="th-label" onclick="toggleSort('title')">Rule Name <i class="fa-solid fa-sort sort-ic" id="sortIc-title"></i></span>
+                            </div>
+                            <span class="col-resizer"></span>
+                        </th>
+                        <th class="rule-th" data-col="platform" style="width: 130px;">
+                            <div class="th-inner">
+                                <span class="th-label" onclick="toggleSort('platform')">Platform <i class="fa-solid fa-sort sort-ic" id="sortIc-platform"></i></span>
+                                <div class="dropdown">
+                                    <button type="button" class="th-icon-btn" id="filterBtnPlatform" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                    <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuPlatform" style="min-width:210px;"></div>
+                                </div>
+                            </div>
+                            <span class="col-resizer"></span>
+                        </th>
+                        <th class="rule-th" data-col="mitre" style="width: 160px;">
+                            <div class="th-inner">
+                                <span>MITRE ATT&amp;CK</span>
+                                <div class="dropdown">
+                                    <button type="button" class="th-icon-btn" id="filterBtnMitre" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                    <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuMitre" style="min-width:220px;"></div>
+                                </div>
+                            </div>
+                            <span class="col-resizer"></span>
+                        </th>
+                        <th class="rule-th" data-col="compliance" style="width: 150px;">
+                            <div class="th-inner">
+                                <span>Compliance</span>
+                                <div class="dropdown">
+                                    <button type="button" class="th-icon-btn" id="filterBtnCompliance" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                    <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuCompliance" style="min-width:210px;"></div>
+                                </div>
+                            </div>
+                            <span class="col-resizer"></span>
+                        </th>
+                        <th class="rule-th" data-col="level" style="width: 115px;">
+                            <div class="th-inner">
+                                <span class="th-label" onclick="toggleSort('level')">Level <i class="fa-solid fa-sort sort-ic" id="sortIc-level"></i></span>
+                                <div class="dropdown">
+                                    <button type="button" class="th-icon-btn" id="filterBtnLevel" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                    <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuLevel" style="min-width:190px;"></div>
+                                </div>
+                            </div>
+                            <span class="col-resizer"></span>
+                        </th>
+                        <th class="rule-th" data-col="status" style="width: 115px;">
+                            <div class="th-inner">
+                                <span class="th-label" onclick="toggleSort('status')">Status <i class="fa-solid fa-sort sort-ic" id="sortIc-status"></i></span>
+                                <div class="dropdown">
+                                    <button type="button" class="th-icon-btn" id="filterBtnStatus" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                    <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuStatus" style="min-width:190px;"></div>
+                                </div>
+                            </div>
+                            <span class="col-resizer"></span>
+                        </th>
+                        <th class="rule-th" data-col="last_update" style="width: 130px;">
+                            <div class="th-inner">
+                                <span class="th-label" onclick="toggleSort('last_update')">Last Update <i class="fa-solid fa-sort sort-ic" id="sortIc-last_update"></i></span>
+                            </div>
+                            <span class="col-resizer"></span>
+                        </th>
+                        <th class="rule-th" data-col="enabled" style="width: 100px;">
+                            <div class="th-inner">
+                                <span class="th-label" onclick="toggleSort('enabled')">Enabled <i class="fa-solid fa-sort sort-ic" id="sortIc-enabled"></i></span>
+                                <div class="dropdown">
+                                    <button type="button" class="th-icon-btn" id="filterBtnEnabled" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                    <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuEnabled" style="min-width:170px;"></div>
+                                </div>
+                            </div>
+                        </th>
+                        <th style="width: 44px;"></th>
+                    </tr>
+                </thead>
+                <tbody id="rt"></tbody>
+            </table>
+        </div>
+
+    </div>
+</div>
+</div>
+<!-- =========================== END DETECTION RULES PANE =========================== -->
+
+<!-- ============================= DETECTION TUNING PANE ============================= -->
+<div id="paneTuning" style="display: {{ 'block' if active_tab == 'tuning' else 'none' }};">
+<div class="card shadow-sm border-secondary bg-dark text-light mb-4">
+    <div class="card-body">
+        <div class="d-flex flex-wrap gap-2 mb-3 align-items-center bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
+            <input type="text" id="tuningSearchBox" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width: 260px;" placeholder="Search rule names..." oninput="q = this.value.toLowerCase(); tuneApplyFilters();">
+            <div class="btn-group btn-group-sm" role="group">
+                <button type="button" class="btn btn-outline-secondary quick-filter-btn active-filter" data-qf="all" onclick="setQuickFilter('all')">All</button>
+                <button type="button" class="btn btn-outline-secondary quick-filter-btn" data-qf="never" onclick="setQuickFilter('never')">Never Triggered</button>
+                <button type="button" class="btn btn-outline-secondary quick-filter-btn" data-qf="noisy" onclick="setQuickFilter('noisy')">Noisy</button>
+                <button type="button" class="btn btn-outline-secondary quick-filter-btn" data-qf="excl" onclick="setQuickFilter('excl')">Has Exclusions</button>
+                <button type="button" class="btn btn-outline-secondary quick-filter-btn" data-qf="override" onclick="setQuickFilter('override')">Severity Overridden</button>
+            </div>
+            <span class="ms-auto text-muted small" id="rowCountLabel"></span>
+        </div>
+
+        <div class="table-responsive" style="max-height: 600px; overflow-y: auto;">
+            <table class="table table-dark table-hover table-sm align-middle" id="tuningTable">
+                <thead>
+                    <tr>
+                        <th class="th-label" style="cursor:pointer;" onclick="tuneToggleSort('title')">Rule Name <i class="fa-solid fa-sort sort-ic" id="sortIc-tune-title"></i></th>
+                        <th>Source</th>
+                        <th>Level</th>
+                        <th>Enabled</th>
+                        <th class="th-label" style="cursor:pointer;" onclick="tuneToggleSort('alerts_7d')">Alerts (7d) <i class="fa-solid fa-sort sort-ic" id="sortIc-tune-alerts_7d"></i></th>
+                        <th class="th-label" style="cursor:pointer;" onclick="tuneToggleSort('alerts_30d')">Alerts (30d) <i class="fa-solid fa-sort sort-ic" id="sortIc-tune-alerts_30d"></i></th>
+                        <th>Last Triggered</th>
+                        <th>Exclusions</th>
+                        <th>Noise</th>
+                        <th style="width:90px;"></th>
+                    </tr>
+                </thead>
+                <tbody id="tuningTableBody">
+                    <tr><td colspan="10" class="text-center text-muted py-4">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+</div>
+<!-- =========================== END DETECTION TUNING PANE =========================== -->
+
+<!-- ============================= REPORTS PANE ============================= -->
+<div id="paneReports" style="display: {{ 'block' if active_tab == 'reports' else 'none' }};">
+<div class="card shadow-sm border-secondary bg-dark text-light mb-4">
+    <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+        <h5 class="mb-0 text-info"><i class="fa-solid fa-folder-open"></i> Generated PDF Reports</h5>
+        <form method="POST" action="{{ url_for('trigger_report') }}" class="m-0">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm btn-outline-success"><i class="fa-solid fa-bolt"></i> Generate New Report</button>
+        </form>
+    </div>
+    <div class="card-body">
+        {% if reports %}
+        <div class="table-responsive">
+            <table class="table table-dark table-hover table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th>File Name</th>
+                        <th class="text-end">Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for r in reports %}
+                    <tr>
+                        <td><i class="fa-regular fa-file-pdf text-danger me-2"></i> {{ r }}</td>
+                        <td class="text-end">
+                            <a href="{{ url_for('download_report', filename=r) }}" class="btn btn-sm btn-outline-primary"><i class="fa-solid fa-download"></i> Download</a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <p class="text-muted small mb-0"><i class="fa-solid fa-circle-info text-info me-1"></i> No reports generated yet. Automated reports run on the 1st of every month.</p>
+        {% endif %}
+    </div>
+</div>
+</div>
+<!-- =========================== END REPORTS PANE =========================== -->
+
+<!-- FIELD MANAGER MODAL (Log Search) -->
 <div class="modal fade" id="fieldManagerModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content bg-dark text-light border-secondary">
@@ -227,7 +579,7 @@ function updateFilters() {
   </div>
 </div>
 
-<!-- LOG DETAIL MODAL -->
+<!-- LOG DETAIL MODAL (Log Search) -->
 <div class="modal fade" id="logDetailModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-lg modal-dialog-scrollable">
     <div class="modal-content bg-dark text-light border-secondary">
@@ -240,36 +592,251 @@ function updateFilters() {
   </div>
 </div>
 
-<!-- LOGS TABLE -->
-<div class="card bg-dark border-secondary">
-    <div class="card-body p-0">
-        <div class="table-responsive">
-            <table class="table table-dark table-striped table-hover mb-0 align-middle">
-                <thead>
-                    <tr>
-                        <th>Time</th>
-                        <th>Type</th>
-                        <th>Sev</th>
-                        <th>Host</th>
-                        <th>App</th>
-                        <th>Event ID</th>
-                        <th>User</th>
-                        <th>Src IP</th>
-                        <th>Message</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr><td colspan="9" class="text-center text-muted py-4">Loading logs...</td></tr>
-                </tbody>
-            </table>
+<!-- RULE EDITOR MODAL (Detection Rules) -->
+<div class="modal fade" id="ruleModal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title" id="ruleModalTitle">New Custom Rule</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div id="ruleMetaBox" class="small text-muted mb-2" style="display:none;"></div>
+        <div id="ruleReadonlyNotice" class="alert alert-secondary py-2 small" style="display:none;"><i class="fa-solid fa-lock me-1"></i>Sigma-sourced rules are read-only. Clone this rule to create an editable custom copy.</div>
+
+        <div id="ruleComplianceBox" class="mb-3" style="display:none;">
+            <label class="form-label small text-muted mb-1">Compliance Frameworks <span class="text-muted">— manually tag which frameworks this detection helps satisfy</span></label>
+            <div id="complianceChecklist" class="d-flex flex-wrap gap-3 mb-2"></div>
+            <button type="button" class="btn btn-sm btn-outline-primary" id="complianceSaveBtn" onclick="saveComplianceTags()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Compliance Tags</button>
+            <span id="complianceSaveMsg" class="small text-success ms-2" style="display:none;">Saved.</span>
         </div>
+
+        <ul class="nav nav-tabs border-secondary mb-3" id="ruleEditorTabs">
+            <li class="nav-item"><button type="button" class="nav-link active" id="tabBtnBuilder" onclick="switchRuleTab('builder')">Guided Builder</button></li>
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnYaml" onclick="switchRuleTab('yaml')">Raw YAML</button></li>
+        </ul>
+
+        <!-- Guided Builder pane -->
+        <div id="paneBuilder">
+            <div class="row g-2 mb-3">
+                <div class="col-md-6">
+                    <label class="form-label small text-muted mb-1">Rule Title</label>
+                    <input type="text" id="bTitle" class="form-control bg-dark text-light border-secondary" placeholder="e.g. Multiple Failed Logins Followed by Success" oninput="renderYamlPreview()">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small text-muted mb-1">Severity</label>
+                    <select id="bSeverity" class="form-select bg-dark text-light border-secondary" onchange="renderYamlPreview()">
+                        <option value="informational">Informational</option>
+                        <option value="low">Low</option>
+                        <option value="medium" selected>Medium</option>
+                        <option value="high">High</option>
+                        <option value="critical">Critical</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small text-muted mb-1">Platform / Log Source</label>
+                    <input type="text" id="bPlatform" class="form-control bg-dark text-light border-secondary" placeholder="custom" oninput="renderYamlPreview()">
+                </div>
+                <div class="col-md-8">
+                    <label class="form-label small text-muted mb-1">Description</label>
+                    <input type="text" id="bDescription" class="form-control bg-dark text-light border-secondary" placeholder="What this rule detects and why it matters" oninput="renderYamlPreview()">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small text-muted mb-1">MITRE ATT&CK Tags (comma-separated)</label>
+                    <input type="text" id="bMitre" class="form-control bg-dark text-light border-secondary" placeholder="attack.t1110, attack.brute-force" oninput="renderYamlPreview()">
+                </div>
+            </div>
+
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <label class="form-label small text-muted mb-0">Match Conditions <span class="text-muted">— facts this rule looks for</span></label>
+                <div id="groupCombineWrap" style="display:none;">
+                    <span class="small text-muted me-1">Combine groups with:</span>
+                    <select id="bCombine" class="form-select form-select-sm bg-dark text-light border-secondary d-inline-block w-auto" onchange="builderState.combine = this.value; renderYamlPreview();">
+                        <option value="or">ANY group matches (OR)</option>
+                        <option value="and">ALL groups match (AND)</option>
+                    </select>
+                </div>
+            </div>
+            <div id="matchGroups"></div>
+            <button type="button" class="btn btn-sm btn-outline-primary mb-3" onclick="addGroup()"><i class="fa-solid fa-plus me-1"></i> Add OR Group</button>
+
+            <div class="mb-2">
+                <label class="form-label small text-muted mb-0">Exclude <span class="text-muted">— suppress the alert if these also match (optional)</span></label>
+            </div>
+            <div id="excludeGroup"></div>
+            <button type="button" class="btn btn-sm btn-outline-secondary mb-3" id="addExcludeBtn" onclick="enableExclude()"><i class="fa-solid fa-plus me-1"></i> Add Exclusion</button>
+
+            <label class="form-label small text-muted mb-1">Generated YAML Preview</label>
+            <pre id="yamlPreview" class="bg-black border border-secondary rounded p-2 small font-monospace" style="max-height:180px; overflow-y:auto; white-space:pre-wrap;"></pre>
+        </div>
+
+        <!-- Raw YAML pane -->
+        <div id="paneYaml" style="display:none;">
+            <p class="text-muted small">Paste or edit a Sigma rule in YAML format. The rule's <code>title</code> field is used as its display name.</p>
+            <textarea id="ruleYamlInput" class="form-control bg-black text-light border-secondary font-monospace small" rows="18" spellcheck="false" placeholder="title: My Detection Rule&#10;status: experimental&#10;logsource:&#10;  product: windows&#10;  category: process_creation&#10;detection:&#10;  selection:&#10;    CommandLine|contains: 'example'&#10;  condition: selection"></textarea>
+        </div>
+
+        <div id="ruleEditorError" class="text-danger small mt-2" style="display:none;"></div>
+        <div id="ruleHistoryBox" class="mt-3" style="display:none;">
+            <h6 class="text-info mb-2"><i class="fa-solid fa-clock-rotate-left me-1"></i>Edit History</h6>
+            <div id="ruleHistoryList" class="small"></div>
+        </div>
+      </div>
+      <div class="modal-footer border-secondary">
+        <button type="button" class="btn btn-outline-secondary me-auto" id="ruleHistoryBtn" style="display:none;" onclick="toggleHistory()"><i class="fa-solid fa-clock-rotate-left me-1"></i> View History</button>
+        <button type="button" class="btn btn-outline-warning" id="ruleCloneBtn" style="display:none;" onclick="cloneFromModal()"><i class="fa-solid fa-copy me-1"></i> Clone to Edit</button>
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="ruleSaveBtn" onclick="saveRule()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Rule</button>
+      </div>
     </div>
+  </div>
 </div>
 
+<!-- TUNE RULE MODAL (Detection Tuning) -->
+<div class="modal fade" id="tuneModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title" id="tuneModalTitle">Tune Rule</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="d-flex flex-wrap gap-3 mb-3 small text-muted" id="tuneStatsRow"></div>
+
+        <h6 class="text-info mb-2"><i class="fa-solid fa-gauge-high me-1"></i>Severity Scoring</h6>
+        <div class="d-flex align-items-center gap-2 mb-4">
+            <select id="tuneSeveritySelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                <option value="">Inherit from rule level</option>
+                <option value="critical">Critical</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+                <option value="informational">Informational</option>
+            </select>
+            {% if current_user.role == 'admin' %}
+            <button type="button" class="btn btn-sm btn-outline-primary" onclick="saveSeverity()"><i class="fa-solid fa-floppy-disk me-1"></i> Save</button>
+            <span id="tuneSeverityMsg" class="small text-success" style="display:none;"></span>
+            {% endif %}
+        </div>
+
+        <h6 class="text-info mb-2"><i class="fa-solid fa-filter-circle-xmark me-1"></i>Exclusions <span class="text-muted small">— suppress alerts from this rule when a match also satisfies one of these</span></h6>
+        <div class="table-responsive mb-2">
+            <table class="table table-dark table-sm align-middle mb-2">
+                <thead><tr><th>Field</th><th>Operator</th><th>Value</th><th>Description</th><th>Enabled</th><th></th></tr></thead>
+                <tbody id="exclusionsTableBody"><tr><td colspan="6" class="text-muted small">No exclusions yet.</td></tr></tbody>
+            </table>
+        </div>
+        {% if current_user.role == 'admin' %}
+        <div class="row g-2 align-items-end bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
+            <div class="col-md-2">
+                <label class="form-label small text-muted mb-1">Field</label>
+                <select id="exclField" class="form-select form-select-sm bg-dark text-light border-secondary"></select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small text-muted mb-1">Operator</label>
+                <select id="exclOp" class="form-select form-select-sm bg-dark text-light border-secondary"></select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small text-muted mb-1">Value</label>
+                <input type="text" id="exclValue" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. svc-backup">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small text-muted mb-1">Description (optional)</label>
+                <input type="text" id="exclDescription" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Why this is excluded">
+            </div>
+            <div class="col-md-2">
+                <button type="button" class="btn btn-sm btn-outline-primary w-100" onclick="addExclusion()"><i class="fa-solid fa-plus me-1"></i> Add</button>
+            </div>
+        </div>
+        <div id="exclError" class="text-danger small mt-2" style="display:none;"></div>
+        {% endif %}
+      </div>
+      <div class="modal-footer border-secondary">
+        {% if current_user.role == 'admin' %}
+        <button type="button" class="btn btn-outline-warning me-auto" id="tuneToggleBtn" onclick="toggleTuneRuleEnabled()"></button>
+        {% endif %}
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
 <script>
+// =====================================================================
+// SHARED STAT ROW + TAB SWITCHING
+// =====================================================================
+function setStatTile(i, label, value, large) {
+    const lEl = document.getElementById('statLabel' + i);
+    const vEl = document.getElementById('statValue' + i);
+    if (lEl) lEl.innerText = label;
+    if (vEl) { vEl.innerText = value; vEl.style.fontSize = large ? '1.05rem' : ''; }
+}
+
+const REPORTS_DATA = { total: {{ reports|length }}, latest: {{ (reports[0].replace('Security_Report_', '').replace('.pdf', '').replace('_', '-') if reports else 'None yet')|tojson }} };
+let searchStats = {};
+let pipelineStats = {};
+
+function updateSharedStats(tab) {
+    if (tab === 'search') {
+        setStatTile(0, 'Total Matches', searchStats.totalMatches ?? '—');
+        setStatTile(1, 'Alerts/Anomalies (this page)', searchStats.alertCount ?? '—');
+        setStatTile(2, 'Unique Hosts (this page)', searchStats.uniqueHosts ?? '—');
+        setStatTile(3, 'Time Window', searchStats.timeWindow ?? '—', true);
+    } else if (tab === 'pipeline') {
+        setStatTile(0, 'Active Drop Rules', pipelineStats.activeDropRules ?? '—');
+        setStatTile(1, 'Total Drop Rules', pipelineStats.totalDropRules ?? '—');
+        setStatTile(2, 'Log Channels Active', pipelineStats.channelsActive ?? '—');
+        setStatTile(3, 'Total Channels', 6);
+    } else if (tab === 'rules') {
+        const enabledCount = allRules.filter(r => r.enabled).length;
+        setStatTile(0, 'Total Rules', allRules.length);
+        setStatTile(1, 'Enabled', enabledCount);
+        setStatTile(2, 'Disabled', allRules.length - enabledCount);
+        setStatTile(3, 'Platforms Covered', new Set(allRules.map(r => r.platform)).size);
+    } else if (tab === 'tuning') {
+        setStatTile(0, 'Enabled Rules', allTuning.filter(r => r.enabled).length);
+        setStatTile(1, 'Never Triggered', allTuning.filter(r => r.alerts_total === 0 && r.enabled).length);
+        setStatTile(2, 'Noisy (7d ≥ 50 alerts)', allTuning.filter(r => r.alerts_7d >= 50).length);
+        setStatTile(3, 'Active Exclusions', allTuning.reduce((sum, r) => sum + (r.exclusion_count || 0), 0));
+    } else if (tab === 'reports') {
+        setStatTile(0, 'Total Reports', REPORTS_DATA.total);
+        setStatTile(1, 'Latest Report', REPORTS_DATA.latest, true);
+        setStatTile(2, 'Auto-Generation', '1st of month', true);
+        setStatTile(3, 'Format', 'PDF', true);
+    }
+}
+
+const SIEM_TABS = ['search', 'pipeline', 'rules', 'tuning', 'reports'];
+let siemTabLoaded = { search: false, pipeline: false, rules: false, tuning: false, reports: false };
+
+function siemTabCap(tab) { return tab.charAt(0).toUpperCase() + tab.slice(1); }
+
+function switchSiemTab(tab) {
+    if (!SIEM_TABS.includes(tab)) return;
+    SIEM_TABS.forEach(t => {
+        document.getElementById('tabBtn' + siemTabCap(t)).classList.toggle('active', t === tab);
+        document.getElementById('pane' + siemTabCap(t)).style.display = (t === tab) ? 'block' : 'none';
+    });
+    if (!siemTabLoaded[tab]) {
+        siemTabLoaded[tab] = true;
+        if (tab === 'search') initSearchTab();
+        else if (tab === 'pipeline') initPipelineTab();
+        else if (tab === 'rules') initRulesTab();
+        else if (tab === 'tuning') initTuningTab();
+        else if (tab === 'reports') initReportsTab();
+    } else {
+        updateSharedStats(tab);
+    }
+    try { localStorage.setItem('microdfir_siem_active_tab', tab); } catch (e) {}
+}
+
+// =====================================================================
+// LOG SEARCH TAB
+// =====================================================================
 let timelineChart = null;
 
-// ---- Time Window: presets, custom absolute range, favorites (saved in localStorage) ----
 let timeRangeState = { range: '5m', start: '', end: '' };
 const RANGE_LABELS = {
     '5m': 'Last 5m', '15m': 'Last 15m', '30m': 'Last 30m', '1h': 'Last 1h', '4h': 'Last 4h',
@@ -370,15 +937,6 @@ function deleteFavorite(i) {
     saveFavoritesList(favs);
     renderFavorites();
 }
-
-document.addEventListener("DOMContentLoaded", function() {
-    initChart();
-    setTimeRangeLabel();
-    markActivePresetBtn(timeRangeState.range);
-    renderFavorites();
-    loadDashboardData();
-    // streamInterval = setInterval(autoStreamLogs, 5000); // Disabled on load
-});
 
 function initChart() {
     const ctx = document.getElementById('logTimelineChart').getContext('2d');
@@ -580,12 +1138,13 @@ window.loadLogs = function() {
 
             const logs = data.logs || [];
             currentLogs = logs;
-            document.getElementById('statTotalMatches').innerText = data.total_matches !== undefined ? data.total_matches : data.count;
-            document.getElementById('statAlertCount').innerText = logs.filter(l => l.type === 'alert' || l.type === 'anomaly').length;
-            document.getElementById('statUniqueHosts').innerText = new Set(logs.map(l => l.host)).size;
-            document.getElementById('statTimeWindow').innerText = timeRangeState.range === 'custom' ? 'Custom' : (RANGE_LABELS[timeRangeState.range] || timeRangeState.range);
+            searchStats.totalMatches = data.total_matches !== undefined ? data.total_matches : data.count;
+            searchStats.alertCount = logs.filter(l => l.type === 'alert' || l.type === 'anomaly').length;
+            searchStats.uniqueHosts = new Set(logs.map(l => l.host)).size;
+            searchStats.timeWindow = timeRangeState.range === 'custom' ? 'Custom' : (RANGE_LABELS[timeRangeState.range] || timeRangeState.range);
+            updateSharedStats('search');
 
-            let tbody = document.querySelector('tbody');
+            let tbody = document.querySelector('#paneSearch tbody');
             if (!tbody) return;
             if (!data.logs || data.logs.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-3">No logs match current filters.</td></tr>';
@@ -656,8 +1215,8 @@ function toggleStream() {
 }
 
 function autoStreamLogs() {
-    if (isStreaming && typeof loadDashboardData === 'function') { 
-        loadDashboardData(); 
+    if (isStreaming && typeof loadDashboardData === 'function') {
+        loadDashboardData();
     }
 }
 
@@ -682,13 +1241,6 @@ function renderFieldList() {
         `;
         listGroup.appendChild(li);
     }
-}
-
-const modalEl = document.getElementById('fieldManagerModal');
-if (modalEl) {
-    modalEl.addEventListener('show.bs.modal', function () {
-        renderFieldList();
-    });
 }
 
 function editField(key, label) {
@@ -747,11 +1299,1144 @@ function deleteField(key) {
 function updateFilters() {
     let apps = Array.from(document.querySelectorAll('.app-chk:checked')).map(c => c.value);
     document.getElementById('appFilterLabel').innerText = apps.length > 0 ? apps.join(', ') : 'All Apps';
-    
+
     let sevs = Array.from(document.querySelectorAll('.sev-chk:checked')).map(c => c.value);
     document.getElementById('sevFilterLabel').innerText = sevs.length > 0 ? sevs.join(', ') : 'Sev';
-    
+
     if (typeof loadDashboardData === 'function') { loadDashboardData(); }
 }
+
+const modalEl = document.getElementById('fieldManagerModal');
+if (modalEl) {
+    modalEl.addEventListener('show.bs.modal', function () {
+        renderFieldList();
+    });
+}
+
+function initSearchTab() {
+    initChart();
+    setTimeRangeLabel();
+    markActivePresetBtn(timeRangeState.range);
+    renderFavorites();
+    loadDashboardData();
+}
+
+// =====================================================================
+// LOG PIPELINE TAB
+// =====================================================================
+function loadDropRules() {
+    fetch('/api/droprules')
+        .then(r => r.json())
+        .then(data => {
+            pipelineStats.activeDropRules = Array.isArray(data) ? data.filter(r => r.enabled).length : 0;
+            pipelineStats.totalDropRules = Array.isArray(data) ? data.length : 0;
+            updateSharedStats('pipeline');
+            let tbody = document.getElementById('dropRulesTableBody');
+            if (!Array.isArray(data) || data.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">No drop rules configured.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = data.map(r => `
+                <tr>
+                    <td>${r.id}</td>
+                    <td><code>${r.field} ${r.operator} "${r.value}"</code></td>
+                    <td>${r.description || ''}</td>
+                    <td>
+                        <div class="form-check form-switch mb-0">
+                            <input class="form-check-input" type="checkbox" ${r.enabled ? 'checked' : ''} onchange="toggleDropRule(${r.id})">
+                        </div>
+                    </td>
+                    <td><button class="btn btn-sm btn-outline-danger py-0 px-2" onclick="deleteDropRule(${r.id})"><i class="fa-solid fa-trash"></i></button></td>
+                </tr>
+            `).join('');
+        }).catch(err => console.error("Error loading drop rules:", err));
+}
+
+function addDropRule() {
+    let field = document.getElementById('dropField').value;
+    let operator = document.getElementById('dropOp').value;
+    let value = document.getElementById('dropVal').value.trim();
+    let description = document.getElementById('dropDesc').value.trim();
+    if (!value) { alert('Match value is required.'); return; }
+
+    fetch('/api/droprules', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({field, operator, value, description})
+    }).then(r => r.json()).then(() => {
+        document.getElementById('dropVal').value = '';
+        document.getElementById('dropDesc').value = '';
+        loadDropRules();
+    }).catch(err => alert('Error adding rule: ' + err));
+}
+
+function toggleDropRule(id) {
+    fetch(`/api/droprules/${id}/toggle`, { method: 'PUT' }).then(() => loadDropRules());
+}
+
+function deleteDropRule(id) {
+    if (confirm('Delete this drop rule?')) {
+        fetch(`/api/droprules/${id}`, { method: 'DELETE' }).then(() => loadDropRules());
+    }
+}
+
+function loadChannelSettings() {
+    fetch('/api/agent/channels')
+        .then(r => r.json())
+        .then(data => {
+            if(document.getElementById('chk_security')) document.getElementById('chk_security').checked = !!data.Security;
+            if(document.getElementById('chk_system')) document.getElementById('chk_system').checked = !!data.System;
+            if(document.getElementById('chk_app')) document.getElementById('chk_app').checked = !!data.Application;
+            if(document.getElementById('chk_ps')) document.getElementById('chk_ps').checked = !!data.PowerShell;
+            if(document.getElementById('chk_sysmon')) document.getElementById('chk_sysmon').checked = !!data.Sysmon;
+            if(document.getElementById('chk_def')) document.getElementById('chk_def').checked = !!data.WindowsDefender;
+            pipelineStats.channelsActive = Object.values(data).filter(Boolean).length;
+            updateSharedStats('pipeline');
+        }).catch(err => console.error("Error loading channels:", err));
+}
+
+function saveChannels() {
+    let payload = {
+        'Security': document.getElementById('chk_security').checked,
+        'System': document.getElementById('chk_system').checked,
+        'Application': document.getElementById('chk_app').checked,
+        'PowerShell': document.getElementById('chk_ps').checked,
+        'Sysmon': document.getElementById('chk_sysmon').checked,
+        'WindowsDefender': document.getElementById('chk_def').checked
+    };
+
+    fetch('/api/agent/channels', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+    }).then(r => r.json()).then(res => {
+        let msg = document.getElementById('saveSuccessMsg');
+        if (msg) {
+            msg.style.display = 'block';
+            setTimeout(() => { msg.style.display = 'none'; }, 3000);
+        }
+        loadChannelSettings();
+    }).catch(err => alert('Error saving channels: ' + err));
+}
+
+function initPipelineTab() {
+    loadDropRules();
+    loadChannelSettings();
+}
+
+// =====================================================================
+// DETECTION RULES TAB
+// =====================================================================
+const IS_ADMIN = {{ 'true' if current_user.role == 'admin' else 'false' }};
+let allRules = [];
+let selectedIds = new Set();
+
+const COMPLIANCE_FRAMEWORKS = [
+    {value: 'pci_dss', label: 'PCI DSS'},
+    {value: 'hipaa', label: 'HIPAA'},
+    {value: 'nist_800_53', label: 'NIST 800-53'},
+    {value: 'nist_csf', label: 'NIST CSF'},
+    {value: 'iso_27001', label: 'ISO 27001'},
+    {value: 'soc2', label: 'SOC 2'},
+    {value: 'cis_controls', label: 'CIS Controls'},
+    {value: 'gdpr', label: 'GDPR'}
+];
+const COMPLIANCE_LABELS = Object.fromEntries(COMPLIANCE_FRAMEWORKS.map(f => [f.value, f.label]));
+
+function escAttr(s) {
+    return (s === null || s === undefined) ? '' : String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// ---- Guided rule builder ----
+const BUILDER_FIELDS = [
+    {value: 'Host', label: 'Host'},
+    {value: 'Channel', label: 'Log Channel / App'},
+    {value: 'EventID', label: 'Event ID'},
+    {value: 'User', label: 'Username'},
+    {value: 'SourceIp', label: 'Source IP'},
+    {value: 'DestinationIp', label: 'Destination IP'},
+    {value: 'Message', label: 'Message contains text'}
+];
+const BUILDER_OPS = [
+    {value: '', label: 'equals'},
+    {value: 'contains', label: 'contains'},
+    {value: 'startswith', label: 'starts with'},
+    {value: 'endswith', label: 'ends with'}
+];
+let builderState = { groups: [[{field: 'Host', op: '', value: ''}]], combine: 'or', excludeEnabled: false, exclude: [] };
+let activeRuleTab = 'builder';
+
+function switchRuleTab(tab) {
+    activeRuleTab = tab;
+    const isBuilder = tab === 'builder';
+    document.getElementById('tabBtnBuilder').classList.toggle('active', isBuilder);
+    document.getElementById('tabBtnYaml').classList.toggle('active', !isBuilder);
+    document.getElementById('paneBuilder').style.display = isBuilder ? 'block' : 'none';
+    document.getElementById('paneYaml').style.display = isBuilder ? 'none' : 'block';
+    if (isBuilder) renderYamlPreview();
+}
+
+function conditionRowHtml(gi, ri, cond, isExclude) {
+    const fieldOpts = BUILDER_FIELDS.map(f => `<option value="${f.value}" ${cond.field === f.value ? 'selected' : ''}>${f.label}</option>`).join('');
+    const opOpts = BUILDER_OPS.map(o => `<option value="${o.value}" ${cond.op === o.value ? 'selected' : ''}>${o.label}</option>`).join('');
+    const removeFn = isExclude ? `removeExcludeRow(${ri})` : `removeCondRow(${gi}, ${ri})`;
+    const fieldFn = isExclude ? `updateExcludeField(${ri}, this.value)` : `updateCondField(${gi}, ${ri}, this.value)`;
+    const opFn = isExclude ? `updateExcludeOp(${ri}, this.value)` : `updateCondOp(${gi}, ${ri}, this.value)`;
+    const valFn = isExclude ? `updateExcludeValue(${ri}, this.value)` : `updateCondValue(${gi}, ${ri}, this.value)`;
+    const safeVal = (cond.value || '').replace(/"/g, '&quot;');
+    return `
+        <div class="row g-2 mb-2 align-items-center">
+            <div class="col-md-3"><select class="form-select form-select-sm bg-dark text-light border-secondary" onchange="${fieldFn}">${fieldOpts}</select></div>
+            <div class="col-md-2"><select class="form-select form-select-sm bg-dark text-light border-secondary" onchange="${opFn}">${opOpts}</select></div>
+            <div class="col-md-6"><input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="value" value="${safeVal}" oninput="${valFn}"></div>
+            <div class="col-md-1"><button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" onclick="${removeFn}"><i class="fa-solid fa-xmark"></i></button></div>
+        </div>
+    `;
+}
+
+function renderGroups() {
+    const wrap = document.getElementById('matchGroups');
+    wrap.innerHTML = builderState.groups.map((rows, gi) => `
+        <div class="border border-secondary rounded p-2 mb-2">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+                <span class="small text-info fw-bold">Group ${gi + 1} <span class="text-muted fw-normal">(all conditions in this group must match)</span></span>
+                ${builderState.groups.length > 1 ? `<button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" onclick="removeGroup(${gi})"><i class="fa-solid fa-trash"></i></button>` : ''}
+            </div>
+            ${rows.map((cond, ri) => conditionRowHtml(gi, ri, cond, false)).join('')}
+            <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 mt-1" onclick="addCondRow(${gi})"><i class="fa-solid fa-plus"></i> Add Condition</button>
+        </div>
+    `).join('');
+    document.getElementById('groupCombineWrap').style.display = builderState.groups.length > 1 ? 'block' : 'none';
+    document.getElementById('bCombine').value = builderState.combine;
+    renderYamlPreview();
+}
+
+function addGroup() { builderState.groups.push([{field: 'Host', op: '', value: ''}]); renderGroups(); }
+function removeGroup(gi) { builderState.groups.splice(gi, 1); renderGroups(); }
+function addCondRow(gi) { builderState.groups[gi].push({field: 'Host', op: '', value: ''}); renderGroups(); }
+function removeCondRow(gi, ri) {
+    builderState.groups[gi].splice(ri, 1);
+    if (builderState.groups[gi].length === 0) builderState.groups[gi].push({field: 'Host', op: '', value: ''});
+    renderGroups();
+}
+function updateCondField(gi, ri, val) { builderState.groups[gi][ri].field = val; renderYamlPreview(); }
+function updateCondOp(gi, ri, val) { builderState.groups[gi][ri].op = val; renderYamlPreview(); }
+function updateCondValue(gi, ri, val) { builderState.groups[gi][ri].value = val; renderYamlPreview(); }
+
+function enableExclude() {
+    builderState.excludeEnabled = true;
+    if (builderState.exclude.length === 0) builderState.exclude.push({field: 'Host', op: '', value: ''});
+    document.getElementById('addExcludeBtn').style.display = 'none';
+    renderExclude();
+}
+function disableExclude() {
+    builderState.excludeEnabled = false;
+    builderState.exclude = [];
+    document.getElementById('addExcludeBtn').style.display = 'inline-block';
+    renderExclude();
+}
+function renderExclude() {
+    const wrap = document.getElementById('excludeGroup');
+    if (!builderState.excludeEnabled) { wrap.innerHTML = ''; renderYamlPreview(); return; }
+    wrap.innerHTML = `
+        <div class="border border-secondary rounded p-2 mb-2">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+                <span class="small text-warning fw-bold">Exclude if all match</span>
+                <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" onclick="disableExclude()"><i class="fa-solid fa-trash"></i></button>
+            </div>
+            ${builderState.exclude.map((cond, ri) => conditionRowHtml(0, ri, cond, true)).join('')}
+            <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 mt-1" onclick="addExcludeRow()"><i class="fa-solid fa-plus"></i> Add Condition</button>
+        </div>
+    `;
+    renderYamlPreview();
+}
+function addExcludeRow() { builderState.exclude.push({field: 'Host', op: '', value: ''}); renderExclude(); }
+function removeExcludeRow(ri) {
+    builderState.exclude.splice(ri, 1);
+    if (builderState.exclude.length === 0) { disableExclude(); return; }
+    renderExclude();
+}
+function updateExcludeField(ri, val) { builderState.exclude[ri].field = val; renderYamlPreview(); }
+function updateExcludeOp(ri, val) { builderState.exclude[ri].op = val; renderYamlPreview(); }
+function updateExcludeValue(ri, val) { builderState.exclude[ri].value = val; renderYamlPreview(); }
+
+function yamlQuote(s) {
+    return "'" + String(s == null ? '' : s).replace(/'/g, "''") + "'";
+}
+
+function buildDetectionYaml() {
+    const lines = [];
+    const groupNames = [];
+    builderState.groups.forEach((rows, gi) => {
+        const validRows = rows.filter(r => r.value && r.value.trim() !== '');
+        if (validRows.length === 0) return;
+        const name = `sel${gi + 1}`;
+        groupNames.push(name);
+        lines.push(`  ${name}:`);
+        validRows.forEach(r => {
+            const key = r.op ? `${r.field}|${r.op}` : r.field;
+            lines.push(`    ${key}: ${yamlQuote(r.value)}`);
+        });
+    });
+
+    let excludeName = null;
+    if (builderState.excludeEnabled) {
+        const validExclude = builderState.exclude.filter(r => r.value && r.value.trim() !== '');
+        if (validExclude.length > 0) {
+            excludeName = 'filter1';
+            lines.push(`  ${excludeName}:`);
+            validExclude.forEach(r => {
+                const key = r.op ? `${r.field}|${r.op}` : r.field;
+                lines.push(`    ${key}: ${yamlQuote(r.value)}`);
+            });
+        }
+    }
+
+    if (groupNames.length === 0) return null;
+    let condition = groupNames.length === 1 ? groupNames[0] : `(${groupNames.join(builderState.combine === 'and' ? ' and ' : ' or ')})`;
+    if (excludeName) condition = `${condition} and not ${excludeName}`;
+    lines.push(`  condition: ${condition}`);
+    return lines.join('\n');
+}
+
+function generateYamlFromBuilder() {
+    const detectionBlock = buildDetectionYaml();
+    if (!detectionBlock) return null;
+
+    const title = document.getElementById('bTitle').value.trim() || 'Untitled Custom Rule';
+    const severity = document.getElementById('bSeverity').value;
+    const platform = document.getElementById('bPlatform').value.trim() || 'custom';
+    const description = document.getElementById('bDescription').value.trim();
+    const mitreRaw = document.getElementById('bMitre').value.trim();
+
+    const parts = [];
+    parts.push(`title: ${yamlQuote(title)}`);
+    if (description) parts.push(`description: ${yamlQuote(description)}`);
+    parts.push('status: experimental');
+    parts.push(`level: ${severity}`);
+    parts.push('logsource:');
+    parts.push('  category: custom');
+    parts.push(`  product: ${yamlQuote(platform)}`);
+    parts.push('detection:');
+    parts.push(detectionBlock);
+    if (mitreRaw) {
+        const tags = mitreRaw.split(',').map(t => t.trim()).filter(Boolean);
+        if (tags.length) {
+            parts.push('tags:');
+            tags.forEach(t => parts.push(`  - ${t}`));
+        }
+    }
+    return parts.join('\n') + '\n';
+}
+
+function renderYamlPreview() {
+    const yaml = generateYamlFromBuilder();
+    document.getElementById('yamlPreview').innerText = yaml || '(Add at least one condition with a value to generate the rule)';
+}
+
+function resetBuilderState() {
+    builderState = { groups: [[{field: 'Host', op: '', value: ''}]], combine: 'or', excludeEnabled: false, exclude: [] };
+    document.getElementById('bTitle').value = '';
+    document.getElementById('bSeverity').value = 'medium';
+    document.getElementById('bPlatform').value = '';
+    document.getElementById('bDescription').value = '';
+    document.getElementById('bMitre').value = '';
+    document.getElementById('addExcludeBtn').style.display = 'inline-block';
+    renderGroups();
+    renderExclude();
+}
+
+const LEVEL_BADGE = {
+    critical: 'bg-danger', high: 'bg-danger', medium: 'bg-warning text-dark',
+    low: 'bg-info text-dark', informational: 'bg-secondary'
+};
+const STATUS_BADGE = {
+    stable: 'bg-success', test: 'bg-info text-dark', experimental: 'bg-secondary',
+    deprecated: 'bg-warning text-dark', unsupported: 'bg-danger'
+};
+
+function complianceTagsHtml(tags) {
+    tags = tags || [];
+    if (!tags.length) return '<span class="text-muted">—</span>';
+    const shown = tags.slice(0, 2);
+    const extra = tags.length - shown.length;
+    const rest = tags.slice(2).map(t => COMPLIANCE_LABELS[t] || t).join(', ');
+    return `<div class="rule-tags-row">${shown.map(t => `<span class="badge bg-success bg-opacity-25 text-light border border-success me-1" style="font-size:.65rem;">${COMPLIANCE_LABELS[t] || t}</span>`).join('')}${extra > 0 ? `<span class="badge bg-secondary" style="font-size:.65rem;" title="${rest}">+${extra}</span>` : ''}</div>`;
+}
+
+function renderComplianceChecklist(selected) {
+    selected = selected || [];
+    document.getElementById('complianceChecklist').innerHTML = COMPLIANCE_FRAMEWORKS.map(f => `
+        <div class="form-check">
+            <input class="form-check-input compliance-chk" type="checkbox" value="${f.value}" id="compl_${f.value}" ${selected.includes(f.value) ? 'checked' : ''} ${IS_ADMIN ? '' : 'disabled'}>
+            <label class="form-check-label small" for="compl_${f.value}">${f.label}</label>
+        </div>
+    `).join('');
+    document.getElementById('complianceSaveBtn').style.display = IS_ADMIN ? 'inline-block' : 'none';
+}
+
+async function saveComplianceTags() {
+    if (!editingRuleId) return;
+    const tags = Array.from(document.querySelectorAll('.compliance-chk:checked')).map(cb => cb.value);
+    try {
+        const res = await fetch(`/api/rules/${editingRuleId}/compliance`, {
+            method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({tags})
+        });
+        const data = await res.json();
+        if (!res.ok) { alert(data.error || 'Failed to save compliance tags.'); return; }
+        const msg = document.getElementById('complianceSaveMsg');
+        msg.style.display = 'inline';
+        setTimeout(() => { msg.style.display = 'none'; }, 3000);
+        ld();
+    } catch (e) {
+        alert('Error saving compliance tags: ' + e);
+    }
+}
+
+// ---- Per-column filters (multi-select with in-menu search), sorting, resize ----
+let colFilters = { source: [], platform: [], mitre: [], compliance: [], level: [], status: [], enabled: [], q: '' };
+let sortState = { key: null, dir: 'asc' };
+
+function buildMultiFilterMenu(menuId, colKey, options) {
+    const menu = document.getElementById(menuId);
+    let html = `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-2" placeholder="Search..." oninput="filterMenuOptions('${menuId}', this.value)">`;
+    html += `<div class="d-flex justify-content-between align-items-center mb-1 px-1">
+        <button type="button" class="btn btn-link btn-sm p-0 small" onclick="selectAllVisibleMenuOptions('${menuId}','${colKey}')">Select all visible</button>
+        <button type="button" class="btn btn-link btn-sm p-0 small text-secondary" onclick="clearMenuOptions('${menuId}','${colKey}')">Clear</button>
+    </div>`;
+    html += `<div class="menu-option-list" style="max-height:220px; overflow-y:auto;">`;
+    if (!options.length) {
+        html += `<div class="text-muted small px-1">No options</div>`;
+    }
+    options.forEach((o, i) => {
+        const checked = colFilters[colKey].includes(o.value) ? 'checked' : '';
+        const cbId = `${menuId}_chk${i}`;
+        const safeVal = String(o.value).replace(/"/g, '&quot;');
+        html += `<div class="form-check menu-option-item" data-search="${o.label.toLowerCase()}">
+            <input class="form-check-input" type="checkbox" data-value="${safeVal}" id="${cbId}" ${checked} onchange="toggleMultiFilter('${colKey}', this.dataset.value, this.checked)">
+            <label class="form-check-label small" for="${cbId}">${o.label}</label>
+        </div>`;
+    });
+    html += `</div>`;
+    menu.innerHTML = html;
+}
+
+function filterMenuOptions(menuId, q) {
+    q = q.toLowerCase();
+    document.querySelectorAll(`#${menuId} .menu-option-item`).forEach(el => {
+        el.style.display = el.dataset.search.includes(q) ? '' : 'none';
+    });
+}
+
+function updateFilterButtonState(colKey) {
+    const btn = document.getElementById('filterBtn' + colKey.charAt(0).toUpperCase() + colKey.slice(1));
+    if (btn) btn.classList.toggle('active-filter', colFilters[colKey].length > 0);
+}
+
+function toggleMultiFilter(colKey, value, checked) {
+    const set = new Set(colFilters[colKey]);
+    if (checked) set.add(value); else set.delete(value);
+    colFilters[colKey] = Array.from(set);
+    updateFilterButtonState(colKey);
+    f();
+}
+
+function selectAllVisibleMenuOptions(menuId, colKey) {
+    const set = new Set(colFilters[colKey]);
+    document.querySelectorAll(`#${menuId} .menu-option-item`).forEach(el => {
+        if (el.style.display !== 'none') {
+            const cb = el.querySelector('input[type=checkbox]');
+            cb.checked = true;
+            set.add(cb.dataset.value);
+        }
+    });
+    colFilters[colKey] = Array.from(set);
+    updateFilterButtonState(colKey);
+    f();
+}
+
+function clearMenuOptions(menuId, colKey) {
+    document.querySelectorAll(`#${menuId} input[type=checkbox]`).forEach(cb => { cb.checked = false; });
+    colFilters[colKey] = [];
+    updateFilterButtonState(colKey);
+    f();
+}
+
+function toggleSort(key) {
+    if (sortState.key === key) {
+        sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+        sortState.key = key;
+        sortState.dir = 'asc';
+    }
+    document.querySelectorAll('#rulesTable .sort-ic').forEach(ic => { ic.className = 'fa-solid fa-sort sort-ic'; });
+    const ic = document.getElementById('sortIc-' + key);
+    if (ic) ic.className = `fa-solid fa-sort-${sortState.dir === 'asc' ? 'up' : 'down'} sort-ic active-sort`;
+    f();
+}
+
+function applySort(rows) {
+    if (!sortState.key) return rows;
+    const key = sortState.key;
+    const dir = sortState.dir === 'asc' ? 1 : -1;
+    return [...rows].sort((a, b) => {
+        let av = a[key], bv = b[key];
+        if (key === 'enabled') { av = av ? 1 : 0; bv = bv ? 1 : 0; }
+        else { av = (av || '').toString().toLowerCase(); bv = (bv || '').toString().toLowerCase(); }
+        if (av < bv) return -1 * dir;
+        if (av > bv) return 1 * dir;
+        return 0;
+    });
+}
+
+function initColResize() {
+    document.querySelectorAll('#rulesTable .col-resizer').forEach(handle => {
+        handle.addEventListener('mousedown', function(e) {
+            e.preventDefault();
+            const th = handle.closest('th');
+            const startX = e.clientX;
+            const startWidth = th.offsetWidth;
+            handle.classList.add('resizing');
+            function onMove(ev) {
+                th.style.width = Math.max(50, startWidth + (ev.clientX - startX)) + 'px';
+            }
+            function onUp() {
+                handle.classList.remove('resizing');
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+                saveColWidths();
+            }
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
+    });
+}
+
+function saveColWidths() {
+    const widths = {};
+    document.querySelectorAll('#rulesTable thead th[data-col]').forEach(th => { widths[th.dataset.col] = th.style.width || null; });
+    try { localStorage.setItem('microdfir_rules_col_widths', JSON.stringify(widths)); } catch (e) {}
+}
+
+function restoreColWidths() {
+    try {
+        const widths = JSON.parse(localStorage.getItem('microdfir_rules_col_widths') || '{}');
+        document.querySelectorAll('#rulesTable thead th[data-col]').forEach(th => { if (widths[th.dataset.col]) th.style.width = widths[th.dataset.col]; });
+    } catch (e) {}
+}
+
+async function ld(){
+    allRules = await(await fetch('/api/rules')).json();
+
+    const platforms = new Set();
+    const statuses = new Set();
+    const mitres = new Set();
+    allRules.forEach(r => {
+        if(r.platform) platforms.add(r.platform);
+        if(r.status) statuses.add(r.status);
+        (r.tags || []).forEach(t => { if (/^attack\./i.test(t)) mitres.add(t); });
+    });
+
+    buildMultiFilterMenu('filterMenuSource', 'source', [{value: 'sigma', label: 'Sigma'}, {value: 'custom', label: 'Custom'}]);
+    buildMultiFilterMenu('filterMenuPlatform', 'platform', Array.from(platforms).sort().map(p => ({value: p, label: p})));
+    buildMultiFilterMenu('filterMenuMitre', 'mitre', Array.from(mitres).sort().map(m => ({value: m, label: m})));
+    buildMultiFilterMenu('filterMenuCompliance', 'compliance', COMPLIANCE_FRAMEWORKS);
+    buildMultiFilterMenu('filterMenuLevel', 'level', ['critical', 'high', 'medium', 'low', 'informational'].map(l => ({value: l, label: l.charAt(0).toUpperCase() + l.slice(1)})));
+    buildMultiFilterMenu('filterMenuStatus', 'status', Array.from(statuses).sort().map(s => ({value: s, label: s.charAt(0).toUpperCase() + s.slice(1)})));
+    buildMultiFilterMenu('filterMenuEnabled', 'enabled', [{value: '1', label: 'Enabled'}, {value: '0', label: 'Disabled'}]);
+
+    updateSharedStats('rules');
+    f();
+}
+
+function renderTable(rules) {
+    document.getElementById('rt').innerHTML = rules.map(rl => {
+        const mitreTags = (rl.tags || []).filter(t => /^attack\./i.test(t));
+        const shownTags = mitreTags.slice(0, 2);
+        const extra = mitreTags.length - shownTags.length;
+        return `
+        <tr>
+            <td><input type="checkbox" class="form-check-input rule-cb bg-dark border-secondary" value="${rl.id}" onchange="updateSelection(this)"></td>
+            <td>
+                <span class="badge ${rl.source === 'custom' ? 'bg-info text-dark' : 'bg-secondary'}" title="${rl.cloned_from ? 'Cloned from rule #' + rl.cloned_from : ''}">${rl.source === 'custom' ? 'Custom' : 'Sigma'}</span>
+            </td>
+            <td title="${escAttr(rl.title)}">
+                <div class="fw-bold text-info text-truncate">${rl.title}</div>
+            </td>
+            <td class="text-truncate" title="${escAttr(rl.platform)}"><span class="text-light"><i class="fa-solid fa-display me-1"></i>${rl.platform}</span></td>
+            <td title="${mitreTags.length ? escAttr(mitreTags.join(', ')) : ''}">
+                ${mitreTags.length ? `<div class="rule-tags-row">${shownTags.map(t => `<span class="badge bg-primary bg-opacity-25 text-light border border-primary me-1" style="font-size:.65rem;">${t}</span>`).join('')}${extra > 0 ? `<span class="badge bg-secondary" style="font-size:.65rem;" title="${mitreTags.slice(2).join(', ')}">+${extra}</span>` : ''}</div>` : '<span class="text-muted">—</span>'}
+            </td>
+            <td title="${(rl.compliance_tags || []).length ? escAttr(rl.compliance_tags.map(t => COMPLIANCE_LABELS[t] || t).join(', ')) : ''}">
+                ${complianceTagsHtml(rl.compliance_tags)}
+            </td>
+            <td title="${escAttr(rl.level || 'medium')}"><span class="badge ${LEVEL_BADGE[rl.level] || 'bg-secondary'}">${rl.level || 'medium'}</span></td>
+            <td title="${escAttr(rl.status || 'unknown')}"><span class="badge ${STATUS_BADGE[rl.status] || 'bg-secondary'}">${rl.status || 'unknown'}</span></td>
+            <td class="text-nowrap small text-muted" title="${escAttr(rl.last_update || '')}">${rl.last_update || '—'}</td>
+            <td>
+                <div class="form-check form-switch mb-0">
+                    <input class="form-check-input" type="checkbox" ${rl.enabled ? 'checked' : ''} onchange="toggleSingle(${rl.id}, this.checked)">
+                </div>
+            </td>
+            <td class="text-nowrap">
+                <div class="dropdown">
+                    <button class="btn btn-sm btn-outline-secondary py-0 px-2" type="button" data-bs-toggle="dropdown"><i class="fa-solid fa-ellipsis-vertical"></i></button>
+                    <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
+                        <li><a class="dropdown-item" href="#" onclick="openRuleModal(${rl.id}); return false;"><i class="fa-solid ${rl.source === 'custom' ? 'fa-pen' : 'fa-eye'} me-2"></i>${rl.source === 'custom' ? 'Edit' : 'View'}</a></li>
+                        <li><a class="dropdown-item" href="#" onclick="quickClone(${rl.id}, '${rl.title.replace(/'/g, "\\'")}'); return false;"><i class="fa-solid fa-copy me-2"></i>Clone</a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><a class="dropdown-item text-danger" href="#" onclick="deleteRule(${rl.id}, '${rl.title.replace(/'/g, "\\'")}'); return false;"><i class="fa-solid fa-trash me-2"></i>Delete</a></li>
+                    </ul>
+                </div>
+            </td>
+        </tr>
+    `;
+    }).join('');
+    selectedIds.clear();
+    // Dropdowns default to absolute positioning, which gets clipped by this table's own
+    // scroll container — same issue fixed on the Agents page. Force fixed-strategy Popper
+    // positioning so the action menu always renders in full.
+    document.querySelectorAll('#rt [data-bs-toggle="dropdown"]').forEach(el => {
+        bootstrap.Dropdown.getOrCreateInstance(el, { popperConfig: { strategy: 'fixed' } });
+    });
+}
+
+function f(){
+    const q = colFilters.q;
+    const source = colFilters.source;
+    const plat = colFilters.platform;
+    const mitre = colFilters.mitre;
+    const compliance = colFilters.compliance;
+    const level = colFilters.level;
+    const status = colFilters.status;
+    const enabled = colFilters.enabled;
+
+    const filtered = allRules.filter(rl => {
+        const matchQ = rl.title.toLowerCase().includes(q);
+        const matchSource = source.length === 0 || source.includes(rl.source);
+        const matchPlat = plat.length === 0 || plat.includes(rl.platform);
+        const matchMitre = mitre.length === 0 || (rl.tags && rl.tags.some(t => mitre.includes(t)));
+        const matchCompliance = compliance.length === 0 || (rl.compliance_tags && rl.compliance_tags.some(t => compliance.includes(t)));
+        const matchLevel = level.length === 0 || level.includes(rl.level);
+        const matchStatus = status.length === 0 || status.includes(rl.status);
+        const matchEnabled = enabled.length === 0 || enabled.includes(String(rl.enabled ? 1 : 0));
+        return matchQ && matchSource && matchPlat && matchMitre && matchCompliance && matchLevel && matchStatus && matchEnabled;
+    });
+
+    renderTable(applySort(filtered));
+}
+
+function toggleAll(state) {
+    document.querySelectorAll('.rule-cb').forEach(cb => {
+        cb.checked = state;
+        updateSelection(cb);
+    });
+}
+
+function updateSelection(cb) {
+    if (cb.checked) selectedIds.add(cb.value);
+    else selectedIds.delete(cb.value);
+}
+
+async function toggleSingle(id, state) {
+    const res = await fetch(`/api/rules/${id}/toggle`, {method: 'PUT'});
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || 'Failed to toggle rule.');
+        ld();
+    }
+}
+
+async function bulkAction(enable) {
+    const ids = Array.from(selectedIds).map(id => parseInt(id));
+    if (ids.length === 0) return alert("Please select at least one rule.");
+
+    const res = await fetch('/api/rules/bulk_update', {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ids: ids, enable: enable})
+    });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || 'Failed to update rules.');
+    }
+    ld();
+}
+
+// ---- Rule editor modal ----
+let ruleModal = null;
+let editingRuleId = null;
+let editingRuleSource = null;
+
+function initRuleModal() {
+    if (!ruleModal) ruleModal = new bootstrap.Modal(document.getElementById('ruleModal'));
+}
+
+function fmtDT(s) {
+    return s ? s : '—';
+}
+
+async function openRuleModal(id) {
+    initRuleModal();
+    editingRuleId = id || null;
+    editingRuleSource = null;
+    document.getElementById('ruleEditorError').style.display = 'none';
+    document.getElementById('ruleYamlInput').value = '';
+    document.getElementById('ruleYamlInput').readOnly = false;
+    document.getElementById('ruleMetaBox').style.display = 'none';
+    document.getElementById('ruleReadonlyNotice').style.display = 'none';
+    document.getElementById('ruleComplianceBox').style.display = 'none';
+    document.getElementById('ruleHistoryBox').style.display = 'none';
+    document.getElementById('ruleHistoryBtn').style.display = 'none';
+    document.getElementById('ruleCloneBtn').style.display = 'none';
+    document.getElementById('ruleSaveBtn').style.display = 'inline-block';
+    document.getElementById('ruleEditorTabs').style.display = 'flex';
+    document.getElementById('tabBtnBuilder').style.display = 'block';
+
+    if (editingRuleId) {
+        try {
+            const res = await fetch(`/api/rules/${editingRuleId}`);
+            const data = await res.json();
+            if (!res.ok) { alert(data.error || 'Failed to load rule.'); return; }
+            document.getElementById('ruleYamlInput').value = data.rule_yaml || '';
+            editingRuleSource = data.source || 'sigma';
+
+            const isSigma = editingRuleSource === 'sigma';
+            document.getElementById('ruleModalTitle').innerText = isSigma ? 'View Sigma Rule' : 'Edit Custom Rule';
+
+            const metaParts = [];
+            metaParts.push(`Created by <strong>${data.created_by || 'unknown'}</strong> on ${fmtDT(data.created_at)}`);
+            metaParts.push(`Last modified by <strong>${data.updated_by || '—'}</strong> on ${fmtDT(data.updated_at)}`);
+            if (data.cloned_from) metaParts.push(`Cloned from rule #${data.cloned_from}`);
+            document.getElementById('ruleMetaBox').innerHTML = metaParts.join(' &middot; ');
+            document.getElementById('ruleMetaBox').style.display = 'block';
+
+            document.getElementById('ruleComplianceBox').style.display = 'block';
+            renderComplianceChecklist(data.compliance_tags);
+
+            if (isSigma) {
+                document.getElementById('ruleYamlInput').readOnly = true;
+                document.getElementById('ruleReadonlyNotice').style.display = 'block';
+                document.getElementById('ruleSaveBtn').style.display = 'none';
+                document.getElementById('ruleCloneBtn').style.display = 'inline-block';
+                // Sigma rules can't be edited or rebuilt — no point showing the builder tab.
+                document.getElementById('ruleEditorTabs').style.display = 'none';
+            } else {
+                document.getElementById('ruleCloneBtn').style.display = 'inline-block';
+                document.getElementById('ruleHistoryBtn').style.display = 'inline-block';
+            }
+            // Editing an existing rule always starts on Raw YAML — its content already exists
+            // as YAML and may use syntax the guided builder can't represent; switching to the
+            // builder tab and saving would silently replace it with the builder's output.
+            switchRuleTab('yaml');
+        } catch (e) {
+            alert('Error loading rule: ' + e);
+            return;
+        }
+    } else {
+        document.getElementById('ruleModalTitle').innerText = 'New Custom Rule';
+        resetBuilderState();
+        switchRuleTab('builder');
+    }
+    ruleModal.show();
+}
+
+async function saveRule() {
+    const errBox = document.getElementById('ruleEditorError');
+    errBox.style.display = 'none';
+
+    let ruleYaml;
+    if (activeRuleTab === 'builder') {
+        ruleYaml = generateYamlFromBuilder();
+        if (!ruleYaml) {
+            errBox.innerText = 'Add at least one match condition with a value before saving.';
+            errBox.style.display = 'block';
+            return;
+        }
+    } else {
+        ruleYaml = document.getElementById('ruleYamlInput').value;
+    }
+
+    const url = editingRuleId ? `/api/rules/${editingRuleId}` : '/api/rules';
+    const method = editingRuleId ? 'PUT' : 'POST';
+
+    try {
+        const res = await fetch(url, {
+            method: method,
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({rule_yaml: ruleYaml})
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            errBox.innerText = data.error || 'Failed to save rule.';
+            errBox.style.display = 'block';
+            return;
+        }
+        ruleModal.hide();
+        ld();
+    } catch (e) {
+        errBox.innerText = 'Error saving rule: ' + e;
+        errBox.style.display = 'block';
+    }
+}
+
+async function doClone(id) {
+    const res = await fetch(`/api/rules/${id}/clone`, {method: 'POST'});
+    const data = await res.json();
+    if (!res.ok) {
+        alert(data.error || 'Failed to clone rule.');
+        return null;
+    }
+    return data.id;
+}
+
+async function cloneFromModal() {
+    if (!editingRuleId) return;
+    const newId = await doClone(editingRuleId);
+    if (!newId) return;
+    await ld();
+    openRuleModal(newId);
+}
+
+async function quickClone(id, title) {
+    if (!confirm(`Clone "${title}" into an editable custom copy?`)) return;
+    const newId = await doClone(id);
+    if (!newId) return;
+    await ld();
+    openRuleModal(newId);
+}
+
+async function toggleHistory() {
+    const box = document.getElementById('ruleHistoryBox');
+    if (box.style.display === 'block') { box.style.display = 'none'; return; }
+    box.style.display = 'block';
+    const list = document.getElementById('ruleHistoryList');
+    list.innerHTML = '<span class="text-muted">Loading...</span>';
+    try {
+        const res = await fetch(`/api/rules/${editingRuleId}/history`);
+        const rows = await res.json();
+        if (!res.ok || !rows.length) {
+            list.innerHTML = '<span class="text-muted">No edits recorded yet.</span>';
+            return;
+        }
+        list.innerHTML = rows.map((h, i) => `
+            <div class="border border-secondary rounded p-2 mb-2 bg-black">
+                <div class="text-muted mb-1">Edited by <strong>${h.changed_by || 'unknown'}</strong> on ${fmtDT(h.changed_at)}</div>
+                <pre class="font-monospace mb-0" style="white-space:pre-wrap; font-size:.75rem;">${h.diff.replace(/</g, '&lt;').replace(/^-.*$/gm, m => `<span class="text-danger">${m}</span>`).replace(/^\+.*$/gm, m => `<span class="text-success">${m}</span>`)}</pre>
+            </div>
+        `).join('');
+    } catch (e) {
+        list.innerHTML = `<span class="text-danger">Error loading history: ${e}</span>`;
+    }
+}
+
+async function importSigmaHQ() {
+    if (!confirm('Pull the latest ruleset from SigmaHQ? This can take up to a minute — new rules are added disabled, existing ones are updated in place, and your enable/disable choices are preserved.')) return;
+    const btn = document.getElementById('importSigmaBtn');
+    const origHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Importing...';
+    try {
+        const res = await fetch('/api/rules/import/sigmahq', {method: 'POST'});
+        const data = await res.json();
+        if (!res.ok) {
+            alert(data.error || 'Import failed.');
+        } else {
+            alert(`Import complete: ${data.inserted} new, ${data.updated} updated, ${data.skipped} skipped, ${data.errors} errors.`);
+            ld();
+        }
+    } catch (e) {
+        alert('Import failed: ' + e);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = origHtml;
+    }
+}
+
+async function deleteRule(id, title) {
+    if (!confirm(`Delete rule "${title}"? This cannot be undone.`)) return;
+    const res = await fetch(`/api/rules/${id}`, {method: 'DELETE'});
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || 'Failed to delete rule.');
+    }
+    ld();
+}
+
+function initFilterDropdowns() {
+    // Same clipping issue fixed on the Agents page — these menus now hold a scrollable
+    // checklist that's taller than the old single-click list, so they're even more likely
+    // to get cut off by this table's own scroll container without fixed-strategy Popper
+    // positioning. data-bs-auto-close="outside" (set in HTML) keeps them open while
+    // checking boxes or typing in the in-menu search.
+    document.querySelectorAll('#rulesTable thead [data-bs-toggle="dropdown"]').forEach(el => {
+        bootstrap.Dropdown.getOrCreateInstance(el, { popperConfig: { strategy: 'fixed' } });
+    });
+}
+
+function initRulesTab() {
+    restoreColWidths();
+    initColResize();
+    initFilterDropdowns();
+    ld().then(() => {
+        // Deep link from Log Search's alert detail modal ("View Rule" button) — opens
+        // straight to the rule that fired instead of leaving the user to search for it.
+        const _deepLinkRuleId = new URLSearchParams(window.location.search).get('rule_id');
+        if (_deepLinkRuleId) openRuleModal(parseInt(_deepLinkRuleId, 10));
+    });
+}
+
+// =====================================================================
+// DETECTION TUNING TAB
+// =====================================================================
+const TUNE_FIELDS = [
+    {value: 'Host', label: 'Host'},
+    {value: 'Channel', label: 'Log Channel / App'},
+    {value: 'EventID', label: 'Event ID'},
+    {value: 'User', label: 'Username'},
+    {value: 'SourceIp', label: 'Source IP'},
+    {value: 'DestinationIp', label: 'Destination IP'},
+    {value: 'Message', label: 'Message'}
+];
+const TUNE_OPS = [
+    {value: 'contains', label: 'contains'},
+    {value: 'equals', label: 'equals'},
+    {value: 'startswith', label: 'starts with'},
+    {value: 'endswith', label: 'ends with'}
+];
+
+let allTuning = [];
+let quickFilter = 'all';
+let q = '';
+let TUNE_SORT_STATE = { key: 'alerts_30d', dir: 'desc' };
+let activeTuneRuleId = null;
+
+const TUNE_LEVEL_BADGE = {
+    critical: 'bg-danger', high: 'bg-danger', medium: 'bg-warning text-dark',
+    low: 'bg-info text-dark', informational: 'bg-secondary'
+};
+
+function classifyNoise(r) {
+    if (r.alerts_total === 0) return { label: 'Never Triggered', cls: 'bg-secondary' };
+    if (r.alerts_7d >= 50) return { label: 'Noisy', cls: 'bg-danger' };
+    if (r.alerts_7d === 0 && r.alerts_30d > 0) return { label: 'Quiet', cls: 'bg-info text-dark' };
+    return { label: 'Normal', cls: 'bg-success' };
+}
+
+function setQuickFilter(name) {
+    quickFilter = name;
+    document.querySelectorAll('.quick-filter-btn').forEach(b => b.classList.toggle('active-filter', b.dataset.qf === name));
+    tuneApplyFilters();
+}
+
+function tuneToggleSort(key) {
+    if (TUNE_SORT_STATE.key === key) TUNE_SORT_STATE.dir = TUNE_SORT_STATE.dir === 'asc' ? 'desc' : 'asc';
+    else { TUNE_SORT_STATE.key = key; TUNE_SORT_STATE.dir = 'asc'; }
+    document.querySelectorAll('#tuningTable .sort-ic').forEach(i => i.classList.remove('active-sort'));
+    const ic = document.getElementById('sortIc-tune-' + key);
+    if (ic) ic.classList.add('active-sort');
+    tuneApplyFilters();
+}
+
+function tuneApplySort(rows) {
+    const { key, dir } = TUNE_SORT_STATE;
+    if (!key) return rows;
+    return [...rows].sort((a, b) => {
+        let av = a[key], bv = b[key];
+        if (typeof av === 'string') av = av.toLowerCase();
+        if (typeof bv === 'string') bv = bv.toLowerCase();
+        if (av === null || av === undefined) av = '';
+        if (bv === null || bv === undefined) bv = '';
+        if (av < bv) return dir === 'asc' ? -1 : 1;
+        if (av > bv) return dir === 'asc' ? 1 : -1;
+        return 0;
+    });
+}
+
+function tuneApplyFilters() {
+    let rows = allTuning;
+    if (quickFilter === 'never') rows = rows.filter(r => r.alerts_total === 0);
+    else if (quickFilter === 'noisy') rows = rows.filter(r => r.alerts_7d >= 50);
+    else if (quickFilter === 'excl') rows = rows.filter(r => r.exclusion_count > 0);
+    else if (quickFilter === 'override') rows = rows.filter(r => !!r.severity_override);
+    if (q) rows = rows.filter(r => r.title.toLowerCase().includes(q));
+    tuneRenderTable(tuneApplySort(rows));
+}
+
+function tuneRenderTable(rows) {
+    const tbody = document.getElementById('tuningTableBody');
+    document.getElementById('rowCountLabel').innerText = `${rows.length} of ${allTuning.length} rules`;
+    if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted py-4">No rules match this filter.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = rows.map(r => {
+        const noise = classifyNoise(r);
+        const level = r.severity_override || r.level || 'medium';
+        const overrideTag = r.severity_override ? ' <span class="text-muted" title="Severity manually overridden">*</span>' : '';
+        return `<tr>
+            <td>${escHtml(r.title)}</td>
+            <td><span class="badge ${r.source === 'custom' ? 'bg-info text-dark' : 'bg-secondary'}">${r.source}</span></td>
+            <td><span class="badge ${TUNE_LEVEL_BADGE[level] || 'bg-secondary'}">${escHtml(level)}</span>${overrideTag}</td>
+            <td>${r.enabled ? '<span class="badge bg-success">Enabled</span>' : '<span class="badge bg-secondary">Disabled</span>'}</td>
+            <td>${r.alerts_7d}</td>
+            <td>${r.alerts_30d}</td>
+            <td class="small text-muted">${r.last_triggered ? escHtml(r.last_triggered) : '—'}</td>
+            <td>${r.exclusion_count > 0 ? `<span class="badge bg-primary">${r.exclusion_count}</span>` : '<span class="text-muted small">—</span>'}</td>
+            <td><span class="badge ${noise.cls}">${noise.label}</span></td>
+            <td><button type="button" class="btn btn-sm btn-outline-secondary" onclick="openTuneModal(${r.id})"><i class="fa-solid fa-sliders"></i> Tune</button></td>
+        </tr>`;
+    }).join('');
+}
+
+function tuneLoad() {
+    fetch('/api/rules/tuning').then(r => r.json()).then(data => {
+        allTuning = data;
+        updateSharedStats('tuning');
+        tuneApplyFilters();
+    }).catch(err => console.error('Error loading tuning data:', err));
+}
+
+function tuneRuleById(id) { return allTuning.find(r => r.id === id); }
+
+function openTuneModal(id) {
+    const r = tuneRuleById(id);
+    if (!r) return;
+    activeTuneRuleId = id;
+    document.getElementById('tuneModalTitle').innerText = r.title;
+    document.getElementById('tuneStatsRow').innerHTML = `
+        <span><i class="fa-solid fa-bolt me-1"></i>${r.alerts_7d} alerts / 7d</span>
+        <span><i class="fa-solid fa-calendar-days me-1"></i>${r.alerts_30d} alerts / 30d</span>
+        <span><i class="fa-solid fa-database me-1"></i>${r.alerts_total} alerts total</span>
+        <span><i class="fa-solid fa-clock me-1"></i>Last triggered: ${r.last_triggered ? escHtml(r.last_triggered) : 'never'}</span>`;
+    document.getElementById('tuneSeveritySelect').value = r.severity_override || '';
+    const msg = document.getElementById('tuneSeverityMsg');
+    if (msg) { msg.style.display = 'none'; }
+
+    if (IS_ADMIN) {
+        const fieldSel = document.getElementById('exclField');
+        fieldSel.innerHTML = TUNE_FIELDS.map(fld => `<option value="${fld.value}">${fld.label}</option>`).join('');
+        const opSel = document.getElementById('exclOp');
+        opSel.innerHTML = TUNE_OPS.map(o => `<option value="${o.value}">${o.label}</option>`).join('');
+        document.getElementById('exclValue').value = '';
+        document.getElementById('exclDescription').value = '';
+        document.getElementById('exclError').style.display = 'none';
+
+        const toggleBtn = document.getElementById('tuneToggleBtn');
+        toggleBtn.innerHTML = r.enabled
+            ? '<i class="fa-solid fa-stop me-1"></i> Disable This Rule'
+            : '<i class="fa-solid fa-play me-1"></i> Enable This Rule';
+    }
+
+    loadExclusions(id);
+    new bootstrap.Modal(document.getElementById('tuneModal')).show();
+}
+
+function loadExclusions(id) {
+    fetch(`/api/rules/${id}/exclusions`).then(r => r.json()).then(rows => {
+        const tbody = document.getElementById('exclusionsTableBody');
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="6" class="text-muted small">No exclusions yet.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map(e => `<tr>
+            <td>${escHtml(e.field)}</td>
+            <td>${escHtml(e.operator)}</td>
+            <td class="font-monospace small">${escHtml(e.value)}</td>
+            <td class="small text-muted">${escHtml(e.description || '')}</td>
+            <td>${IS_ADMIN
+                ? `<input type="checkbox" class="form-check-input" ${e.enabled ? 'checked' : ''} onchange="toggleExclusion(${e.id}, this.checked)">`
+                : (e.enabled ? '<span class="badge bg-success">On</span>' : '<span class="badge bg-secondary">Off</span>')}</td>
+            <td>${IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteExclusion(${e.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
+        </tr>`).join('');
+    }).catch(err => console.error('Error loading exclusions:', err));
+}
+
+function saveSeverity() {
+    if (!activeTuneRuleId) return;
+    const sev = document.getElementById('tuneSeveritySelect').value;
+    fetch(`/api/rules/${activeTuneRuleId}/severity`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ severity: sev || null })
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        const msg = document.getElementById('tuneSeverityMsg');
+        if (ok) {
+            msg.className = 'small text-success'; msg.innerText = 'Saved.'; msg.style.display = 'inline';
+            setTimeout(() => { msg.style.display = 'none'; }, 3000);
+            tuneLoad();
+        } else {
+            alert(data.error || 'Failed to save severity override.');
+        }
+    }).catch(err => alert('Error saving severity: ' + err));
+}
+
+function addExclusion() {
+    if (!activeTuneRuleId) return;
+    const payload = {
+        field: document.getElementById('exclField').value,
+        operator: document.getElementById('exclOp').value,
+        value: document.getElementById('exclValue').value.trim(),
+        description: document.getElementById('exclDescription').value.trim()
+    };
+    const errBox = document.getElementById('exclError');
+    errBox.style.display = 'none';
+    if (!payload.value) {
+        errBox.innerText = 'A value is required.'; errBox.style.display = 'block'; return;
+    }
+    fetch(`/api/rules/${activeTuneRuleId}/exclusions`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (ok) {
+            document.getElementById('exclValue').value = '';
+            document.getElementById('exclDescription').value = '';
+            loadExclusions(activeTuneRuleId);
+            tuneLoad();
+        } else {
+            errBox.innerText = data.error || 'Failed to add exclusion.'; errBox.style.display = 'block';
+        }
+    }).catch(err => { errBox.innerText = 'Error: ' + err; errBox.style.display = 'block'; });
+}
+
+function toggleExclusion(eid, enabled) {
+    fetch(`/api/rules/exclusions/${eid}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ enabled })
+    }).then(() => { if (activeTuneRuleId) { loadExclusions(activeTuneRuleId); tuneLoad(); } })
+      .catch(err => alert('Error updating exclusion: ' + err));
+}
+
+function deleteExclusion(eid) {
+    if (!confirm('Delete this exclusion?')) return;
+    fetch(`/api/rules/exclusions/${eid}`, { method: 'DELETE' })
+        .then(() => { if (activeTuneRuleId) { loadExclusions(activeTuneRuleId); tuneLoad(); } })
+        .catch(err => alert('Error deleting exclusion: ' + err));
+}
+
+function toggleTuneRuleEnabled() {
+    if (!activeTuneRuleId) return;
+    fetch(`/api/rules/${activeTuneRuleId}/toggle`, { method: 'PUT' })
+        .then(() => { tuneLoad(); bootstrap.Modal.getInstance(document.getElementById('tuneModal')).hide(); })
+        .catch(err => alert('Error toggling rule: ' + err));
+}
+
+function initTuningTab() {
+    tuneLoad();
+}
+
+// =====================================================================
+// REPORTS TAB
+// =====================================================================
+function initReportsTab() {
+    updateSharedStats('reports');
+}
+
+// =====================================================================
+// INIT
+// =====================================================================
+document.addEventListener("DOMContentLoaded", function() {
+    let startTab = {{ active_tab|tojson }};
+    const urlTab = new URLSearchParams(window.location.search).get('tab');
+    if (urlTab && SIEM_TABS.includes(urlTab)) startTab = urlTab;
+    switchSiemTab(startTab);
+});
 </script>
 {% endblock %}
