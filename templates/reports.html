@@ -1,8 +1,9 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="container-fluid mt-4">
-    <h2 class="text-primary"><i class="fa-solid fa-file-pdf"></i> SOC & Compliance Reports</h2>
-    <hr class="border-secondary">
+<div class="page-header">
+    <h2><i class="fa-solid fa-file-pdf me-2"></i>Reports</h2>
+    <p>Generate and download monthly SOC and compliance PDF reports.</p>
+</div>
 
     <div class="card shadow-sm border-secondary bg-dark text-light mb-4">
         <div class="card-header border-secondary d-flex justify-content-between align-items-center">
@@ -38,5 +39,4 @@
             {% endif %}
         </div>
     </div>
-</div>
 {% endblock %}
