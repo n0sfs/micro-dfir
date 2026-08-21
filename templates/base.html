@@ -222,13 +222,12 @@ hr{border-color:var(--border);}
             <a href="/rules" class="nav-link {{ 'active' if request.endpoint == 'rules' else '' }}"><i class="fa-solid fa-file-shield"></i><span>Detection Rules</span></a>
             <a href="{{ url_for('reports') }}" class="nav-link {{ 'active' if request.endpoint in ['reports','download_report','trigger_report'] else '' }}"><i class="fa-solid fa-file-pdf"></i><span>Reports</span></a>
 
-            <a href="/hunt" class="nav-link nav-standalone {{ 'active' if request.endpoint == 'hunt' else '' }}"><i class="fa-solid fa-crosshairs"></i><span>Threat Hunt</span></a>
-
             <div class="nav-group-label">UEBA</div>
             <a href="/ueba" class="nav-link {{ 'active' if request.endpoint == 'ueba' else '' }}"><i class="fa-solid fa-user-secret"></i><span>Anomaly Detections</span></a>
 
-            <div class="nav-group-label">Threat Intel</div>
+            <div class="nav-group-label">Threat Intel &amp; Hunting</div>
             <a href="/threat-intel" class="nav-link {{ 'active' if request.endpoint == 'threat_intel' else '' }}"><i class="fa-solid fa-globe"></i><span>IOCs</span></a>
+            <a href="/hunt" class="nav-link {{ 'active' if request.endpoint == 'hunt' else '' }}"><i class="fa-solid fa-crosshairs"></i><span>Threat Hunt</span></a>
         </nav>
 
         <div class="sidebar-bottom">
