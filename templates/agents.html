@@ -1,149 +1,111 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-header d-flex justify-content-between align-items-start flex-wrap gap-2">
-    <div>
-        <h2><i class="fa-solid fa-laptop-medical me-2"></i>Agents</h2>
-        <p>Endpoint agent check-ins and remote response actions. Drag the <i class="fa-solid fa-grip-vertical"></i> handle to move a box, or drag its edge to resize.</p>
-    </div>
-    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="resetAgentsLayout()"><i class="fa-solid fa-arrows-rotate me-1"></i>Reset Layout</button>
+<div class="page-header">
+    <h2><i class="fa-solid fa-laptop-medical me-2"></i>Agents</h2>
+    <p>Endpoint agent check-ins and remote response actions.</p>
 </div>
 
 <style>
-#agentsGrid .grid-stack-item-content .card,
-#agentsGrid .grid-stack-item-content .stat-tile{
-    height:100%;
-    margin:0;
-    display:flex;
-    flex-direction:column;
-}
-#agentsGrid .grid-stack-item-content .card-body{
-    flex:1 1 auto;
-    min-height:0;
-    overflow-y:auto;
-}
-#agentsGrid .grid-stack-item-content .table-responsive{
-    height:100%;
-    overflow-y:auto;
-}
-#agentsGrid .grid-drag-handle{
-    cursor:move;
-    color:var(--text-muted);
-}
-#agentsGrid .grid-drag-handle:hover{color:var(--text-secondary);}
-#agentsGrid .stat-tile{position:relative;}
-#agentsGrid .stat-tile .grid-drag-handle{
-    position:absolute;
-    top:10px; right:10px;
-    font-size:.8rem;
-}
 .endpoint-status-btn.active-filter{background-color:var(--accent); border-color:var(--accent); color:#fff;}
+#agentsTabs .nav-link{color:var(--text-muted); border-color:transparent; background:transparent;}
+#agentsTabs .nav-link:hover{color:var(--text-secondary); border-color:transparent;}
+#agentsTabs .nav-link.active{color:var(--text-primary); background-color:var(--bg-card-alt); border-color:var(--border) var(--border) var(--bg-card-alt);}
 </style>
 
-<div class="grid-stack" id="agentsGrid">
-    <div class="grid-stack-item" gs-id="stat-endpoints" gs-x="0" gs-y="0" gs-w="3" gs-h="4">
-        <div class="grid-stack-item-content">
-            <div class="stat-tile">
-                <i class="fa-solid fa-grip-vertical grid-drag-handle" title="Drag to move"></i>
-                <div class="stat-label">Endpoints Online</div>
-                <div class="stat-value" id="statEndpoints">—</div>
-            </div>
+<div class="row g-3 mb-3">
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label">Endpoints Online</div>
+            <div class="stat-value" id="statEndpoints">—</div>
         </div>
     </div>
-    <div class="grid-stack-item" gs-id="stat-pending" gs-x="3" gs-y="0" gs-w="3" gs-h="4">
-        <div class="grid-stack-item-content">
-            <div class="stat-tile">
-                <i class="fa-solid fa-grip-vertical grid-drag-handle" title="Drag to move"></i>
-                <div class="stat-label">Pending Actions</div>
-                <div class="stat-value" id="statPendingActions">—</div>
-            </div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label">Pending Actions</div>
+            <div class="stat-value" id="statPendingActions">—</div>
         </div>
     </div>
-    <div class="grid-stack-item" gs-id="stat-done" gs-x="6" gs-y="0" gs-w="3" gs-h="4">
-        <div class="grid-stack-item-content">
-            <div class="stat-tile">
-                <i class="fa-solid fa-grip-vertical grid-drag-handle" title="Drag to move"></i>
-                <div class="stat-label">Completed Actions</div>
-                <div class="stat-value" id="statDoneActions">—</div>
-            </div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label">Completed Actions</div>
+            <div class="stat-value" id="statDoneActions">—</div>
         </div>
     </div>
-    <div class="grid-stack-item" gs-id="stat-failed" gs-x="9" gs-y="0" gs-w="3" gs-h="4">
-        <div class="grid-stack-item-content">
-            <div class="stat-tile">
-                <i class="fa-solid fa-grip-vertical grid-drag-handle" title="Drag to move"></i>
-                <div class="stat-label">Failed Actions</div>
-                <div class="stat-value" id="statFailedActions">—</div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label">Failed Actions</div>
+            <div class="stat-value" id="statFailedActions">—</div>
+        </div>
+    </div>
+</div>
+
+<div class="card bg-dark border-secondary">
+    <div class="card-header border-secondary p-0">
+        <ul class="nav nav-tabs border-0" id="agentsTabs">
+            <li class="nav-item"><button type="button" class="nav-link active" id="tabBtnAgents" onclick="switchAgentsTab('agents')"><i class="fa-solid fa-laptop-medical me-2"></i>Agents</button></li>
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnResponse" onclick="switchAgentsTab('response')"><i class="fa-solid fa-terminal me-2"></i>Response Actions</button></li>
+        </ul>
+    </div>
+
+    <!-- Agents pane -->
+    <div id="paneAgents">
+        <div class="card-body py-2 px-3 border-bottom border-secondary d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+                <input type="text" id="endpointSearchBox" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width: 220px;" placeholder="Search hostname or IP..." oninput="renderEndpoints()">
+                <div class="btn-group btn-group-sm" role="group">
+                    <button type="button" class="btn btn-outline-secondary endpoint-status-btn active-filter" data-status="all" onclick="setEndpointStatusFilter('all')">All</button>
+                    <button type="button" class="btn btn-outline-secondary endpoint-status-btn" data-status="Online" onclick="setEndpointStatusFilter('Online')">Online</button>
+                    <button type="button" class="btn btn-outline-secondary endpoint-status-btn" data-status="Idle" onclick="setEndpointStatusFilter('Idle')">Idle</button>
+                    <button type="button" class="btn btn-outline-secondary endpoint-status-btn" data-status="Offline" onclick="setEndpointStatusFilter('Offline')">Offline</button>
+                </div>
+                <span class="text-muted small text-nowrap" id="endpointCountLabel"></span>
+            </div>
+            <button class="btn btn-outline-secondary btn-sm" onclick="loadUniqueEndpoints()"><i class="fa-solid fa-rotate me-1"></i> Refresh List</button>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive" style="max-height: 600px; overflow-y: auto;">
+                <table class="table table-dark table-striped table-hover mb-0 align-middle">
+                    <thead>
+                        <tr>
+                            <th>Hostname</th>
+                            <th>Endpoint IP</th>
+                            <th>Client / Agent Info</th>
+                            <th>Status</th>
+                            <th>Last Check-in</th>
+                            <th>Heartbeat Stream</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="endpointsTableBody">
+                        <tr><td colspan="7" class="text-center text-muted py-4">Loading active endpoints...</td></tr>
+                    </tbody>
+                </table>
             </div>
         </div>
     </div>
 
-    <div class="grid-stack-item" gs-id="checkins" gs-x="0" gs-y="4" gs-w="12" gs-h="14">
-        <div class="grid-stack-item-content">
-            <div class="card bg-dark border-secondary">
-                <div class="card-header border-secondary d-flex justify-content-between align-items-center flex-wrap gap-2">
-                    <h5 class="card-title text-light mb-0"><i class="fa-solid fa-grip-vertical grid-drag-handle me-2" title="Drag to move"></i><i class="fa-solid fa-laptop-medical me-2"></i>Active Endpoint Check-ins & Response Actions</h5>
-                    <div class="d-flex align-items-center gap-2 flex-wrap">
-                        <input type="text" id="endpointSearchBox" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width: 220px;" placeholder="Search hostname or IP..." oninput="renderEndpoints()">
-                        <div class="btn-group btn-group-sm" role="group">
-                            <button type="button" class="btn btn-outline-secondary endpoint-status-btn active-filter" data-status="all" onclick="setEndpointStatusFilter('all')">All</button>
-                            <button type="button" class="btn btn-outline-secondary endpoint-status-btn" data-status="Online" onclick="setEndpointStatusFilter('Online')">Online</button>
-                            <button type="button" class="btn btn-outline-secondary endpoint-status-btn" data-status="Idle" onclick="setEndpointStatusFilter('Idle')">Idle</button>
-                            <button type="button" class="btn btn-outline-secondary endpoint-status-btn" data-status="Offline" onclick="setEndpointStatusFilter('Offline')">Offline</button>
-                        </div>
-                        <span class="text-muted small text-nowrap" id="endpointCountLabel"></span>
-                        <button class="btn btn-outline-secondary btn-sm" onclick="loadUniqueEndpoints()"><i class="fa-solid fa-rotate me-1"></i> Refresh List</button>
-                    </div>
-                </div>
-                <div class="card-body p-0">
-                    <div class="table-responsive">
-                        <table class="table table-dark table-striped table-hover mb-0 align-middle">
-                            <thead>
-                                <tr>
-                                    <th>Hostname</th>
-                                    <th>Endpoint IP</th>
-                                    <th>Client / Agent Info</th>
-                                    <th>Status</th>
-                                    <th>Last Check-in</th>
-                                    <th>Heartbeat Stream</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody id="endpointsTableBody">
-                                <tr><td colspan="7" class="text-center text-muted py-4">Loading active endpoints...</td></tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
+    <!-- Response Actions pane -->
+    <div id="paneResponse" style="display:none;">
+        <div class="card-body py-2 px-3 border-bottom border-secondary d-flex justify-content-end">
+            <button class="btn btn-outline-secondary btn-sm" onclick="loadCommandHistory()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
         </div>
-    </div>
-
-    <div class="grid-stack-item" gs-id="cmdhistory" gs-x="0" gs-y="18" gs-w="12" gs-h="11">
-        <div class="grid-stack-item-content">
-            <div class="card bg-dark border-secondary">
-                <div class="card-header border-secondary d-flex justify-content-between align-items-center">
-                    <h5 class="card-title text-light mb-0"><i class="fa-solid fa-grip-vertical grid-drag-handle me-2" title="Drag to move"></i><i class="fa-solid fa-terminal me-2"></i>Response Action History</h5>
-                    <button class="btn btn-outline-secondary btn-sm" onclick="loadCommandHistory()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
-                </div>
-                <div class="card-body p-0">
-                    <div class="table-responsive">
-                        <table class="table table-dark table-hover table-sm mb-0 align-middle">
-                            <thead>
-                                <tr>
-                                    <th class="ps-3">Queued</th>
-                                    <th>Host</th>
-                                    <th>Action</th>
-                                    <th>By</th>
-                                    <th>Status</th>
-                                    <th>Result</th>
-                                </tr>
-                            </thead>
-                            <tbody id="cmdHistoryBody">
-                                <tr><td colspan="6" class="text-center text-muted py-4">Loading command history...</td></tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
+        <div class="card-body p-0">
+            <div class="table-responsive" style="max-height: 600px; overflow-y: auto;">
+                <table class="table table-dark table-hover table-sm mb-0 align-middle">
+                    <thead>
+                        <tr>
+                            <th class="ps-3">Queued</th>
+                            <th>Host</th>
+                            <th>Action</th>
+                            <th>By</th>
+                            <th>Status</th>
+                            <th>Result</th>
+                        </tr>
+                    </thead>
+                    <tbody id="cmdHistoryBody">
+                        <tr><td colspan="6" class="text-center text-muted py-4">Loading command history...</td></tr>
+                    </tbody>
+                </table>
             </div>
         </div>
     </div>
@@ -185,25 +147,12 @@
 </div>
 
 <script>
-const AGENTS_LAYOUT_KEY = 'microdfir_agents_layout_v1';
+const AGENTS_TAB_KEY = 'microdfir_agents_active_tab';
 
 document.addEventListener("DOMContentLoaded", function() {
-    const grid = GridStack.init({
-        cellHeight: 30,
-        margin: 10,
-        handle: '.grid-drag-handle',
-        resizable: { handles: 'e, se, s' },
-        float: false
-    }, '#agentsGrid');
-
-    try {
-        const saved = JSON.parse(localStorage.getItem(AGENTS_LAYOUT_KEY) || 'null');
-        if (Array.isArray(saved) && saved.length) grid.load(saved);
-    } catch (e) { console.error('Failed to restore Agents layout:', e); }
-
-    grid.on('change', function() {
-        try { localStorage.setItem(AGENTS_LAYOUT_KEY, JSON.stringify(grid.save(false))); } catch (e) {}
-    });
+    let savedTab = 'agents';
+    try { savedTab = localStorage.getItem(AGENTS_TAB_KEY) || 'agents'; } catch (e) {}
+    switchAgentsTab(savedTab);
 
     loadUniqueEndpoints();
     loadCommandHistory();
@@ -211,9 +160,13 @@ document.addEventListener("DOMContentLoaded", function() {
     setInterval(loadCommandHistory, 15000);
 });
 
-function resetAgentsLayout() {
-    localStorage.removeItem(AGENTS_LAYOUT_KEY);
-    location.reload();
+function switchAgentsTab(tab) {
+    const isAgents = tab !== 'response';
+    document.getElementById('tabBtnAgents').classList.toggle('active', isAgents);
+    document.getElementById('tabBtnResponse').classList.toggle('active', !isAgents);
+    document.getElementById('paneAgents').style.display = isAgents ? 'block' : 'none';
+    document.getElementById('paneResponse').style.display = isAgents ? 'none' : 'block';
+    try { localStorage.setItem(AGENTS_TAB_KEY, isAgents ? 'agents' : 'response'); } catch (e) {}
 }
 
 function escHtml(str) {
