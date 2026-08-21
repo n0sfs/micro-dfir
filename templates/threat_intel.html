@@ -44,14 +44,16 @@
                                     <th class="ps-3">Name</th>
                                     <th>Type</th>
                                     <th>Source</th>
+                                    <th>Enabled</th>
                                     <th>Status</th>
                                     <th>Last Sync</th>
+                                    <th>Auto-Sync</th>
                                     <th>IOCs</th>
                                     <th style="width:150px;">Actions</th>
                                 </tr>
                             </thead>
                             <tbody id="feedsTableBody">
-                                <tr><td colspan="7" class="text-center text-muted py-4">Loading feeds...</td></tr>
+                                <tr><td colspan="9" class="text-center text-muted py-4">Loading feeds...</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -149,7 +151,10 @@
         <div class="mb-3">
             <label class="form-label">Feed Type</label>
             <select id="feedType" class="form-select bg-dark text-light border-secondary" onchange="toggleFeedTypeFields()">
-                <option value="threatfox">ThreatFox Bulk Export (public, no auth)</option>
+                <option value="threatfox">ThreatFox Recent IOCs (public, no auth)</option>
+                <option value="urlhaus">URLhaus Malicious URLs (public, no auth)</option>
+                <option value="feodotracker">Feodo Tracker Botnet C2 IPs (public, no auth)</option>
+                <option value="otx">AlienVault OTX Subscribed Pulses (API key required)</option>
                 <option value="taxii">STIX / TAXII 2.1 Server</option>
             </select>
         </div>
@@ -172,6 +177,27 @@
                     <input type="password" id="feedPassword" class="form-control bg-dark text-light border-secondary" placeholder="Leave blank to keep existing">
                 </div>
             </div>
+            <p class="text-muted small">Either username/password above, or an API key below (as a bearer token) — not both.</p>
+        </div>
+        <div id="apiKeyField" style="display:none;">
+            <div class="mb-3">
+                <label class="form-label">API Key</label>
+                <input type="password" id="feedApiKey" class="form-control bg-dark text-light border-secondary" placeholder="Leave blank to keep existing">
+                <div id="apiKeyStatus" class="form-text text-muted"></div>
+            </div>
+        </div>
+        <div class="mb-3">
+            <label class="form-label">Auto-Sync Interval</label>
+            <select id="feedSyncInterval" class="form-select bg-dark text-light border-secondary">
+                <option value="">Manual only (no auto-sync)</option>
+                <option value="15">Every 15 minutes</option>
+                <option value="30">Every 30 minutes</option>
+                <option value="60">Every 1 hour</option>
+                <option value="360">Every 6 hours</option>
+                <option value="720">Every 12 hours</option>
+                <option value="1440">Every 24 hours</option>
+            </select>
+            <div class="form-text text-muted">Feeds due for auto-sync are checked roughly every 30s in the background.</div>
         </div>
         <div id="feedModalError" class="text-danger small" style="display:none;"></div>
       </div>
@@ -242,8 +268,14 @@ let editingFeedId = null;
 
 function initFeedModal() { if (!feedModal) feedModal = new bootstrap.Modal(document.getElementById('feedModal')); }
 
+// Feed types that need the API key field shown: TAXII servers can optionally use a
+// bearer token instead of basic auth, and OTX requires one outright.
+const FEED_TYPES_WITH_API_KEY = ['taxii', 'otx'];
+
 function toggleFeedTypeFields() {
-    document.getElementById('taxiiFields').style.display = document.getElementById('feedType').value === 'taxii' ? 'block' : 'none';
+    const type = document.getElementById('feedType').value;
+    document.getElementById('taxiiFields').style.display = type === 'taxii' ? 'block' : 'none';
+    document.getElementById('apiKeyField').style.display = FEED_TYPES_WITH_API_KEY.includes(type) ? 'block' : 'none';
 }
 
 function openFeedModal(feed) {
@@ -256,6 +288,9 @@ function openFeedModal(feed) {
     document.getElementById('feedCollection').value = feed ? (feed.collection_id || '') : '';
     document.getElementById('feedUsername').value = feed ? (feed.username || '') : '';
     document.getElementById('feedPassword').value = '';
+    document.getElementById('feedApiKey').value = '';
+    document.getElementById('apiKeyStatus').innerText = feed && feed.has_api_key ? 'An API key is already set — leave blank to keep it.' : '';
+    document.getElementById('feedSyncInterval').value = feed && feed.sync_interval_minutes ? String(feed.sync_interval_minutes) : '';
     toggleFeedTypeFields();
     feedModal.show();
 }
@@ -268,6 +303,8 @@ async function saveFeed() {
         collection_id: document.getElementById('feedCollection').value.trim(),
         username: document.getElementById('feedUsername').value.trim(),
         password: document.getElementById('feedPassword').value,
+        api_key: document.getElementById('feedApiKey').value.trim(),
+        sync_interval_minutes: document.getElementById('feedSyncInterval').value || null,
         enabled: true
     };
     const url = editingFeedId ? `/api/ti/feeds/${editingFeedId}` : '/api/ti/feeds';
@@ -281,6 +318,29 @@ async function saveFeed() {
         loadFeeds();
     } catch (e) {
         errBox.innerText = 'Error: ' + e; errBox.style.display = 'block';
+    }
+}
+
+// Editing always force-enabled a feed (the modal's payload hardcodes enabled: true),
+// so this switch is the only way to actually turn one off — it reuses the same PUT
+// endpoint with the feed's own current fields, changing only enabled.
+async function toggleFeedEnabled(id, checked) {
+    const feed = allFeeds.find(f => f.id === id);
+    if (!feed) return;
+    try {
+        const res = await fetch(`/api/ti/feeds/${id}`, {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                name: feed.name, discovery_url: feed.discovery_url, collection_id: feed.collection_id,
+                username: feed.username, password: '', api_key: '',
+                sync_interval_minutes: feed.sync_interval_minutes, enabled: checked
+            })
+        });
+        if (!res.ok) { const err = await res.json().catch(() => ({})); alert(err.error || 'Failed to update feed.'); }
+    } catch (e) {
+        alert('Error: ' + e);
+    } finally {
+        loadFeeds();
     }
 }
 
@@ -306,10 +366,32 @@ async function deleteFeed(id, name) {
     loadFeeds();
 }
 
+function escHtml(str) {
+    const d = document.createElement('div');
+    d.innerText = str == null ? '' : String(str);
+    return d.innerHTML;
+}
+
 function statusBadge(status) {
     if (!status) return '<span class="badge bg-secondary">Never synced</span>';
     if (status === 'success') return '<span class="badge bg-success">OK</span>';
-    return `<span class="badge bg-danger" title="${status}">Failed</span>`;
+    return `<span class="badge bg-danger" title="${escHtml(status)}">Failed</span>`;
+}
+
+const FEED_TYPE_LABELS = {
+    threatfox: 'ThreatFox', taxii: 'STIX/TAXII 2.1', otx: 'AlienVault OTX',
+    urlhaus: 'URLhaus', feodotracker: 'Feodo Tracker'
+};
+const FEED_TYPE_SOURCES = {
+    threatfox: 'threatfox.abuse.ch (public)', urlhaus: 'urlhaus.abuse.ch (public)',
+    feodotracker: 'feodotracker.abuse.ch (public)', otx: 'otx.alienvault.com (API key)'
+};
+
+function syncIntervalLabel(mins) {
+    if (!mins) return '<span class="text-muted">Manual</span>';
+    if (mins < 60) return `Every ${mins}m`;
+    if (mins < 1440) return `Every ${mins / 60}h`;
+    return `Every ${mins / 1440}d`;
 }
 
 function loadFeeds() {
@@ -321,22 +403,28 @@ function loadFeeds() {
 
             const tbody = document.getElementById('feedsTableBody');
             if (feeds.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">No threat feeds configured.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-4">No threat feeds configured.</td></tr>';
                 return;
             }
             const isAdmin = {{ 'true' if current_user.role == 'admin' else 'false' }};
             tbody.innerHTML = feeds.map(f => `
                 <tr>
-                    <td class="ps-3"><strong>${f.name}</strong></td>
-                    <td><span class="badge bg-secondary">${f.feed_type === 'taxii' ? 'STIX/TAXII 2.1' : 'ThreatFox Bulk'}</span></td>
-                    <td class="text-muted small text-truncate" style="max-width:220px;">${f.feed_type === 'taxii' ? (f.discovery_url || '') : 'threatfox.abuse.ch (public)'}</td>
+                    <td class="ps-3"><strong>${escHtml(f.name)}</strong></td>
+                    <td><span class="badge bg-secondary">${escHtml(FEED_TYPE_LABELS[f.feed_type] || f.feed_type)}</span></td>
+                    <td class="text-muted small text-truncate" style="max-width:200px;">${escHtml(f.feed_type === 'taxii' ? (f.discovery_url || '') : (FEED_TYPE_SOURCES[f.feed_type] || ''))}</td>
+                    <td>
+                        <div class="form-check form-switch mb-0">
+                            <input class="form-check-input" type="checkbox" ${f.enabled ? 'checked' : ''} ${isAdmin ? '' : 'disabled'} onchange="toggleFeedEnabled(${f.id}, this.checked)">
+                        </div>
+                    </td>
                     <td>${statusBadge(f.last_status)}</td>
-                    <td class="text-nowrap small">${f.last_sync || '—'}</td>
+                    <td class="text-nowrap small">${escHtml(f.last_sync) || '—'}</td>
+                    <td class="text-nowrap small">${syncIntervalLabel(f.sync_interval_minutes)}</td>
                     <td>${f.last_count ?? 0}</td>
                     <td class="text-nowrap">
                         ${isAdmin ? `
                         <button class="btn btn-sm btn-outline-secondary py-0 px-2 me-1" title="Sync Now" onclick="syncFeedNow(${f.id}, this)"><i class="fa-solid fa-rotate"></i></button>
-                        <button class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="Edit" onclick='openFeedModal(${JSON.stringify(f)})'><i class="fa-solid fa-pen"></i></button>
+                        <button class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="Edit" onclick='openFeedModal(${JSON.stringify(f).replace(/'/g, "&#39;")})'><i class="fa-solid fa-pen"></i></button>
                         <button class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete" onclick="deleteFeed(${f.id}, '${f.name.replace(/'/g, "\\'")}')"><i class="fa-solid fa-trash"></i></button>
                         ` : ''}
                     </td>
