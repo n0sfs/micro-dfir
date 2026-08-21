@@ -2037,17 +2037,35 @@ def api_download_agent(os_type):
 @login_required
 def agent_checkins():
     from flask import jsonify
+    import datetime
     db = get_db()
     try:
         rows = db.execute('SELECT * FROM agent_polls WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY ip_address) ORDER BY id DESC LIMIT 20').fetchall()
+        now = datetime.datetime.now()
         mapped = []
         for r in rows:
+            ts = r["timestamp"] if "timestamp" in r.keys() else ""
+            # Every row used to be hardcoded "Online" regardless of how long ago it actually
+            # checked in — an agent that stopped polling (uninstalled, powered off, network
+            # drop) would sit at the top of this list looking perpetually alive forever.
+            # The agent checks in roughly every 15s under normal operation, so a healthy
+            # margin above that (45s) still counts as Online; anything not heard from in
+            # over 5 minutes is genuinely gone, not just a missed beat.
+            status = "Unknown"
+            try:
+                last_seen = datetime.datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
+                age = (now - last_seen).total_seconds()
+                if age <= 45: status = "Online"
+                elif age <= 300: status = "Idle"
+                else: status = "Offline"
+            except (ValueError, TypeError):
+                pass
             mapped.append({
                 "hostname": r["user_agent"] if "user_agent" in r.keys() else "Windows-Endpoint",
-                "endpoint_ip": r["ip_address"] if "ip_address" in r.keys() else "192.168.86.49",
+                "endpoint_ip": r["ip_address"] if "ip_address" in r.keys() else "Unknown",
                 "client_info": "Active Agent",
-                "status": "Online",
-                "last_check_in": r["timestamp"] if "timestamp" in r.keys() else ""
+                "status": status,
+                "last_check_in": ts
             })
         return jsonify(mapped)
     except Exception as e:

@@ -36,6 +36,7 @@
     top:10px; right:10px;
     font-size:.8rem;
 }
+.endpoint-status-btn.active-filter{background-color:var(--accent); border-color:var(--accent); color:#fff;}
 </style>
 
 <div class="grid-stack" id="agentsGrid">
@@ -81,8 +82,14 @@
             <div class="card bg-dark border-secondary">
                 <div class="card-header border-secondary d-flex justify-content-between align-items-center flex-wrap gap-2">
                     <h5 class="card-title text-light mb-0"><i class="fa-solid fa-grip-vertical grid-drag-handle me-2" title="Drag to move"></i><i class="fa-solid fa-laptop-medical me-2"></i>Active Endpoint Check-ins & Response Actions</h5>
-                    <div class="d-flex align-items-center gap-2">
+                    <div class="d-flex align-items-center gap-2 flex-wrap">
                         <input type="text" id="endpointSearchBox" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width: 220px;" placeholder="Search hostname or IP..." oninput="renderEndpoints()">
+                        <div class="btn-group btn-group-sm" role="group">
+                            <button type="button" class="btn btn-outline-secondary endpoint-status-btn active-filter" data-status="all" onclick="setEndpointStatusFilter('all')">All</button>
+                            <button type="button" class="btn btn-outline-secondary endpoint-status-btn" data-status="Online" onclick="setEndpointStatusFilter('Online')">Online</button>
+                            <button type="button" class="btn btn-outline-secondary endpoint-status-btn" data-status="Idle" onclick="setEndpointStatusFilter('Idle')">Idle</button>
+                            <button type="button" class="btn btn-outline-secondary endpoint-status-btn" data-status="Offline" onclick="setEndpointStatusFilter('Offline')">Offline</button>
+                        </div>
                         <span class="text-muted small text-nowrap" id="endpointCountLabel"></span>
                         <button class="btn btn-outline-secondary btn-sm" onclick="loadUniqueEndpoints()"><i class="fa-solid fa-rotate me-1"></i> Refresh List</button>
                     </div>
@@ -220,15 +227,38 @@ function rowHost(el) {
 }
 
 let allEndpoints = [];
+let endpointStatusFilter = 'all';
 
 function loadUniqueEndpoints() {
     fetch('/api/agent/checkins')
         .then(r => r.json())
         .then(data => {
             allEndpoints = Array.isArray(data) ? data : [];
-            document.getElementById('statEndpoints').innerText = allEndpoints.length;
+            // "Online" specifically, not just "however many rows came back" — a dead agent
+            // that stopped checking in stays in the list (so it's still visible/actionable)
+            // but shouldn't count toward the online tally.
+            document.getElementById('statEndpoints').innerText = allEndpoints.filter(d => d.status === 'Online').length;
             renderEndpoints();
         });
+}
+
+function setEndpointStatusFilter(status) {
+    endpointStatusFilter = status;
+    document.querySelectorAll('.endpoint-status-btn').forEach(b => b.classList.toggle('active-filter', b.dataset.status === status));
+    renderEndpoints();
+}
+
+function endpointStatusBadge(status) {
+    if (status === 'Online') return '<span class="badge bg-success">Online</span>';
+    if (status === 'Idle') return '<span class="badge bg-warning text-dark">Idle</span>';
+    if (status === 'Offline') return '<span class="badge bg-secondary">Offline</span>';
+    return '<span class="badge bg-secondary">Unknown</span>';
+}
+
+function heartbeatBadge(status) {
+    if (status === 'Online') return '<span class="badge bg-dark border border-success text-success px-2 py-1 font-monospace" style="font-size: 11px;"><i class="fa-solid fa-wave-square me-1"></i>ONLINE</span>';
+    if (status === 'Idle') return '<span class="badge bg-dark border border-warning text-warning px-2 py-1 font-monospace" style="font-size: 11px;"><i class="fa-solid fa-wave-square me-1"></i>IDLE</span>';
+    return '<span class="badge bg-dark border border-secondary text-secondary px-2 py-1 font-monospace" style="font-size: 11px;"><i class="fa-solid fa-slash me-1"></i>OFFLINE</span>';
 }
 
 function renderEndpoints() {
@@ -242,18 +272,20 @@ function renderEndpoints() {
     }
 
     const q = (document.getElementById('endpointSearchBox').value || '').trim().toLowerCase();
-    const filtered = q ? allEndpoints.filter(dev =>
+    let filtered = allEndpoints;
+    if (endpointStatusFilter !== 'all') filtered = filtered.filter(dev => dev.status === endpointStatusFilter);
+    if (q) filtered = filtered.filter(dev =>
         (dev.hostname || '').toLowerCase().includes(q) ||
         (dev.endpoint_ip || '').toLowerCase().includes(q) ||
         (dev.client_info || '').toLowerCase().includes(q)
-    ) : allEndpoints;
+    );
 
-    document.getElementById('endpointCountLabel').innerText = q
+    document.getElementById('endpointCountLabel').innerText = (q || endpointStatusFilter !== 'all')
         ? `${filtered.length} of ${allEndpoints.length} endpoints`
         : `${allEndpoints.length} endpoint${allEndpoints.length === 1 ? '' : 's'}`;
 
     if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No endpoints match your search.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No endpoints match your filters.</td></tr>';
         return;
     }
 
@@ -266,13 +298,9 @@ function renderEndpoints() {
                     <td><strong>${escHtml(dev.hostname)}</strong></td>
                     <td><span class="text-info">${escHtml(dev.endpoint_ip)}</span></td>
                     <td>${escHtml(dev.client_info)}</td>
-                    <td><span class="badge bg-success">${escHtml(dev.status)}</span></td>
+                    <td>${endpointStatusBadge(dev.status)}</td>
                     <td class="text-nowrap">${escHtml(dev.last_check_in)}</td>
-                    <td>
-                        <span class="badge bg-dark border border-success text-success px-2 py-1 font-monospace" style="font-size: 11px;">
-                            <i class="fa-solid fa-wave-square me-1"></i>ONLINE
-                        </span>
-                    </td>
+                    <td>${heartbeatBadge(dev.status)}</td>
                     <td class="text-nowrap">
                         <div class="dropdown d-inline-block">
                             <button class="btn btn-sm btn-outline-primary py-0 px-2 dropdown-toggle" type="button" data-bs-toggle="dropdown">Respond</button>
