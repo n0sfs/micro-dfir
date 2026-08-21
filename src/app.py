@@ -366,6 +366,39 @@ def api_rules():
     db.commit()
     invalidate_rules_cache()
     return jsonify({"status": "success"})
+@app.route('/api/rules/<int:rid>', methods=['GET', 'PUT', 'DELETE'])
+@login_required
+def api_rule_detail(rid):
+    db = get_db()
+
+    if request.method == 'GET':
+        r = db.execute("SELECT id, title, rule_yaml, enabled FROM sigma_rules WHERE id = ?", (rid,)).fetchone()
+        if not r:
+            return jsonify({"error": "Rule not found"}), 404
+        return jsonify(dict(r))
+
+    if current_user.role != 'admin':
+        return jsonify({"error": "Admin required"}), 403
+
+    if request.method == 'DELETE':
+        db.execute("DELETE FROM sigma_rules WHERE id = ?", (rid,))
+        db.commit()
+        invalidate_rules_cache()
+        return jsonify({"ok": 1})
+
+    # PUT — update an existing rule's title/YAML
+    import yaml
+    ry = (request.get_json() or {}).get('rule_yaml', '')
+    try:
+        parsed = yaml.safe_load(ry)
+        t = parsed.get('title', 'Untitled') if isinstance(parsed, dict) else 'Untitled'
+    except yaml.YAMLError as e:
+        return jsonify({"error": f"Invalid rule YAML: {e}"}), 400
+    db.execute("UPDATE sigma_rules SET title = ?, rule_yaml = ? WHERE id = ?", (t, ry, rid))
+    db.commit()
+    invalidate_rules_cache()
+    return jsonify({"status": "success"})
+
 @app.route('/api/rules/<int:rid>/toggle', methods=['PUT'])
 @login_required
 def api_r_tog(rid): 
