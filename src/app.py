@@ -2052,6 +2052,7 @@ def agent_checkins():
         rows = db.execute('SELECT * FROM agent_polls WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY ip_address) ORDER BY id DESC LIMIT 20').fetchall()
         now = datetime.datetime.now()
         mapped = []
+        hostnames = []
         for r in rows:
             ts = r["timestamp"] if "timestamp" in r.keys() else ""
             # Every row used to be hardcoded "Online" regardless of how long ago it actually
@@ -2069,13 +2070,33 @@ def agent_checkins():
                 else: status = "Offline"
             except (ValueError, TypeError):
                 pass
+            hostname = r["user_agent"] if "user_agent" in r.keys() else "Windows-Endpoint"
+            hostnames.append(hostname)
             mapped.append({
-                "hostname": r["user_agent"] if "user_agent" in r.keys() else "Windows-Endpoint",
+                "hostname": hostname,
                 "endpoint_ip": r["ip_address"] if "ip_address" in r.keys() else "Unknown",
-                "client_info": "Active Agent",
                 "status": status,
-                "last_check_in": ts
+                "last_check_in": ts,
+                "recent_polls": []
             })
+
+        # Recent check-in timestamps per host, for the heartbeat sparkline on the Agents
+        # page — one bulk query bounded to the last 2000 polls across the visible hosts,
+        # rather than a separate query per row.
+        if hostnames:
+            placeholders = ','.join('?' * len(hostnames))
+            poll_rows = db.execute(
+                f"SELECT user_agent, timestamp FROM agent_polls WHERE user_agent IN ({placeholders}) ORDER BY id DESC LIMIT 2000",
+                hostnames
+            ).fetchall()
+            polls_by_host = {}
+            for pr in poll_rows:
+                bucket = polls_by_host.setdefault(pr['user_agent'], [])
+                if len(bucket) < 20:
+                    bucket.append(pr['timestamp'])
+            for m in mapped:
+                m['recent_polls'] = polls_by_host.get(m['hostname'], [])
+
         return jsonify(mapped)
     except Exception as e:
         print("Checkins error:", e)
@@ -2132,12 +2153,12 @@ def api_agent_commands():
     else:
         return jsonify({'error': f'Unknown command label: {label}'}), 400
 
-    db.execute(
+    cur = db.execute(
         "INSERT INTO agent_commands (hostname, label, script, queued_by) VALUES (?, ?, ?, ?)",
         (hostname, label, script, current_user.username)
     )
     db.commit()
-    return jsonify({'status': 'success'})
+    return jsonify({'status': 'success', 'id': cur.lastrowid})
 
 @app.route('/api/agent/result', methods=['POST'])
 def api_agent_result():

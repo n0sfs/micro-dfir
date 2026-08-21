@@ -10,6 +10,10 @@
 #agentsTabs .nav-link{color:var(--text-muted); border-color:transparent; background:transparent;}
 #agentsTabs .nav-link:hover{color:var(--text-secondary); border-color:transparent;}
 #agentsTabs .nav-link.active{color:var(--text-primary); background-color:var(--bg-card-alt); border-color:var(--border) var(--border) var(--bg-card-alt);}
+.hb-spark{vertical-align:middle;}
+.console-action-btn{text-align:left;}
+#consoleTerminal .term-line{margin-bottom:2px;}
+#consoleActionsWrap.disabled{opacity:.4; pointer-events:none;}
 </style>
 
 <div class="row g-3 mb-3">
@@ -69,15 +73,14 @@
                         <tr>
                             <th>Hostname</th>
                             <th>Endpoint IP</th>
-                            <th>Client / Agent Info</th>
                             <th>Status</th>
                             <th>Last Check-in</th>
-                            <th>Heartbeat Stream</th>
+                            <th>Heartbeat</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody id="endpointsTableBody">
-                        <tr><td colspan="7" class="text-center text-muted py-4">Loading active endpoints...</td></tr>
+                        <tr><td colspan="6" class="text-center text-muted py-4">Loading active endpoints...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -86,7 +89,50 @@
 
     <!-- Response Actions pane -->
     <div id="paneResponse" style="display:none;">
-        <div class="card-body py-2 px-3 border-bottom border-secondary d-flex justify-content-end">
+
+        <!-- Interactive response console -->
+        <div class="card-body p-3 border-bottom border-secondary">
+            <div class="row g-3">
+                <div class="col-lg-4">
+                    <label for="consoleHostSelect" class="form-label small text-muted mb-1 fw-bold">Target Host</label>
+                    <select id="consoleHostSelect" class="form-select form-select-sm bg-dark text-light border-secondary mb-3" onchange="onConsoleHostChange()">
+                        <option value="">-- Select an endpoint --</option>
+                    </select>
+
+                    <div id="consoleActionsWrap" class="disabled">
+                        <label class="form-label small text-muted mb-1 fw-bold">Response Actions</label>
+                        <div class="d-grid gap-2 mb-2">
+                            <button type="button" class="btn btn-sm btn-outline-light console-action-btn" onclick="consoleRun('list_processes')"><i class="fa-solid fa-list me-2"></i>List Processes</button>
+                            <button type="button" class="btn btn-sm btn-outline-light console-action-btn" onclick="consoleShowParamForm('kill_process')"><i class="fa-solid fa-skull me-2"></i>Kill Process (PID)</button>
+                            <button type="button" class="btn btn-sm btn-outline-light console-action-btn" onclick="consoleShowParamForm('collect_file')"><i class="fa-solid fa-file-arrow-down me-2"></i>Collect File</button>
+                            <button type="button" class="btn btn-sm btn-outline-light console-action-btn" onclick="consoleRun('collect_triage')"><i class="fa-solid fa-microscope me-2"></i>Triage Collection</button>
+                            <button type="button" class="btn btn-sm btn-outline-warning console-action-btn" onclick="consoleRun('isolate_host', {}, 'Isolate this host from the network? Only traffic to/from this SOC server will be allowed.')"><i class="fa-solid fa-network-wired me-2"></i>Isolate Host</button>
+                            <button type="button" class="btn btn-sm btn-outline-success console-action-btn" onclick="consoleRun('restore_network', {}, 'Restore normal network connectivity on this host?')"><i class="fa-solid fa-wifi me-2"></i>Restore Network</button>
+                            <button type="button" class="btn btn-sm btn-outline-danger console-action-btn" onclick="consoleUninstall()"><i class="fa-solid fa-trash me-2"></i>Uninstall Agent</button>
+                        </div>
+
+                        <div id="consoleParamForm" style="display:none;" class="border border-secondary rounded p-2 mt-2 bg-secondary bg-opacity-10"></div>
+                    </div>
+                </div>
+
+                <div class="col-lg-8">
+                    <label class="form-label small text-muted mb-1 fw-bold">Output Terminal</label>
+                    <div id="consoleTerminal" class="bg-black border border-secondary rounded p-2 font-monospace small" style="height: 360px; overflow-y:auto; white-space:pre-wrap;">
+                        <span class="text-muted">Select an endpoint to begin an interactive session.</span>
+                    </div>
+                    <div class="input-group input-group-sm mt-2">
+                        <span class="input-group-text bg-dark text-success border-secondary font-monospace">PS&gt;</span>
+                        <input type="text" id="consoleCmdInput" class="form-control bg-black text-light border-secondary font-monospace" placeholder="Type a PowerShell command and press Enter..." disabled onkeydown="if(event.key==='Enter') consoleSubmitTyped()">
+                        <button class="btn btn-outline-danger" id="consoleSendBtn" disabled onclick="consoleSubmitTyped()"><i class="fa-solid fa-paper-plane"></i></button>
+                    </div>
+                    <p class="text-muted small mt-1 mb-0"><i class="fa-solid fa-circle-info me-1"></i>Commands queue to the endpoint and run on its next check-in (usually within 15s).</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- History -->
+        <div class="card-body py-2 px-3 border-bottom border-secondary d-flex justify-content-between align-items-center">
+            <h6 class="mb-0 text-muted"><i class="fa-solid fa-clock-rotate-left me-2"></i>All Response Action History</h6>
             <button class="btn btn-outline-secondary btn-sm" onclick="loadCommandHistory()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
         </div>
         <div class="card-body p-0">
@@ -111,27 +157,7 @@
     </div>
 </div>
 
-<!-- Custom Command Modal -->
-<div class="modal fade" id="customCmdModal" tabindex="-1">
-  <div class="modal-dialog modal-lg">
-    <div class="modal-content bg-dark text-light border-secondary">
-      <div class="modal-header border-secondary">
-        <h5 class="modal-title">Run Custom PowerShell on <span id="customCmdHost"></span></h5>
-        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-      </div>
-      <div class="modal-body">
-        <p class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i><strong>High-risk action.</strong> This runs arbitrary PowerShell on the endpoint with the agent's privileges. Only use this if you understand exactly what the script does.</p>
-        <textarea id="customCmdScript" class="form-control bg-black text-light border-secondary font-monospace small" rows="8" spellcheck="false" placeholder="Get-Process | Select-Object -First 10"></textarea>
-      </div>
-      <div class="modal-footer border-secondary">
-        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button type="button" class="btn btn-danger" onclick="submitCustomCommand()"><i class="fa-solid fa-bolt me-1"></i> Execute</button>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- Command Result Modal -->
+<!-- Command Result Modal (for history rows) -->
 <div class="modal fade" id="cmdResultModal" tabindex="-1">
   <div class="modal-dialog modal-lg modal-dialog-scrollable">
     <div class="modal-content bg-dark text-light border-secondary">
@@ -179,6 +205,52 @@ function rowHost(el) {
     return el.closest('tr').dataset.hostname;
 }
 
+// ---- Heartbeat sparkline ----
+// Buckets the host's last ~20 poll timestamps into 15s slots covering a 5-minute
+// window and draws a tiny EKG-style polyline: consecutive on-time check-ins alternate
+// peak/trough so a healthy agent visibly "pulses", while a quiet stretch draws flat —
+// an actual graph of recent activity instead of a static status badge restating the
+// Status column.
+function heartbeatSpark(status, recentPolls) {
+    const SLOTS = 20, SLOT_MS = 15000;
+    const now = Date.now();
+    const times = (recentPolls || [])
+        .filter(ts => ts)
+        .map(ts => new Date(String(ts).replace(' ', 'T')).getTime())
+        .filter(t => !isNaN(t));
+    const filled = new Array(SLOTS).fill(false);
+    times.forEach(t => {
+        const age = now - t;
+        if (age < 0 || age > SLOTS * SLOT_MS) return;
+        const idx = SLOTS - 1 - Math.floor(age / SLOT_MS);
+        if (idx >= 0 && idx < SLOTS) filled[idx] = true;
+    });
+    const color = status === 'Online' ? '#3fb950' : (status === 'Idle' ? '#d29922' : '#5b6270');
+    const w = 100, h = 24, step = w / (SLOTS - 1), base = h - 4;
+    let pts = [];
+    for (let i = 0; i < SLOTS; i++) {
+        const x = i * step;
+        const y = filled[i] ? (i % 2 === 0 ? 4 : h - 4) : base;
+        pts.push(`${x.toFixed(1)},${y}`);
+    }
+    const hasAny = filled.some(Boolean);
+    const title = hasAny ? `${times.length} check-in${times.length === 1 ? '' : 's'} in the last 5 minutes` : 'No check-ins in the last 5 minutes';
+    return `<svg class="hb-spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="width:96px;height:24px;display:block;" title="${escHtml(title)}">
+        <polyline points="${pts.join(' ')}" fill="none" stroke="${color}" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="${hasAny ? '1' : '0.35'}"/>
+    </svg>`;
+}
+
+function relativeTime(ts) {
+    if (!ts) return '';
+    const t = new Date(ts.replace(' ', 'T')).getTime();
+    if (isNaN(t)) return '';
+    const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (s < 60) return `${s}s ago`;
+    if (s < 3600) return `${Math.round(s / 60)}m ago`;
+    if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+    return `${Math.round(s / 86400)}d ago`;
+}
+
 let allEndpoints = [];
 let endpointStatusFilter = 'all';
 
@@ -192,6 +264,7 @@ function loadUniqueEndpoints() {
             // but shouldn't count toward the online tally.
             document.getElementById('statEndpoints').innerText = allEndpoints.filter(d => d.status === 'Online').length;
             renderEndpoints();
+            populateConsoleHostSelect();
         });
 }
 
@@ -208,19 +281,13 @@ function endpointStatusBadge(status) {
     return '<span class="badge bg-secondary">Unknown</span>';
 }
 
-function heartbeatBadge(status) {
-    if (status === 'Online') return '<span class="badge bg-dark border border-success text-success px-2 py-1 font-monospace" style="font-size: 11px;"><i class="fa-solid fa-wave-square me-1"></i>ONLINE</span>';
-    if (status === 'Idle') return '<span class="badge bg-dark border border-warning text-warning px-2 py-1 font-monospace" style="font-size: 11px;"><i class="fa-solid fa-wave-square me-1"></i>IDLE</span>';
-    return '<span class="badge bg-dark border border-secondary text-secondary px-2 py-1 font-monospace" style="font-size: 11px;"><i class="fa-solid fa-slash me-1"></i>OFFLINE</span>';
-}
-
 function renderEndpoints() {
     let tbody = document.getElementById('endpointsTableBody');
     if (!tbody) return;
 
     if (allEndpoints.length === 0) {
         document.getElementById('endpointCountLabel').innerText = '';
-        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No active agent endpoints detected.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">No active agent endpoints detected.</td></tr>';
         return;
     }
 
@@ -229,8 +296,7 @@ function renderEndpoints() {
     if (endpointStatusFilter !== 'all') filtered = filtered.filter(dev => dev.status === endpointStatusFilter);
     if (q) filtered = filtered.filter(dev =>
         (dev.hostname || '').toLowerCase().includes(q) ||
-        (dev.endpoint_ip || '').toLowerCase().includes(q) ||
-        (dev.client_info || '').toLowerCase().includes(q)
+        (dev.endpoint_ip || '').toLowerCase().includes(q)
     );
 
     document.getElementById('endpointCountLabel').innerText = (q || endpointStatusFilter !== 'all')
@@ -238,7 +304,7 @@ function renderEndpoints() {
         : `${allEndpoints.length} endpoint${allEndpoints.length === 1 ? '' : 's'}`;
 
     if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No endpoints match your filters.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">No endpoints match your filters.</td></tr>';
         return;
     }
 
@@ -250,14 +316,15 @@ function renderEndpoints() {
                 <tr data-hostname="${escHtml(dev.hostname)}">
                     <td><strong>${escHtml(dev.hostname)}</strong></td>
                     <td><span class="text-info">${escHtml(dev.endpoint_ip)}</span></td>
-                    <td>${escHtml(dev.client_info)}</td>
                     <td>${endpointStatusBadge(dev.status)}</td>
-                    <td class="text-nowrap">${escHtml(dev.last_check_in)}</td>
-                    <td>${heartbeatBadge(dev.status)}</td>
+                    <td class="text-nowrap"><span title="${escHtml(dev.last_check_in)}">${escHtml(relativeTime(dev.last_check_in)) || escHtml(dev.last_check_in)}</span></td>
+                    <td>${heartbeatSpark(dev.status, dev.recent_polls)}</td>
                     <td class="text-nowrap">
                         <div class="dropdown d-inline-block">
                             <button class="btn btn-sm btn-outline-primary py-0 px-2 dropdown-toggle" type="button" data-bs-toggle="dropdown">Respond</button>
                             <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
+                                <li><a class="dropdown-item text-primary" href="#" onclick="openInConsole(rowHost(this)); return false;"><i class="fa-solid fa-terminal me-2"></i>Interact in Console</a></li>
+                                <li><hr class="dropdown-divider"></li>
                                 <li><a class="dropdown-item" href="#" onclick="queueCommand(rowHost(this), 'list_processes'); return false;"><i class="fa-solid fa-list me-2"></i>List Processes</a></li>
                                 <li><a class="dropdown-item" href="#" onclick="killProcessPrompt(rowHost(this)); return false;"><i class="fa-solid fa-skull me-2"></i>Kill Process (PID)</a></li>
                                 <li><a class="dropdown-item" href="#" onclick="collectFilePrompt(rowHost(this)); return false;"><i class="fa-solid fa-file-arrow-down me-2"></i>Collect File</a></li>
@@ -266,7 +333,7 @@ function renderEndpoints() {
                                 <li><a class="dropdown-item text-warning" href="#" onclick="queueCommand(rowHost(this), 'isolate_host', {}, 'Isolate this host from the network? Only traffic to/from this SOC server will be allowed.'); return false;"><i class="fa-solid fa-network-wired me-2"></i>Isolate Host</a></li>
                                 <li><a class="dropdown-item text-success" href="#" onclick="queueCommand(rowHost(this), 'restore_network', {}, 'Restore normal network connectivity on this host?'); return false;"><i class="fa-solid fa-wifi me-2"></i>Restore Network</a></li>
                                 <li><hr class="dropdown-divider"></li>
-                                <li><a class="dropdown-item text-danger" href="#" onclick="openCustomCmdModal(rowHost(this)); return false;"><i class="fa-solid fa-terminal me-2"></i>Custom Command</a></li>
+                                <li><a class="dropdown-item text-danger" href="#" onclick="openCustomCmdModalOnConsole(rowHost(this)); return false;"><i class="fa-solid fa-terminal me-2"></i>Custom Command</a></li>
                                 <li><a class="dropdown-item text-danger" href="#" onclick="removeEndpoint(rowHost(this)); return false;"><i class="fa-solid fa-trash me-2"></i>Uninstall Agent</a></li>
                             </ul>
                         </div>
@@ -282,6 +349,7 @@ function renderEndpoints() {
 }
 
 function removeEndpoint(hostname) {
+    if (!hostname) return;
     if (!confirm(`Uninstall the MicroDFIR agent on ${hostname}? It will remove itself on its next check-in.`)) return;
     fetch(`/api/agent/${encodeURIComponent(hostname)}`, { method: 'DELETE' })
         .then(r => r.json())
@@ -291,7 +359,7 @@ function removeEndpoint(hostname) {
         }).catch(err => alert('Error removing endpoint: ' + err));
 }
 
-// ---- Response actions ----
+// ---- Response actions (per-row dropdown on the Agents pane) ----
 function queueCommand(hostname, label, params, confirmMsg) {
     if (confirmMsg && !confirm(confirmMsg)) return;
     fetch('/api/agent/commands', {
@@ -321,30 +389,178 @@ function collectFilePrompt(hostname) {
     queueCommand(hostname, 'collect_file', {path: path.trim()});
 }
 
-let customCmdHostname = null;
-function openCustomCmdModal(hostname) {
-    customCmdHostname = hostname;
-    document.getElementById('customCmdHost').innerText = hostname;
-    document.getElementById('customCmdScript').value = '';
-    new bootstrap.Modal(document.getElementById('customCmdModal')).show();
+// A row's "Custom Command" action opens the interactive console (which has its own
+// typed-command prompt) rather than a separate one-off modal, so the resulting output
+// lands somewhere visible instead of a single-shot alert.
+function openCustomCmdModalOnConsole(hostname) {
+    openInConsole(hostname);
+    const input = document.getElementById('consoleCmdInput');
+    if (input) input.focus();
 }
 
-function submitCustomCommand() {
-    const script = document.getElementById('customCmdScript').value;
-    if (!script.trim()) { alert('Script cannot be empty.'); return; }
+// ---- Interactive response console ----
+let consoleSessions = {};
+let consoleSelectedHost = '';
+
+const CONSOLE_ACTION_DISPLAY = {
+    list_processes: 'Get-Process (list running processes)',
+    collect_triage: 'Collect-Triage (processes, connections, autoruns, users, startup items)',
+    isolate_host: 'Isolate-Host (block all traffic except this SOC server)',
+    restore_network: 'Restore-Network'
+};
+
+function populateConsoleHostSelect() {
+    const sel = document.getElementById('consoleHostSelect');
+    if (!sel) return;
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">-- Select an endpoint --</option>' +
+        allEndpoints.map(e => `<option value="${escHtml(e.hostname)}">${escHtml(e.hostname)} (${escHtml(e.status)})</option>`).join('');
+    if (prev && allEndpoints.some(e => e.hostname === prev)) {
+        sel.value = prev;
+    } else if (prev) {
+        // The previously selected host dropped out of the active list (e.g. uninstalled) —
+        // don't leave the console pointed at a host that's no longer selectable.
+        consoleSelectedHost = '';
+        onConsoleHostChange();
+    }
+}
+
+function openInConsole(hostname) {
+    if (!hostname) return;
+    switchAgentsTab('response');
+    populateConsoleHostSelect();
+    const sel = document.getElementById('consoleHostSelect');
+    if (sel) sel.value = hostname;
+    consoleSelectedHost = hostname;
+    onConsoleHostChange();
+}
+
+function onConsoleHostChange() {
+    consoleSelectedHost = document.getElementById('consoleHostSelect').value;
+    const wrap = document.getElementById('consoleActionsWrap');
+    const active = !!consoleSelectedHost;
+    wrap.classList.toggle('disabled', !active);
+    document.getElementById('consoleCmdInput').disabled = !active;
+    document.getElementById('consoleSendBtn').disabled = !active;
+    document.getElementById('consoleParamForm').style.display = 'none';
+    renderConsoleTerminal();
+}
+
+function consoleEntryHtml(entry) {
+    let out = `<div class="term-line text-success">PS&gt; ${escHtml(entry.display)}</div>`;
+    if (entry.status === 'pending' || entry.status === 'sent') {
+        out += `<div class="term-line text-muted">[waiting for endpoint check-in...]</div>`;
+    } else {
+        if (entry.stdout) out += `<div class="term-line">${escHtml(entry.stdout)}</div>`;
+        if (entry.stderr) out += `<div class="term-line text-danger">${escHtml(entry.stderr)}</div>`;
+        if (!entry.stdout && !entry.stderr) out += `<div class="term-line text-muted">(no output)</div>`;
+    }
+    return out;
+}
+
+function renderConsoleTerminal() {
+    const term = document.getElementById('consoleTerminal');
+    if (!consoleSelectedHost) {
+        term.innerHTML = '<span class="text-muted">Select an endpoint to begin an interactive session.</span>';
+        return;
+    }
+    const sess = consoleSessions[consoleSelectedHost] || [];
+    if (!sess.length) {
+        term.innerHTML = `<span class="text-muted">No commands run yet this session on ${escHtml(consoleSelectedHost)}. Run an action on the left, or type a command below.</span>`;
+        return;
+    }
+    term.innerHTML = sess.map(consoleEntryHtml).join('<div class="term-line">&nbsp;</div>');
+    term.scrollTop = term.scrollHeight;
+}
+
+function queueConsoleCommand(hostname, label, params, display, script) {
+    const body = { hostname, label, params: params || {} };
+    if (script !== undefined) body.script = script;
     fetch('/api/agent/commands', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({hostname: customCmdHostname, label: 'custom', script})
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
     }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
-        if (ok) {
-            bootstrap.Modal.getInstance(document.getElementById('customCmdModal')).hide();
-            alert(`Custom command queued for ${customCmdHostname}.`);
-            loadCommandHistory();
-        } else {
-            alert(data.error || 'Failed to queue command.');
-        }
-    }).catch(err => alert('Error: ' + err));
+        if (!ok) { alert(data.error || 'Failed to queue command.'); return; }
+        if (!consoleSessions[hostname]) consoleSessions[hostname] = [];
+        consoleSessions[hostname].push({ id: data.id, status: 'pending', display, stdout: '', stderr: '' });
+        if (hostname === consoleSelectedHost) renderConsoleTerminal();
+        loadCommandHistory();
+    }).catch(err => alert('Error queuing command: ' + err));
+}
+
+function consoleRun(label, params, confirmMsg) {
+    if (!consoleSelectedHost) return;
+    if (confirmMsg && !confirm(confirmMsg)) return;
+    document.getElementById('consoleParamForm').style.display = 'none';
+    queueConsoleCommand(consoleSelectedHost, label, params || {}, CONSOLE_ACTION_DISPLAY[label] || label);
+}
+
+function consoleUninstall() {
+    removeEndpoint(consoleSelectedHost);
+}
+
+function consoleShowParamForm(label) {
+    const wrap = document.getElementById('consoleParamForm');
+    if (label === 'kill_process') {
+        wrap.innerHTML = `
+            <label class="form-label small text-muted mb-1">PID to terminate</label>
+            <div class="input-group input-group-sm">
+                <input type="text" id="paramPid" class="form-control bg-dark text-light border-secondary" placeholder="1234" onkeydown="if(event.key==='Enter') submitKillProcess()">
+                <button class="btn btn-outline-danger" onclick="submitKillProcess()">Run</button>
+            </div>`;
+    } else if (label === 'collect_file') {
+        wrap.innerHTML = `
+            <label class="form-label small text-muted mb-1">Full file path (max 4MB)</label>
+            <div class="input-group input-group-sm">
+                <input type="text" id="paramPath" class="form-control bg-dark text-light border-secondary" placeholder="C:\\Users\\...\\file.exe" onkeydown="if(event.key==='Enter') submitCollectFile()">
+                <button class="btn btn-outline-primary" onclick="submitCollectFile()">Run</button>
+            </div>`;
+    } else {
+        return;
+    }
+    wrap.style.display = 'block';
+}
+
+function submitKillProcess() {
+    const pid = (document.getElementById('paramPid').value || '').trim();
+    if (!/^\d+$/.test(pid)) { alert('PID must be a number.'); return; }
+    if (!confirm(`Terminate PID ${pid} on ${consoleSelectedHost}? This cannot be undone.`)) return;
+    queueConsoleCommand(consoleSelectedHost, 'kill_process', {pid}, `Stop-Process -Id ${pid} -Force`);
+    document.getElementById('consoleParamForm').style.display = 'none';
+}
+
+function submitCollectFile() {
+    const path = (document.getElementById('paramPath').value || '').trim();
+    if (!path) return;
+    queueConsoleCommand(consoleSelectedHost, 'collect_file', {path}, `Collect-File "${path}"`);
+    document.getElementById('consoleParamForm').style.display = 'none';
+}
+
+function consoleSubmitTyped() {
+    const input = document.getElementById('consoleCmdInput');
+    const script = input.value.trim();
+    if (!script || !consoleSelectedHost) return;
+    input.value = '';
+    queueConsoleCommand(consoleSelectedHost, 'custom', {}, script, script);
+}
+
+// Reconciles any pending/sent console-session entries against the latest command
+// history poll, so the terminal updates with results as soon as an endpoint reports
+// back — without a second polling loop duplicating what loadCommandHistory() already does.
+function reconcileConsoleSessions() {
+    let dirty = false;
+    Object.keys(consoleSessions).forEach(host => {
+        consoleSessions[host].forEach(entry => {
+            if (entry.status === 'done' || entry.status === 'failed') return;
+            const match = cmdHistoryCache.find(c => c.id === entry.id);
+            if (match && match.status !== entry.status) {
+                entry.status = match.status;
+                entry.stdout = match.stdout || '';
+                entry.stderr = match.stderr || '';
+                if (host === consoleSelectedHost) dirty = true;
+            }
+        });
+    });
+    if (dirty) renderConsoleTerminal();
 }
 
 // ---- Command history ----
@@ -368,18 +584,19 @@ function loadCommandHistory() {
             const tbody = document.getElementById('cmdHistoryBody');
             if (!rows || rows.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">No response actions have been run yet.</td></tr>';
-                return;
+            } else {
+                tbody.innerHTML = rows.map(c => `
+                    <tr>
+                        <td class="ps-3 text-nowrap small">${escHtml(c.queued_at)}</td>
+                        <td><strong>${escHtml(c.hostname)}</strong></td>
+                        <td><code>${escHtml(c.label)}</code></td>
+                        <td class="small text-muted">${escHtml(c.queued_by || '')}</td>
+                        <td>${statusBadgeCmd(c.status)}</td>
+                        <td>${(c.status === 'done' || c.status === 'failed') ? `<button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="viewCommandResult(${c.id})">View</button>` : '—'}</td>
+                    </tr>
+                `).join('');
             }
-            tbody.innerHTML = rows.map(c => `
-                <tr>
-                    <td class="ps-3 text-nowrap small">${escHtml(c.queued_at)}</td>
-                    <td><strong>${escHtml(c.hostname)}</strong></td>
-                    <td><code>${escHtml(c.label)}</code></td>
-                    <td class="small text-muted">${escHtml(c.queued_by || '')}</td>
-                    <td>${statusBadgeCmd(c.status)}</td>
-                    <td>${(c.status === 'done' || c.status === 'failed') ? `<button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="viewCommandResult(${c.id})">View</button>` : '—'}</td>
-                </tr>
-            `).join('');
+            reconcileConsoleSessions();
         })
         .catch(err => console.error('Error loading command history:', err));
 }
