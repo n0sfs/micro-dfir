@@ -471,8 +471,19 @@ def api_rules():
                     elif 'hunting' in t or 'threat_hunting' in t:
                         rule_type = "Threat Hunting"
                         break
+
+                lv_match = re.search(r'level:\s*([^\n\r]+)', ry)
+                level = lv_match.group(1).strip().strip("'\"").lower() if lv_match else 'medium'
+
+                st_match = re.search(r'status:\s*([^\n\r]+)', ry)
+                status = st_match.group(1).strip().strip("'\"").lower() if st_match else 'unknown'
+
+                d_match = re.search(r'modified:\s*([0-9]{4}[-/][0-9]{2}[-/][0-9]{2})', ry) or \
+                          re.search(r'date:\s*([0-9]{4}[-/][0-9]{2}[-/][0-9]{2})', ry)
+                rule_date = d_match.group(1).replace('/', '-') if d_match else None
             except Exception:
                 rule_type, platform, cat, tags = "Generic", "Global", "unknown", []
+                level, status, rule_date = "medium", "unknown", None
 
             rules_out.append({
                 "id": rid,
@@ -482,12 +493,15 @@ def api_rules():
                 "platform": platform,
                 "category": cat,
                 "tags": tags,
+                "level": level,
+                "status": status,
                 "source": r['source'] or 'sigma',
                 "cloned_from": r['cloned_from'],
                 "created_by": r['created_by'],
                 "created_at": r['created_at'],
                 "updated_by": r['updated_by'],
-                "updated_at": r['updated_at']
+                "updated_at": r['updated_at'],
+                "last_update": r['updated_at'] or rule_date or r['created_at']
             })
         RULES_CACHE = rules_out
         RULES_CACHE_TIME = time.time()

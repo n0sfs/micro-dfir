@@ -38,8 +38,8 @@
 
             <!-- Filters -->
             <div class="row mb-3">
-                <div class="col-md-3 mb-2">
-                    <input type="text" id="rq" class="form-control bg-dark text-light border-secondary" placeholder="Search titles..." onkeyup="f()">
+                <div class="col-md-4 mb-2">
+                    <input type="text" id="rq" class="form-control bg-dark text-light border-secondary" placeholder="Search rule names..." onkeyup="f()">
                 </div>
                 <div class="col-md-2 mb-2">
                     <select id="sourceFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
@@ -49,23 +49,23 @@
                     </select>
                 </div>
                 <div class="col-md-2 mb-2">
-                    <select id="typeFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
-                        <option value="">All Types</option>
-                    </select>
-                </div>
-                <div class="col-md-2 mb-2">
                     <select id="platformFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
                         <option value="">All Platforms</option>
                     </select>
                 </div>
-                <div class="col-md-1 mb-2">
-                    <select id="catFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
-                        <option value="">All Subcategories</option>
+                <div class="col-md-2 mb-2">
+                    <select id="levelFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
+                        <option value="">All Levels</option>
+                        <option value="critical">Critical</option>
+                        <option value="high">High</option>
+                        <option value="medium">Medium</option>
+                        <option value="low">Low</option>
+                        <option value="informational">Informational</option>
                     </select>
                 </div>
                 <div class="col-md-2 mb-2">
-                    <select id="mitreFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
-                        <option value="">All MITRE Tags</option>
+                    <select id="statusFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
+                        <option value="">All Statuses</option>
                     </select>
                 </div>
             </div>
@@ -88,13 +88,14 @@
                     <thead>
                         <tr>
                             <th style="width: 40px;"></th>
-                            <th style="width: 80px;">Status</th>
                             <th style="width: 80px;">Source</th>
-                            <th>Rule Title</th>
+                            <th>Rule Name</th>
                             <th>Platform</th>
-                            <th>Subcategory</th>
-                            <th>MITRE ATT&CK</th>
-                            <th style="width: 120px;">Actions</th>
+                            <th style="width: 110px;">Level</th>
+                            <th style="width: 110px;">Status</th>
+                            <th style="width: 140px;">Last Update</th>
+                            <th style="width: 70px;">Enabled</th>
+                            <th style="width: 50px;"></th>
                         </tr>
                     </thead>
                     <tbody id="rt"></tbody>
@@ -409,36 +410,35 @@ function resetBuilderState() {
     renderExclude();
 }
 
+const LEVEL_BADGE = {
+    critical: 'bg-danger', high: 'bg-danger', medium: 'bg-warning text-dark',
+    low: 'bg-info text-dark', informational: 'bg-secondary'
+};
+const STATUS_BADGE = {
+    stable: 'bg-success', test: 'bg-info text-dark', experimental: 'bg-secondary',
+    deprecated: 'bg-warning text-dark', unsupported: 'bg-danger'
+};
+
 async function ld(){
-    allRules = await(await fetch('/api/rules')).json(); 
-    
+    allRules = await(await fetch('/api/rules')).json();
+
     // Parse out unique filters
-    const types = new Set();
     const platforms = new Set();
-    const cats = new Set();
-    const mitres = new Set();
-    
+    const statuses = new Set();
+
     allRules.forEach(r => {
-        if(r.rule_type) types.add(r.rule_type);
         if(r.platform) platforms.add(r.platform);
-        if(r.category) cats.add(r.category);
-        if(r.tags) r.tags.forEach(t => mitres.add(t));
+        if(r.status) statuses.add(r.status);
     });
-    
-    const typeSelect = document.getElementById('typeFilter');
+
     const platSelect = document.getElementById('platformFilter');
-    const catSelect = document.getElementById('catFilter');
-    const mitreSelect = document.getElementById('mitreFilter');
-    
-    typeSelect.innerHTML = '<option value="">All Types</option>';
+    const statusSelect = document.getElementById('statusFilter');
+
     platSelect.innerHTML = '<option value="">All Platforms</option>';
-    catSelect.innerHTML = '<option value="">All Subcategories</option>';
-    mitreSelect.innerHTML = '<option value="">All MITRE Tags</option>';
-    
-    Array.from(types).sort().forEach(t => typeSelect.innerHTML += `<option value="${t}">${t}</option>`);
+    statusSelect.innerHTML = '<option value="">All Statuses</option>';
+
     Array.from(platforms).sort().forEach(p => platSelect.innerHTML += `<option value="${p}">${p}</option>`);
-    Array.from(cats).sort().forEach(c => catSelect.innerHTML += `<option value="${c}">${c}</option>`);
-    Array.from(mitres).sort().forEach(m => mitreSelect.innerHTML += `<option value="${m}">${m}</option>`);
+    Array.from(statuses).sort().forEach(s => statusSelect.innerHTML += `<option value="${s}">${s.charAt(0).toUpperCase() + s.slice(1)}</option>`);
 
     const enabledCount = allRules.filter(r => r.enabled).length;
     document.getElementById('statTotalRules').innerText = allRules.length;
@@ -450,53 +450,64 @@ async function ld(){
 }
 
 function renderTable(rules) {
-    document.getElementById('rt').innerHTML = rules.map(rl => `
+    document.getElementById('rt').innerHTML = rules.map(rl => {
+        const mitreTags = (rl.tags || []).filter(t => /^attack\./i.test(t));
+        return `
         <tr>
             <td><input type="checkbox" class="form-check-input rule-cb bg-dark border-secondary" value="${rl.id}" onchange="updateSelection(this)"></td>
-            <td>
-                <div class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" ${rl.enabled ? 'checked' : ''} onchange="toggleSingle(${rl.id}, this.checked)">
-                </div>
-            </td>
             <td>
                 <span class="badge ${rl.source === 'custom' ? 'bg-info text-dark' : 'bg-secondary'}" title="${rl.cloned_from ? 'Cloned from rule #' + rl.cloned_from : ''}">${rl.source === 'custom' ? 'Custom' : 'Sigma'}</span>
             </td>
             <td>
-                <span class="badge ${rl.rule_type === 'Generic' ? 'bg-secondary' : (rl.rule_type === 'Compliance' ? 'bg-primary' : 'bg-danger')} me-2">${rl.rule_type}</span>
                 <span class="fw-bold text-info">${rl.title}</span>
+                ${mitreTags.length ? `<div>${mitreTags.map(t => `<span class="badge bg-primary bg-opacity-25 text-light border border-primary me-1 mt-1" style="font-size:.68rem;">${t}</span>`).join('')}</div>` : ''}
             </td>
             <td><span class="text-light"><i class="fa-solid fa-display me-1"></i>${rl.platform}</span></td>
-            <td><span class="badge bg-secondary">${rl.category}</span></td>
-            <td>${(rl.tags || []).map(t => `<span class="badge bg-primary bg-opacity-25 text-light border border-primary me-1 mb-1">${t}</span>`).join('')}</td>
+            <td><span class="badge ${LEVEL_BADGE[rl.level] || 'bg-secondary'}">${rl.level || 'medium'}</span></td>
+            <td><span class="badge ${STATUS_BADGE[rl.status] || 'bg-secondary'}">${rl.status || 'unknown'}</span></td>
+            <td class="text-nowrap small text-muted">${rl.last_update || '—'}</td>
+            <td>
+                <div class="form-check form-switch mb-0">
+                    <input class="form-check-input" type="checkbox" ${rl.enabled ? 'checked' : ''} onchange="toggleSingle(${rl.id}, this.checked)">
+                </div>
+            </td>
             <td class="text-nowrap">
-                ${rl.source === 'custom'
-                    ? `<button class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="Edit" onclick="openRuleModal(${rl.id})"><i class="fa-solid fa-pen"></i></button>`
-                    : `<button class="btn btn-sm btn-outline-secondary py-0 px-2 me-1" title="View (read-only)" onclick="openRuleModal(${rl.id})"><i class="fa-solid fa-eye"></i></button>`
-                }
-                <button class="btn btn-sm btn-outline-warning py-0 px-2 me-1" title="Clone" onclick="quickClone(${rl.id}, '${rl.title.replace(/'/g, "\\'")}')"><i class="fa-solid fa-copy"></i></button>
-                <button class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete" onclick="deleteRule(${rl.id}, '${rl.title.replace(/'/g, "\\'")}')"><i class="fa-solid fa-trash"></i></button>
+                <div class="dropdown">
+                    <button class="btn btn-sm btn-outline-secondary py-0 px-2" type="button" data-bs-toggle="dropdown"><i class="fa-solid fa-ellipsis-vertical"></i></button>
+                    <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
+                        <li><a class="dropdown-item" href="#" onclick="openRuleModal(${rl.id}); return false;"><i class="fa-solid ${rl.source === 'custom' ? 'fa-pen' : 'fa-eye'} me-2"></i>${rl.source === 'custom' ? 'Edit' : 'View'}</a></li>
+                        <li><a class="dropdown-item" href="#" onclick="quickClone(${rl.id}, '${rl.title.replace(/'/g, "\\'")}'); return false;"><i class="fa-solid fa-copy me-2"></i>Clone</a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><a class="dropdown-item text-danger" href="#" onclick="deleteRule(${rl.id}, '${rl.title.replace(/'/g, "\\'")}'); return false;"><i class="fa-solid fa-trash me-2"></i>Delete</a></li>
+                    </ul>
+                </div>
             </td>
         </tr>
-    `).join('');
+    `;
+    }).join('');
     selectedIds.clear();
+    // Dropdowns default to absolute positioning, which gets clipped by this table's own
+    // scroll container — same issue fixed on the Agents page. Force fixed-strategy Popper
+    // positioning so the action menu always renders in full.
+    document.querySelectorAll('#rt [data-bs-toggle="dropdown"]').forEach(el => {
+        bootstrap.Dropdown.getOrCreateInstance(el, { popperConfig: { strategy: 'fixed' } });
+    });
 }
 
 function f(){
     const q = document.getElementById('rq').value.toLowerCase();
     const source = document.getElementById('sourceFilter').value;
-    const type = document.getElementById('typeFilter').value;
     const plat = document.getElementById('platformFilter').value;
-    const cat = document.getElementById('catFilter').value;
-    const mitre = document.getElementById('mitreFilter').value;
+    const level = document.getElementById('levelFilter').value;
+    const status = document.getElementById('statusFilter').value;
 
     const filtered = allRules.filter(rl => {
         const matchQ = rl.title.toLowerCase().includes(q);
         const matchSource = source === "" || rl.source === source;
-        const matchType = type === "" || rl.rule_type === type;
         const matchPlat = plat === "" || rl.platform === plat;
-        const matchCat = cat === "" || rl.category === cat;
-        const matchMitre = mitre === "" || (rl.tags && rl.tags.includes(mitre));
-        return matchQ && matchSource && matchType && matchPlat && matchCat && matchMitre;
+        const matchLevel = level === "" || rl.level === level;
+        const matchStatus = status === "" || rl.status === status;
+        return matchQ && matchSource && matchPlat && matchLevel && matchStatus;
     });
 
     renderTable(filtered);
