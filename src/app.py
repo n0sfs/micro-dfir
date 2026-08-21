@@ -1458,6 +1458,23 @@ def get_soc_secret(db):
     row = db.execute("SELECT value FROM settings WHERE key = 'soc_secret'").fetchone()
     return row['value'] if row and row['value'] else None
 
+def _resolve_ingest_port(ui_port):
+    # settings.ingest_port only reflects reality while the systemd unit still has the
+    # dual --bind that /settings/network's save flow writes — a plain reinstall
+    # (install.sh) resets the unit to a single bind on ui_port without resetting that
+    # settings row, silently stranding agents on a port nothing listens on (they'd still
+    # get told the stale ingest_port on every check-in via the zero-touch routing below).
+    # Reading the live unit file is the ground truth for what gunicorn actually bound.
+    try:
+        with open('/etc/systemd/system/microsoc-web.service', 'r') as f:
+            svc = f.read()
+        ports = re.findall(r'--bind\s+[^\s:]+:(\d+)', svc)
+        if len(ports) >= 2:
+            return ports[1]
+    except Exception:
+        pass
+    return ui_port
+
 @app.route('/api/agent/config', methods=['GET'])
 def agent_config():
     from flask import request, jsonify
@@ -1503,7 +1520,7 @@ def agent_config():
     cursor = db.execute("SELECT key, value FROM settings")
     s = {r[0]: r[1] for r in cursor.fetchall()}
     ing_ip = s.get("ingest_bind_ip", "0.0.0.0")
-    ing_port = s.get("ingest_port", "5000")
+    ing_port = _resolve_ingest_port(s.get("ui_port", "5001"))
 
     # If set to 0.0.0.0, fallback to the IP the agent connected to
     if ing_ip == "0.0.0.0":
@@ -1943,7 +1960,7 @@ def api_download_agent(os_type):
     cursor = db.execute("SELECT key, value FROM settings")
     s = {r[0]: r[1] for r in cursor.fetchall()}
     ui_port = s.get("ui_port", "5001")
-    ingest_port = s.get("ingest_port", "5000")
+    ingest_port = _resolve_ingest_port(ui_port)
     soc_token = get_soc_secret(db) or ''
 
     agents_dir = '/opt/micro-dfir/agents'
