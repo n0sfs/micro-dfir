@@ -2,15 +2,15 @@
 {% block content %}
 <div class="page-header">
     <h2><i class="fa-solid fa-sliders me-2"></i>Anomaly Tuning</h2>
-    <p>Tune the sensitivity of the UEBA behavioral anomaly model.</p>
+    <p>Tune the sensitivity of the UEBA behavioral anomaly model, see what it's currently working with, and quiet entities that legitimately run hot.</p>
 </div>
 
-<div class="card bg-dark border-secondary">
+<div class="card bg-dark border-secondary mb-4">
     <div class="card-header">
         <i class="fa-solid fa-sliders me-2"></i>Baseline Model Parameters
     </div>
     <div class="card-body">
-        <p class="text-muted small mb-3">The model flags a host when today's log volume exceeds <code>baseline average + (multiplier &times; standard deviation)</code>, and only once a host's baseline average clears the minimum floor below (this avoids flagging quiet hosts on their first noisy day).</p>
+        <p class="text-muted small mb-3">The model flags an entity (host or user) when today's event volume exceeds <code>baseline average + (multiplier &times; standard deviation)</code>, and only once that entity's baseline average clears the minimum floor below (this avoids flagging quiet entities on their first noisy day). Both entity types share these settings.</p>
         <div class="row g-3">
             <div class="col-md-4">
                 <label class="form-label">Baseline Lookback (days)</label>
@@ -33,10 +33,84 @@
         {% endif %}
     </div>
 </div>
+
+<style>
+    .baseline-filter-btn.active-filter{background-color:var(--accent); border-color:var(--accent); color:#fff;}
+</style>
+
+<div class="card bg-dark border-secondary mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span><i class="fa-solid fa-chart-simple me-2"></i>Entity Baselines <span class="text-muted small fw-normal">— every host/user the model currently tracks, not just the ones that fired</span></span>
+        <span class="text-muted small" id="baselinesComputedAt"></span>
+    </div>
+    <div class="card-body">
+        <div class="d-flex flex-wrap gap-2 mb-3 align-items-center bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
+            <input type="text" id="baselineSearchBox" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width: 240px;" placeholder="Search entity..." oninput="baselineQ = this.value.toLowerCase(); renderBaselines();">
+            <div class="btn-group btn-group-sm" role="group">
+                <button type="button" class="btn btn-outline-secondary baseline-filter-btn active-filter" data-bt="all" onclick="setBaselineFilter('all')">All</button>
+                <button type="button" class="btn btn-outline-secondary baseline-filter-btn" data-bt="host" onclick="setBaselineFilter('host')">Hosts</button>
+                <button type="button" class="btn btn-outline-secondary baseline-filter-btn" data-bt="user" onclick="setBaselineFilter('user')">Users</button>
+            </div>
+            <span class="ms-auto text-muted small" id="baselineRowCount"></span>
+        </div>
+        <div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
+            <table class="table table-dark table-hover table-sm align-middle mb-0">
+                <thead>
+                    <tr><th>Entity</th><th>Current</th><th>Baseline Avg</th><th>Baseline StdDev</th><th>Threshold</th><th>Status</th><th></th></tr>
+                </thead>
+                <tbody id="baselinesTableBody"><tr><td colspan="7" class="text-center text-muted py-4">Loading…</td></tr></tbody>
+            </table>
+        </div>
+        <p class="text-muted small mt-2 mb-0">Showing up to 200 entities per type, ranked by current-vs-baseline ratio.</p>
+    </div>
+</div>
+
+<div class="card bg-dark border-secondary" id="exclusionsCard">
+    <div class="card-header">
+        <i class="fa-solid fa-filter-circle-xmark me-2"></i>Exclusions <span class="text-muted small fw-normal">— entities that legitimately run hot and shouldn't be flagged</span>
+    </div>
+    <div class="card-body">
+        <div class="table-responsive mb-3">
+            <table class="table table-dark table-sm align-middle mb-0">
+                <thead><tr><th>Type</th><th>Entity</th><th>Description</th><th>Enabled</th><th></th></tr></thead>
+                <tbody id="ueExclusionsTableBody"><tr><td colspan="5" class="text-muted small">No exclusions yet.</td></tr></tbody>
+            </table>
+        </div>
+        {% if current_user.role == 'admin' %}
+        <div class="row g-2 align-items-end bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
+            <div class="col-md-2">
+                <label class="form-label small text-muted mb-1">Type</label>
+                <select id="ueExclType" class="form-select form-select-sm bg-dark text-light border-secondary">
+                    <option value="host">Host</option>
+                    <option value="user">User</option>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small text-muted mb-1">Entity ID</label>
+                <input type="text" id="ueExclEntityId" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. BACKUP-SVR-01">
+            </div>
+            <div class="col-md-5">
+                <label class="form-label small text-muted mb-1">Description (optional)</label>
+                <input type="text" id="ueExclDescription" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Why this is excluded">
+            </div>
+            <div class="col-md-2">
+                <button type="button" class="btn btn-sm btn-outline-primary w-100" onclick="addUebaExclusion()"><i class="fa-solid fa-plus me-1"></i> Add</button>
+            </div>
+        </div>
+        <div id="ueExclError" class="text-danger small mt-2" style="display:none;"></div>
+        {% endif %}
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
+const IS_ADMIN = {{ 'true' if current_user.role == 'admin' else 'false' }};
+
+function escHtml(s) {
+    return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
 function loadUebaConfig() {
     fetch('/api/ueba/config')
         .then(r => r.json())
@@ -72,6 +146,124 @@ function saveUebaConfig() {
     }).catch(err => alert('Error saving config: ' + err));
 }
 
+// ---- Entity Baselines ----
+let allBaselines = [];
+let baselineFilter = 'all';
+let baselineQ = '';
+
+function entityTypeBadge(t) {
+    const isUser = t === 'user';
+    return `<span class="badge ${isUser ? 'bg-info text-dark' : 'bg-secondary'} me-1" style="font-size:.65rem;"><i class="fa-solid ${isUser ? 'fa-user' : 'fa-desktop'} me-1"></i>${isUser ? 'User' : 'Host'}</span>`;
+}
+
+function setBaselineFilter(t) {
+    baselineFilter = t;
+    document.querySelectorAll('.baseline-filter-btn').forEach(b => b.classList.toggle('active-filter', b.dataset.bt === t));
+    renderBaselines();
+}
+
+function baselineStatusBadge(row) {
+    if (row.excluded) return '<span class="badge bg-secondary">Excluded</span>';
+    if (row.is_anomalous) return '<span class="badge bg-danger">Anomalous</span>';
+    return '<span class="badge bg-success">Normal</span>';
+}
+
+function renderBaselines() {
+    let rows = allBaselines;
+    if (baselineFilter !== 'all') rows = rows.filter(r => r.entity_type === baselineFilter);
+    if (baselineQ) rows = rows.filter(r => r.entity_id.toLowerCase().includes(baselineQ));
+    document.getElementById('baselineRowCount').innerText = `${rows.length} of ${allBaselines.length} entities`;
+    const tbody = document.getElementById('baselinesTableBody');
+    if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">No entities match this filter.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = rows.map(r => `<tr>
+        <td>${entityTypeBadge(r.entity_type)}${escHtml(r.entity_id)}</td>
+        <td>${r.current_count}</td>
+        <td>${r.baseline_avg ?? '—'}</td>
+        <td>${r.baseline_stddev ?? '—'}</td>
+        <td>${r.threshold ?? '—'}</td>
+        <td>${baselineStatusBadge(r)}</td>
+        <td>${IS_ADMIN && !r.excluded ? `<button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="prefillExclusion('${r.entity_type}', '${escHtml(r.entity_id).replace(/'/g, "\\'")}')"><i class="fa-solid fa-filter-circle-xmark"></i> Exclude</button>` : ''}</td>
+    </tr>`).join('');
+}
+
+function loadBaselines() {
+    fetch('/api/ueba/baselines').then(r => r.json()).then(data => {
+        allBaselines = data.baselines || [];
+        document.getElementById('baselinesComputedAt').innerText = data.computed_at ? `Last computed: ${data.computed_at}` : '';
+        renderBaselines();
+    }).catch(err => console.error('Error loading UEBA baselines:', err));
+}
+
+function prefillExclusion(entityType, entityId) {
+    document.getElementById('ueExclType').value = entityType;
+    document.getElementById('ueExclEntityId').value = entityId;
+    document.getElementById('exclusionsCard').scrollIntoView({behavior: 'smooth', block: 'center'});
+}
+
+// ---- Exclusions ----
+function loadUebaExclusions() {
+    fetch('/api/ueba/exclusions').then(r => r.json()).then(rows => {
+        const tbody = document.getElementById('ueExclusionsTableBody');
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="5" class="text-muted small">No exclusions yet.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map(e => `<tr>
+            <td>${entityTypeBadge(e.entity_type)}</td>
+            <td>${escHtml(e.entity_id)}</td>
+            <td class="small text-muted">${escHtml(e.description || '')}</td>
+            <td>${IS_ADMIN
+                ? `<input type="checkbox" class="form-check-input" ${e.enabled ? 'checked' : ''} onchange="toggleUebaExclusion(${e.id}, this.checked)">`
+                : (e.enabled ? '<span class="badge bg-success">On</span>' : '<span class="badge bg-secondary">Off</span>')}</td>
+            <td>${IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteUebaExclusion(${e.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
+        </tr>`).join('');
+    }).catch(err => console.error('Error loading UEBA exclusions:', err));
+}
+
+function addUebaExclusion() {
+    const payload = {
+        entity_type: document.getElementById('ueExclType').value,
+        entity_id: document.getElementById('ueExclEntityId').value.trim(),
+        description: document.getElementById('ueExclDescription').value.trim()
+    };
+    const errBox = document.getElementById('ueExclError');
+    errBox.style.display = 'none';
+    if (!payload.entity_id) {
+        errBox.innerText = 'Entity ID is required.'; errBox.style.display = 'block'; return;
+    }
+    fetch('/api/ueba/exclusions', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (ok) {
+            document.getElementById('ueExclEntityId').value = '';
+            document.getElementById('ueExclDescription').value = '';
+            loadUebaExclusions();
+            loadBaselines();
+        } else {
+            errBox.innerText = data.error || 'Failed to add exclusion.'; errBox.style.display = 'block';
+        }
+    }).catch(err => { errBox.innerText = 'Error: ' + err; errBox.style.display = 'block'; });
+}
+
+function toggleUebaExclusion(eid, enabled) {
+    fetch(`/api/ueba/exclusions/${eid}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled})
+    }).then(() => { loadUebaExclusions(); loadBaselines(); })
+      .catch(err => alert('Error updating exclusion: ' + err));
+}
+
+function deleteUebaExclusion(eid) {
+    if (!confirm('Delete this exclusion?')) return;
+    fetch(`/api/ueba/exclusions/${eid}`, {method: 'DELETE'})
+        .then(() => { loadUebaExclusions(); loadBaselines(); })
+        .catch(err => alert('Error deleting exclusion: ' + err));
+}
+
 loadUebaConfig();
+loadBaselines();
+loadUebaExclusions();
 </script>
 {% endblock %}

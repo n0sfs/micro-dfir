@@ -1,6 +1,6 @@
 PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, role TEXT DEFAULT 'analyst');
-CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME NOT NULL, source_ip TEXT, hostname TEXT, app_name TEXT, facility TEXT, severity TEXT, message TEXT NOT NULL, raw_json TEXT);
+CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME NOT NULL, source_ip TEXT, hostname TEXT, app_name TEXT, facility TEXT, severity TEXT, message TEXT NOT NULL, raw_json TEXT, entity_type TEXT);
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
 CREATE TABLE IF NOT EXISTS live_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME NOT NULL, host TEXT, app TEXT, severity TEXT, event_id TEXT, username TEXT, source_ip TEXT, destination_ip TEXT, message TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_live_logs_timestamp ON live_logs(timestamp);
@@ -18,3 +18,6 @@ CREATE TABLE IF NOT EXISTS ti_feeds (id INTEGER PRIMARY KEY AUTOINCREMENT, name 
 INSERT OR IGNORE INTO ti_feeds (id, name, feed_type, enabled) VALUES (1, 'ThreatFox Recent (Public)', 'threatfox', 1);
 CREATE TABLE IF NOT EXISTS agent_commands (id INTEGER PRIMARY KEY AUTOINCREMENT, hostname TEXT NOT NULL, label TEXT NOT NULL, script TEXT NOT NULL, status TEXT DEFAULT 'pending', queued_by TEXT, queued_at DATETIME DEFAULT CURRENT_TIMESTAMP, completed_at DATETIME, exit_code INTEGER, stdout TEXT, stderr TEXT);
 CREATE INDEX IF NOT EXISTS idx_agent_commands_host_status ON agent_commands(hostname, status);
+CREATE TABLE IF NOT EXISTS ueba_exclusions (id INTEGER PRIMARY KEY AUTOINCREMENT, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, description TEXT, enabled BOOLEAN DEFAULT 1, created_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS idx_ueba_exclusions_entity ON ueba_exclusions(entity_type, entity_id);
+CREATE TABLE IF NOT EXISTS ueba_entity_baselines (entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, current_count INTEGER, baseline_avg REAL, baseline_stddev REAL, threshold REAL, is_anomalous BOOLEAN DEFAULT 0, excluded BOOLEAN DEFAULT 0, computed_at DATETIME, PRIMARY KEY (entity_type, entity_id));
