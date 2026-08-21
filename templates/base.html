@@ -244,6 +244,11 @@ body.sidebar-collapsed .btn-logout span{display:none;}
 .stat-tile{
   background-color:var(--bg-card);border:1px solid var(--border);
   border-radius:var(--radius);padding:16px 18px;
+  /* Sibling tiles sit in a Bootstrap .row, whose flex items already stretch to equal
+     height — but that stretch reaches only the .col-* wrapper, not this nested div. A
+     tile with a longer value (e.g. a wrapping timestamp) was left visibly taller than
+     its neighbors, so this tile has to explicitly fill that already-equal-height column. */
+  height:100%; display:flex; flex-direction:column; justify-content:center;
 }
 .stat-tile .stat-label{
   font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
