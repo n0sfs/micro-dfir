@@ -1357,32 +1357,6 @@ def _run_sigmahq_import():
         shutil.rmtree(t, ignore_errors=True)
     return stats
 
-migrate_settings()
-migrate_ti_feeds()
-migrate_agent_commands()
-migrate_alerts_columns()
-migrate_sigma_rules_columns()
-migrate_rule_tuning()
-migrate_compliance_tags()
-migrate_ueba_entities()
-migrate_ueba_math_v2()
-migrate_live_logs_ip_columns()
-
-try:
-    # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every
-    # startup — self-heals a config left stale or hand-patched by a prior bug (wrong
-    # port, wrong scheme, placeholder auth token) without needing an admin to touch a
-    # drop rule or the Network settings form to trigger a regeneration.
-    with app.app_context():
-        generate_vector_config()
-    print("[startup] vector.toml regenerated", flush=True)
-except Exception:
-    import traceback
-    print("[startup] Could not regenerate vector.toml:", flush=True)
-    traceback.print_exc()
-    import sys as _sys
-    _sys.stdout.flush(); _sys.stderr.flush()
-
 @app.route('/settings', methods=['GET', 'POST'])
 @login_required
 def settings():
@@ -2168,3 +2142,36 @@ def delete_agent(hostname):
     )
     db.commit()
     return jsonify({"status": "success"})
+
+# ==========================================
+# STARTUP — schema migrations + config regeneration
+# ==========================================
+# Placed at the true end of the file (after every def/route) rather than interleaved
+# among the function definitions above, specifically so nothing here can accidentally
+# call a name that hasn't been defined yet at the point it runs — that exact ordering
+# bug bit both _resolve_ingest_port and get_soc_secret when this block sat mid-file.
+migrate_settings()
+migrate_ti_feeds()
+migrate_agent_commands()
+migrate_alerts_columns()
+migrate_sigma_rules_columns()
+migrate_rule_tuning()
+migrate_compliance_tags()
+migrate_ueba_entities()
+migrate_ueba_math_v2()
+migrate_live_logs_ip_columns()
+
+try:
+    # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every
+    # startup — self-heals a config left stale or hand-patched by a prior bug (wrong
+    # port, wrong scheme, placeholder auth token) without needing an admin to touch a
+    # drop rule or the Network settings form to trigger a regeneration.
+    with app.app_context():
+        generate_vector_config()
+    print("[startup] vector.toml regenerated", flush=True)
+except Exception:
+    import traceback
+    print("[startup] Could not regenerate vector.toml:", flush=True)
+    traceback.print_exc()
+    import sys as _sys
+    _sys.stdout.flush(); _sys.stderr.flush()
