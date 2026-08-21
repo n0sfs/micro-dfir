@@ -1,9 +1,15 @@
-# Canned PowerShell templates for agent response actions.
-# Each function returns a ready-to-run script string; the caller is
-# responsible for validating/sanitizing any parameters before formatting.
+# Canned response-action templates, one script-builder set per agent OS. Each function
+# returns a ready-to-run script string; the caller is responsible for
+# validating/sanitizing any parameters before formatting. Windows templates are
+# PowerShell (run by the agent via `powershell -EncodedCommand`); Linux templates are
+# bash (run by the agent via `subprocess.run(['bash', '-c', script])`, which sidesteps
+# shell-quoting entirely since the whole script travels as one argument — no
+# encoding step is needed the way PowerShell's -EncodedCommand needs one).
 import re
 
 _IPV4_RE = re.compile(r'^(\d{1,3}\.){3}\d{1,3}$')
+
+# ---- Windows (PowerShell) ----
 
 def list_processes():
     return (
@@ -68,7 +74,7 @@ $hash = (Get-FileHash $p -Algorithm SHA256).Hash
 _PROGRESS_SILENT = "$ProgressPreference = 'SilentlyContinue'\n"
 
 # label -> (builder, required param names)
-TEMPLATES = {
+WINDOWS_TEMPLATES = {
     'list_processes': (lambda params: _PROGRESS_SILENT + list_processes(), []),
     'kill_process': (lambda params: _PROGRESS_SILENT + kill_process(params['pid']), ['pid']),
     'isolate_host': (lambda params: _PROGRESS_SILENT + isolate_host(params['soc_ip']), ['soc_ip']),
@@ -76,3 +82,102 @@ TEMPLATES = {
     'collect_triage': (lambda params: _PROGRESS_SILENT + collect_triage(), []),
     'collect_file': (lambda params: _PROGRESS_SILENT + collect_file(params['path']), ['path']),
 }
+
+# ---- Linux (bash) ----
+# Unlike PowerShell, plain shell command output is already human-readable text with no
+# serialization step needed — these return native `ps`/`ss`/etc. output rather than
+# forcing everything through a JSON encoder the way the Windows templates do.
+
+def list_processes_linux():
+    return "ps -eo pid,ppid,user,pcpu,pmem,etime,comm --sort=-pcpu --no-headers | head -100"
+
+def kill_process_linux(pid):
+    pid = int(pid)
+    return (
+        f'if kill -0 {pid} 2>/dev/null; then\n'
+        f'    kill -9 {pid} && echo "Process {pid} terminated." || echo "Failed to terminate PID {pid}."\n'
+        f'else\n'
+        f'    echo "Failed to terminate PID {pid}: no such process."\n'
+        f'fi'
+    )
+
+# A dedicated chain (rather than editing INPUT/OUTPUT's default policy directly, as the
+# Windows firewall-profile approach does) makes isolate/restore a clean flush-and-remove
+# pair — restore_network_linux() can't accidentally leave stray rules behind or clobber
+# other firewall rules that were already on the host before isolation.
+_ISOLATION_CHAIN = "MICRODFIR_ISOLATION"
+
+def isolate_host_linux(soc_ip):
+    if not _IPV4_RE.match(soc_ip):
+        raise ValueError(f"Invalid SOC IP address: {soc_ip!r}")
+    return f"""iptables -D INPUT -j {_ISOLATION_CHAIN} 2>/dev/null
+iptables -D OUTPUT -j {_ISOLATION_CHAIN} 2>/dev/null
+iptables -F {_ISOLATION_CHAIN} 2>/dev/null
+iptables -X {_ISOLATION_CHAIN} 2>/dev/null
+iptables -N {_ISOLATION_CHAIN}
+iptables -A {_ISOLATION_CHAIN} -d {soc_ip} -j ACCEPT
+iptables -A {_ISOLATION_CHAIN} -s {soc_ip} -j ACCEPT
+iptables -A {_ISOLATION_CHAIN} -j DROP
+iptables -I INPUT 1 -j {_ISOLATION_CHAIN}
+iptables -I OUTPUT 1 -j {_ISOLATION_CHAIN}
+echo "Host isolated. Only traffic to/from {soc_ip} is permitted."
+"""
+
+def restore_network_linux():
+    return f"""iptables -D INPUT -j {_ISOLATION_CHAIN} 2>/dev/null
+iptables -D OUTPUT -j {_ISOLATION_CHAIN} 2>/dev/null
+iptables -F {_ISOLATION_CHAIN} 2>/dev/null
+iptables -X {_ISOLATION_CHAIN} 2>/dev/null
+echo "Network isolation removed. Host restored to normal connectivity."
+"""
+
+def collect_triage_linux():
+    return r"""echo "=== Processes ==="
+ps -eo pid,ppid,user,comm,pcpu,pmem --sort=-pcpu --no-headers | head -60
+echo
+echo "=== Established Connections ==="
+ss -tnp state established 2>/dev/null | head -60
+echo
+echo "=== Cron / Autostart ==="
+for f in /etc/crontab /etc/cron.d/*; do [ -f "$f" ] && echo "--$f--" && cat "$f"; done 2>/dev/null
+systemctl list-unit-files --state=enabled --no-legend 2>/dev/null | head -40
+echo
+echo "=== Users (uid 0 or >= 1000) ==="
+getent passwd | awk -F: '$3>=1000 || $3==0 {print $1,$3,$6,$7}'
+echo
+echo "=== Autostart Files Modified in the Last 7 Days ==="
+find /etc/cron.d /etc/systemd/system -type f -newermt "-7 days" 2>/dev/null
+"""
+
+def collect_file_linux(path):
+    # A quoted heredoc delimiter ('PYEOF') disables all shell expansion inside the
+    # block, so the path only needs escaping for its own Python string-literal context
+    # below — not for bash at all, unlike the PowerShell version of this template.
+    esc = path.replace('\\', '\\\\').replace("'", "\\'")
+    return f"""python3 - <<'PYEOF'
+import base64, hashlib, json, os
+p = '{esc}'
+if not os.path.isfile(p):
+    print(json.dumps({{'error': 'file not found'}}))
+else:
+    size = os.path.getsize(p)
+    if size > 4 * 1024 * 1024:
+        print(json.dumps({{'error': 'file too large (%d bytes, 4MB limit)' % size}}))
+    else:
+        with open(p, 'rb') as f:
+            data = f.read()
+        print(json.dumps({{'path': p, 'size': size, 'sha256': hashlib.sha256(data).hexdigest(), 'content_b64': base64.b64encode(data).decode()}}))
+PYEOF
+"""
+
+LINUX_TEMPLATES = {
+    'list_processes': (lambda params: list_processes_linux(), []),
+    'kill_process': (lambda params: kill_process_linux(params['pid']), ['pid']),
+    'isolate_host': (lambda params: isolate_host_linux(params['soc_ip']), ['soc_ip']),
+    'restore_network': (lambda params: restore_network_linux(), []),
+    'collect_triage': (lambda params: collect_triage_linux(), []),
+    'collect_file': (lambda params: collect_file_linux(params['path']), ['path']),
+}
+
+TEMPLATES_BY_OS = {'windows': WINDOWS_TEMPLATES, 'linux': LINUX_TEMPLATES}
+TEMPLATES = WINDOWS_TEMPLATES  # back-compat alias

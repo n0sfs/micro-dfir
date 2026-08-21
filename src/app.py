@@ -1547,6 +1547,11 @@ def migrate_agent_versions():
         cols = {row[1] for row in conn.execute("PRAGMA table_info(agent_polls)").fetchall()}
         if 'version' not in cols:
             conn.execute("ALTER TABLE agent_polls ADD COLUMN version TEXT")
+        if 'os' not in cols:
+            # Agents that predate OS reporting (or haven't checked in since the Linux
+            # agent shipped) simply won't send X-Agent-OS — NULL here, treated as
+            # 'windows' everywhere this is read, since every agent before this was one.
+            conn.execute("ALTER TABLE agent_polls ADD COLUMN os TEXT")
         conn.execute('''CREATE TABLE IF NOT EXISTS agent_version_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             hostname TEXT NOT NULL,
@@ -1817,9 +1822,15 @@ def agent_config():
     # as "unknown" in the UI rather than guessed at, since that's itself a useful
     # signal that the endpoint hasn't been upgraded since version tracking shipped.
     agent_version = request.headers.get('X-Agent-Version', 'unknown')
+    # Agents that predate OS reporting send no header at all — defaulting to 'windows'
+    # matches every agent that existed before this, rather than surfacing a confusing
+    # third "unknown" OS state in the UI for endpoints that just haven't upgraded yet.
+    agent_os = request.headers.get('X-Agent-OS', 'windows')
+    if agent_os not in ('windows', 'linux'):
+        agent_os = 'windows'
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    db.execute('CREATE TABLE IF NOT EXISTS agent_polls (id INTEGER PRIMARY KEY, timestamp TEXT, ip_address TEXT, user_agent TEXT, version TEXT)')
-    db.execute('INSERT INTO agent_polls (timestamp, ip_address, user_agent, version) VALUES (?, ?, ?, ?)', (now, ip, ua, agent_version))
+    db.execute('CREATE TABLE IF NOT EXISTS agent_polls (id INTEGER PRIMARY KEY, timestamp TEXT, ip_address TEXT, user_agent TEXT, version TEXT, os TEXT)')
+    db.execute('INSERT INTO agent_polls (timestamp, ip_address, user_agent, version, os) VALUES (?, ?, ?, ?, ?)', (now, ip, ua, agent_version, agent_os))
     db.execute(
         "INSERT OR IGNORE INTO agent_version_history (hostname, version, first_seen) VALUES (?, ?, ?)",
         (ua, agent_version, now)
@@ -1849,12 +1860,15 @@ def agent_config():
             # Embeds the current agent source (with the same __HOST_URL__/__SOC_TOKEN__
             # substitution as the manual download) directly in the poll response — the
             # agent overwrites its own installed copy and restarts itself with it.
+            # agent_os is this exact check-in's own header, so no extra lookup is
+            # needed to know which source file matches the endpoint asking for it.
             server_ip = request.host.split(':')[0]
             cursor = db.execute("SELECT key, value FROM settings")
             s = {r[0]: r[1] for r in cursor.fetchall()}
             ui_port = s.get("ui_port", "5001")
             ingest_port = _resolve_ingest_port(ui_port)
-            source = _build_agent_source('micro_agent_windows.py', server_ip, ui_port, ingest_port, expected_token or '')
+            agent_filename = 'micro_agent_linux.py' if agent_os == 'linux' else 'micro_agent_windows.py'
+            source = _build_agent_source(agent_filename, server_ip, ui_port, ingest_port, expected_token or '')
             if source:
                 return jsonify({'command': 'upgrade', 'source': source})
         return jsonify({'run_script': {'id': cmd_row['id'], 'script': cmd_row['script']}})
@@ -2260,6 +2274,17 @@ def api_settings_users():
     return jsonify({'users': [dict(u) for u in users]})
 
 
+def _get_host_os(db, hostname):
+    # Response actions are queued from the UI, not by the agent itself, so there's no
+    # X-Agent-OS header on that request to read — look up what this hostname last
+    # reported on its own check-in instead. Defaults to 'windows' for a host that's
+    # never checked in with an OS at all, matching agent_config()'s own default.
+    row = db.execute(
+        "SELECT os FROM agent_polls WHERE user_agent = ? AND os IS NOT NULL AND os != '' ORDER BY id DESC LIMIT 1",
+        (hostname,)
+    ).fetchone()
+    return row['os'] if row and row['os'] in ('windows', 'linux') else 'windows'
+
 def _build_agent_source(agent_filename, server_ip, ui_port, ingest_port, soc_token):
     # Shared by the manual download route and the remote self-upgrade path (agent_config())
     # so both ever inject the placeholders the exact same way.
@@ -2351,6 +2376,7 @@ def agent_checkins():
             hostname = r["user_agent"] if "user_agent" in r.keys() else "Windows-Endpoint"
             hostnames.append(hostname)
             version = r["version"] if "version" in r.keys() and r["version"] else "unknown"
+            os_name = r["os"] if "os" in r.keys() and r["os"] in ("windows", "linux") else "windows"
             mapped.append({
                 "hostname": hostname,
                 "endpoint_ip": r["ip_address"] if "ip_address" in r.keys() else "Unknown",
@@ -2358,6 +2384,7 @@ def agent_checkins():
                 "last_check_in": ts,
                 "version": version,
                 "version_since": None,
+                "os": os_name,
                 "recent_polls": []
             })
 
@@ -2427,12 +2454,17 @@ def api_agent_commands():
     if not hostname or not label:
         return jsonify({'error': 'hostname and label are required'}), 400
 
+    # Response actions are queued from the UI (not by the agent), so there's no
+    # X-Agent-OS header on this request — the target host's own last-reported OS
+    # decides which script flavor (PowerShell vs bash) gets built.
+    host_templates = agent_scripts.TEMPLATES_BY_OS[_get_host_os(db, hostname)]
+
     if label == 'custom':
         script = d.get('script', '')
         if not script.strip():
             return jsonify({'error': 'script is required for a custom command'}), 400
-    elif label in agent_scripts.TEMPLATES:
-        builder, required = agent_scripts.TEMPLATES[label]
+    elif label in host_templates:
+        builder, required = host_templates[label]
         params = d.get('params', {}) or {}
         if label == 'isolate_host' and not params.get('soc_ip'):
             s = {r[0]: r[1] for r in db.execute("SELECT key, value FROM settings").fetchall()}

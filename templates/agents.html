@@ -11,6 +11,9 @@
 #agentsTabs .nav-link:hover{color:var(--text-secondary); border-color:transparent;}
 #agentsTabs .nav-link.active{color:var(--text-primary); background-color:var(--bg-card-alt); border-color:var(--border) var(--border) var(--bg-card-alt);}
 .hb-spark{vertical-align:middle;}
+.hostname-cell{cursor:default; border-bottom:1px dotted var(--text-muted);}
+#hostInfoMenu{display:none;}
+#hostInfoMenu table td{padding:1px 0;}
 .console-action-btn{text-align:left;}
 #consoleTerminal .term-line{margin-bottom:2px;}
 #consoleActionsWrap.disabled{opacity:.4; pointer-events:none;}
@@ -73,6 +76,7 @@
                     <thead>
                         <tr>
                             <th>Hostname</th>
+                            <th>OS</th>
                             <th>Endpoint IP</th>
                             <th>Status</th>
                             <th>Last Check-in</th>
@@ -82,7 +86,7 @@
                         </tr>
                     </thead>
                     <tbody id="endpointsTableBody">
-                        <tr><td colspan="7" class="text-center text-muted py-4">Loading active endpoints...</td></tr>
+                        <tr><td colspan="8" class="text-center text-muted py-4">Loading active endpoints...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -136,7 +140,7 @@
                     </div>
 
                     <div class="input-group input-group-sm mt-2">
-                        <span class="input-group-text bg-dark text-success border-secondary font-monospace">PS&gt;</span>
+                        <span class="input-group-text bg-dark text-success border-secondary font-monospace" id="consolePrompt">PS&gt;</span>
                         <input type="text" id="consoleCmdInput" class="form-control bg-black text-light border-secondary font-monospace" placeholder="Type a PowerShell command and press Enter..." disabled onkeydown="if(event.key==='Enter') consoleSubmitTyped()">
                         <button class="btn btn-outline-danger" id="consoleSendBtn" disabled onclick="consoleSubmitTyped()"><i class="fa-solid fa-paper-plane"></i></button>
                     </div>
@@ -337,6 +341,78 @@ function relativeTime(ts) {
     return `${Math.round(s / 86400)}d ago`;
 }
 
+function osIcon(os) {
+    if (os === 'linux') return '<i class="fa-brands fa-linux text-warning" title="Linux"></i> <span class="text-muted small">Linux</span>';
+    return '<i class="fa-brands fa-windows text-info" title="Windows"></i> <span class="text-muted small">Windows</span>';
+}
+
+// Multi-line native tooltip (title attribute) shown on hover — the browser renders \n
+// as line breaks. Richer than a single-line badge, cheaper than the right-click menu.
+function hostInfoText(dev) {
+    return [
+        `Hostname: ${dev.hostname}`,
+        `OS: ${dev.os === 'linux' ? 'Linux' : 'Windows'}`,
+        `IP: ${dev.endpoint_ip}`,
+        `Status: ${dev.status}`,
+        `Version: ${dev.version && dev.version !== 'unknown' ? dev.version : 'Unknown'}`,
+        `Last check-in: ${dev.last_check_in || 'Never'}`
+    ].join('\n');
+}
+
+// Right-click context menu on the hostname cell — a formatted card version of the same
+// info the hover tooltip carries, since a native title tooltip can't hold real markup
+// (icons, a divider, a follow-up action link). Positioned at the cursor and clamped to
+// stay inside the viewport, dismissed on outside click or Escape.
+function showHostInfoMenu(evt, hostname) {
+    const dev = allEndpoints.find(e => e.hostname === hostname);
+    if (!dev) return;
+    let menu = document.getElementById('hostInfoMenu');
+    if (!menu) {
+        menu = document.createElement('div');
+        menu.id = 'hostInfoMenu';
+        menu.className = 'dropdown-menu dropdown-menu-dark show p-2';
+        document.body.appendChild(menu);
+    }
+    menu.innerHTML = `
+        <div class="px-2 py-1">
+            <div class="fw-bold text-light mb-1"><i class="fa-solid fa-laptop-medical me-1"></i>${escHtml(dev.hostname)}</div>
+            <div class="small text-muted mb-2">${osIcon(dev.os)}</div>
+            <table class="small mb-2">
+                <tr><td class="text-muted pe-2">Endpoint IP</td><td class="text-info">${escHtml(dev.endpoint_ip)}</td></tr>
+                <tr><td class="text-muted pe-2">Status</td><td>${endpointStatusBadge(dev.status)}</td></tr>
+                <tr><td class="text-muted pe-2">Version</td><td>${escHtml(dev.version && dev.version !== 'unknown' ? dev.version : 'Unknown')}</td></tr>
+                <tr><td class="text-muted pe-2">Last check-in</td><td>${escHtml(dev.last_check_in || 'Never')}</td></tr>
+            </table>
+            <hr class="dropdown-divider my-1">
+            <a class="dropdown-item small text-primary px-1" href="#" onclick="hideHostInfoMenu(); openInConsole('${hostname.replace(/'/g, "\\'")}'); return false;"><i class="fa-solid fa-terminal me-2"></i>Interact in Console</a>
+        </div>
+    `;
+    const x = Math.min(evt.clientX, window.innerWidth - 280);
+    const y = Math.min(evt.clientY, window.innerHeight - 220);
+    menu.style.position = 'fixed';
+    menu.style.left = `${Math.max(0, x)}px`;
+    menu.style.top = `${Math.max(0, y)}px`;
+    menu.style.zIndex = 3000;
+    menu.style.display = 'block';
+    menu.style.minWidth = '260px';
+    // Deferred so the click that opened the menu doesn't immediately close it (the
+    // listener is added after this event has finished bubbling).
+    setTimeout(() => {
+        document.addEventListener('click', hideHostInfoMenu, { once: true });
+        document.addEventListener('keydown', hostInfoMenuEscHandler);
+    }, 0);
+}
+
+function hostInfoMenuEscHandler(e) {
+    if (e.key === 'Escape') hideHostInfoMenu();
+}
+
+function hideHostInfoMenu() {
+    const menu = document.getElementById('hostInfoMenu');
+    if (menu) menu.style.display = 'none';
+    document.removeEventListener('keydown', hostInfoMenuEscHandler);
+}
+
 let allEndpoints = [];
 let endpointStatusFilter = 'all';
 
@@ -373,7 +449,7 @@ function renderEndpoints() {
 
     if (allEndpoints.length === 0) {
         document.getElementById('endpointCountLabel').innerText = '';
-        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No active agent endpoints detected.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-3">No active agent endpoints detected.</td></tr>';
         return;
     }
 
@@ -390,7 +466,7 @@ function renderEndpoints() {
         : `${allEndpoints.length} endpoint${allEndpoints.length === 1 ? '' : 's'}`;
 
     if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No endpoints match your filters.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-3">No endpoints match your filters.</td></tr>';
         return;
     }
 
@@ -400,7 +476,10 @@ function renderEndpoints() {
     // instead of a string-built function call.
     tbody.innerHTML = filtered.map(dev => `
                 <tr data-hostname="${escHtml(dev.hostname)}">
-                    <td><strong>${escHtml(dev.hostname)}</strong></td>
+                    <td>
+                        <strong class="hostname-cell" title="${escHtml(hostInfoText(dev))}" oncontextmenu="showHostInfoMenu(event, rowHost(this)); return false;">${escHtml(dev.hostname)}</strong>
+                    </td>
+                    <td>${osIcon(dev.os)}</td>
                     <td><span class="text-info">${escHtml(dev.endpoint_ip)}</span></td>
                     <td>${endpointStatusBadge(dev.status)}</td>
                     <td class="text-nowrap"><span title="${escHtml(dev.last_check_in)}">${escHtml(relativeTime(dev.last_check_in)) || escHtml(dev.last_check_in)}</span></td>
@@ -490,13 +569,31 @@ function openCustomCmdModalOnConsole(hostname) {
 let consoleSessions = {};
 let consoleSelectedHost = '';
 
+// Keyed by OS since the underlying command each label maps to is a different real
+// command per platform (PowerShell cmdlet vs. shell utility) — the backend already
+// picks the right script per host automatically (see agent_scripts.TEMPLATES_BY_OS),
+// this only changes what the terminal transcript *shows* for what ran.
 const CONSOLE_ACTION_DISPLAY = {
-    list_processes: 'Get-Process (list running processes)',
-    collect_triage: 'Collect-Triage (processes, connections, autoruns, users, startup items)',
-    isolate_host: 'Isolate-Host (block all traffic except this SOC server)',
-    restore_network: 'Restore-Network',
-    upgrade: 'Upgrade-Agent (fetch latest agent, restart)'
+    windows: {
+        list_processes: 'Get-Process (list running processes)',
+        collect_triage: 'Collect-Triage (processes, connections, autoruns, users, startup items)',
+        isolate_host: 'Isolate-Host (block all traffic except this SOC server)',
+        restore_network: 'Restore-Network',
+        upgrade: 'Upgrade-Agent (fetch latest agent, restart)'
+    },
+    linux: {
+        list_processes: 'ps (list running processes)',
+        collect_triage: 'Collect-Triage (processes, connections, cron/systemd autostart, users)',
+        isolate_host: 'Isolate-Host (iptables: block all traffic except this SOC server)',
+        restore_network: 'Restore-Network (iptables: remove isolation rules)',
+        upgrade: 'Upgrade-Agent (fetch latest agent, restart)'
+    }
 };
+
+function consoleSelectedOS() {
+    const dev = allEndpoints.find(e => e.hostname === consoleSelectedHost);
+    return (dev && dev.os === 'linux') ? 'linux' : 'windows';
+}
 
 function populateConsoleHostSelect() {
     const sel = document.getElementById('consoleHostSelect');
@@ -524,6 +621,10 @@ function openInConsole(hostname) {
     onConsoleHostChange();
 }
 
+function consolePromptSymbol(os) {
+    return os === 'linux' ? '$' : 'PS&gt;';
+}
+
 function onConsoleHostChange() {
     consoleSelectedHost = document.getElementById('consoleHostSelect').value;
     const wrap = document.getElementById('consoleActionsWrap');
@@ -532,11 +633,19 @@ function onConsoleHostChange() {
     document.getElementById('consoleCmdInput').disabled = !active;
     document.getElementById('consoleSendBtn').disabled = !active;
     document.getElementById('consoleParamForm').style.display = 'none';
+    const os = consoleSelectedOS();
+    document.getElementById('consolePrompt').innerHTML = consolePromptSymbol(os);
+    document.getElementById('consoleCmdInput').placeholder = active
+        ? `Type a ${os === 'linux' ? 'bash' : 'PowerShell'} command and press Enter...`
+        : 'Type a PowerShell command and press Enter...';
+    renderConsoleFavSelect();
     renderConsoleTerminal();
 }
 
 function consoleEntryHtml(entry) {
-    let out = `<div class="term-line text-success">PS&gt; ${escHtml(entry.display)}</div>`;
+    // Always rendered for consoleSelectedHost's own session (see renderConsoleTerminal),
+    // so its current OS is the right prompt for every entry in this transcript.
+    let out = `<div class="term-line text-success">${consolePromptSymbol(consoleSelectedOS())} ${escHtml(entry.display)}</div>`;
     if (entry.status === 'queuing') {
         out += `<div class="term-line text-muted">[queuing...]</div>`;
     } else if (entry.status === 'queue_failed') {
@@ -626,7 +735,7 @@ function consoleRun(label, params, confirmMsg) {
     if (!consoleSelectedHost) return;
     if (confirmMsg && !confirm(confirmMsg)) return;
     document.getElementById('consoleParamForm').style.display = 'none';
-    queueConsoleCommand(consoleSelectedHost, label, params || {}, CONSOLE_ACTION_DISPLAY[label] || label);
+    queueConsoleCommand(consoleSelectedHost, label, params || {}, CONSOLE_ACTION_DISPLAY[consoleSelectedOS()][label] || label);
 }
 
 function consoleUpgrade() {
@@ -732,25 +841,40 @@ function reconcileConsoleSessions() {
     if (dirty) renderConsoleTerminal();
 }
 
-// ---- Favorite PowerShell commands (typed-prompt shortcuts) ----
+// ---- Favorite commands (typed-prompt shortcuts) ----
+// Tagged per-OS since a PowerShell favorite is meaningless typed at a Linux host's bash
+// prompt (and vice versa) — the dropdown only offers favorites matching whichever
+// host is currently selected.
 const CONSOLE_FAV_KEY = 'microdfir_console_favorites';
 const CONSOLE_FAV_DEFAULTS = [
-    { name: 'List Processes (detailed)', script: "Get-Process | Sort-Object CPU -Descending | Select-Object -First 20 Name,Id,CPU,WorkingSet | Format-Table -AutoSize | Out-String" },
-    { name: 'Network Connections', script: "Get-NetTCPConnection -State Established | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,OwningProcess | Format-Table -AutoSize | Out-String" },
-    { name: 'Local Users', script: "Get-LocalUser | Select-Object Name,Enabled,LastLogon | Format-Table -AutoSize | Out-String" },
-    { name: 'Running Services', script: "Get-Service | Where-Object { $_.Status -eq 'Running' } | Select-Object Name,DisplayName | Format-Table -AutoSize | Out-String" },
-    { name: 'Recent Security Events', script: "Get-WinEvent -LogName Security -MaxEvents 20 | Select-Object TimeCreated,Id,Message | Format-List | Out-String" },
-    { name: 'System Info', script: "Get-ComputerInfo | Select-Object OsName,OsVersion,CsName,OsArchitecture | Format-List | Out-String" },
-    { name: 'Scheduled Tasks (enabled)', script: "Get-ScheduledTask | Where-Object { $_.State -eq 'Ready' } | Select-Object TaskName,State | Format-Table -AutoSize | Out-String" },
-    { name: 'Installed Software', script: "Get-ItemProperty 'HKLM:\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' -ErrorAction SilentlyContinue | Where-Object DisplayName | Select-Object DisplayName,DisplayVersion | Format-Table -AutoSize | Out-String" }
+    { name: 'List Processes (detailed)', os: 'windows', script: "Get-Process | Sort-Object CPU -Descending | Select-Object -First 20 Name,Id,CPU,WorkingSet | Format-Table -AutoSize | Out-String" },
+    { name: 'Network Connections', os: 'windows', script: "Get-NetTCPConnection -State Established | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,OwningProcess | Format-Table -AutoSize | Out-String" },
+    { name: 'Local Users', os: 'windows', script: "Get-LocalUser | Select-Object Name,Enabled,LastLogon | Format-Table -AutoSize | Out-String" },
+    { name: 'Running Services', os: 'windows', script: "Get-Service | Where-Object { $_.Status -eq 'Running' } | Select-Object Name,DisplayName | Format-Table -AutoSize | Out-String" },
+    { name: 'Recent Security Events', os: 'windows', script: "Get-WinEvent -LogName Security -MaxEvents 20 | Select-Object TimeCreated,Id,Message | Format-List | Out-String" },
+    { name: 'System Info', os: 'windows', script: "Get-ComputerInfo | Select-Object OsName,OsVersion,CsName,OsArchitecture | Format-List | Out-String" },
+    { name: 'Scheduled Tasks (enabled)', os: 'windows', script: "Get-ScheduledTask | Where-Object { $_.State -eq 'Ready' } | Select-Object TaskName,State | Format-Table -AutoSize | Out-String" },
+    { name: 'Installed Software', os: 'windows', script: "Get-ItemProperty 'HKLM:\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' -ErrorAction SilentlyContinue | Where-Object DisplayName | Select-Object DisplayName,DisplayVersion | Format-Table -AutoSize | Out-String" },
+    { name: 'Network Connections', os: 'linux', script: "ss -tnp state established" },
+    { name: 'Logged-in Users', os: 'linux', script: "who" },
+    { name: 'Running Services', os: 'linux', script: "systemctl list-units --type=service --state=running --no-legend" },
+    { name: 'Recent Auth Log Entries', os: 'linux', script: "journalctl -u ssh -u sshd -n 30 --no-pager 2>/dev/null || tail -n 30 /var/log/auth.log" },
+    { name: 'System Info', os: 'linux', script: "uname -a && cat /etc/os-release" },
+    { name: 'Cron Jobs (all users)', os: 'linux', script: "for u in $(cut -f1 -d: /etc/passwd); do crontab -l -u \"$u\" 2>/dev/null && echo \"-- $u --\"; done" },
+    { name: 'Installed Packages (top 20 by size)', os: 'linux', script: "dpkg-query -Wf '${Installed-Size}\\t${Package}\\n' 2>/dev/null | sort -rn | head -20 || rpm -qa" }
 ];
 
 function loadConsoleFavorites() {
+    let favs;
     try {
         const raw = localStorage.getItem(CONSOLE_FAV_KEY);
-        if (raw) return JSON.parse(raw);
-    } catch (e) {}
-    return CONSOLE_FAV_DEFAULTS.slice();
+        favs = raw ? JSON.parse(raw) : CONSOLE_FAV_DEFAULTS.slice();
+    } catch (e) {
+        favs = CONSOLE_FAV_DEFAULTS.slice();
+    }
+    // Favorites saved before OS-tagging existed have no `os` field — they were all
+    // PowerShell (Linux support didn't exist yet), so treat a missing tag as windows.
+    return favs.map(f => ({ ...f, os: f.os || 'windows' }));
 }
 
 function saveConsoleFavoritesList(favs) {
@@ -760,9 +884,13 @@ function saveConsoleFavoritesList(favs) {
 function renderConsoleFavSelect() {
     const sel = document.getElementById('consoleFavSelect');
     if (!sel) return;
+    const os = consoleSelectedOS();
     const favs = loadConsoleFavorites();
+    // Option values stay indices into the *full* favorites list (not the filtered
+    // display order) so insertConsoleFavorite()/deleteConsoleFavorite() still address
+    // the right entry regardless of which OS's subset is currently shown.
     sel.innerHTML = '<option value="">-- Favorite commands --</option>' +
-        favs.map((f, i) => `<option value="${i}">${escHtml(f.name)}</option>`).join('');
+        favs.map((f, i) => ({ f, i })).filter(({ f }) => f.os === os).map(({ f, i }) => `<option value="${i}">${escHtml(f.name)}</option>`).join('');
 }
 
 function insertConsoleFavorite() {
@@ -782,7 +910,7 @@ function saveConsoleFavorite() {
     const name = prompt('Name this favorite command:', defaultName);
     if (!name) return;
     const favs = loadConsoleFavorites();
-    favs.push({ name, script });
+    favs.push({ name, script, os: consoleSelectedOS() });
     saveConsoleFavoritesList(favs);
     renderConsoleFavSelect();
 }
