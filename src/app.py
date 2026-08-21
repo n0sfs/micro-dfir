@@ -434,6 +434,37 @@ def trigger_report():
 
 
 # ==========================================
+# UEBA — BEHAVIORAL ANOMALY DETECTIONS
+# ==========================================
+@app.route('/ueba')
+@login_required
+def ueba():
+    return render_template('ueba.html', current_user=current_user)
+
+@app.route('/api/ueba/detections')
+@login_required
+def api_ueba_detections():
+    db = get_db()
+    limit = request.args.get('limit', 100, type=int)
+    rows = db.execute(
+        "SELECT timestamp, hostname, severity, message FROM events WHERE app_name = 'duckdb_ueba' ORDER BY id DESC LIMIT ?",
+        (limit,)
+    ).fetchall()
+    detections = [dict(r) for r in rows]
+    total = db.execute("SELECT COUNT(*) FROM events WHERE app_name = 'duckdb_ueba'").fetchone()[0]
+    today = db.execute("SELECT COUNT(*) FROM events WHERE app_name = 'duckdb_ueba' AND date(timestamp) = date('now')").fetchone()[0]
+    hosts_flagged = db.execute("SELECT COUNT(DISTINCT hostname) FROM events WHERE app_name = 'duckdb_ueba'").fetchone()[0]
+    latest = detections[0]['timestamp'] if detections else None
+    return jsonify({
+        'detections': detections,
+        'total': total,
+        'today': today,
+        'hosts_flagged': hosts_flagged,
+        'latest': latest
+    })
+
+
+# ==========================================
 # GLOBAL SETTINGS & AGENT DEPLOYMENT ROUTES
 # ==========================================
 def migrate_settings():

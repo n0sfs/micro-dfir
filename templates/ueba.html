@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <h2><i class="fa-solid fa-user-secret me-2"></i>UEBA — Behavioral Anomaly Detections</h2>
+    <p>Hosts whose daily log volume has statistically exceeded their 30-day baseline, computed hourly by the DuckDB behavioral model.</p>
+</div>
+
+<div class="row g-3 mb-4">
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label">Total Detections</div>
+            <div class="stat-value" id="statTotal">—</div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label">Detected Today</div>
+            <div class="stat-value" id="statToday">—</div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label">Hosts Flagged</div>
+            <div class="stat-value" id="statHosts">—</div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label">Latest Detection</div>
+            <div class="stat-value" id="statLatest" style="font-size:1.05rem;">—</div>
+        </div>
+    </div>
+</div>
+
+<div class="card bg-dark border-secondary">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="fa-solid fa-chart-line me-2"></i>Anomaly Feed</span>
+        <button class="btn btn-outline-secondary btn-sm" onclick="loadUebaDetections()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-dark table-hover mb-0 align-middle">
+                <thead>
+                    <tr>
+                        <th class="ps-3">Time</th>
+                        <th>Host</th>
+                        <th>Severity</th>
+                        <th>Detail</th>
+                    </tr>
+                </thead>
+                <tbody id="uebaTableBody">
+                    <tr><td colspan="4" class="text-center text-muted py-4">Loading detections...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function severityBadge(sev) {
+    const s = (sev || '').toUpperCase();
+    const cls = s === 'CRITICAL' ? 'bg-danger' : s === 'HIGH' ? 'bg-warning text-dark' : s === 'LOW' ? 'bg-secondary' : 'bg-info text-dark';
+    return `<span class="badge ${cls}">${s || 'INFO'}</span>`;
+}
+
+function loadUebaDetections() {
+    fetch('/api/ueba/detections')
+        .then(r => r.json())
+        .then(data => {
+            document.getElementById('statTotal').innerText = data.total ?? 0;
+            document.getElementById('statToday').innerText = data.today ?? 0;
+            document.getElementById('statHosts').innerText = data.hosts_flagged ?? 0;
+            document.getElementById('statLatest').innerText = data.latest ? data.latest : 'None yet';
+
+            const tbody = document.getElementById('uebaTableBody');
+            if (!data.detections || data.detections.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-4">No behavioral anomalies detected yet. The model needs at least 30 days of baseline data per host before it will flag anything.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = data.detections.map(d => `
+                <tr>
+                    <td class="ps-3 text-nowrap">${d.timestamp}</td>
+                    <td><strong>${d.hostname}</strong></td>
+                    <td>${severityBadge(d.severity)}</td>
+                    <td class="text-muted small">${d.message}</td>
+                </tr>
+            `).join('');
+        })
+        .catch(err => console.error('Error loading UEBA detections:', err));
+}
+
+loadUebaDetections();
+</script>
+{% endblock %}
