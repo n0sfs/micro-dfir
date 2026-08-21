@@ -55,35 +55,6 @@
         </div>
     </div>
 </div>
-
-<div class="card bg-dark border-secondary mt-4">
-    <div class="card-header">
-        <i class="fa-solid fa-sliders me-2"></i>Detection Tuning
-    </div>
-    <div class="card-body">
-        <p class="text-muted small mb-3">The model flags a host when today's log volume exceeds <code>baseline average + (multiplier &times; standard deviation)</code>, and only once a host's baseline average clears the minimum floor below (this avoids flagging quiet hosts on their first noisy day).</p>
-        <div class="row g-3">
-            <div class="col-md-4">
-                <label class="form-label">Baseline Lookback (days)</label>
-                <input type="number" id="cfgLookback" class="form-control bg-dark text-light border-secondary" min="1" max="365" {{ '' if current_user.role == 'admin' else 'disabled' }}>
-            </div>
-            <div class="col-md-4">
-                <label class="form-label">Standard Deviation Multiplier</label>
-                <input type="number" id="cfgStddev" class="form-control bg-dark text-light border-secondary" min="0.5" max="10" step="0.1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
-            </div>
-            <div class="col-md-4">
-                <label class="form-label">Minimum Baseline Floor (events/day)</label>
-                <input type="number" id="cfgMinBaseline" class="form-control bg-dark text-light border-secondary" min="0" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
-            </div>
-        </div>
-        {% if current_user.role == 'admin' %}
-        <button class="btn btn-primary btn-sm mt-3" onclick="saveUebaConfig()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Tuning</button>
-        <span id="cfgSaveMsg" class="small ms-2" style="display:none;"></span>
-        {% else %}
-        <p class="text-muted small mt-3 mb-0"><i class="fa-solid fa-lock me-1"></i>Admin role required to change tuning.</p>
-        {% endif %}
-    </div>
-</div>
 {% endblock %}
 
 {% block scripts %}
@@ -120,42 +91,6 @@ function loadUebaDetections() {
         .catch(err => console.error('Error loading UEBA detections:', err));
 }
 
-function loadUebaConfig() {
-    fetch('/api/ueba/config')
-        .then(r => r.json())
-        .then(cfg => {
-            document.getElementById('cfgLookback').value = cfg.lookback_days;
-            document.getElementById('cfgStddev').value = cfg.stddev_multiplier;
-            document.getElementById('cfgMinBaseline').value = cfg.min_baseline;
-        })
-        .catch(err => console.error('Error loading UEBA config:', err));
-}
-
-function saveUebaConfig() {
-    const payload = {
-        lookback_days: parseInt(document.getElementById('cfgLookback').value, 10),
-        stddev_multiplier: parseFloat(document.getElementById('cfgStddev').value),
-        min_baseline: parseFloat(document.getElementById('cfgMinBaseline').value)
-    };
-    const msg = document.getElementById('cfgSaveMsg');
-    fetch('/api/ueba/config', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(payload)
-    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
-        msg.style.display = 'inline';
-        if (ok) {
-            msg.className = 'small ms-2 text-success';
-            msg.innerText = 'Saved. Applies on the next hourly UEBA run.';
-        } else {
-            msg.className = 'small ms-2 text-danger';
-            msg.innerText = data.error || 'Failed to save.';
-        }
-        setTimeout(() => { msg.style.display = 'none'; }, 4000);
-    }).catch(err => alert('Error saving config: ' + err));
-}
-
 loadUebaDetections();
-loadUebaConfig();
 </script>
 {% endblock %}
