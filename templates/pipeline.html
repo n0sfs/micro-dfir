@@ -5,6 +5,33 @@
     <p>Manage real-time log ingestion filtering rules and endpoint log collection channels.</p>
 </div>
 
+<div class="row g-3 mb-4">
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label">Active Drop Rules</div>
+            <div class="stat-value" id="statDropRules">—</div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label">Endpoints Online</div>
+            <div class="stat-value" id="statEndpoints">—</div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label">Log Channels Active</div>
+            <div class="stat-value" id="statChannels">—</div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label">Pending Actions</div>
+            <div class="stat-value" id="statPendingActions">—</div>
+        </div>
+    </div>
+</div>
+
 <div class="row g-4 mb-4">
     <!-- Active Drop / Filter Rules -->
     <div class="col-lg-6">
@@ -213,6 +240,7 @@ function loadDropRules() {
     fetch('/api/droprules')
         .then(r => r.json())
         .then(data => {
+            document.getElementById('statDropRules').innerText = Array.isArray(data) ? data.filter(r => r.enabled).length : 0;
             let tbody = document.getElementById('dropRulesTableBody');
             if (!Array.isArray(data) || data.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">No drop rules configured.</td></tr>';
@@ -272,6 +300,7 @@ function loadChannelSettings() {
             if(document.getElementById('chk_ps')) document.getElementById('chk_ps').checked = !!data.PowerShell;
             if(document.getElementById('chk_sysmon')) document.getElementById('chk_sysmon').checked = !!data.Sysmon;
             if(document.getElementById('chk_def')) document.getElementById('chk_def').checked = !!data.WindowsDefender;
+            document.getElementById('statChannels').innerText = Object.values(data).filter(Boolean).length;
         }).catch(err => console.error("Error loading channels:", err));
 }
 
@@ -313,6 +342,7 @@ function loadUniqueEndpoints() {
     fetch('/api/agent/checkins')
         .then(r => r.json())
         .then(data => {
+            document.getElementById('statEndpoints').innerText = Array.isArray(data) ? data.length : 0;
             let card = Array.from(document.querySelectorAll('.card')).find(c => c.innerText.includes('Active Endpoint Check-ins'));
             let tbody = card ? card.querySelector('tbody') : document.querySelectorAll('table tbody')[1];
             if (!tbody) return;
@@ -439,6 +469,7 @@ function loadCommandHistory() {
         .then(r => r.json())
         .then(rows => {
             cmdHistoryCache = rows;
+            document.getElementById('statPendingActions').innerText = (rows || []).filter(c => c.status === 'pending' || c.status === 'sent').length;
             const tbody = document.getElementById('cmdHistoryBody');
             if (!rows || rows.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">No response actions have been run yet.</td></tr>';

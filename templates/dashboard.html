@@ -110,6 +110,33 @@ function updateFilters() {
     </div>
 </div>
 
+<div class="row g-3 mb-3">
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label">Total Matches</div>
+            <div class="stat-value" id="statTotalMatches">—</div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label">Alerts (this page)</div>
+            <div class="stat-value" id="statAlertCount">—</div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label">Unique Hosts (this page)</div>
+            <div class="stat-value" id="statUniqueHosts">—</div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label">Time Window</div>
+            <div class="stat-value" id="statTimeWindow" style="font-size:1.05rem;">—</div>
+        </div>
+    </div>
+</div>
+
 <!-- TIME-SERIES TIMELINE CHART CARD -->
 <div class="card bg-dark border-secondary mb-3">
     <div class="card-body py-2 px-3">
@@ -257,6 +284,12 @@ window.loadLogs = function() {
             if (badge) {
                 badge.innerText = `Total Matches: ${data.total_matches !== undefined ? data.total_matches : data.count} (Showing latest ${data.count})`;
             }
+
+            const logs = data.logs || [];
+            document.getElementById('statTotalMatches').innerText = data.total_matches !== undefined ? data.total_matches : data.count;
+            document.getElementById('statAlertCount').innerText = logs.filter(l => l.severity === 'ALERT').length;
+            document.getElementById('statUniqueHosts').innerText = new Set(logs.map(l => l.host)).size;
+            document.getElementById('statTimeWindow').innerText = document.getElementById('timeRange').value;
 
             let tbody = document.querySelector('tbody');
             if (!tbody) return;
