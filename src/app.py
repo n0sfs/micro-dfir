@@ -2190,12 +2190,12 @@ def delete_agent(hostname):
         return jsonify({'error': 'Admin required'}), 403
     db = get_db()
     db.execute('DELETE FROM agent_polls WHERE user_agent = ?', (hostname,))
-    db.execute(
+    cur = db.execute(
         "INSERT INTO agent_commands (hostname, label, script, queued_by) VALUES (?, 'uninstall', '', ?)",
         (hostname, current_user.username)
     )
     db.commit()
-    return jsonify({"status": "success"})
+    return jsonify({"status": "success", "id": cur.lastrowid})
 
 # ==========================================
 # STARTUP — schema migrations + config regeneration
