@@ -293,7 +293,10 @@ def pipeline(): return redirect(url_for('dash', tab='pipeline'))
 
 @app.route('/agents')
 @login_required
-def agents(): return render_template('agents.html', current_user=current_user)
+def agents():
+    db = get_db()
+    s = {r[0]: r[1] for r in db.execute("SELECT key, value FROM settings").fetchall()}
+    return render_template('agents.html', soc_token=s.get('soc_secret', ''), current_user=current_user)
 
 @app.route('/api/alerts')
 @login_required
@@ -1425,7 +1428,7 @@ def settings():
     all_settings = {row[0]: row[1] for row in cursor.fetchall()}
     conn.close()
 
-    return render_template("settings.html", all_settings=all_settings, soc_token=all_settings.get('soc_secret', ''), current_user=current_user)
+    return render_template("settings.html", all_settings=all_settings, current_user=current_user)
 
 @app.route('/api/settings/token', methods=['POST'])
 @login_required
