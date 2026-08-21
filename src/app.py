@@ -124,7 +124,11 @@ def generate_vector_config():
         stmts.append(f"  # {desc}\n  if {cond} {{ abort }}")
     drop_block = ('\n' + '\n'.join(stmts)) if stmts else ''
 
-    toml = f"""[sources.syslog_in]
+    toml = f"""[api]
+enabled = true
+address = "127.0.0.1:8686"
+
+[sources.syslog_in]
 type = "syslog"
 mode = "udp"
 address = "{ingest_ip}:514"
