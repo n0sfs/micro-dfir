@@ -4,7 +4,9 @@ CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, timesta
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
 CREATE TABLE IF NOT EXISTS live_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME NOT NULL, host TEXT, app TEXT, severity TEXT, event_id TEXT, username TEXT, source_ip TEXT, destination_ip TEXT, message TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_live_logs_timestamp ON live_logs(timestamp);
-CREATE TABLE IF NOT EXISTS sigma_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, rule_yaml TEXT NOT NULL, enabled BOOLEAN DEFAULT 0);
+CREATE TABLE IF NOT EXISTS sigma_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, rule_yaml TEXT NOT NULL, enabled BOOLEAN DEFAULT 0, source TEXT DEFAULT 'sigma', sigma_uuid TEXT, cloned_from INTEGER, created_by TEXT, created_at DATETIME, updated_by TEXT, updated_at DATETIME);
+CREATE TABLE IF NOT EXISTS sigma_rule_history (id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id INTEGER NOT NULL, changed_by TEXT, changed_at DATETIME DEFAULT CURRENT_TIMESTAMP, old_yaml TEXT, new_yaml TEXT);
+CREATE INDEX IF NOT EXISTS idx_sigma_rule_history_rule ON sigma_rule_history(rule_id);
 CREATE TABLE IF NOT EXISTS yara_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, rule_text TEXT NOT NULL, enabled BOOLEAN DEFAULT 1);
 CREATE TABLE IF NOT EXISTS alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, rule_id INTEGER, event_id INTEGER, rule_name TEXT, host TEXT, message TEXT, severity TEXT, acknowledged BOOLEAN DEFAULT 0, FOREIGN KEY(rule_id) REFERENCES sigma_rules(id), FOREIGN KEY(event_id) REFERENCES live_logs(id));
 CREATE TABLE IF NOT EXISTS drop_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, field TEXT NOT NULL, operator TEXT NOT NULL, value TEXT NOT NULL, description TEXT, enabled BOOLEAN DEFAULT 1);

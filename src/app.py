@@ -447,7 +447,10 @@ def api_rules():
 
         import re
         rules_out = []
-        for r in db.execute("SELECT id, title, rule_yaml, enabled FROM sigma_rules ORDER BY id DESC").fetchall():
+        for r in db.execute(
+            "SELECT id, title, rule_yaml, enabled, source, cloned_from, created_by, created_at, updated_by, updated_at "
+            "FROM sigma_rules ORDER BY id DESC"
+        ).fetchall():
             rid = r['id']
             ry = r['rule_yaml']
             try:
@@ -478,7 +481,13 @@ def api_rules():
                 "rule_type": rule_type,
                 "platform": platform,
                 "category": cat,
-                "tags": tags
+                "tags": tags,
+                "source": r['source'] or 'sigma',
+                "cloned_from": r['cloned_from'],
+                "created_by": r['created_by'],
+                "created_at": r['created_at'],
+                "updated_by": r['updated_by'],
+                "updated_at": r['updated_at']
             })
         RULES_CACHE = rules_out
         RULES_CACHE_TIME = time.time()
@@ -492,7 +501,10 @@ def api_rules():
         t = parsed.get('title', 'Untitled') if isinstance(parsed, dict) else 'Untitled'
     except yaml.YAMLError as e:
         return jsonify({"error": f"Invalid rule YAML: {e}"}), 400
-    db.execute("INSERT INTO sigma_rules (title, rule_yaml, enabled) VALUES (?, ?, 1)", (t, ry))
+    db.execute(
+        "INSERT INTO sigma_rules (title, rule_yaml, enabled, source, created_by, created_at) VALUES (?, ?, 1, 'custom', ?, CURRENT_TIMESTAMP)",
+        (t, ry, current_user.username)
+    )
     db.commit()
     invalidate_rules_cache()
     return jsonify({"status": "success"})
@@ -502,7 +514,10 @@ def api_rule_detail(rid):
     db = get_db()
 
     if request.method == 'GET':
-        r = db.execute("SELECT id, title, rule_yaml, enabled FROM sigma_rules WHERE id = ?", (rid,)).fetchone()
+        r = db.execute(
+            "SELECT id, title, rule_yaml, enabled, source, cloned_from, created_by, created_at, updated_by, updated_at "
+            "FROM sigma_rules WHERE id = ?", (rid,)
+        ).fetchone()
         if not r:
             return jsonify({"error": "Rule not found"}), 404
         return jsonify(dict(r))
@@ -512,11 +527,19 @@ def api_rule_detail(rid):
 
     if request.method == 'DELETE':
         db.execute("DELETE FROM sigma_rules WHERE id = ?", (rid,))
+        db.execute("DELETE FROM sigma_rule_history WHERE rule_id = ?", (rid,))
         db.commit()
         invalidate_rules_cache()
         return jsonify({"ok": 1})
 
-    # PUT — update an existing rule's title/YAML
+    # PUT — update an existing rule's title/YAML. Sigma-sourced rules are read-only;
+    # they must be cloned into a custom rule before they can be edited.
+    existing = db.execute("SELECT rule_yaml, source FROM sigma_rules WHERE id = ?", (rid,)).fetchone()
+    if not existing:
+        return jsonify({"error": "Rule not found"}), 404
+    if existing['source'] == 'sigma':
+        return jsonify({"error": "Sigma-sourced rules are read-only. Clone this rule to create an editable custom copy."}), 403
+
     import yaml
     ry = (request.get_json() or {}).get('rule_yaml', '')
     try:
@@ -524,10 +547,67 @@ def api_rule_detail(rid):
         t = parsed.get('title', 'Untitled') if isinstance(parsed, dict) else 'Untitled'
     except yaml.YAMLError as e:
         return jsonify({"error": f"Invalid rule YAML: {e}"}), 400
-    db.execute("UPDATE sigma_rules SET title = ?, rule_yaml = ? WHERE id = ?", (t, ry, rid))
+    db.execute(
+        "INSERT INTO sigma_rule_history (rule_id, changed_by, old_yaml, new_yaml) VALUES (?, ?, ?, ?)",
+        (rid, current_user.username, existing['rule_yaml'], ry)
+    )
+    db.execute(
+        "UPDATE sigma_rules SET title = ?, rule_yaml = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (t, ry, current_user.username, rid)
+    )
     db.commit()
     invalidate_rules_cache()
     return jsonify({"status": "success"})
+
+@app.route('/api/rules/<int:rid>/clone', methods=['POST'])
+@login_required
+def api_rule_clone(rid):
+    if current_user.role != 'admin':
+        return jsonify({"error": "Admin required"}), 403
+    db = get_db()
+    r = db.execute("SELECT title, rule_yaml FROM sigma_rules WHERE id = ?", (rid,)).fetchone()
+    if not r:
+        return jsonify({"error": "Rule not found"}), 404
+    new_title = f"{r['title']} (Custom Copy)"
+    cur = db.execute(
+        "INSERT INTO sigma_rules (title, rule_yaml, enabled, source, cloned_from, created_by, created_at) "
+        "VALUES (?, ?, 0, 'custom', ?, ?, CURRENT_TIMESTAMP)",
+        (new_title, r['rule_yaml'], rid, current_user.username)
+    )
+    db.commit()
+    invalidate_rules_cache()
+    return jsonify({"status": "success", "id": cur.lastrowid})
+
+@app.route('/api/rules/<int:rid>/history', methods=['GET'])
+@login_required
+def api_rule_history(rid):
+    import difflib
+    db = get_db()
+    rows = db.execute(
+        "SELECT changed_by, changed_at, old_yaml, new_yaml FROM sigma_rule_history WHERE rule_id = ? ORDER BY id DESC",
+        (rid,)
+    ).fetchall()
+    out = []
+    for row in rows:
+        diff = '\n'.join(difflib.unified_diff(
+            (row['old_yaml'] or '').splitlines(),
+            (row['new_yaml'] or '').splitlines(),
+            lineterm='', fromfile='before', tofile='after'
+        ))
+        out.append({"changed_by": row['changed_by'], "changed_at": row['changed_at'], "diff": diff})
+    return jsonify(out)
+
+@app.route('/api/rules/import/sigmahq', methods=['POST'])
+@login_required
+def api_rules_import_sigmahq():
+    if current_user.role != 'admin':
+        return jsonify({"error": "Admin required"}), 403
+    try:
+        stats = _run_sigmahq_import()
+    except Exception as e:
+        return jsonify({"error": f"Import failed: {e}"}), 500
+    invalidate_rules_cache()
+    return jsonify({"status": "success", **stats})
 
 @app.route('/api/rules/<int:rid>/toggle', methods=['PUT'])
 @login_required
@@ -755,10 +835,109 @@ def migrate_alerts_columns():
     except Exception:
         pass
 
+def migrate_sigma_rules_columns():
+    # sigma_rules originally had no provenance columns — rules bulk-imported from SigmaHQ
+    # and rules hand-written in the editor were indistinguishable. ALTER TABLE catches
+    # already-deployed databases up; existing rows are backfilled as source='sigma' since
+    # the SigmaHQ bulk import is overwhelmingly what populated them historically.
+    try:
+        import sqlite3, re as _re
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(sigma_rules)").fetchall()}
+        need_uuid_backfill = 'sigma_uuid' not in cols
+
+        if 'source' not in cols:
+            conn.execute("ALTER TABLE sigma_rules ADD COLUMN source TEXT DEFAULT 'sigma'")
+            conn.execute("UPDATE sigma_rules SET source = 'sigma' WHERE source IS NULL")
+        for col, coltype in (('sigma_uuid', 'TEXT'), ('cloned_from', 'INTEGER'),
+                              ('created_by', 'TEXT'), ('created_at', 'DATETIME'),
+                              ('updated_by', 'TEXT'), ('updated_at', 'DATETIME')):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE sigma_rules ADD COLUMN {col} {coltype}")
+
+        if need_uuid_backfill:
+            # One-time pass so re-importing SigmaHQ later can upsert by UUID instead of
+            # blindly re-inserting every rule already loaded by the original import script.
+            id_re = _re.compile(r'^id:\s*([0-9a-fA-F-]{36})\s*$', _re.MULTILINE)
+            for rid, ry in conn.execute("SELECT id, rule_yaml FROM sigma_rules WHERE sigma_uuid IS NULL").fetchall():
+                m = id_re.search(ry or '')
+                if m:
+                    conn.execute("UPDATE sigma_rules SET sigma_uuid = ? WHERE id = ?", (m.group(1), rid))
+
+        conn.execute('''CREATE TABLE IF NOT EXISTS sigma_rule_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_id INTEGER NOT NULL,
+            changed_by TEXT,
+            changed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            old_yaml TEXT,
+            new_yaml TEXT
+        )''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sigma_rule_history_rule ON sigma_rule_history(rule_id)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def _run_sigmahq_import():
+    import urllib.request, zipfile, tempfile, shutil, socket, sqlite3
+    import yaml as _yaml
+    t = tempfile.mkdtemp()
+    stats = {'inserted': 0, 'updated': 0, 'skipped': 0, 'errors': 0}
+    try:
+        zp = os.path.join(t, "sigma.zip")
+        old_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(60)
+        try:
+            urllib.request.urlretrieve("https://github.com/SigmaHQ/sigma/archive/refs/heads/master.zip", zp)
+        finally:
+            socket.setdefaulttimeout(old_timeout)
+        with zipfile.ZipFile(zp, 'r') as z:
+            z.extractall(t)
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.row_factory = sqlite3.Row
+        rules_dir = os.path.join(t, "sigma-master", "rules")
+        for root, _, files in os.walk(rules_dir):
+            for f in files:
+                if not f.endswith(('.yml', '.yaml')):
+                    continue
+                try:
+                    with open(os.path.join(root, f), 'r', encoding='utf-8') as fh:
+                        ry = fh.read()
+                    parsed = _yaml.safe_load(ry)
+                    if not parsed or 'title' not in parsed:
+                        stats['skipped'] += 1
+                        continue
+                    title = parsed['title']
+                    uuid_ = parsed.get('id')
+                    existing = conn.execute(
+                        "SELECT id, rule_yaml FROM sigma_rules WHERE sigma_uuid = ?", (uuid_,)
+                    ).fetchone() if uuid_ else None
+                    if existing:
+                        if existing['rule_yaml'] != ry:
+                            conn.execute(
+                                "UPDATE sigma_rules SET title = ?, rule_yaml = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                                (title, ry, existing['id'])
+                            )
+                            stats['updated'] += 1
+                    else:
+                        conn.execute(
+                            "INSERT INTO sigma_rules (title, rule_yaml, enabled, source, sigma_uuid, created_at) VALUES (?, ?, 0, 'sigma', ?, CURRENT_TIMESTAMP)",
+                            (title, ry, uuid_)
+                        )
+                        stats['inserted'] += 1
+                except Exception:
+                    stats['errors'] += 1
+        conn.commit()
+        conn.close()
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+    return stats
+
 migrate_settings()
 migrate_ti_feeds()
 migrate_agent_commands()
 migrate_alerts_columns()
+migrate_sigma_rules_columns()
 
 @app.route('/settings', methods=['GET', 'POST'])
 @login_required

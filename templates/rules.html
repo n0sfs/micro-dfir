@@ -3,7 +3,7 @@
 <div class="container-fluid">
     <div class="page-header">
         <h2><i class="fa-solid fa-file-shield me-2"></i>Detection Rules</h2>
-        <p>Manage Sigma detection rules — enable, disable, and import from SigmaHQ.</p>
+        <p>Manage Sigma and custom detection rules — enable, disable, clone, and import from SigmaHQ.</p>
     </div>
 
     <div class="row g-3 mb-4">
@@ -42,6 +42,13 @@
                     <input type="text" id="rq" class="form-control bg-dark text-light border-secondary" placeholder="Search titles..." onkeyup="f()">
                 </div>
                 <div class="col-md-2 mb-2">
+                    <select id="sourceFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
+                        <option value="">All Sources</option>
+                        <option value="sigma">Sigma</option>
+                        <option value="custom">Custom</option>
+                    </select>
+                </div>
+                <div class="col-md-2 mb-2">
                     <select id="typeFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
                         <option value="">All Types</option>
                     </select>
@@ -51,12 +58,12 @@
                         <option value="">All Platforms</option>
                     </select>
                 </div>
-                <div class="col-md-2 mb-2">
+                <div class="col-md-1 mb-2">
                     <select id="catFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
                         <option value="">All Subcategories</option>
                     </select>
                 </div>
-                <div class="col-md-3 mb-2">
+                <div class="col-md-2 mb-2">
                     <select id="mitreFilter" class="form-select bg-dark text-light border-secondary" onchange="f()">
                         <option value="">All MITRE Tags</option>
                     </select>
@@ -70,6 +77,7 @@
                 <div class="ms-auto d-flex gap-2">
                     <button class="btn btn-sm btn-outline-success" onclick="bulkAction(true)"><i class="fa-solid fa-play"></i> Enable Selected</button>
                     <button class="btn btn-sm btn-outline-danger" onclick="bulkAction(false)"><i class="fa-solid fa-stop"></i> Disable Selected</button>
+                    <button class="btn btn-sm btn-outline-info" id="importSigmaBtn" onclick="importSigmaHQ()"><i class="fa-solid fa-cloud-arrow-down"></i> Import SigmaHQ Rules</button>
                     <button class="btn btn-sm btn-primary" onclick="openRuleModal()"><i class="fa-solid fa-plus"></i> New Rule</button>
                 </div>
             </div>
@@ -81,11 +89,12 @@
                         <tr>
                             <th style="width: 40px;"></th>
                             <th style="width: 80px;">Status</th>
+                            <th style="width: 80px;">Source</th>
                             <th>Rule Title</th>
                             <th>Platform</th>
                             <th>Subcategory</th>
                             <th>MITRE ATT&CK</th>
-                            <th style="width: 90px;">Actions</th>
+                            <th style="width: 120px;">Actions</th>
                         </tr>
                     </thead>
                     <tbody id="rt"></tbody>
@@ -105,13 +114,21 @@
         <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
+        <div id="ruleMetaBox" class="small text-muted mb-2" style="display:none;"></div>
+        <div id="ruleReadonlyNotice" class="alert alert-secondary py-2 small" style="display:none;"><i class="fa-solid fa-lock me-1"></i>Sigma-sourced rules are read-only. Clone this rule to create an editable custom copy.</div>
         <p class="text-muted small">Paste or edit a Sigma rule in YAML format. The rule's <code>title</code> field is used as its display name.</p>
         <textarea id="ruleYamlInput" class="form-control bg-black text-light border-secondary font-monospace small" rows="18" spellcheck="false" placeholder="title: My Detection Rule&#10;status: experimental&#10;logsource:&#10;  product: windows&#10;  category: process_creation&#10;detection:&#10;  selection:&#10;    CommandLine|contains: 'example'&#10;  condition: selection"></textarea>
         <div id="ruleEditorError" class="text-danger small mt-2" style="display:none;"></div>
+        <div id="ruleHistoryBox" class="mt-3" style="display:none;">
+            <h6 class="text-info mb-2"><i class="fa-solid fa-clock-rotate-left me-1"></i>Edit History</h6>
+            <div id="ruleHistoryList" class="small"></div>
+        </div>
       </div>
       <div class="modal-footer border-secondary">
+        <button type="button" class="btn btn-outline-secondary me-auto" id="ruleHistoryBtn" style="display:none;" onclick="toggleHistory()"><i class="fa-solid fa-clock-rotate-left me-1"></i> View History</button>
+        <button type="button" class="btn btn-outline-warning" id="ruleCloneBtn" style="display:none;" onclick="cloneFromModal()"><i class="fa-solid fa-copy me-1"></i> Clone to Edit</button>
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button type="button" class="btn btn-primary" onclick="saveRule()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Rule</button>
+        <button type="button" class="btn btn-primary" id="ruleSaveBtn" onclick="saveRule()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Rule</button>
       </div>
     </div>
   </div>
@@ -173,6 +190,9 @@ function renderTable(rules) {
                 </div>
             </td>
             <td>
+                <span class="badge ${rl.source === 'custom' ? 'bg-info text-dark' : 'bg-secondary'}" title="${rl.cloned_from ? 'Cloned from rule #' + rl.cloned_from : ''}">${rl.source === 'custom' ? 'Custom' : 'Sigma'}</span>
+            </td>
+            <td>
                 <span class="badge ${rl.rule_type === 'Generic' ? 'bg-secondary' : (rl.rule_type === 'Compliance' ? 'bg-primary' : 'bg-danger')} me-2">${rl.rule_type}</span>
                 <span class="fw-bold text-info">${rl.title}</span>
             </td>
@@ -180,7 +200,11 @@ function renderTable(rules) {
             <td><span class="badge bg-secondary">${rl.category}</span></td>
             <td>${(rl.tags || []).map(t => `<span class="badge bg-primary bg-opacity-25 text-light border border-primary me-1 mb-1">${t}</span>`).join('')}</td>
             <td class="text-nowrap">
-                <button class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="Edit" onclick="openRuleModal(${rl.id})"><i class="fa-solid fa-pen"></i></button>
+                ${rl.source === 'custom'
+                    ? `<button class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="Edit" onclick="openRuleModal(${rl.id})"><i class="fa-solid fa-pen"></i></button>`
+                    : `<button class="btn btn-sm btn-outline-secondary py-0 px-2 me-1" title="View (read-only)" onclick="openRuleModal(${rl.id})"><i class="fa-solid fa-eye"></i></button>`
+                }
+                <button class="btn btn-sm btn-outline-warning py-0 px-2 me-1" title="Clone" onclick="quickClone(${rl.id}, '${rl.title.replace(/'/g, "\\'")}')"><i class="fa-solid fa-copy"></i></button>
                 <button class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete" onclick="deleteRule(${rl.id}, '${rl.title.replace(/'/g, "\\'")}')"><i class="fa-solid fa-trash"></i></button>
             </td>
         </tr>
@@ -190,20 +214,22 @@ function renderTable(rules) {
 
 function f(){
     const q = document.getElementById('rq').value.toLowerCase();
+    const source = document.getElementById('sourceFilter').value;
     const type = document.getElementById('typeFilter').value;
     const plat = document.getElementById('platformFilter').value;
     const cat = document.getElementById('catFilter').value;
     const mitre = document.getElementById('mitreFilter').value;
-    
+
     const filtered = allRules.filter(rl => {
         const matchQ = rl.title.toLowerCase().includes(q);
+        const matchSource = source === "" || rl.source === source;
         const matchType = type === "" || rl.rule_type === type;
         const matchPlat = plat === "" || rl.platform === plat;
         const matchCat = cat === "" || rl.category === cat;
         const matchMitre = mitre === "" || (rl.tags && rl.tags.includes(mitre));
-        return matchQ && matchType && matchPlat && matchCat && matchMitre;
+        return matchQ && matchSource && matchType && matchPlat && matchCat && matchMitre;
     });
-    
+
     renderTable(filtered);
 }
 
@@ -247,30 +273,63 @@ async function bulkAction(enable) {
 // ---- Rule editor modal ----
 let ruleModal = null;
 let editingRuleId = null;
+let editingRuleSource = null;
 
 function initRuleModal() {
     if (!ruleModal) ruleModal = new bootstrap.Modal(document.getElementById('ruleModal'));
 }
 
+function fmtDT(s) {
+    return s ? s : '—';
+}
+
 async function openRuleModal(id) {
     initRuleModal();
     editingRuleId = id || null;
+    editingRuleSource = null;
     document.getElementById('ruleEditorError').style.display = 'none';
     document.getElementById('ruleYamlInput').value = '';
+    document.getElementById('ruleYamlInput').readOnly = false;
+    document.getElementById('ruleMetaBox').style.display = 'none';
+    document.getElementById('ruleReadonlyNotice').style.display = 'none';
+    document.getElementById('ruleHistoryBox').style.display = 'none';
+    document.getElementById('ruleHistoryBtn').style.display = 'none';
+    document.getElementById('ruleCloneBtn').style.display = 'none';
+    document.getElementById('ruleSaveBtn').style.display = 'inline-block';
 
     if (editingRuleId) {
-        document.getElementById('ruleModalTitle').innerText = 'Edit Sigma Rule';
         try {
             const res = await fetch(`/api/rules/${editingRuleId}`);
             const data = await res.json();
             if (!res.ok) { alert(data.error || 'Failed to load rule.'); return; }
             document.getElementById('ruleYamlInput').value = data.rule_yaml || '';
+            editingRuleSource = data.source || 'sigma';
+
+            const isSigma = editingRuleSource === 'sigma';
+            document.getElementById('ruleModalTitle').innerText = isSigma ? 'View Sigma Rule' : 'Edit Custom Rule';
+
+            const metaParts = [];
+            metaParts.push(`Created by <strong>${data.created_by || 'unknown'}</strong> on ${fmtDT(data.created_at)}`);
+            metaParts.push(`Last modified by <strong>${data.updated_by || '—'}</strong> on ${fmtDT(data.updated_at)}`);
+            if (data.cloned_from) metaParts.push(`Cloned from rule #${data.cloned_from}`);
+            document.getElementById('ruleMetaBox').innerHTML = metaParts.join(' &middot; ');
+            document.getElementById('ruleMetaBox').style.display = 'block';
+
+            if (isSigma) {
+                document.getElementById('ruleYamlInput').readOnly = true;
+                document.getElementById('ruleReadonlyNotice').style.display = 'block';
+                document.getElementById('ruleSaveBtn').style.display = 'none';
+                document.getElementById('ruleCloneBtn').style.display = 'inline-block';
+            } else {
+                document.getElementById('ruleCloneBtn').style.display = 'inline-block';
+                document.getElementById('ruleHistoryBtn').style.display = 'inline-block';
+            }
         } catch (e) {
             alert('Error loading rule: ' + e);
             return;
         }
     } else {
-        document.getElementById('ruleModalTitle').innerText = 'New Sigma Rule';
+        document.getElementById('ruleModalTitle').innerText = 'New Custom Rule';
     }
     ruleModal.show();
 }
@@ -303,8 +362,81 @@ async function saveRule() {
     }
 }
 
+async function doClone(id) {
+    const res = await fetch(`/api/rules/${id}/clone`, {method: 'POST'});
+    const data = await res.json();
+    if (!res.ok) {
+        alert(data.error || 'Failed to clone rule.');
+        return null;
+    }
+    return data.id;
+}
+
+async function cloneFromModal() {
+    if (!editingRuleId) return;
+    const newId = await doClone(editingRuleId);
+    if (!newId) return;
+    await ld();
+    openRuleModal(newId);
+}
+
+async function quickClone(id, title) {
+    if (!confirm(`Clone "${title}" into an editable custom copy?`)) return;
+    const newId = await doClone(id);
+    if (!newId) return;
+    await ld();
+    openRuleModal(newId);
+}
+
+async function toggleHistory() {
+    const box = document.getElementById('ruleHistoryBox');
+    if (box.style.display === 'block') { box.style.display = 'none'; return; }
+    box.style.display = 'block';
+    const list = document.getElementById('ruleHistoryList');
+    list.innerHTML = '<span class="text-muted">Loading...</span>';
+    try {
+        const res = await fetch(`/api/rules/${editingRuleId}/history`);
+        const rows = await res.json();
+        if (!res.ok || !rows.length) {
+            list.innerHTML = '<span class="text-muted">No edits recorded yet.</span>';
+            return;
+        }
+        list.innerHTML = rows.map((h, i) => `
+            <div class="border border-secondary rounded p-2 mb-2 bg-black">
+                <div class="text-muted mb-1">Edited by <strong>${h.changed_by || 'unknown'}</strong> on ${fmtDT(h.changed_at)}</div>
+                <pre class="font-monospace mb-0" style="white-space:pre-wrap; font-size:.75rem;">${h.diff.replace(/</g, '&lt;').replace(/^-.*$/gm, m => `<span class="text-danger">${m}</span>`).replace(/^\+.*$/gm, m => `<span class="text-success">${m}</span>`)}</pre>
+            </div>
+        `).join('');
+    } catch (e) {
+        list.innerHTML = `<span class="text-danger">Error loading history: ${e}</span>`;
+    }
+}
+
+async function importSigmaHQ() {
+    if (!confirm('Pull the latest ruleset from SigmaHQ? This can take up to a minute — new rules are added disabled, existing ones are updated in place, and your enable/disable choices are preserved.')) return;
+    const btn = document.getElementById('importSigmaBtn');
+    const origHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Importing...';
+    try {
+        const res = await fetch('/api/rules/import/sigmahq', {method: 'POST'});
+        const data = await res.json();
+        if (!res.ok) {
+            alert(data.error || 'Import failed.');
+        } else {
+            alert(`Import complete: ${data.inserted} new, ${data.updated} updated, ${data.skipped} skipped, ${data.errors} errors.`);
+            ld();
+        }
+    } catch (e) {
+        alert('Import failed: ' + e);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = origHtml;
+    }
+}
+
 async function deleteRule(id, title) {
-    if (!confirm(`Delete Sigma rule "${title}"? This cannot be undone.`)) return;
+    if (!confirm(`Delete rule "${title}"? This cannot be undone.`)) return;
     const res = await fetch(`/api/rules/${id}`, {method: 'DELETE'});
     if (!res.ok) {
         const err = await res.json().catch(() => ({}));
