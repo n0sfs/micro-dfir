@@ -20,4 +20,4 @@ CREATE TABLE IF NOT EXISTS agent_commands (id INTEGER PRIMARY KEY AUTOINCREMENT,
 CREATE INDEX IF NOT EXISTS idx_agent_commands_host_status ON agent_commands(hostname, status);
 CREATE TABLE IF NOT EXISTS ueba_exclusions (id INTEGER PRIMARY KEY AUTOINCREMENT, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, description TEXT, enabled BOOLEAN DEFAULT 1, created_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS idx_ueba_exclusions_entity ON ueba_exclusions(entity_type, entity_id);
-CREATE TABLE IF NOT EXISTS ueba_entity_baselines (entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, current_count INTEGER, baseline_avg REAL, baseline_stddev REAL, threshold REAL, is_anomalous BOOLEAN DEFAULT 0, excluded BOOLEAN DEFAULT 0, computed_at DATETIME, PRIMARY KEY (entity_type, entity_id));
+CREATE TABLE IF NOT EXISTS ueba_entity_baselines (entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, current_count INTEGER, baseline_avg REAL, baseline_stddev REAL, threshold REAL, is_anomalous BOOLEAN DEFAULT 0, excluded BOOLEAN DEFAULT 0, days_seen INTEGER, baseline_mode TEXT, computed_at DATETIME, PRIMARY KEY (entity_type, entity_id));

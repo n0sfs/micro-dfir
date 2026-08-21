@@ -10,20 +10,29 @@
         <i class="fa-solid fa-sliders me-2"></i>Baseline Model Parameters
     </div>
     <div class="card-body">
-        <p class="text-muted small mb-3">The model flags an entity (host or user) when today's event volume exceeds <code>baseline average + (multiplier &times; standard deviation)</code>, and only once that entity's baseline average clears the minimum floor below (this avoids flagging quiet entities on their first noisy day). Both entity types share these settings.</p>
+        <p class="text-muted small mb-3">The model compares today's event volume against this entity's historical <strong>same weekday</strong> (e.g. today's Friday count vs. its past Fridays), using median and MAD (median absolute deviation) instead of mean/stddev so a single past spike day doesn't drag the baseline up for weeks. An entity is flagged when today exceeds <code>baseline median + (multiplier &times; MAD-derived spread)</code>, and only once its baseline clears the minimum floor. Both entity types share these settings.</p>
         <div class="row g-3">
-            <div class="col-md-4">
+            <div class="col-md-3">
                 <label class="form-label">Baseline Lookback (days)</label>
                 <input type="number" id="cfgLookback" class="form-control bg-dark text-light border-secondary" min="1" max="365" {{ '' if current_user.role == 'admin' else 'disabled' }}>
             </div>
-            <div class="col-md-4">
-                <label class="form-label">Standard Deviation Multiplier</label>
+            <div class="col-md-3">
+                <label class="form-label">Spread Multiplier</label>
                 <input type="number" id="cfgStddev" class="form-control bg-dark text-light border-secondary" min="0.5" max="10" step="0.1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
             </div>
-            <div class="col-md-4">
+            <div class="col-md-3">
                 <label class="form-label">Minimum Baseline Floor (events/day)</label>
                 <input type="number" id="cfgMinBaseline" class="form-control bg-dark text-light border-secondary" min="0" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
             </div>
+            <div class="col-md-3">
+                <label class="form-label">Min. Same-Weekday Samples</label>
+                <input type="number" id="cfgMinDaysObserved" class="form-control bg-dark text-light border-secondary" min="1" max="52" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                <p class="text-muted small mt-1 mb-0">Below this, falls back to a flat baseline across all weekdays until enough same-weekday history builds up.</p>
+            </div>
+        </div>
+        <div class="form-check form-switch mt-3">
+            <input class="form-check-input" type="checkbox" id="cfgNewIpEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+            <label class="form-check-label small" for="cfgNewIpEnabled">Flag users active from a source IP never seen for them before <span class="text-muted">(needs source IPs to be present in ingested logs — best-effort, extracted from Windows auth event text)</span></label>
         </div>
         {% if current_user.role == 'admin' %}
         <button class="btn btn-primary btn-sm mt-3" onclick="saveUebaConfig()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Tuning</button>
@@ -56,9 +65,9 @@
         <div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
             <table class="table table-dark table-hover table-sm align-middle mb-0">
                 <thead>
-                    <tr><th>Entity</th><th>Current</th><th>Baseline Avg</th><th>Baseline StdDev</th><th>Threshold</th><th>Status</th><th></th></tr>
+                    <tr><th>Entity</th><th>Current</th><th>Baseline Median</th><th>Spread (MAD)</th><th>Threshold</th><th>Samples</th><th>Status</th><th></th></tr>
                 </thead>
-                <tbody id="baselinesTableBody"><tr><td colspan="7" class="text-center text-muted py-4">Loading…</td></tr></tbody>
+                <tbody id="baselinesTableBody"><tr><td colspan="8" class="text-center text-muted py-4">Loading…</td></tr></tbody>
             </table>
         </div>
         <p class="text-muted small mt-2 mb-0">Showing up to 200 entities per type, ranked by current-vs-baseline ratio.</p>
@@ -118,6 +127,8 @@ function loadUebaConfig() {
             document.getElementById('cfgLookback').value = cfg.lookback_days;
             document.getElementById('cfgStddev').value = cfg.stddev_multiplier;
             document.getElementById('cfgMinBaseline').value = cfg.min_baseline;
+            document.getElementById('cfgMinDaysObserved').value = cfg.min_days_observed;
+            document.getElementById('cfgNewIpEnabled').checked = !!cfg.new_ip_enabled;
         })
         .catch(err => console.error('Error loading UEBA config:', err));
 }
@@ -126,7 +137,9 @@ function saveUebaConfig() {
     const payload = {
         lookback_days: parseInt(document.getElementById('cfgLookback').value, 10),
         stddev_multiplier: parseFloat(document.getElementById('cfgStddev').value),
-        min_baseline: parseFloat(document.getElementById('cfgMinBaseline').value)
+        min_baseline: parseFloat(document.getElementById('cfgMinBaseline').value),
+        min_days_observed: parseInt(document.getElementById('cfgMinDaysObserved').value, 10),
+        new_ip_enabled: document.getElementById('cfgNewIpEnabled').checked
     };
     const msg = document.getElementById('cfgSaveMsg');
     fetch('/api/ueba/config', {
@@ -168,6 +181,12 @@ function baselineStatusBadge(row) {
     return '<span class="badge bg-success">Normal</span>';
 }
 
+function baselineModeLabel(r) {
+    const n = r.days_seen ?? 0;
+    if (r.baseline_mode === 'weekday') return `<span title="Same-weekday baseline">${n} weeks</span>`;
+    return `<span class="text-warning" title="Not enough same-weekday history yet — using a flat baseline across all weekdays">${n} days <i class="fa-solid fa-triangle-exclamation ms-1"></i></span>`;
+}
+
 function renderBaselines() {
     let rows = allBaselines;
     if (baselineFilter !== 'all') rows = rows.filter(r => r.entity_type === baselineFilter);
@@ -175,7 +194,7 @@ function renderBaselines() {
     document.getElementById('baselineRowCount').innerText = `${rows.length} of ${allBaselines.length} entities`;
     const tbody = document.getElementById('baselinesTableBody');
     if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">No entities match this filter.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-4">No entities match this filter.</td></tr>';
         return;
     }
     tbody.innerHTML = rows.map(r => `<tr>
@@ -184,6 +203,7 @@ function renderBaselines() {
         <td>${r.baseline_avg ?? '—'}</td>
         <td>${r.baseline_stddev ?? '—'}</td>
         <td>${r.threshold ?? '—'}</td>
+        <td class="small">${baselineModeLabel(r)}</td>
         <td>${baselineStatusBadge(r)}</td>
         <td>${IS_ADMIN && !r.excluded ? `<button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="prefillExclusion('${r.entity_type}', '${escHtml(r.entity_id).replace(/'/g, "\\'")}')"><i class="fa-solid fa-filter-circle-xmark"></i> Exclude</button>` : ''}</td>
     </tr>`).join('');

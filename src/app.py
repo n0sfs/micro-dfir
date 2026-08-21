@@ -11,7 +11,7 @@ try:
 except Exception as e:
     print(f"WAL setup error: {e}")
 
-import os, json, sqlite3, tempfile, yaml, secrets, subprocess
+import os, json, re, sqlite3, tempfile, yaml, secrets, subprocess
 from datetime import datetime
 from werkzeug.utils import secure_filename
 from werkzeug.security import check_password_hash
@@ -148,6 +148,22 @@ def login():
 @login_required
 def logout(): logout_user(); return redirect(url_for('login'))
 
+# live_logs.source_ip has never been populated by any ingest path — the Windows agent's
+# Get-WinEvent selection doesn't request a network-address property, and nothing extracts
+# one from the message text either. Windows Security auth events (4624/4625/4648, etc.)
+# do carry it in their human-readable message body under this label, so best-effort regex
+# extraction there is enough to make source_ip usable without changing the agent.
+_SOURCE_IP_RE = re.compile(r'Source Network Address:\s*([0-9a-fA-F:.]+)')
+
+def _extract_source_ip(message):
+    if not message:
+        return None
+    m = _SOURCE_IP_RE.search(message)
+    if not m:
+        return None
+    ip = m.group(1).strip()
+    return ip if ip and ip != '-' else None
+
 @app.route('/api/ingest', methods=['POST'])
 def api_ingest():
     from flask import request, jsonify
@@ -171,7 +187,8 @@ def api_ingest():
             eid = log.get('event_id', '-')
             usr = log.get('username', '-')
             msg = log.get('message', '')
-            db.execute("INSERT INTO live_logs (timestamp, host, app, severity, event_id, username, message) VALUES (?, ?, ?, ?, ?, ?, ?)", (ts, hst, app_n, sev, eid, usr, msg))
+            sip = log.get('source_ip') or _extract_source_ip(msg)
+            db.execute("INSERT INTO live_logs (timestamp, host, app, severity, event_id, username, source_ip, message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (ts, hst, app_n, sev, eid, usr, sip, msg))
             count += 1
 
             # --- INLINE DETECTION ENGINE (fast keyword heuristics; sigma_engine.py runs the real Sigma-rule pipeline) ---
@@ -891,7 +908,7 @@ def api_ueba_baselines():
     entity_type = request.args.get('type')
     if entity_type and entity_type not in ('host', 'user'):
         return jsonify({"error": "Invalid entity type"}), 400
-    query = "SELECT entity_type, entity_id, current_count, baseline_avg, baseline_stddev, threshold, is_anomalous, excluded, computed_at FROM ueba_entity_baselines"
+    query = "SELECT entity_type, entity_id, current_count, baseline_avg, baseline_stddev, threshold, is_anomalous, excluded, days_seen, baseline_mode, computed_at FROM ueba_entity_baselines"
     params = ()
     if entity_type:
         query += " WHERE entity_type = ?"
@@ -950,7 +967,10 @@ def api_ueba_exclusion_detail(eid):
     db.commit()
     return jsonify({"status": "success"})
 
-UEBA_CONFIG_DEFAULTS = {'ueba_lookback_days': '30', 'ueba_stddev_multiplier': '3', 'ueba_min_baseline': '50'}
+UEBA_CONFIG_DEFAULTS = {
+    'ueba_lookback_days': '30', 'ueba_stddev_multiplier': '3', 'ueba_min_baseline': '50',
+    'ueba_min_days_observed': '4', 'ueba_new_ip_enabled': '1',
+}
 
 @app.route('/api/ueba/config', methods=['GET', 'POST'])
 @login_required
@@ -959,13 +979,16 @@ def api_ueba_config():
 
     if request.method == 'GET':
         rows = db.execute(
-            "SELECT key, value FROM settings WHERE key IN ('ueba_lookback_days', 'ueba_stddev_multiplier', 'ueba_min_baseline')"
+            "SELECT key, value FROM settings WHERE key IN "
+            "('ueba_lookback_days', 'ueba_stddev_multiplier', 'ueba_min_baseline', 'ueba_min_days_observed', 'ueba_new_ip_enabled')"
         ).fetchall()
         cfg = {**UEBA_CONFIG_DEFAULTS, **{r['key']: r['value'] for r in rows}}
         return jsonify({
             'lookback_days': int(cfg['ueba_lookback_days']),
             'stddev_multiplier': float(cfg['ueba_stddev_multiplier']),
             'min_baseline': float(cfg['ueba_min_baseline']),
+            'min_days_observed': int(cfg['ueba_min_days_observed']),
+            'new_ip_enabled': str(cfg['ueba_new_ip_enabled']) not in ('0', 'false', 'False'),
         })
 
     if current_user.role != 'admin':
@@ -976,15 +999,20 @@ def api_ueba_config():
         lookback_days = int(data.get('lookback_days'))
         stddev_multiplier = float(data.get('stddev_multiplier'))
         min_baseline = float(data.get('min_baseline'))
+        min_days_observed = int(data.get('min_days_observed'))
+        new_ip_enabled = bool(data.get('new_ip_enabled'))
         if not (1 <= lookback_days <= 365): raise ValueError('lookback_days must be 1-365')
         if not (0.5 <= stddev_multiplier <= 10): raise ValueError('stddev_multiplier must be 0.5-10')
         if not (0 <= min_baseline <= 1000000): raise ValueError('min_baseline must be 0-1000000')
+        if not (1 <= min_days_observed <= 52): raise ValueError('min_days_observed must be 1-52')
     except (TypeError, ValueError) as e:
         return jsonify({'error': str(e) or 'Invalid config values'}), 400
 
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_lookback_days', ?)", (str(lookback_days),))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_stddev_multiplier', ?)", (str(stddev_multiplier),))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_min_baseline', ?)", (str(min_baseline),))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_min_days_observed', ?)", (str(min_days_observed),))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_new_ip_enabled', ?)", ('1' if new_ip_enabled else '0',))
     db.commit()
     return jsonify({'status': 'success'})
 
@@ -1003,6 +1031,8 @@ def migrate_settings():
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_lookback_days', '30')")
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_stddev_multiplier', '3')")
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_min_baseline', '50')")
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_min_days_observed', '4')")
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_new_ip_enabled', '1')")
         conn.commit()
         conn.close()
     except Exception:
@@ -1141,6 +1171,41 @@ def migrate_rule_tuning():
     except Exception:
         pass
 
+def migrate_ueba_math_v2():
+    # Day-of-week baselines + a flat-baseline fallback for entities that don't have
+    # enough same-weekday history yet — both need to record which mode produced the
+    # numbers (days_seen, baseline_mode) so the visibility view can show it honestly.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(ueba_entity_baselines)").fetchall()}
+        if 'days_seen' not in cols:
+            conn.execute("ALTER TABLE ueba_entity_baselines ADD COLUMN days_seen INTEGER")
+        if 'baseline_mode' not in cols:
+            conn.execute("ALTER TABLE ueba_entity_baselines ADD COLUMN baseline_mode TEXT")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_live_logs_ip_columns():
+    # source_ip/destination_ip were added to schema.sql at some point but no migration
+    # ever backfilled them onto already-deployed databases, and no ingest path ever
+    # populated them — Log Search's "Source IP"/"Destination IP" field filters have
+    # been silently failing (caught by api_search's blanket try/except) on any DB that
+    # predates these columns. destination_ip is added for schema completeness but stays
+    # unpopulated for now — there's no reliable extraction source for it yet.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(live_logs)").fetchall()}
+        if 'source_ip' not in cols:
+            conn.execute("ALTER TABLE live_logs ADD COLUMN source_ip TEXT")
+        if 'destination_ip' not in cols:
+            conn.execute("ALTER TABLE live_logs ADD COLUMN destination_ip TEXT")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_ueba_entities():
     # UEBA originally modeled hosts only, with a fixed 'HIGH' severity and no way to
     # quiet a legitimately bursty entity. Adds: entity_type on events (host vs user,
@@ -1255,6 +1320,8 @@ migrate_sigma_rules_columns()
 migrate_rule_tuning()
 migrate_compliance_tags()
 migrate_ueba_entities()
+migrate_ueba_math_v2()
+migrate_live_logs_ip_columns()
 
 @app.route('/settings', methods=['GET', 'POST'])
 @login_required
