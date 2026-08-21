@@ -1,6 +1,11 @@
 # Micro DFIR Windows Agent
 import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, base64, threading
 
+# Bump this on every change to this file — it's reported on every check-in
+# (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
+# actually running and when it last picked up an upgrade.
+AGENT_VERSION = "2026.08.21.1"
+
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
 SERVER_URL = 'https://__HOST_URL__/api/agent/config'
@@ -170,7 +175,7 @@ def run_agent():
             for attempt in range(3):
                 try:
                     print(f"[*] Checking in with {SERVER_URL} (Attempt {attempt + 1})...", flush=True)
-                    headers = {'X-Agent-Hostname': socket.gethostname(), 'X-Agent-Token': SOC_TOKEN}
+                    headers = {'X-Agent-Hostname': socket.gethostname(), 'X-Agent-Token': SOC_TOKEN, 'X-Agent-Version': AGENT_VERSION}
                     req = urllib.request.Request(SERVER_URL, headers=headers)
                     with urllib.request.urlopen(req, context=context, timeout=5) as response:
                         data = json.loads(response.read().decode())
