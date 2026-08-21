@@ -76,12 +76,13 @@
                             <th>Endpoint IP</th>
                             <th>Status</th>
                             <th>Last Check-in</th>
+                            <th>Version</th>
                             <th>Heartbeat</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody id="endpointsTableBody">
-                        <tr><td colspan="6" class="text-center text-muted py-4">Loading active endpoints...</td></tr>
+                        <tr><td colspan="7" class="text-center text-muted py-4">Loading active endpoints...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -312,6 +313,19 @@ function heartbeatSpark(status, recentPolls) {
     </svg>`;
 }
 
+// Agents that predate version reporting send no version at all ("unknown") — flagged
+// distinctly rather than blended in with real version numbers, since "never upgraded
+// since tracking shipped" is itself the useful signal for those endpoints.
+function versionBadge(dev) {
+    if (!dev.version || dev.version === 'unknown') {
+        return '<span class="badge bg-secondary" title="This agent predates version reporting — use Upgrade Agent to update it.">Unknown</span>';
+    }
+    const since = dev.version_since ? relativeTime(dev.version_since) : '';
+    const title = dev.version_since ? `Running v${dev.version} since ${dev.version_since}` : `Running v${dev.version}`;
+    return `<span class="badge bg-info text-dark" title="${escHtml(title)}">v${escHtml(dev.version)}</span>` +
+        (since ? `<div class="small text-muted">${escHtml(since)}</div>` : '');
+}
+
 function relativeTime(ts) {
     if (!ts) return '';
     const t = new Date(ts.replace(' ', 'T')).getTime();
@@ -359,7 +373,7 @@ function renderEndpoints() {
 
     if (allEndpoints.length === 0) {
         document.getElementById('endpointCountLabel').innerText = '';
-        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">No active agent endpoints detected.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No active agent endpoints detected.</td></tr>';
         return;
     }
 
@@ -376,7 +390,7 @@ function renderEndpoints() {
         : `${allEndpoints.length} endpoint${allEndpoints.length === 1 ? '' : 's'}`;
 
     if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">No endpoints match your filters.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No endpoints match your filters.</td></tr>';
         return;
     }
 
@@ -390,6 +404,7 @@ function renderEndpoints() {
                     <td><span class="text-info">${escHtml(dev.endpoint_ip)}</span></td>
                     <td>${endpointStatusBadge(dev.status)}</td>
                     <td class="text-nowrap"><span title="${escHtml(dev.last_check_in)}">${escHtml(relativeTime(dev.last_check_in)) || escHtml(dev.last_check_in)}</span></td>
+                    <td class="text-nowrap">${versionBadge(dev)}</td>
                     <td>${heartbeatSpark(dev.status, dev.recent_polls)}</td>
                     <td class="text-nowrap">
                         <div class="dropdown d-inline-block">

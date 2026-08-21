@@ -1301,6 +1301,29 @@ def migrate_live_logs_ip_columns():
     except Exception:
         pass
 
+def migrate_agent_versions():
+    # agent_polls predates version reporting — add the column for already-deployed
+    # databases. agent_version_history is new: one row per (hostname, version) pair,
+    # first-seen timestamped, so the Agents page can show not just what version an
+    # endpoint is running but when it started running it (i.e. when it was last
+    # upgraded), without bloating on every single check-in.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(agent_polls)").fetchall()}
+        if 'version' not in cols:
+            conn.execute("ALTER TABLE agent_polls ADD COLUMN version TEXT")
+        conn.execute('''CREATE TABLE IF NOT EXISTS agent_version_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hostname TEXT NOT NULL,
+            version TEXT NOT NULL,
+            first_seen TEXT NOT NULL,
+            UNIQUE(hostname, version)
+        )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_ueba_entities():
     # UEBA originally modeled hosts only, with a fixed 'HIGH' severity and no way to
     # quiet a legitimately bursty entity. Adds: entity_type on events (host vs user,
@@ -1555,9 +1578,17 @@ def agent_config():
     ip = request.remote_addr
     agent_host = request.headers.get('X-Agent-Hostname')
     ua = agent_host if agent_host else request.headers.get('User-Agent', 'Unknown')
+    # Agents that predate version reporting simply won't send this header — surfaced
+    # as "unknown" in the UI rather than guessed at, since that's itself a useful
+    # signal that the endpoint hasn't been upgraded since version tracking shipped.
+    agent_version = request.headers.get('X-Agent-Version', 'unknown')
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    db.execute('CREATE TABLE IF NOT EXISTS agent_polls (id INTEGER PRIMARY KEY, timestamp TEXT, ip_address TEXT, user_agent TEXT)')
-    db.execute('INSERT INTO agent_polls (timestamp, ip_address, user_agent) VALUES (?, ?, ?)', (now, ip, ua))
+    db.execute('CREATE TABLE IF NOT EXISTS agent_polls (id INTEGER PRIMARY KEY, timestamp TEXT, ip_address TEXT, user_agent TEXT, version TEXT)')
+    db.execute('INSERT INTO agent_polls (timestamp, ip_address, user_agent, version) VALUES (?, ?, ?, ?)', (now, ip, ua, agent_version))
+    db.execute(
+        "INSERT OR IGNORE INTO agent_version_history (hostname, version, first_seen) VALUES (?, ?, ?)",
+        (ua, agent_version, now)
+    )
 
     # A command marked 'sent' means the response left the server, but if the connection
     # dropped before the agent actually processed it (or the agent crashed mid-run), it
@@ -2084,11 +2115,14 @@ def agent_checkins():
                 pass
             hostname = r["user_agent"] if "user_agent" in r.keys() else "Windows-Endpoint"
             hostnames.append(hostname)
+            version = r["version"] if "version" in r.keys() and r["version"] else "unknown"
             mapped.append({
                 "hostname": hostname,
                 "endpoint_ip": r["ip_address"] if "ip_address" in r.keys() else "Unknown",
                 "status": status,
                 "last_check_in": ts,
+                "version": version,
+                "version_since": None,
                 "recent_polls": []
             })
 
@@ -2108,6 +2142,22 @@ def agent_checkins():
                     bucket.append(pr['timestamp'])
             for m in mapped:
                 m['recent_polls'] = polls_by_host.get(m['hostname'], [])
+
+            # When each host's currently-reported version was first seen — i.e. when it
+            # was last upgraded to (or installed at) that version — one bulk lookup
+            # against the (hostname, version) pairs actually present rather than a
+            # query per row.
+            version_pairs = [(m['hostname'], m['version']) for m in mapped if m.get('version') and m['version'] != 'unknown']
+            if version_pairs:
+                or_clause = ' OR '.join(['(hostname = ? AND version = ?)'] * len(version_pairs))
+                vh_params = [v for pair in version_pairs for v in pair]
+                vh_rows = db.execute(
+                    f"SELECT hostname, version, first_seen FROM agent_version_history WHERE {or_clause}",
+                    vh_params
+                ).fetchall()
+                vh_map = {(vr['hostname'], vr['version']): vr['first_seen'] for vr in vh_rows}
+                for m in mapped:
+                    m['version_since'] = vh_map.get((m['hostname'], m['version']))
 
         return jsonify(mapped)
     except Exception as e:
@@ -2232,6 +2282,7 @@ migrate_compliance_tags()
 migrate_ueba_entities()
 migrate_ueba_math_v2()
 migrate_live_logs_ip_columns()
+migrate_agent_versions()
 
 try:
     # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every
