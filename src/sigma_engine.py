@@ -1,4 +1,4 @@
-import os, json, time, sqlite3, requests
+import os, json, re, time, sqlite3, requests
 from dataclasses import dataclass, field as dc_field
 from sigma.collection import SigmaCollection
 from sigma.backends.sqlite import sqliteBackend
@@ -23,6 +23,14 @@ class MapAllFieldsToMessage(FieldMappingTransformation):
     def get_mapping(self, field_name):
         return "message"
 
+# Many older SigmaHQ rules predate the spec settling on strict ISO 8601 (yyyy-mm-dd) for
+# date/modified fields and still use yyyy/mm/dd, which pysigma's SigmaRule validation
+# rejects outright — the rule fails to even parse. ~30% of the imported rule set is affected.
+_SLASH_DATE_RE = re.compile(r'^(date|modified):\s*(\d{4})/(\d{2})/(\d{2})', re.MULTILINE)
+
+def _normalize_rule_dates(rule_yaml):
+    return _SLASH_DATE_RE.sub(lambda m: f"{m.group(1)}: {m.group(2)}-{m.group(3)}-{m.group(4)}", rule_yaml)
+
 def _make_backend():
     pipeline = ProcessingPipeline(items=[ProcessingItem(transformation=MapAllFieldsToMessage())])
     backend = sqliteBackend(processing_pipeline=pipeline)
@@ -46,7 +54,7 @@ def run_detection_cycle():
 
     for r in rules:
         try:
-            for q in backend.convert(SigmaCollection.from_yaml(r['rule_yaml'])):
+            for q in backend.convert(SigmaCollection.from_yaml(_normalize_rule_dates(r['rule_yaml']))):
                 for m in cursor.execute(q).fetchall():
                     cursor.execute("INSERT INTO alerts (rule_id, event_id, severity) VALUES (?, ?, ?)", (r['id'], m['id'], 'High'))
                     try:
