@@ -269,19 +269,27 @@ def api_ingest():
 
 @app.route('/')
 @login_required
-def dash(): return render_template('dashboard.html', current_user=current_user)
+def dash():
+    active_tab = request.args.get('tab', 'search')
+    report_dir = '/opt/micro-dfir/reports'
+    os.makedirs(report_dir, exist_ok=True)
+    pdfs = [f for f in os.listdir(report_dir) if f.endswith('.pdf')]
+    pdfs.sort(reverse=True)
+    return render_template('dashboard.html', reports=pdfs, channels=get_agent_channels(), active_tab=active_tab, current_user=current_user)
 
 @app.route('/rules')
 @login_required
-def rules(): return render_template('rules.html', current_user=current_user)
+def rules():
+    rule_id = request.args.get('rule_id')
+    return redirect(url_for('dash', tab='rules', rule_id=rule_id) if rule_id else url_for('dash', tab='rules'))
 
 @app.route('/rules/tuning')
 @login_required
-def detection_tuning(): return render_template('detection_tuning.html', current_user=current_user)
+def detection_tuning(): return redirect(url_for('dash', tab='tuning'))
 
 @app.route('/pipeline')
 @login_required
-def pipeline(): return render_template('pipeline.html', current_user=current_user, channels=get_agent_channels())
+def pipeline(): return redirect(url_for('dash', tab='pipeline'))
 
 @app.route('/agents')
 @login_required
@@ -896,33 +904,25 @@ def api_yara_scan():
 # ==========================================
 @app.route('/reports')
 @login_required
-def reports():
-    import os
-    report_dir = '/opt/micro-dfir/reports'
-    os.makedirs(report_dir, exist_ok=True)
-    
-    pdfs = [f for f in os.listdir(report_dir) if f.endswith('.pdf')]
-    pdfs.sort(reverse=True) # Newest first
-    return render_template('reports.html', reports=pdfs, current_user=current_user)
+def reports(): return redirect(url_for('dash', tab='reports'))
 
 @app.route('/reports/download/<filename>')
 @login_required
 def download_report(filename):
     from flask import send_from_directory
     return send_from_directory('/opt/micro-dfir/reports', filename, as_attachment=True)
-    
+
 @app.route('/reports/generate', methods=['POST'])
 @login_required
 def trigger_report():
-    import subprocess
     if not validate_csrf():
-        return redirect(url_for('reports'))
+        return redirect(url_for('dash', tab='reports'))
     try:
         subprocess.run(["/opt/micro-dfir/venv/bin/python3", "/opt/micro-dfir/src/generate_report.py"], check=True)
         flash("Report successfully generated!", "success")
     except Exception as e:
         flash(f"Failed to generate report: {str(e)}", "danger")
-    return redirect(url_for('reports'))
+    return redirect(url_for('dash', tab='reports'))
 
 
 # ==========================================

@@ -217,11 +217,7 @@ hr{border-color:var(--border);}
         </div>
         <nav class="sidebar-nav">
             <div class="nav-group-label">SIEM</div>
-            <a href="/" class="nav-link {{ 'active' if request.endpoint == 'dash' else '' }}"><i class="fa-solid fa-magnifying-glass-chart"></i><span>Log Search</span></a>
-            <a href="/pipeline" class="nav-link {{ 'active' if request.endpoint == 'pipeline' else '' }}"><i class="fa-solid fa-filter"></i><span>Log Pipeline</span></a>
-            <a href="/rules" class="nav-link {{ 'active' if request.endpoint == 'rules' else '' }}"><i class="fa-solid fa-file-shield"></i><span>Detection Rules</span></a>
-            <a href="/rules/tuning" class="nav-link {{ 'active' if request.endpoint == 'detection_tuning' else '' }}"><i class="fa-solid fa-sliders"></i><span>Detection Tuning</span></a>
-            <a href="{{ url_for('reports') }}" class="nav-link {{ 'active' if request.endpoint in ['reports','download_report','trigger_report'] else '' }}"><i class="fa-solid fa-file-pdf"></i><span>Reports</span></a>
+            <a href="/" class="nav-link {{ 'active' if request.endpoint in ['dash','pipeline','rules','detection_tuning','reports','download_report','trigger_report'] else '' }}"><i class="fa-solid fa-shield-halved"></i><span>SIEM</span></a>
 
             <div class="nav-group-label">UEBA</div>
             <a href="/ueba" class="nav-link {{ 'active' if request.endpoint in ['ueba', 'ueba_tuning'] else '' }}"><i class="fa-solid fa-user-secret"></i><span>UEBA</span></a>
