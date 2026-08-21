@@ -9,8 +9,29 @@ RESULT_URL = 'https://__HOST_URL__/api/agent/result'
 SOC_TOKEN = '__SOC_TOKEN__'
 SCRIPT_TIMEOUT_SECONDS = 90
 
+def _kill_other_agent_instances():
+    # A manual reinstall previously just registered a new scheduled-task run without
+    # ever stopping whatever instance was already running in the background — leaving
+    # two copies polling and shipping logs concurrently until the machine next
+    # rebooted. Finds and stops any OTHER running instance of the long-lived agent
+    # process (excluding one-shot `install`/`uninstall` invocations, and this process
+    # itself) before handing off to the new one.
+    try:
+        my_pid = os.getpid()
+        ps = (
+            "Get-CimInstance Win32_Process | Where-Object { "
+            "$_.CommandLine -like '*micro_agent_windows.py*' "
+            "-and $_.CommandLine -notlike '* install*' -and $_.CommandLine -notlike '* uninstall*' "
+            f"-and $_.ProcessId -ne {my_pid} "
+            "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+        )
+        subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', ps], capture_output=True, timeout=15)
+    except Exception:
+        pass
+
 def install_agent():
     try:
+        _kill_other_agent_instances()
         if not os.path.exists(INSTALL_DIR): os.makedirs(INSTALL_DIR)
         target_path = os.path.join(INSTALL_DIR, "micro_agent_windows.py")
         with open(os.path.abspath(__file__), 'r', encoding='utf-8') as src, open(target_path, 'w', encoding='utf-8') as dst:
@@ -26,6 +47,27 @@ def install_agent():
 
 def uninstall_agent():
     subprocess.run(f'schtasks /delete /tn "{TASK_NAME}" /f', shell=True, capture_output=True)
+
+def upgrade_agent(new_source):
+    # Remote self-update: overwrite the installed copy with the source the server just
+    # sent, then hand off to a fresh instance via the scheduled task. Only returns True
+    # (telling the caller to let this process exit) once the new file is safely on
+    # disk — if the write fails, the old process keeps running rather than vanishing
+    # with nothing to replace it, unlike uninstall which always removes itself.
+    if not new_source.strip():
+        print("[-] Upgrade command had no source; ignoring.", flush=True)
+        return False
+    try:
+        if not os.path.exists(INSTALL_DIR): os.makedirs(INSTALL_DIR)
+        target_path = os.path.join(INSTALL_DIR, "micro_agent_windows.py")
+        with open(target_path, 'w', encoding='utf-8') as f:
+            f.write(new_source)
+        print("[+] Agent script updated on disk. Handing off to a fresh instance...", flush=True)
+        subprocess.run(f'schtasks /run /tn "{TASK_NAME}"', shell=True)
+        return True
+    except Exception as e:
+        print(f"[-] Upgrade failed: {e}", flush=True)
+        return False
 
 def run_remote_script(context, cmd_id, script):
     # Runs on a background thread (see run_agent()) so a slow or hung command can't
@@ -138,6 +180,13 @@ def run_agent():
                             print("[*] Uninstall command received. Removing agent...", flush=True)
                             uninstall_agent()
                             return
+
+                        # Server pushed a remote self-upgrade with the new agent source
+                        # embedded in the response
+                        if data.get('command') == 'upgrade':
+                            print("[*] Upgrade command received. Updating agent...", flush=True)
+                            if upgrade_agent(data.get('source', '')):
+                                return
 
                         # Server pushed a response-action script (process list, isolate, triage collection, etc.)
                         # Dispatched on a background thread so a slow/hung command can't
