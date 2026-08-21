@@ -1,94 +1,137 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-header">
-    <h2><i class="fa-solid fa-laptop-medical me-2"></i>Agents</h2>
-    <p>Endpoint agent check-ins and remote response actions.</p>
+<div class="page-header d-flex justify-content-between align-items-start flex-wrap gap-2">
+    <div>
+        <h2><i class="fa-solid fa-laptop-medical me-2"></i>Agents</h2>
+        <p>Endpoint agent check-ins and remote response actions. Drag the <i class="fa-solid fa-grip-vertical"></i> handle to move a box, or drag its edge to resize.</p>
+    </div>
+    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="resetAgentsLayout()"><i class="fa-solid fa-arrows-rotate me-1"></i>Reset Layout</button>
 </div>
 
-<div class="row g-3 mb-4">
-    <div class="col-6 col-lg-3">
-        <div class="stat-tile">
-            <div class="stat-label">Endpoints Online</div>
-            <div class="stat-value" id="statEndpoints">—</div>
-        </div>
-    </div>
-    <div class="col-6 col-lg-3">
-        <div class="stat-tile">
-            <div class="stat-label">Pending Actions</div>
-            <div class="stat-value" id="statPendingActions">—</div>
-        </div>
-    </div>
-    <div class="col-6 col-lg-3">
-        <div class="stat-tile">
-            <div class="stat-label">Completed Actions</div>
-            <div class="stat-value" id="statDoneActions">—</div>
-        </div>
-    </div>
-    <div class="col-6 col-lg-3">
-        <div class="stat-tile">
-            <div class="stat-label">Failed Actions</div>
-            <div class="stat-value" id="statFailedActions">—</div>
-        </div>
-    </div>
-</div>
+<style>
+#agentsGrid .grid-stack-item-content .card,
+#agentsGrid .grid-stack-item-content .stat-tile{
+    height:100%;
+    margin:0;
+    display:flex;
+    flex-direction:column;
+}
+#agentsGrid .grid-stack-item-content .card-body{
+    flex:1 1 auto;
+    min-height:0;
+    overflow-y:auto;
+}
+#agentsGrid .grid-stack-item-content .table-responsive{
+    height:100%;
+    overflow-y:auto;
+}
+#agentsGrid .grid-drag-handle{
+    cursor:move;
+    color:var(--text-muted);
+}
+#agentsGrid .grid-drag-handle:hover{color:var(--text-secondary);}
+#agentsGrid .stat-tile{position:relative;}
+#agentsGrid .stat-tile .grid-drag-handle{
+    position:absolute;
+    top:10px; right:10px;
+    font-size:.8rem;
+}
+</style>
 
-<!-- Active Endpoint Check-ins & Response Actions -->
-<div class="row mb-4">
-    <div class="col-12">
-        <div class="card bg-dark border-secondary">
-            <div class="card-header border-secondary d-flex justify-content-between align-items-center">
-                <h5 class="card-title text-light mb-0"><i class="fa-solid fa-laptop-medical me-2"></i>Active Endpoint Check-ins & Response Actions</h5>
-                <button class="btn btn-outline-secondary btn-sm" onclick="loadUniqueEndpoints()"><i class="fa-solid fa-rotate me-1"></i> Refresh List</button>
+<div class="grid-stack" id="agentsGrid">
+    <div class="grid-stack-item" gs-id="stat-endpoints" gs-x="0" gs-y="0" gs-w="3" gs-h="4">
+        <div class="grid-stack-item-content">
+            <div class="stat-tile">
+                <i class="fa-solid fa-grip-vertical grid-drag-handle" title="Drag to move"></i>
+                <div class="stat-label">Endpoints Online</div>
+                <div class="stat-value" id="statEndpoints">—</div>
             </div>
-            <div class="card-body p-0">
-                <div class="table-responsive">
-                    <table class="table table-dark table-striped table-hover mb-0 align-middle">
-                        <thead>
-                            <tr>
-                                <th>Hostname</th>
-                                <th>Endpoint IP</th>
-                                <th>Client / Agent Info</th>
-                                <th>Status</th>
-                                <th>Last Check-in</th>
-                                <th>Heartbeat Stream</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr><td colspan="7" class="text-center text-muted py-4">Loading active endpoints...</td></tr>
-                        </tbody>
-                    </table>
+        </div>
+    </div>
+    <div class="grid-stack-item" gs-id="stat-pending" gs-x="3" gs-y="0" gs-w="3" gs-h="4">
+        <div class="grid-stack-item-content">
+            <div class="stat-tile">
+                <i class="fa-solid fa-grip-vertical grid-drag-handle" title="Drag to move"></i>
+                <div class="stat-label">Pending Actions</div>
+                <div class="stat-value" id="statPendingActions">—</div>
+            </div>
+        </div>
+    </div>
+    <div class="grid-stack-item" gs-id="stat-done" gs-x="6" gs-y="0" gs-w="3" gs-h="4">
+        <div class="grid-stack-item-content">
+            <div class="stat-tile">
+                <i class="fa-solid fa-grip-vertical grid-drag-handle" title="Drag to move"></i>
+                <div class="stat-label">Completed Actions</div>
+                <div class="stat-value" id="statDoneActions">—</div>
+            </div>
+        </div>
+    </div>
+    <div class="grid-stack-item" gs-id="stat-failed" gs-x="9" gs-y="0" gs-w="3" gs-h="4">
+        <div class="grid-stack-item-content">
+            <div class="stat-tile">
+                <i class="fa-solid fa-grip-vertical grid-drag-handle" title="Drag to move"></i>
+                <div class="stat-label">Failed Actions</div>
+                <div class="stat-value" id="statFailedActions">—</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="grid-stack-item" gs-id="checkins" gs-x="0" gs-y="4" gs-w="12" gs-h="14">
+        <div class="grid-stack-item-content">
+            <div class="card bg-dark border-secondary">
+                <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+                    <h5 class="card-title text-light mb-0"><i class="fa-solid fa-grip-vertical grid-drag-handle me-2" title="Drag to move"></i><i class="fa-solid fa-laptop-medical me-2"></i>Active Endpoint Check-ins & Response Actions</h5>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="loadUniqueEndpoints()"><i class="fa-solid fa-rotate me-1"></i> Refresh List</button>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-dark table-striped table-hover mb-0 align-middle">
+                            <thead>
+                                <tr>
+                                    <th>Hostname</th>
+                                    <th>Endpoint IP</th>
+                                    <th>Client / Agent Info</th>
+                                    <th>Status</th>
+                                    <th>Last Check-in</th>
+                                    <th>Heartbeat Stream</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="endpointsTableBody">
+                                <tr><td colspan="7" class="text-center text-muted py-4">Loading active endpoints...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
-</div>
 
-<!-- Command History & Results -->
-<div class="row">
-    <div class="col-12">
-        <div class="card bg-dark border-secondary">
-            <div class="card-header border-secondary d-flex justify-content-between align-items-center">
-                <h5 class="card-title text-light mb-0"><i class="fa-solid fa-terminal me-2"></i>Response Action History</h5>
-                <button class="btn btn-outline-secondary btn-sm" onclick="loadCommandHistory()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
-            </div>
-            <div class="card-body p-0">
-                <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
-                    <table class="table table-dark table-hover table-sm mb-0 align-middle">
-                        <thead>
-                            <tr>
-                                <th class="ps-3">Queued</th>
-                                <th>Host</th>
-                                <th>Action</th>
-                                <th>By</th>
-                                <th>Status</th>
-                                <th>Result</th>
-                            </tr>
-                        </thead>
-                        <tbody id="cmdHistoryBody">
-                            <tr><td colspan="6" class="text-center text-muted py-4">Loading command history...</td></tr>
-                        </tbody>
-                    </table>
+    <div class="grid-stack-item" gs-id="cmdhistory" gs-x="0" gs-y="18" gs-w="12" gs-h="11">
+        <div class="grid-stack-item-content">
+            <div class="card bg-dark border-secondary">
+                <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+                    <h5 class="card-title text-light mb-0"><i class="fa-solid fa-grip-vertical grid-drag-handle me-2" title="Drag to move"></i><i class="fa-solid fa-terminal me-2"></i>Response Action History</h5>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="loadCommandHistory()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-dark table-hover table-sm mb-0 align-middle">
+                            <thead>
+                                <tr>
+                                    <th class="ps-3">Queued</th>
+                                    <th>Host</th>
+                                    <th>Action</th>
+                                    <th>By</th>
+                                    <th>Status</th>
+                                    <th>Result</th>
+                                </tr>
+                            </thead>
+                            <tbody id="cmdHistoryBody">
+                                <tr><td colspan="6" class="text-center text-muted py-4">Loading command history...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
         </div>
@@ -131,12 +174,36 @@
 </div>
 
 <script>
+const AGENTS_LAYOUT_KEY = 'microdfir_agents_layout_v1';
+
 document.addEventListener("DOMContentLoaded", function() {
+    const grid = GridStack.init({
+        cellHeight: 30,
+        margin: 10,
+        handle: '.grid-drag-handle',
+        resizable: { handles: 'e, se, s' },
+        float: false
+    }, '#agentsGrid');
+
+    try {
+        const saved = JSON.parse(localStorage.getItem(AGENTS_LAYOUT_KEY) || 'null');
+        if (Array.isArray(saved) && saved.length) grid.load(saved);
+    } catch (e) { console.error('Failed to restore Agents layout:', e); }
+
+    grid.on('change', function() {
+        try { localStorage.setItem(AGENTS_LAYOUT_KEY, JSON.stringify(grid.save(false))); } catch (e) {}
+    });
+
     loadUniqueEndpoints();
     loadCommandHistory();
     setInterval(loadUniqueEndpoints, 30000);
     setInterval(loadCommandHistory, 15000);
 });
+
+function resetAgentsLayout() {
+    localStorage.removeItem(AGENTS_LAYOUT_KEY);
+    location.reload();
+}
 
 function escHtml(str) {
     const d = document.createElement('div');
@@ -153,8 +220,7 @@ function loadUniqueEndpoints() {
         .then(r => r.json())
         .then(data => {
             document.getElementById('statEndpoints').innerText = Array.isArray(data) ? data.length : 0;
-            let card = Array.from(document.querySelectorAll('.card')).find(c => c.innerText.includes('Active Endpoint Check-ins'));
-            let tbody = card ? card.querySelector('tbody') : document.querySelectorAll('table tbody')[0];
+            let tbody = document.getElementById('endpointsTableBody');
             if (!tbody) return;
             if (!Array.isArray(data) || data.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No active agent endpoints detected.</td></tr>';
@@ -195,6 +261,12 @@ function loadUniqueEndpoints() {
                     </td>
                 </tr>
             `).join("");
+            // Dropdowns default to absolute positioning, which gets visually clipped by this
+            // table's own scroll container once the endpoint list outgrows the box. Force
+            // fixed-strategy positioning so the full "Respond" menu always renders in view.
+            tbody.querySelectorAll('[data-bs-toggle="dropdown"]').forEach(el => {
+                bootstrap.Dropdown.getOrCreateInstance(el, { popperConfig: { strategy: 'fixed' } });
+            });
         });
 }
 
