@@ -10,7 +10,7 @@ echo "[*] Syncing updated files to production environment..."
 rsync -av --exclude='siem.db' \
           --exclude='venv' \
           --exclude='.git' \
-          --exclude='config/server.config.yaml' \
+          --exclude='agent_config.json' \
           --exclude='*.log' \
           ./ $SOC_DIR/
 

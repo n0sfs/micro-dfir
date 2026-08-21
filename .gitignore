@@ -19,6 +19,8 @@ config/cert.pem
 config/key.pem
 config/*.key
 
+agent_config.json
+
 # OS Specific
 .DS_Store
 Thumbs.db

@@ -1,5 +1,5 @@
 import os, yara, sqlite3
-DB_PATH = os.path.abspath("siem.db")
+DB_PATH = "/opt/micro-dfir/siem.db"
 def scan_file(file_path):
     conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row
     try: rules = conn.cursor().execute("SELECT id, title, rule_text FROM yara_rules WHERE enabled = 1").fetchall()

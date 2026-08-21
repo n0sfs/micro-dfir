@@ -1,55 +1,71 @@
 {% extends "base.html" %}
 
 {% block content %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+function updateFilters() {
+    let apps = Array.from(document.querySelectorAll('.app-chk:checked')).map(c => c.value);
+    document.getElementById('appFilterLabel').innerText = apps.length > 0 ? apps.join(', ') : 'All Apps';
+
+    let sevs = Array.from(document.querySelectorAll('.sev-chk:checked')).map(c => c.value);
+    document.getElementById('sevFilterLabel').innerText = sevs.length > 0 ? sevs.join(', ') : 'Sev';
+
+    if (typeof loadDashboardData === 'function') { loadDashboardData(); }
+}
+</script>
 <h2 class="mb-4">SOC Dashboard</h2>
 
-
-<!-- UNIFIED ADVANCED SOC TOOLBAR WITH LABELS & TOOLTIPS -->
+<!-- UNIFIED ADVANCED SOC TOOLBAR -->
 <div class="row g-2 mb-3 bg-dark p-3 rounded border border-secondary">
     
-    <!-- Global Search -->
     <div class="col-md-2">
         <label for="searchQuery" class="form-label text-muted small mb-1 fw-bold">Global Search</label>
-        <input type="text" id="searchQuery" class="form-control bg-dark text-light border-secondary form-control-sm" placeholder="Search keyword, ID..." title="Searches across hosts, apps, IDs, users, and messages" onkeyup="if(event.key === 'Enter') loadLogs()">
+        <input type="text" id="searchQuery" class="form-control bg-dark text-light border-secondary form-control-sm" placeholder="Search keyword, ID..." title="Searches across hosts, apps, IDs, users, and messages" onkeyup="if(event.key === 'Enter') loadDashboardData()">
     </div>
 
-    <!-- App Filter -->
     <div class="col-md-2">
-        <label for="appFilter" class="form-label text-muted small mb-1 fw-bold">Log Source / App</label>
-        <select id="appFilter" class="form-select bg-dark text-light border-secondary form-select-sm" title="Filter logs by specific Windows event channel or application">
-            <option value="">All Apps</option>
-            <option value="Security">Security</option>
-            <option value="System">System</option>
-            <option value="Application">Application</option>
-            <option value="Sysmon">Sysmon</option>
-            <option value="PowerShell">PowerShell</option>
-        </select>
+        <label class="form-label text-muted small mb-1 fw-bold">Log Source / App</label>
+        <div class="dropdown">
+            <button class="btn btn-sm bg-dark text-light border-secondary text-start d-flex justify-content-between align-items-center dropdown-toggle w-100" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" title="Filter logs by one or more Windows event channels">
+                <span id="appFilterLabel" class="text-truncate">All Apps</span>
+            </button>
+            <ul class="dropdown-menu dropdown-menu-dark shadow" style="min-width: 200px;">
+                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input app-chk" type="checkbox" value="Security" id="app_sec" onchange="updateFilters()"><label class="form-check-label w-100" for="app_sec">Security</label></div></li>
+                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input app-chk" type="checkbox" value="System" id="app_sys" onchange="updateFilters()"><label class="form-check-label w-100" for="app_sys">System</label></div></li>
+                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input app-chk" type="checkbox" value="Application" id="app_app" onchange="updateFilters()"><label class="form-check-label w-100" for="app_app">Application</label></div></li>
+                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input app-chk" type="checkbox" value="Sysmon" id="app_sysmon" onchange="updateFilters()"><label class="form-check-label w-100" for="app_sysmon">Sysmon</label></div></li>
+                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input app-chk" type="checkbox" value="PowerShell" id="app_ps" onchange="updateFilters()"><label class="form-check-label w-100" for="app_ps">PowerShell</label></div></li>
+            </ul>
+        </div>
     </div>
 
-    <!-- Severity Filter -->
     <div class="col-md-1">
-        <label for="sevFilter" class="form-label text-muted small mb-1 fw-bold">Severity</label>
-        <select id="sevFilter" class="form-select bg-dark text-light border-secondary form-select-sm" title="Filter by event severity level (INFO, WARN, ALERT)">
-            <option value="">Sev</option>
-            <option value="INFO">INFO</option>
-            <option value="WARN">WARN</option>
-            <option value="ALERT">ALERT</option>
-        </select>
+        <label class="form-label text-muted small mb-1 fw-bold">Severity</label>
+        <div class="dropdown">
+            <button class="btn btn-sm bg-dark text-light border-secondary text-start d-flex justify-content-between align-items-center dropdown-toggle w-100" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" title="Filter by one or more event severities">
+                <span id="sevFilterLabel" class="text-truncate">Sev</span>
+            </button>
+            <ul class="dropdown-menu dropdown-menu-dark shadow">
+                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input sev-chk" type="checkbox" value="INFO" id="sev_info" onchange="updateFilters()"><label class="form-check-label w-100" for="sev_info"><span class="badge bg-info">INFO</span></label></div></li>
+                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input sev-chk" type="checkbox" value="WARN" id="sev_warn" onchange="updateFilters()"><label class="form-check-label w-100" for="sev_warn"><span class="badge bg-warning">WARN</span></label></div></li>
+                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input sev-chk" type="checkbox" value="ALERT" id="sev_alert" onchange="updateFilters()"><label class="form-check-label w-100" for="sev_alert"><span class="badge bg-danger">ALERT</span></label></div></li>
+            </ul>
+        </div>
     </div>
 
-    <!-- Time Range Filter -->
     <div class="col-md-1">
         <label for="timeRange" class="form-label text-muted small mb-1 fw-bold">Time Window</label>
-        <select id="timeRange" class="form-select bg-dark text-light border-secondary form-select-sm" title="Select historical time range for log queries">
+        <select id="timeRange" class="form-select bg-dark text-light border-secondary form-select-sm" title="Select historical time range for log queries" onchange="loadDashboardData()">
+            <option value="5m" selected>5m</option>
             <option value="15m">15m</option>
             <option value="1h">1h</option>
-            <option value="24h" selected>24h</option>
+            <option value="12h">12h</option>
+            <option value="24h">24h</option>
             <option value="7d">7d</option>
             <option value="all">All</option>
         </select>
     </div>
     
-    <!-- Field Key Picklist & Settings -->
     <div class="col-md-2">
         <label for="fieldKey" class="form-label text-muted small mb-1 fw-bold">Target Field</label>
         <div class="input-group input-group-sm" title="Select a specific database field to target your filter query">
@@ -67,7 +83,6 @@
         </div>
     </div>
 
-    <!-- Operator Selection -->
     <div class="col-md-1 px-1">
         <label for="fieldOp" class="form-label text-muted small mb-1 fw-bold">Operator</label>
         <select id="fieldOp" class="form-select bg-dark text-light border-secondary form-select-sm" title="Select conditional operator (contains, equals, starts with, etc.)">
@@ -81,21 +96,72 @@
         </select>
     </div>
 
-    <!-- Field Value Input -->
     <div class="col-md-2">
         <label for="fieldVal" class="form-label text-muted small mb-1 fw-bold">Field Value</label>
-        <input type="text" id="fieldVal" class="form-control bg-dark text-light border-secondary form-control-sm" placeholder="Value..." title="Enter target string or numeric value to match against the selected field" onkeyup="if(event.key === 'Enter') loadLogs()">
+        <input type="text" id="fieldVal" class="form-control bg-dark text-light border-secondary form-control-sm" placeholder="Value..." title="Enter target string or numeric value to match against the selected field" onkeyup="if(event.key === 'Enter') loadDashboardData()">
     </div>
 
-    <!-- Action Buttons -->
     <div class="col-md-1 d-flex align-items-end gap-1">
-        <button class="btn btn-primary btn-sm w-100 h-100" onclick="loadLogs()" title="Execute search query"><i class="fa-solid fa-search"></i></button>
-        <button id="streamToggleBtn" class="btn btn-success btn-sm h-100" title="Toggle Live Streaming Mode (Auto-refresh every 5s)" onclick="toggleStream()"><i class="fa-solid fa-play"></i></button>
+        <button class="btn btn-primary btn-sm w-100" onclick="loadDashboardData()" title="Execute search query"><i class="fa-solid fa-search"></i></button>
+        <button id="streamToggleBtn" class="btn btn-outline-secondary btn-sm" title="Toggle Live Streaming Mode (Auto-refresh every 5s)" onclick="toggleStream()"><i class="fa-solid fa-play"></i></button>
     </div>
 </div>
 
-<!-- LOGS TABLE -->
+<!-- TIME-SERIES TIMELINE CHART CARD -->
+<div class="card bg-dark border-secondary mb-3">
+    <div class="card-body py-2 px-3">
+        <div class="d-flex justify-content-between align-items-center mb-1">
+            <span class="text-muted small fw-bold"><i class="fa-solid fa-chart-line me-1 text-primary"></i> Log Volume Over Time</span>
+            <span id="logCountBadge" class="badge bg-secondary">Loading log count...</span>
+        </div>
+        <div style="height: 110px; width: 100%;">
+            <canvas id="logTimelineChart"></canvas>
+        </div>
+    </div>
+</div>
 
+<!-- EXPORT ROW -->
+<div class="d-flex justify-content-end align-items-center mb-2">
+    <button class="btn btn-outline-success btn-sm" onclick="exportCSV()" title="Export current filtered logs to CSV"><i class="fa-solid fa-file-excel me-1"></i> Export CSV</button>
+</div>
+
+<!-- FIELD MANAGER MODAL -->
+<div class="modal fade" id="fieldManagerModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title"><i class="fa-solid fa-gear me-2"></i>Manage Search Fields</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+            <label class="form-label text-muted small">Current Fields in Picklist:</label>
+            <ul id="fieldListGroup" class="list-group bg-dark border border-secondary mb-3" style="max-height: 180px; overflow-y: auto;"></ul>
+        </div>
+        <hr class="border-secondary">
+        <h6 id="modalFormTitle" class="text-primary mb-2">Add New Field</h6>
+        <input type="hidden" id="editOriginalKey" value="">
+        <div class="mb-2">
+          <label for="customFieldName" class="form-label small">Field Internal Key (e.g. <code>process_name</code>)</label>
+          <input type="text" class="form-control bg-dark text-light border-secondary form-control-sm" id="customFieldName" placeholder="e.g. workstation_id">
+        </div>
+        <div class="mb-3">
+          <label for="customFieldLabel" class="form-label small">Display Label (e.g. <code>Workstation ID</code>)</label>
+          <input type="text" class="form-control bg-dark text-light border-secondary form-control-sm" id="customFieldLabel" placeholder="e.g. Workstation ID">
+        </div>
+      </div>
+      <div class="modal-footer border-secondary justify-content-between">
+        <button type="button" class="btn btn-outline-secondary btn-sm" onclick="resetFieldForm()">Clear / New</button>
+        <div>
+            <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+            <button type="button" class="btn btn-primary btn-sm" onclick="saveFieldOption()">Save Field</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- LOGS TABLE -->
 <div class="card bg-dark border-secondary">
     <div class="card-body p-0">
         <div class="table-responsive">
@@ -121,11 +187,61 @@
 </div>
 
 <script>
-// Define loadLogs globally first
+let timelineChart = null;
+
+document.addEventListener("DOMContentLoaded", function() {
+    initChart();
+    loadDashboardData();
+    // streamInterval = setInterval(autoStreamLogs, 5000); // Disabled on load
+});
+
+function initChart() {
+    const ctx = document.getElementById('logTimelineChart').getContext('2d');
+    timelineChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [{
+                label: 'Logs',
+                data: [],
+                borderColor: '#0d6efd',
+                backgroundColor: 'rgba(13, 110, 253, 0.1)',
+                borderWidth: 2,
+                fill: true,
+                tension: 0.2,
+                pointRadius: 2
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: { mode: 'index', intersect: false }
+            },
+            scales: {
+                x: {
+                    grid: { color: '#2b2f33' },
+                    ticks: { color: '#adb5bd', font: { size: 10 }, maxTicksLimit: 12 }
+                },
+                y: {
+                    grid: { color: '#2b2f33' },
+                    ticks: { color: '#adb5bd', font: { size: 10 }, beginAtZero: true }
+                }
+            }
+        }
+    });
+}
+
+window.loadDashboardData = function() {
+    loadLogs();
+    loadTimeline();
+};
+
 window.loadLogs = function() {
     let q = document.getElementById('searchQuery').value;
-    let app = document.getElementById('appFilter').value;
-    let sev = document.getElementById('sevFilter').value;
+    let app = Array.from(document.querySelectorAll('.app-chk:checked')).map(c=>c.value).join(',');
+    let sev = Array.from(document.querySelectorAll('.sev-chk:checked')).map(c=>c.value).join(',');
     let range = document.getElementById('timeRange').value;
     let fieldKey = document.getElementById('fieldKey').value;
     let fieldOp = document.getElementById('fieldOp').value;
@@ -134,6 +250,11 @@ window.loadLogs = function() {
     fetch(`/api/logs/search?q=${encodeURIComponent(q)}&range=${range}&app=${encodeURIComponent(app)}&severity=${encodeURIComponent(sev)}&fieldKey=${encodeURIComponent(fieldKey)}&fieldOp=${encodeURIComponent(fieldOp)}&fieldVal=${encodeURIComponent(fieldVal)}`)
         .then(r => r.json())
         .then(data => {
+            let badge = document.getElementById('logCountBadge');
+            if (badge) {
+                badge.innerText = `Total Matches: ${data.total_matches !== undefined ? data.total_matches : data.count} (Showing latest ${data.count})`;
+            }
+
             let tbody = document.querySelector('tbody');
             if (!tbody) return;
             if (!data.logs || data.logs.length === 0) {
@@ -156,7 +277,39 @@ window.loadLogs = function() {
         .catch(err => console.error("Error fetching logs:", err));
 };
 
-let isStreaming = true;
+function loadTimeline() {
+    let app = Array.from(document.querySelectorAll('.app-chk:checked')).map(c=>c.value).join(',');
+    let sev = Array.from(document.querySelectorAll('.sev-chk:checked')).map(c=>c.value).join(',');
+    let range = document.getElementById('timeRange').value;
+
+    fetch(`/api/logs/timeline?range=${range}&app=${encodeURIComponent(app)}&severity=${encodeURIComponent(sev)}`)
+        .then(r => r.json())
+        .then(data => {
+            if (!timelineChart || !data.timeline) return;
+            let labels = data.timeline.map(item => item.time);
+            let counts = data.timeline.map(item => item.count);
+
+            timelineChart.data.labels = labels;
+            timelineChart.data.datasets[0].data = counts;
+            timelineChart.update();
+        })
+        .catch(err => console.error("Error fetching timeline:", err));
+}
+
+window.exportCSV = function() {
+    let q = document.getElementById('searchQuery').value;
+    let app = Array.from(document.querySelectorAll('.app-chk:checked')).map(c=>c.value).join(',');
+    let sev = Array.from(document.querySelectorAll('.sev-chk:checked')).map(c=>c.value).join(',');
+    let range = document.getElementById('timeRange').value;
+    let fieldKey = document.getElementById('fieldKey').value;
+    let fieldOp = document.getElementById('fieldOp').value;
+    let fieldVal = document.getElementById('fieldVal').value;
+
+    let exportUrl = `/api/logs/export?q=${encodeURIComponent(q)}&range=${range}&app=${encodeURIComponent(app)}&severity=${encodeURIComponent(sev)}&fieldKey=${encodeURIComponent(fieldKey)}&fieldOp=${encodeURIComponent(fieldOp)}&fieldVal=${encodeURIComponent(fieldVal)}`;
+    window.location.href = exportUrl;
+};
+
+let isStreaming = false;
 let streamInterval = null;
 
 function toggleStream() {
@@ -165,7 +318,7 @@ function toggleStream() {
     if (isStreaming) {
         btn.className = "btn btn-success btn-sm";
         btn.innerHTML = '<i class="fa-solid fa-play"></i>';
-        streamInterval = setInterval(autoStreamLogs, 5000);
+        // streamInterval = setInterval(autoStreamLogs, 5000); // Disabled on load
     } else {
         btn.className = "btn btn-outline-secondary btn-sm";
         btn.innerHTML = '<i class="fa-solid fa-pause"></i>';
@@ -174,16 +327,10 @@ function toggleStream() {
 }
 
 function autoStreamLogs() {
-    if (isStreaming && typeof loadLogs === 'function') { 
-        loadLogs(); 
+    if (isStreaming && typeof loadDashboardData === 'function') { 
+        loadDashboardData(); 
     }
 }
-
-// Field Manager Modal functions
-document.addEventListener("DOMContentLoaded", function() {
-    loadLogs();
-    streamInterval = setInterval(autoStreamLogs, 5000);
-});
 
 function renderFieldList() {
     let select = document.getElementById('fieldKey');
@@ -266,6 +413,16 @@ function deleteField(key) {
         }
     }
     renderFieldList();
+}
+
+function updateFilters() {
+    let apps = Array.from(document.querySelectorAll('.app-chk:checked')).map(c => c.value);
+    document.getElementById('appFilterLabel').innerText = apps.length > 0 ? apps.join(', ') : 'All Apps';
+    
+    let sevs = Array.from(document.querySelectorAll('.sev-chk:checked')).map(c => c.value);
+    document.getElementById('sevFilterLabel').innerText = sevs.length > 0 ? sevs.join(', ') : 'Sev';
+    
+    if (typeof loadDashboardData === 'function') { loadDashboardData(); }
 }
 </script>
 {% endblock %}
