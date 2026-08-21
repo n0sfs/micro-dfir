@@ -108,6 +108,7 @@
                             <button type="button" class="btn btn-sm btn-outline-light console-action-btn" onclick="consoleRun('collect_triage')"><i class="fa-solid fa-microscope me-2"></i>Triage Collection</button>
                             <button type="button" class="btn btn-sm btn-outline-warning console-action-btn" onclick="consoleRun('isolate_host', {}, 'Isolate this host from the network? Only traffic to/from this SOC server will be allowed.')"><i class="fa-solid fa-network-wired me-2"></i>Isolate Host</button>
                             <button type="button" class="btn btn-sm btn-outline-success console-action-btn" onclick="consoleRun('restore_network', {}, 'Restore normal network connectivity on this host?')"><i class="fa-solid fa-wifi me-2"></i>Restore Network</button>
+                            <button type="button" class="btn btn-sm btn-outline-info console-action-btn" onclick="consoleUpgrade()"><i class="fa-solid fa-rotate me-2"></i>Upgrade Agent</button>
                             <button type="button" class="btn btn-sm btn-outline-danger console-action-btn" onclick="consoleUninstall()"><i class="fa-solid fa-trash me-2"></i>Uninstall Agent</button>
                         </div>
 
@@ -348,6 +349,7 @@ function renderEndpoints() {
                                 <li><hr class="dropdown-divider"></li>
                                 <li><a class="dropdown-item text-warning" href="#" onclick="queueCommand(rowHost(this), 'isolate_host', {}, 'Isolate this host from the network? Only traffic to/from this SOC server will be allowed.'); return false;"><i class="fa-solid fa-network-wired me-2"></i>Isolate Host</a></li>
                                 <li><a class="dropdown-item text-success" href="#" onclick="queueCommand(rowHost(this), 'restore_network', {}, 'Restore normal network connectivity on this host?'); return false;"><i class="fa-solid fa-wifi me-2"></i>Restore Network</a></li>
+                                <li><a class="dropdown-item text-info" href="#" onclick="queueCommand(rowHost(this), 'upgrade', {}, 'Upgrade the MicroDFIR agent on this host to the latest version? It restarts itself automatically.'); return false;"><i class="fa-solid fa-rotate me-2"></i>Upgrade Agent</a></li>
                                 <li><hr class="dropdown-divider"></li>
                                 <li><a class="dropdown-item text-danger" href="#" onclick="openCustomCmdModalOnConsole(rowHost(this)); return false;"><i class="fa-solid fa-terminal me-2"></i>Custom Command</a></li>
                                 <li><a class="dropdown-item text-danger" href="#" onclick="removeEndpoint(rowHost(this)); return false;"><i class="fa-solid fa-trash me-2"></i>Uninstall Agent</a></li>
@@ -422,7 +424,8 @@ const CONSOLE_ACTION_DISPLAY = {
     list_processes: 'Get-Process (list running processes)',
     collect_triage: 'Collect-Triage (processes, connections, autoruns, users, startup items)',
     isolate_host: 'Isolate-Host (block all traffic except this SOC server)',
-    restore_network: 'Restore-Network'
+    restore_network: 'Restore-Network',
+    upgrade: 'Upgrade-Agent (fetch latest agent, restart)'
 };
 
 function populateConsoleHostSelect() {
@@ -554,6 +557,11 @@ function consoleRun(label, params, confirmMsg) {
     if (confirmMsg && !confirm(confirmMsg)) return;
     document.getElementById('consoleParamForm').style.display = 'none';
     queueConsoleCommand(consoleSelectedHost, label, params || {}, CONSOLE_ACTION_DISPLAY[label] || label);
+}
+
+function consoleUpgrade() {
+    if (!consoleSelectedHost) return;
+    consoleRun('upgrade', {}, `Upgrade the MicroDFIR agent on ${consoleSelectedHost} to the latest version? It restarts itself automatically.`);
 }
 
 function consoleUninstall() {

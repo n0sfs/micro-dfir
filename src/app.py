@@ -1576,6 +1576,18 @@ def agent_config():
         db.commit()
         if cmd_row['label'] == 'uninstall':
             return jsonify({'command': 'uninstall'})
+        if cmd_row['label'] == 'upgrade':
+            # Embeds the current agent source (with the same __HOST_URL__/__SOC_TOKEN__
+            # substitution as the manual download) directly in the poll response — the
+            # agent overwrites its own installed copy and restarts itself with it.
+            server_ip = request.host.split(':')[0]
+            cursor = db.execute("SELECT key, value FROM settings")
+            s = {r[0]: r[1] for r in cursor.fetchall()}
+            ui_port = s.get("ui_port", "5001")
+            ingest_port = _resolve_ingest_port(ui_port)
+            source = _build_agent_source('micro_agent_windows.py', server_ip, ui_port, ingest_port, expected_token or '')
+            if source:
+                return jsonify({'command': 'upgrade', 'source': source})
         return jsonify({'run_script': {'id': cmd_row['id'], 'script': cmd_row['script']}})
 
     channels = ','.join(k for k, v in get_agent_channels().items() if v) or 'Security,System,Application,PowerShell'
@@ -1979,6 +1991,21 @@ def api_settings_users():
     return jsonify({'users': [dict(u) for u in users]})
 
 
+def _build_agent_source(agent_filename, server_ip, ui_port, ingest_port, soc_token):
+    # Shared by the manual download route and the remote self-upgrade path (agent_config())
+    # so both ever inject the placeholders the exact same way.
+    agents_dir = '/opt/micro-dfir/agents'
+    target_file = os.path.join(agents_dir, agent_filename)
+    if not os.path.exists(target_file):
+        return None
+    with open(target_file, 'r', encoding='utf-8') as f:
+        script_data = f.read()
+    script_data = script_data.replace('https://__HOST_URL__/api/agent/config', f'https://{server_ip}:{ui_port}/api/agent/config')
+    script_data = script_data.replace('https://__HOST_URL__/api/agent/result', f'https://{server_ip}:{ui_port}/api/agent/result')
+    script_data = script_data.replace('https://__HOST_URL__/api/ingest', f'https://{server_ip}:{ingest_port}/api/ingest')
+    script_data = script_data.replace('__SOC_TOKEN__', soc_token)
+    return script_data
+
 @app.route('/api/agent/download/<os_type>', methods=['GET'])
 @login_required
 def api_download_agent(os_type):
@@ -1995,22 +2022,12 @@ def api_download_agent(os_type):
     ingest_port = _resolve_ingest_port(ui_port)
     soc_token = get_soc_secret(db) or ''
 
-    agents_dir = '/opt/micro-dfir/agents'
     memory_file = io.BytesIO()
 
     if os_type == 'windows':
-        target_file = os.path.join(agents_dir, 'micro_agent_windows.py')
-        if not os.path.exists(target_file):
+        script_data = _build_agent_source('micro_agent_windows.py', server_ip, ui_port, ingest_port, soc_token)
+        if script_data is None:
             return "Windows agent not found on server.", 404
-
-        with open(target_file, 'r', encoding='utf-8') as f:
-            script_data = f.read()
-
-        # Dynamically inject the IP, Ports, and agent auth token!
-        script_data = script_data.replace('https://__HOST_URL__/api/agent/config', f'https://{server_ip}:{ui_port}/api/agent/config')
-        script_data = script_data.replace('https://__HOST_URL__/api/agent/result', f'https://{server_ip}:{ui_port}/api/agent/result')
-        script_data = script_data.replace('https://__HOST_URL__/api/ingest', f'https://{server_ip}:{ingest_port}/api/ingest')
-        script_data = script_data.replace('__SOC_TOKEN__', soc_token)
 
         with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
             zf.writestr('micro_agent_windows.py', script_data)
@@ -2019,17 +2036,9 @@ def api_download_agent(os_type):
         return send_file(memory_file, download_name='MicroDFIR_Windows_Agent.zip', as_attachment=True)
 
     elif os_type == 'linux':
-        target_file = os.path.join(agents_dir, 'micro_agent_linux.py')
-        if not os.path.exists(target_file):
+        script_data = _build_agent_source('micro_agent_linux.py', server_ip, ui_port, ingest_port, soc_token)
+        if script_data is None:
             return "Linux agent not found on server.", 404
-
-        with open(target_file, 'r', encoding='utf-8') as f:
-            script_data = f.read()
-
-        script_data = script_data.replace('https://__HOST_URL__/api/agent/config', f'https://{server_ip}:{ui_port}/api/agent/config')
-        script_data = script_data.replace('https://__HOST_URL__/api/agent/result', f'https://{server_ip}:{ui_port}/api/agent/result')
-        script_data = script_data.replace('https://__HOST_URL__/api/ingest', f'https://{server_ip}:{ingest_port}/api/ingest')
-        script_data = script_data.replace('__SOC_TOKEN__', soc_token)
 
         with tarfile.open(fileobj=memory_file, mode='w:gz') as tf:
             tarinfo = tarfile.TarInfo('micro_agent_linux.py')
@@ -2150,6 +2159,11 @@ def api_agent_commands():
             script = builder(params)
         except Exception as e:
             return jsonify({'error': f'Failed to build script: {e}'}), 400
+    elif label == 'upgrade':
+        # No script to build here — agent_config() recognizes this label specially and
+        # embeds the current agent source directly in the poll response, mirroring how
+        # 'uninstall' is handled.
+        script = ''
     else:
         return jsonify({'error': f'Unknown command label: {label}'}), 400
 
