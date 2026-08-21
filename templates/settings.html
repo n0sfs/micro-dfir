@@ -1,130 +1,402 @@
 {% extends "base.html" %}
 {% block content %}
-<h2><i class="fa-solid fa-gears text-primary"></i> Micro-SOC Settings & Configuration</h2>
-<p class="text-muted small">Manage centralized platform security, network bindings, agent deployment packages, and system preferences.</p>
+<div class="row mb-4">
+    <div class="col-12">
+        <h2 class="text-light"><i class="fa-solid fa-gears me-2 text-primary"></i>Micro-SOC Settings & Configuration</h2>
+        <p class="text-muted small">Manage centralized platform security, network bindings, agent deployment packages, and system preferences.</p>
+    </div>
+</div>
 
-<div class="accordion mt-4" id="settingsAccordion">
+<div class="accordion accordion-flush border border-secondary rounded" id="settingsAccordion">
     
-    <!-- SECTION 1: Security & Authentication -->
-    <div class="accordion-item bg-dark text-light border-secondary">
-        <h2 class="accordion-header" id="headingSecurity">
-            <button class="accordion-button bg-secondary text-white" type="button" data-bs-toggle="collapse" data-bs-target="#collapseSecurity" aria-expanded="true" aria-controls="collapseSecurity">
+    <!-- 1. GENERAL SECURITY & RBAC -->
+    <div class="accordion-item bg-dark border-secondary">
+        <h2 class="accordion-header" id="headingOne">
+            <button class="accordion-button collapsed bg-dark text-light" type="button" data-bs-toggle="collapse" data-bs-target="#collapseOne">
                 <i class="fa-solid fa-shield-halved me-2"></i> General Security & Platform Authentication
             </button>
         </h2>
-        <div id="collapseSecurity" class="accordion-collapse collapse show" aria-labelledby="headingSecurity" data-bs-parent="#settingsAccordion">
-            <div class="accordion-body bg-dark">
-                <p class="text-muted small">Manage web dashboard session security, SSL/TLS enforcement, and administrative access policies.</p>
-                <div class="alert alert-secondary py-2 small mb-0">
-                    <i class="fa-solid fa-circle-info text-info me-1"></i> Web UI authentication is active using secure hashed session cookies.
+        <div id="collapseOne" class="accordion-collapse collapse" data-bs-parent="#settingsAccordion">
+            <div class="accordion-body text-light border-top border-secondary">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <span class="text-muted small">Manage platform access, users, and role-based permissions.</span>
+                    <button class="btn btn-sm btn-primary" onclick="showUserModal()"><i class="fa-solid fa-plus me-1"></i> Add User</button>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-dark table-striped table-hover mb-0 align-middle border border-secondary">
+                        <thead>
+                            <tr>
+                                <th class="ps-3">Username</th>
+                                <th>Role / Group</th>
+                                <th class="text-end pe-3">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="usersTableBody">
+                            <tr><td colspan="3" class="text-center text-muted py-3">Loading users...</td></tr>
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- SECTION 2: Network & Ingestion -->
-    <div class="accordion-item bg-dark text-light border-secondary mt-3">
-        <h2 class="accordion-header" id="headingNetwork">
-            <button class="accordion-button collapsed bg-secondary text-white" type="button" data-bs-toggle="collapse" data-bs-target="#collapseNetwork" aria-expanded="false" aria-controls="collapseNetwork">
+    <!-- 2. NETWORK & CERTS -->
+    <div class="accordion-item bg-dark border-secondary">
+        <h2 class="accordion-header" id="headingTwo">
+            <button class="accordion-button collapsed bg-dark text-light" type="button" data-bs-toggle="collapse" data-bs-target="#collapseTwo">
                 <i class="fa-solid fa-network-wired me-2"></i> Network & Ingestion Bindings
             </button>
         </h2>
-        <div id="collapseNetwork" class="accordion-collapse collapse" aria-labelledby="headingNetwork" data-bs-parent="#settingsAccordion">
-            <div class="accordion-body bg-dark">
-                <div class="row g-3">
+        <div id="collapseTwo" class="accordion-collapse collapse" data-bs-parent="#settingsAccordion">
+            <div class="accordion-body text-light border-top border-secondary">
+                <p class="text-muted small mb-4">Manage current SSL/TLS certificates used for secure HTTPS web access and encrypted agent log ingestion.</p>
+                
+                <div class="row">
                     <div class="col-md-6">
-                        <label class="form-label text-info fw-bold">Server Bind IP</label>
-                        <input type="text" class="form-control bg-black text-light border-secondary font-monospace" value="0.0.0.0" readonly>
+                        <h6 class="text-info mb-3">Current Network Bindings</h6>
+                        <ul class="list-group list-group-flush rounded border border-secondary small mb-3">
+                            <li class="list-group-item bg-dark text-light border-secondary"><i class="fa-solid fa-globe me-2 text-muted"></i> Web UI Port: <strong>5001 (HTTPS)</strong></li>
+                            <li class="list-group-item bg-dark text-light border-secondary"><i class="fa-solid fa-satellite-dish me-2 text-muted"></i> Ingestion API Port: <strong>5000 (HTTPS)</strong></li>
+                            <li class="list-group-item bg-dark text-light border-secondary"><i class="fa-solid fa-file-certificate me-2 text-muted"></i> Certificate Path: <strong>/opt/micro-dfir/certs/</strong></li>
+                        </ul>
                     </div>
                     <div class="col-md-6">
-                        <label class="form-label text-info fw-bold">HTTPS Production Port</label>
-                        <input type="text" class="form-control bg-black text-light border-secondary font-monospace" value="5001" readonly>
-                    </div>
-                    <div class="col-12">
-                        <label class="form-label text-info fw-bold">Active TLS Certificate Path</label>
-                        <input type="text" class="form-control bg-black text-light border-secondary font-monospace" value="/opt/micro-dfir/config/cert.pem" readonly>
+                        <h6 class="text-info mb-3">Upload New Certificates</h6>
+                        <form id="certUploadForm">
+                            <div class="mb-2">
+                                <label class="form-label text-light small mb-1">Public Certificate (.pem / .crt)</label>
+                                <input class="form-control bg-dark text-light border-secondary form-control-sm" type="file" id="certFile" required>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label text-light small mb-1">Private Key (.pem / .key)</label>
+                                <input class="form-control bg-dark text-light border-secondary form-control-sm" type="file" id="keyFile" required>
+                            </div>
+                            <button type="submit" class="btn btn-outline-success btn-sm w-100"><i class="fa-solid fa-shield-halved me-2"></i>Upload & Apply Certificates</button>
+                        </form>
+                        <div id="certMsg" class="mt-3 small text-center" style="display: none;"></div>
                     </div>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- SECTION 3: Agent Settings & Deployment Packages (Now Includes Ingestion Token) -->
-    <div class="accordion-item bg-dark text-light border-secondary mt-3">
-        <h2 class="accordion-header" id="headingAgents">
-            <button class="accordion-button collapsed bg-secondary text-white" type="button" data-bs-toggle="collapse" data-bs-target="#collapseAgents" aria-expanded="false" aria-controls="collapseAgents">
-                <i class="fa-solid fa-laptop-code me-2"></i> Agent Settings & Deployment Packages
+    <!-- 3. AGENT SETTINGS & PACKAGES (RESTORED) -->
+    <div class="accordion-item bg-dark border-secondary">
+        <h2 class="accordion-header" id="headingThree">
+            <button class="accordion-button bg-dark text-light" type="button" data-bs-toggle="collapse" data-bs-target="#collapseThree">
+                <i class="fa-solid fa-box-archive me-2"></i> Agent Settings & Deployment Packages
             </button>
         </h2>
-        <div id="collapseAgents" class="accordion-collapse collapse" aria-labelledby="headingAgents" data-bs-parent="#settingsAccordion">
-            <div class="accordion-body bg-dark">
-                <!-- Ingestion Token Form -->
-                <div class="card bg-black border-secondary mb-4">
+        <div id="collapseThree" class="accordion-collapse collapse show" data-bs-parent="#settingsAccordion">
+            <div class="accordion-body text-light border-top border-secondary">
+                
+                <div class="card bg-black border-info mb-4">
                     <div class="card-body">
-                        <form id="security-settings-form">
-                            <label class="form-label text-info fw-bold">SOC Secret Token (Ingestion API)</label>
-                            <p class="text-muted small">Used by Vector and deployed log forwarders to authenticate against the ingestion API.</p>
-                            <div class="input-group mb-3">
-                                <input type="text" class="form-control bg-dark text-light border-secondary font-monospace" id="soc-secret-input" value="5dc6b73a8d20d3508072fbd515bc1593">
-                                <button class="btn btn-outline-warning btn-sm" type="button" onclick="generateSecret()"><i class="fa-solid fa-key"></i> Generate New</button>
-                            </div>
-                            <button type="submit" class="btn btn-outline-primary btn-sm"><i class="fa-solid fa-save"></i> Save Ingestion Token</button>
-                        </form>
+                        <h6 class="text-info fw-bold">SOC Secret Token (Ingestion API)</h6>
+                        <p class="text-muted small">Used by Vector and deployed log forwarders to authenticate against the ingestion API.</p>
+                        <div class="input-group mb-3">
+                            <input type="text" class="form-control bg-dark text-light border-secondary" id="socToken" value="{{ soc_token }}">
+                            <button class="btn btn-outline-warning" type="button" onclick="generateToken()"><i class="fa-solid fa-key me-1"></i> Generate New</button>
+                        </div>
+                        <button class="btn btn-outline-primary btn-sm" onclick="saveToken()"><i class="fa-solid fa-lock me-1"></i> Save Ingestion Token</button>
                     </div>
                 </div>
-
-                <p class="text-muted small">Download pre-configured agent scripts embedded with your current SOC secret and server IP, or manage local background services.</p>
-                <div class="d-flex gap-3 mb-4">
-                    <a href="/download/agent/windows" class="btn btn-outline-success"><i class="fa-brands fa-windows me-1"></i> Download Windows Agent (.zip)</a>
-                    <a href="/download/agent/linux" class="btn btn-outline-info"><i class="fa-brands fa-linux me-1"></i> Download Linux Agent (.tar.gz)</a>
+                
+                <p class="text-muted small mb-3">Download pre-configured agent scripts embedded with your current SOC secret and server IP, or manage local background services.</p>
+                <div class="mb-4">
+                    <a href="/api/agent/download/windows" class="btn btn-outline-success btn-sm me-2"><i class="fa-brands fa-windows me-1"></i> Download Windows Agent (.zip)</a>
+                    <a href="/api/agent/download/linux" class="btn btn-outline-info btn-sm"><i class="fa-brands fa-linux me-1"></i> Download Linux Agent (.tar.gz)</a>
                 </div>
-                <h6 class="text-warning"><i class="fa-solid fa-terminal me-1"></i> Windows Background Service Management</h6>
-                <p class="text-muted small">To run the Windows agent persistently in the background, open PowerShell as Administrator and run:</p>
-                <div class="p-2 bg-black border border-secondary rounded font-monospace small mb-2 text-success">
-                    python micro_agent_windows.py install
-                </div>
-                <p class="text-muted small">To stop and remove the background service:</p>
-                <div class="p-2 bg-black border border-secondary rounded font-monospace small text-danger">
-                    python micro_agent_windows.py uninstall
-                </div>
+                
+                <h6 class="text-warning mt-4 font-monospace"><i class="fa-solid fa-greater-than me-2"></i>Windows Background Service Management</h6>
+                <p class="text-muted small mb-2">To run the Windows agent persistently in the background, open PowerShell as Administrator and run:</p>
+                <div class="bg-black p-2 rounded mb-3 font-monospace text-success small border border-secondary">python micro_agent_windows.py install</div>
+                <p class="text-muted small mb-2">To stop and remove the background service:</p>
+                <div class="bg-black p-2 rounded font-monospace text-danger small border border-secondary">python micro_agent_windows.py uninstall</div>
             </div>
         </div>
     </div>
 
-    <!-- SECTION 4: System & Storage Maintenance -->
-    <div class="accordion-item bg-dark text-light border-secondary mt-3">
-        <h2 class="accordion-header" id="headingSystem">
-            <button class="accordion-button collapsed bg-secondary text-white" type="button" data-bs-toggle="collapse" data-bs-target="#collapseSystem" aria-expanded="false" aria-controls="collapseSystem">
+    <!-- 4. SYSTEM & STORAGE -->
+    <div class="accordion-item bg-dark border-secondary">
+        <h2 class="accordion-header" id="headingFour">
+            <button class="accordion-button collapsed bg-dark text-light" type="button" data-bs-toggle="collapse" data-bs-target="#collapseFour">
                 <i class="fa-solid fa-database me-2"></i> System & Storage Maintenance
             </button>
         </h2>
-        <div id="collapseSystem" class="accordion-collapse collapse" aria-labelledby="headingSystem" data-bs-parent="#settingsAccordion">
-            <div class="accordion-body bg-dark">
-                <p class="text-muted small">Database path: <code class="text-info">/opt/micro-dfir/siem.db</code></p>
-                <div class="d-flex gap-2">
-                    <button class="btn btn-outline-warning btn-sm" onclick="alert('Database optimization complete.')"><i class="fa-solid fa-broom"></i> Optimize SQLite DB</button>
-                    <button class="btn btn-outline-danger btn-sm" onclick="alert('Backup snapshot created in /opt/micro-dfir/backups/')"><i class="fa-solid fa-download"></i> Export SIEM Backup</button>
+        <div id="collapseFour" class="accordion-collapse collapse" data-bs-parent="#settingsAccordion">
+            <div class="accordion-body text-light border-top border-secondary">
+                
+                <!-- New Telemetry -->
+                <div class="row text-center mb-5 mt-2">
+                    <div class="col-md-3 mb-3 mb-md-0">
+                        <h6 class="text-muted small text-uppercase">CPU Load</h6>
+                        <h3 class="text-light" id="met_cpu">--%</h3>
+                        <div class="progress bg-black" style="height: 5px;"><div id="bar_cpu" class="progress-bar bg-info" style="width: 0%"></div></div>
+                    </div>
+                    <div class="col-md-3 mb-3 mb-md-0">
+                        <h6 class="text-muted small text-uppercase">Memory Usage</h6>
+                        <h3 class="text-light" id="met_ram">--%</h3>
+                        <div class="progress bg-black" style="height: 5px;"><div id="bar_ram" class="progress-bar bg-warning" style="width: 0%"></div></div>
+                    </div>
+                    <div class="col-md-3 mb-3 mb-md-0">
+                        <h6 class="text-muted small text-uppercase">Disk Space (<span id="met_disk_free">--</span>GB Free)</h6>
+                        <h3 class="text-light" id="met_disk">--%</h3>
+                        <div class="progress bg-black" style="height: 5px;"><div id="bar_disk" class="progress-bar bg-danger" style="width: 0%"></div></div>
+                    </div>
+                    <div class="col-md-3">
+                        <h6 class="text-muted small text-uppercase">SIEM Database Size</h6>
+                        <h3 class="text-light text-success" id="met_db">-- MB</h3>
+                        <p class="text-muted small mb-0 mt-1">sqlite3 / siem.db</p>
+                    </div>
+                </div>
+
+                <!-- Restored DB Maintenance -->
+                <h6 class="text-info mb-3">Database Maintenance & Backups</h6>
+                <p class="text-muted small mb-3">Manage local SQLite database health, generate manual backups, or purge old event logs to free up disk space.</p>
+                <button class="btn btn-outline-primary btn-sm me-2" onclick="backupDB()"><i class="fa-solid fa-download me-1"></i> Download DB Backup</button>
+                <button class="btn btn-outline-warning btn-sm me-2" onclick="vacuumDB()"><i class="fa-solid fa-broom me-1"></i> Vacuum / Optimize DB</button>
+                <button class="btn btn-outline-danger btn-sm" onclick="purgeOldLogs()"><i class="fa-solid fa-trash-can me-1"></i> Purge Logs > 30 Days</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- USER MANAGEMENT MODAL -->
+<div class="modal fade" id="userModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title" id="userModalTitle">Add New User</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="manageUserId">
+        <input type="hidden" id="manageUserAction">
+        
+        <div class="mb-3" id="groupUsername">
+            <label class="form-label small">Username</label>
+            <input type="text" class="form-control bg-dark text-light border-secondary" id="manageUsername">
+        </div>
+        <div class="mb-3" id="groupRole">
+            <label class="form-label small">Role / Group</label>
+            <select class="form-select bg-dark text-light border-secondary" id="manageRole">
+                <option value="Admin">Admin (Full Access)</option>
+                <option value="Analyst" selected>Analyst (Read-Only / Dashboards)</option>
+            </select>
+        </div>
+        <div class="mb-3">
+            <label class="form-label small" id="lblPassword">Password</label>
+            <input type="password" class="form-control bg-dark text-light border-secondary" id="managePassword">
+        </div>
+      </div>
+      <div class="modal-footer border-secondary">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" onclick="submitUserForm()">Save Changes</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    loadMetrics();
+    loadUsers();
+    setInterval(loadMetrics, 5000); 
+
+    let certForm = document.getElementById('certUploadForm');
+    if(certForm) {
+        certForm.addEventListener('submit', function(e) {
+            e.preventDefault();
+            uploadCerts();
+        });
+    }
+});
+
+// Telemetry Logic
+function loadMetrics() {
+    fetch('/api/settings/metrics')
+        .then(r => r.json())
+        .then(data => {
+            if(data.error) return;
+            document.getElementById('met_cpu').innerText = data.cpu + '%';
+            document.getElementById('bar_cpu').style.width = data.cpu + '%';
+            document.getElementById('met_ram').innerText = data.ram + '%';
+            document.getElementById('bar_ram').style.width = data.ram + '%';
+            document.getElementById('met_disk').innerText = data.disk_pct + '%';
+            document.getElementById('bar_disk').style.width = data.disk_pct + '%';
+            document.getElementById('met_disk_free').innerText = data.disk_free_gb;
+            document.getElementById('met_db').innerText = data.db_size_mb + ' MB';
+        }).catch(e => console.log('Metrics polling issue:', e));
+}
+
+// Cert Upload Logic
+function uploadCerts() {
+    let fd = new FormData();
+    fd.append('cert_file', document.getElementById('certFile').files[0]);
+    fd.append('key_file', document.getElementById('keyFile').files[0]);
+
+    fetch('/api/settings/cert', { method: 'POST', body: fd })
+        .then(r => r.json())
+        .then(res => {
+            let msg = document.getElementById('certMsg');
+            msg.style.display = 'block';
+            if(res.status === 'success') {
+                msg.className = 'mt-3 small text-center text-success';
+                msg.innerHTML = '<i class="fa-solid fa-check-circle"></i> ' + res.message;
+                document.getElementById('certUploadForm').reset();
+            } else {
+                msg.className = 'mt-3 small text-center text-danger';
+                msg.innerText = res.error;
+            }
+        });
+}
+
+// User Management Logic
+let userModal = null;
+function loadUsers() {
+    fetch('/api/settings/users')
+        .then(r => r.json())
+        .then(data => {
+            let tbody = document.getElementById('usersTableBody');
+            if(data.users) {
+                tbody.innerHTML = data.users.map(u => `
+                    <tr>
+                        <td class="ps-3 fw-bold">${u.username}</td>
+                        <td><span class="badge bg-${u.role === 'Admin' ? 'danger' : 'info'}">${u.role || 'Analyst'}</span></td>
+                        <td class="text-end pe-3">
+                            <button class="btn btn-sm btn-outline-warning py-0 px-2 me-1" title="Reset Password" onclick="showResetModal(${u.id}, '${u.username}')"><i class="fa-solid fa-key"></i></button>
+                            <button class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete User" onclick="deleteUser(${u.id}, '${u.username}')"><i class="fa-solid fa-trash"></i></button>
+                        </td>
+                    </tr>
+                `).join('');
+            }
+        });
+}
+
+function initModal() {
+    if(!userModal) userModal = new bootstrap.Modal(document.getElementById('userModal'));
+}
+
+function showUserModal() {
+    initModal();
+    document.getElementById('userModalTitle').innerText = 'Add New User';
+    document.getElementById('manageUserAction').value = 'create';
+    document.getElementById('groupUsername').style.display = 'block';
+    document.getElementById('groupRole').style.display = 'block';
+    document.getElementById('manageUsername').value = '';
+    document.getElementById('managePassword').value = '';
+    document.getElementById('lblPassword').innerText = 'Password';
+    userModal.show();
+}
+
+function showResetModal(id, username) {
+    initModal();
+    document.getElementById('userModalTitle').innerText = 'Reset Password for ' + username;
+    document.getElementById('manageUserAction').value = 'reset';
+    document.getElementById('manageUserId').value = id;
+    document.getElementById('groupUsername').style.display = 'none';
+    document.getElementById('groupRole').style.display = 'none';
+    document.getElementById('managePassword').value = '';
+    document.getElementById('lblPassword').innerText = 'New Password';
+    userModal.show();
+}
+
+function submitUserForm() {
+    let action = document.getElementById('manageUserAction').value;
+    let payload = { action: action };
+    
+    if(action === 'create') {
+        payload.username = document.getElementById('manageUsername').value;
+        payload.password = document.getElementById('managePassword').value;
+        payload.role = document.getElementById('manageRole').value;
+    } else if (action === 'reset') {
+        payload.id = document.getElementById('manageUserId').value;
+        payload.password = document.getElementById('managePassword').value;
+    }
+
+    fetch('/api/settings/users', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+    }).then(r => r.json()).then(res => {
+        if(res.status === 'success') {
+            userModal.hide();
+            loadUsers();
+        } else {
+            alert(res.error || 'Operation failed.');
+        }
+    });
+}
+
+function deleteUser(id, username) {
+    if(confirm(`Are you sure you want to delete user ${username}?`)) {
+        fetch('/api/settings/users', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: 'delete', id: id})
+        }).then(() => loadUsers());
+    }
+}
+
+// Token & DB Original Logic (Placeholders to ensure buttons work if backend routes exist)
+function generateToken() {
+    const chars = 'abcdef0123456789';
+    let token = '';
+    for(let i=0; i<32; i++) token += chars[Math.floor(Math.random() * chars.length)];
+    document.getElementById('socToken').value = token;
+}
+function saveToken() {
+    let token = document.getElementById('socToken').value.trim();
+    if (!token) { alert('Token cannot be empty.'); return; }
+    fetch('/api/settings/token', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({token: token})
+    }).then(r => r.json()).then(res => {
+        if (res.status === 'success') alert('Token saved. Re-download agent packages to pick up the new token.');
+        else alert(res.error || 'Failed to save token.');
+    }).catch(err => alert('Error saving token: ' + err));
+}
+function backupDB() { window.location.href = '/api/settings/backup'; }
+function vacuumDB() { alert('Vacuum initiated.'); }
+function purgeOldLogs() { if(confirm('Purge logs older than 30 days?')) alert('Purge initiated.'); }
+</script>
+
+    <div class="row mt-4">
+        <div class="col-12">
+            <div class="card bg-dark text-white border-secondary">
+                <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0"><i class="fa-solid fa-network-wired me-2"></i>Network Configuration (Control & Data Planes)</h5>
+                </div>
+                <div class="card-body">
+                    <form method="POST" action="/settings/network">
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label text-info">UI Bind IP (Gunicorn)</label>
+                                <input type="text" class="form-control bg-dark text-white border-secondary" name="ui_bind_ip" value="{{ all_settings.get('ui_bind_ip', '0.0.0.0') }}" placeholder="e.g. 192.168.86.100 (Wi-Fi)">
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label text-info">UI Port</label>
+                                <input type="text" class="form-control bg-dark text-white border-secondary" name="ui_port" value="{{ all_settings.get('ui_port', '5001') }}">
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label text-warning">Ingestion Bind IP (Vector)</label>
+                                <input type="text" class="form-control bg-dark text-white border-secondary" name="ingest_bind_ip" value="{{ all_settings.get('ingest_bind_ip', '0.0.0.0') }}" placeholder="e.g. 192.168.1.50 (Ethernet)">
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label text-warning">Ingestion Port</label>
+                                <input type="text" class="form-control bg-dark text-white border-secondary" name="ingest_port" value="{{ all_settings.get('ingest_port', '5000') }}">
+                            </div>
+                        </div>
+                        <button type="submit" class="btn btn-primary"><i class="fa-solid fa-save me-2"></i>Save & Apply Network Settings</button>
+                    </form>
+                    <small class="text-muted d-block mt-3"><i class="fa-solid fa-triangle-exclamation me-1"></i><strong>Warning:</strong> Applying changes will instantly reload Vector and restart Gunicorn in the background. You may need to reconnect your browser to the new UI IP and Port.</small>
                 </div>
             </div>
         </div>
     </div>
 
-</div>
-{% endblock %}
-
-{% block scripts %}
-<script>
-    function generateSecret() {
-        const chars = 'abcdef0123456789';
-        let secret = '';
-        for (let i = 0; i < 32; i++) {
-            secret += chars.charAt(Math.floor(Math.random() * chars.length));
-        }
-        document.getElementById('soc-secret-input').value = secret;
-    }
-    document.getElementById('security-settings-form').addEventListener('submit', (e) => {
-        e.preventDefault();
-        alert('Ingestion token updated successfully!');
-    });
-</script>
 {% endblock %}

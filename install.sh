@@ -22,11 +22,6 @@ echo "[*] Installing Vector Ingestion Engine..."
 curl -1sLf 'https://repositories.timber.io/public/vector/cfg/setup/bash.deb.sh' | bash
 apt-get install -y vector
 
-echo "[*] Downloading Velociraptor Server Binary..."
-mkdir -p $SOC_DIR/bin
-curl -L -o $SOC_DIR/bin/velociraptor https://github.com/Velocidex/velociraptor/releases/download/v0.77.2/velociraptor-v0.77.2-linux-amd64
-chmod +x $SOC_DIR/bin/velociraptor
-
 echo "[*] Copying application files to $SOC_DIR..."
 mkdir -p $SOC_DIR
 cp -r ./* $SOC_DIR/
@@ -46,11 +41,6 @@ mkdir -p /etc/systemd/system/vector.service.d
 echo -e "[Service]\nAmbientCapabilities=CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE" > /etc/systemd/system/vector.service.d/override.conf
 chown -R vector:vector /etc/vector/
 
-echo "[*] Configuring Velociraptor..."
-$SOC_DIR/bin/velociraptor config generate > $SOC_DIR/config/server.config.yaml
-sed -i 's/bind_address: 127.0.0.1/bind_address: 0.0.0.0/g' $SOC_DIR/config/server.config.yaml
-$SOC_DIR/bin/velociraptor --config $SOC_DIR/config/server.config.yaml user add admin "Admin123!" --role administrator
-
 echo "[*] Initializing Database & Administrator..."
 venv/bin/python -c "import sys; sys.path.append('src'); from app import init_db; init_db()"
 venv/bin/python src/setup_admin.py
@@ -65,16 +55,13 @@ echo "[*] Installing Systemd Services..."
 cp config/microsoc-web.service /etc/systemd/system/
 cp config/microsoc-sigma.service /etc/systemd/system/
 cp config/microsoc-soar.service /etc/systemd/system/
-cp config/velociraptor.service /etc/systemd/system/
 
 systemctl daemon-reload
 systemctl enable --now vector.service
 systemctl enable --now microsoc-web.service
 systemctl enable --now microsoc-sigma.service
 systemctl enable --now microsoc-soar.service
-systemctl enable --now velociraptor.service
 
 echo "[+] Deployment Complete!"
 echo "[+] Micro DFIR Dashboard: http://<nuc-ip>:5001"
-echo "[+] Velociraptor GUI:      https://<nuc-ip>:8889"
 EOF
