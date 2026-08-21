@@ -360,7 +360,20 @@ function saveToken() {
 }
 function backupDB() { window.location.href = '/api/settings/backup'; }
 function vacuumDB() { alert('Vacuum initiated.'); }
-function purgeOldLogs() { if(confirm('Purge logs older than 30 days?')) alert('Purge initiated.'); }
+function purgeOldLogs() {
+    if (!confirm('Permanently delete all logs older than 30 days? This cannot be undone.')) return;
+    fetch('/api/settings/purge', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({days: 30})
+    }).then(r => r.json()).then(res => {
+        if (res.status === 'success') {
+            alert(`Purged ${res.deleted} log(s) older than ${res.cutoff}. Run "Vacuum / Optimize DB" afterward to reclaim disk space.`);
+        } else {
+            alert(res.error || 'Purge failed.');
+        }
+    }).catch(err => alert('Error purging logs: ' + err));
+}
 </script>
 
     <div class="row mt-4">
