@@ -1166,7 +1166,7 @@ def migrate_alerts_enrichment():
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
         cols = {row[1] for row in conn.execute("PRAGMA table_info(alerts)").fetchall()}
-        for col in ('username', 'source_ip', 'destination_ip'):
+        for col in ('username', 'source_ip', 'destination_ip', 'log_event_id', 'log_app'):
             if col not in cols:
                 conn.execute(f"ALTER TABLE alerts ADD COLUMN {col} TEXT")
         conn.execute("""
@@ -1175,8 +1175,10 @@ def migrate_alerts_enrichment():
                 message = COALESCE(message, (SELECT message FROM live_logs WHERE live_logs.id = alerts.event_id)),
                 username = COALESCE(username, (SELECT username FROM live_logs WHERE live_logs.id = alerts.event_id)),
                 source_ip = COALESCE(source_ip, (SELECT source_ip FROM live_logs WHERE live_logs.id = alerts.event_id)),
-                destination_ip = COALESCE(destination_ip, (SELECT destination_ip FROM live_logs WHERE live_logs.id = alerts.event_id))
-            WHERE event_id IS NOT NULL AND (host IS NULL OR message IS NULL)
+                destination_ip = COALESCE(destination_ip, (SELECT destination_ip FROM live_logs WHERE live_logs.id = alerts.event_id)),
+                log_event_id = COALESCE(log_event_id, (SELECT event_id FROM live_logs WHERE live_logs.id = alerts.event_id)),
+                log_app = COALESCE(log_app, (SELECT app FROM live_logs WHERE live_logs.id = alerts.event_id))
+            WHERE event_id IS NOT NULL AND (host IS NULL OR message IS NULL OR log_event_id IS NULL)
         """)
         conn.commit()
         conn.close()
@@ -1590,7 +1592,8 @@ def agent_config():
 # Every branch is normalized to the same column shape so the existing filter/search
 # logic (built for live_logs alone) works unchanged against the union.
 UNIFIED_LOGS_SQL = """(
-SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type
+SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type,
+       NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json
 FROM live_logs
 UNION ALL
 SELECT a.timestamp, a.severity,
@@ -1601,12 +1604,18 @@ SELECT a.timestamp, a.severity,
        a.source_ip as source_ip,
        a.destination_ip as destination_ip,
        COALESCE(a.message, '') as message,
-       'alert' as log_type
+       'alert' as log_type,
+       a.rule_id as rule_id,
+       CASE WHEN a.rule_id IS NULL THEN 'heuristic' ELSE COALESCE(s.source, 'sigma') END as rule_source,
+       a.log_event_id as log_event_id,
+       a.log_app as log_app,
+       NULL as raw_json
 FROM alerts a
 LEFT JOIN sigma_rules s ON a.rule_id = s.id
 UNION ALL
 SELECT timestamp, severity, hostname as host, 'UEBA Anomaly' as app, '-' as event_id, '-' as username,
-       NULL as source_ip, NULL as destination_ip, message, 'anomaly' as log_type
+       NULL as source_ip, NULL as destination_ip, message, 'anomaly' as log_type,
+       NULL as rule_id, 'ueba' as rule_source, NULL as log_event_id, NULL as log_app, raw_json
 FROM events
 WHERE app_name = 'duckdb_ueba'
 ) AS unified_logs"""
@@ -1695,7 +1704,12 @@ def api_logs_search():
             'source_ip': r['source_ip'] if r['source_ip'] is not None else '-',
             'destination_ip': r['destination_ip'] if r['destination_ip'] is not None else '-',
             'message': r['message'],
-            'type': r['log_type']
+            'type': r['log_type'],
+            'rule_id': r['rule_id'],
+            'rule_source': r['rule_source'],
+            'log_event_id': r['log_event_id'],
+            'log_app': r['log_app'],
+            'raw_json': r['raw_json']
         } for r in rows]
 
         return jsonify({'logs': logs, 'count': len(logs), 'total_matches': total_count})
