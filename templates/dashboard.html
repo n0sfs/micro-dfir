@@ -15,6 +15,7 @@ function updateFilters() {
 </script>
 <style>
     .time-preset-btn.active-filter{background-color:var(--accent); border-color:var(--accent); color:#fff;}
+    mark.search-highlight{background-color:var(--accent); color:#fff; padding:0 2px; border-radius:2px;}
 </style>
 
 <div class="page-header">
@@ -426,6 +427,34 @@ function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+function escRegex(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Wraps every case-insensitive occurrence of any given term in <mark>, operating on the
+// already-HTML-escaped text so this can't reopen an XSS hole through the search terms.
+function highlightText(text, terms) {
+    const escaped = escHtml(text);
+    const valid = (terms || []).filter(t => t && String(t).trim());
+    if (!valid.length) return escaped;
+    const pattern = valid.map(t => escRegex(escHtml(String(t).trim()))).join('|');
+    if (!pattern) return escaped;
+    return escaped.replace(new RegExp(`(${pattern})`, 'gi'), '<mark class="search-highlight">$1</mark>');
+}
+
+// The active search terms as of the last executed search, keyed by which column each
+// applies to — kept at module scope so both the results table and the detail modal
+// (opened later, after the box may have been edited again) highlight consistently.
+let lastSearchTerms = { global: '', field: '', fieldKey: '' };
+const GLOBAL_Q_COLUMNS = ['host', 'app', 'event_id', 'username', 'message'];
+
+function termsFor(col) {
+    const terms = [];
+    if (lastSearchTerms.global && GLOBAL_Q_COLUMNS.includes(col)) terms.push(lastSearchTerms.global);
+    if (lastSearchTerms.field && lastSearchTerms.fieldKey === col) terms.push(lastSearchTerms.field);
+    return terms;
+}
+
 function severityBadgeClass(sev) {
     const s = (sev || '').toUpperCase();
     if (s === 'CRITICAL' || s === 'HIGH' || s === 'ALERT') return 'bg-danger';
@@ -502,12 +531,12 @@ function showLogDetail(idx) {
             <dt class="col-3">Type</dt><dd class="col-9">${typeBadge(log.type)}</dd>
             ${srcLabel ? `<dt class="col-3">Detection Source</dt><dd class="col-9"><span class="badge bg-secondary">${escHtml(srcLabel)}</span></dd>` : ''}
             <dt class="col-3">Severity</dt><dd class="col-9"><span class="badge ${severityBadgeClass(log.severity)}">${escHtml((log.severity || '').toUpperCase())}</span></dd>
-            <dt class="col-3">Host</dt><dd class="col-9">${escHtml(log.host)}</dd>
-            <dt class="col-3">App / Rule</dt><dd class="col-9">${escHtml(log.app)}</dd>
-            <dt class="col-3">Event ID</dt><dd class="col-9">${escHtml(log.event_id)}</dd>
-            <dt class="col-3">User</dt><dd class="col-9">${escHtml(log.username)}</dd>
-            <dt class="col-3">Src IP</dt><dd class="col-9">${escHtml(log.source_ip)}</dd>
-            <dt class="col-3">Dest IP</dt><dd class="col-9">${escHtml(log.destination_ip)}</dd>
+            <dt class="col-3">Host</dt><dd class="col-9">${highlightText(log.host, termsFor('host'))}</dd>
+            <dt class="col-3">App / Rule</dt><dd class="col-9">${highlightText(log.app, termsFor('app'))}</dd>
+            <dt class="col-3">Event ID</dt><dd class="col-9">${highlightText(log.event_id, termsFor('event_id'))}</dd>
+            <dt class="col-3">User</dt><dd class="col-9">${highlightText(log.username, termsFor('username'))}</dd>
+            <dt class="col-3">Src IP</dt><dd class="col-9">${highlightText(log.source_ip, termsFor('source_ip'))}</dd>
+            <dt class="col-3">Dest IP</dt><dd class="col-9">${highlightText(log.destination_ip, termsFor('destination_ip'))}</dd>
         </dl>
         ${viewRuleBtn}
         ${showTriggeringEvent ? `
@@ -518,10 +547,12 @@ function showLogDetail(idx) {
         </dl>` : ''}
         ${anomalyDetailHtml(log)}
         <label class="form-label small text-muted mb-1">Full Message</label>
-        <pre class="bg-black border border-secondary rounded p-2 small mb-0" style="white-space:pre-wrap; word-break:break-word; max-height:400px; overflow-y:auto;">${escHtml(log.message)}</pre>
+        <pre class="bg-black border border-secondary rounded p-2 small mb-0" style="white-space:pre-wrap; word-break:break-word; max-height:400px; overflow-y:auto;">${highlightText(log.message, termsFor('message'))}</pre>
     `;
     new bootstrap.Modal(document.getElementById('logDetailModal')).show();
 }
+
+const TEXT_MATCH_OPS = ['contains', 'equals', 'starts_with', 'ends_with'];
 
 window.loadLogs = function() {
     let q = document.getElementById('searchQuery').value;
@@ -530,6 +561,12 @@ window.loadLogs = function() {
     let fieldKey = document.getElementById('fieldKey').value;
     let fieldOp = document.getElementById('fieldOp').value;
     let fieldVal = document.getElementById('fieldVal').value;
+
+    lastSearchTerms = {
+        global: q.trim(),
+        field: (fieldKey && fieldVal.trim() && TEXT_MATCH_OPS.includes(fieldOp)) ? fieldVal.trim() : '',
+        fieldKey: fieldKey
+    };
 
     fetch(`/api/logs/search?q=${encodeURIComponent(q)}&${timeRangeQuery()}&app=${encodeURIComponent(app)}&severity=${encodeURIComponent(sev)}&fieldKey=${encodeURIComponent(fieldKey)}&fieldOp=${encodeURIComponent(fieldOp)}&fieldVal=${encodeURIComponent(fieldVal)}`)
         .then(r => r.json())
@@ -557,12 +594,12 @@ window.loadLogs = function() {
                     <td class="text-nowrap">${escHtml(log.time)}</td>
                     <td>${typeBadge(log.type)}</td>
                     <td><span class="badge ${severityBadgeClass(log.severity)}">${escHtml((log.severity || '').toUpperCase())}</span></td>
-                    <td class="text-nowrap">${escHtml(log.host)}</td>
-                    <td>${escHtml(log.app)}</td>
-                    <td>${escHtml(log.event_id)}</td>
-                    <td>${escHtml(log.username)}</td>
-                    <td>${escHtml(log.source_ip)}</td>
-                    <td class="text-truncate log-msg-cell" style="max-width: 350px; cursor: pointer;" onclick="showLogDetail(${idx})" title="Click to view full message">${escHtml(log.message)}</td>
+                    <td class="text-nowrap">${highlightText(log.host, termsFor('host'))}</td>
+                    <td>${highlightText(log.app, termsFor('app'))}</td>
+                    <td>${highlightText(log.event_id, termsFor('event_id'))}</td>
+                    <td>${highlightText(log.username, termsFor('username'))}</td>
+                    <td>${highlightText(log.source_ip, termsFor('source_ip'))}</td>
+                    <td class="text-truncate log-msg-cell" style="max-width: 350px; cursor: pointer;" onclick="showLogDetail(${idx})" title="Click to view full message">${highlightText(log.message, termsFor('message'))}</td>
                 </tr>
             `).join('');
         })
