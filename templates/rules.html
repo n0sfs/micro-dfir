@@ -289,6 +289,10 @@ const COMPLIANCE_FRAMEWORKS = [
 ];
 const COMPLIANCE_LABELS = Object.fromEntries(COMPLIANCE_FRAMEWORKS.map(f => [f.value, f.label]));
 
+function escAttr(s) {
+    return (s === null || s === undefined) ? '' : String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 // ---- Guided rule builder ----
 const BUILDER_FIELDS = [
     {value: 'Host', label: 'Host'},
@@ -707,19 +711,19 @@ function renderTable(rules) {
             <td>
                 <span class="badge ${rl.source === 'custom' ? 'bg-info text-dark' : 'bg-secondary'}" title="${rl.cloned_from ? 'Cloned from rule #' + rl.cloned_from : ''}">${rl.source === 'custom' ? 'Custom' : 'Sigma'}</span>
             </td>
-            <td>
+            <td title="${escAttr(rl.title)}">
                 <div class="fw-bold text-info text-truncate">${rl.title}</div>
             </td>
-            <td class="text-truncate"><span class="text-light"><i class="fa-solid fa-display me-1"></i>${rl.platform}</span></td>
-            <td>
+            <td class="text-truncate" title="${escAttr(rl.platform)}"><span class="text-light"><i class="fa-solid fa-display me-1"></i>${rl.platform}</span></td>
+            <td title="${mitreTags.length ? escAttr(mitreTags.join(', ')) : ''}">
                 ${mitreTags.length ? `<div class="rule-tags-row">${shownTags.map(t => `<span class="badge bg-primary bg-opacity-25 text-light border border-primary me-1" style="font-size:.65rem;">${t}</span>`).join('')}${extra > 0 ? `<span class="badge bg-secondary" style="font-size:.65rem;" title="${mitreTags.slice(2).join(', ')}">+${extra}</span>` : ''}</div>` : '<span class="text-muted">—</span>'}
             </td>
-            <td>
+            <td title="${(rl.compliance_tags || []).length ? escAttr(rl.compliance_tags.map(t => COMPLIANCE_LABELS[t] || t).join(', ')) : ''}">
                 ${complianceTagsHtml(rl.compliance_tags)}
             </td>
-            <td><span class="badge ${LEVEL_BADGE[rl.level] || 'bg-secondary'}">${rl.level || 'medium'}</span></td>
-            <td><span class="badge ${STATUS_BADGE[rl.status] || 'bg-secondary'}">${rl.status || 'unknown'}</span></td>
-            <td class="text-nowrap small text-muted">${rl.last_update || '—'}</td>
+            <td title="${escAttr(rl.level || 'medium')}"><span class="badge ${LEVEL_BADGE[rl.level] || 'bg-secondary'}">${rl.level || 'medium'}</span></td>
+            <td title="${escAttr(rl.status || 'unknown')}"><span class="badge ${STATUS_BADGE[rl.status] || 'bg-secondary'}">${rl.status || 'unknown'}</span></td>
+            <td class="text-nowrap small text-muted" title="${escAttr(rl.last_update || '')}">${rl.last_update || '—'}</td>
             <td>
                 <div class="form-check form-switch mb-0">
                     <input class="form-check-input" type="checkbox" ${rl.enabled ? 'checked' : ''} onchange="toggleSingle(${rl.id}, this.checked)">
