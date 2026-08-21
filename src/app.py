@@ -429,13 +429,27 @@ def threat_intel():
 
     return render_template('threat_intel.html', matches=matches, yara_files=yara_files, active_tab=active_tab, current_user=current_user)
 
+TI_FEED_TYPES = ('taxii', 'threatfox', 'otx', 'urlhaus', 'feodotracker')
+
+def _parse_sync_interval(d):
+    val = d.get('sync_interval_minutes')
+    try:
+        val = int(val)
+    except (TypeError, ValueError):
+        return None
+    return val if val > 0 else None
+
 @app.route('/api/ti/feeds', methods=['GET', 'POST'])
 @login_required
 def api_ti_feeds():
     db = get_db()
     if request.method == 'GET':
+        # api_key itself is never sent to the browser (same as password) — has_api_key
+        # tells the UI whether one's already configured without exposing the secret.
         rows = db.execute(
-            "SELECT id, name, feed_type, discovery_url, collection_id, username, enabled, last_sync, last_status, last_count FROM ti_feeds ORDER BY id DESC"
+            "SELECT id, name, feed_type, discovery_url, collection_id, username, "
+            "(api_key IS NOT NULL AND api_key != '') AS has_api_key, sync_interval_minutes, "
+            "enabled, last_sync, last_status, last_count FROM ti_feeds ORDER BY id DESC"
         ).fetchall()
         return jsonify([dict(r) for r in rows])
 
@@ -444,13 +458,17 @@ def api_ti_feeds():
     d = request.json or {}
     name = (d.get('name') or '').strip()
     feed_type = d.get('feed_type')
-    if not name or feed_type not in ('taxii', 'threatfox'):
-        return jsonify({'error': 'name and a valid feed_type (taxii/threatfox) are required'}), 400
+    if not name or feed_type not in TI_FEED_TYPES:
+        return jsonify({'error': f'name and a valid feed_type ({"/".join(TI_FEED_TYPES)}) are required'}), 400
     if feed_type == 'taxii' and not (d.get('discovery_url') and d.get('collection_id')):
         return jsonify({'error': 'TAXII feeds require a discovery_url and collection_id'}), 400
+    if feed_type == 'otx' and not d.get('api_key'):
+        return jsonify({'error': 'OTX feeds require an API key'}), 400
     db.execute(
-        "INSERT INTO ti_feeds (name, feed_type, discovery_url, collection_id, username, password, enabled) VALUES (?, ?, ?, ?, ?, ?, 1)",
-        (name, feed_type, d.get('discovery_url', ''), d.get('collection_id', ''), d.get('username', ''), d.get('password', ''))
+        "INSERT INTO ti_feeds (name, feed_type, discovery_url, collection_id, username, password, api_key, sync_interval_minutes, enabled) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
+        (name, feed_type, d.get('discovery_url', ''), d.get('collection_id', ''), d.get('username', ''),
+         d.get('password', ''), d.get('api_key', ''), _parse_sync_interval(d))
     )
     db.commit()
     return jsonify({'status': 'success'})
@@ -467,12 +485,14 @@ def api_ti_feed_detail(fid):
         return jsonify({'ok': 1})
 
     d = request.json or {}
-    # Blank password means "keep the existing one" rather than clearing it
+    # Blank password/api_key means "keep the existing one" rather than clearing it
     db.execute(
         "UPDATE ti_feeds SET name=?, discovery_url=?, collection_id=?, username=?, "
-        "password=COALESCE(NULLIF(?, ''), password), enabled=? WHERE id=?",
+        "password=COALESCE(NULLIF(?, ''), password), api_key=COALESCE(NULLIF(?, ''), api_key), "
+        "sync_interval_minutes=?, enabled=? WHERE id=?",
         (d.get('name', ''), d.get('discovery_url', ''), d.get('collection_id', ''),
-         d.get('username', ''), d.get('password', ''), 1 if d.get('enabled') else 0, fid)
+         d.get('username', ''), d.get('password', ''), d.get('api_key', ''),
+         _parse_sync_interval(d), 1 if d.get('enabled') else 0, fid)
     )
     db.commit()
     return jsonify({'status': 'success'})
@@ -1127,13 +1147,25 @@ def migrate_ti_feeds():
             collection_id TEXT,
             username TEXT,
             password TEXT,
+            api_key TEXT,
+            sync_interval_minutes INTEGER,
             enabled BOOLEAN DEFAULT 1,
             last_sync DATETIME,
             last_status TEXT,
             last_count INTEGER DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )''')
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(ti_feeds)").fetchall()}
+        if 'api_key' not in cols:
+            conn.execute("ALTER TABLE ti_feeds ADD COLUMN api_key TEXT")
+        if 'sync_interval_minutes' not in cols:
+            conn.execute("ALTER TABLE ti_feeds ADD COLUMN sync_interval_minutes INTEGER")
         conn.execute("INSERT OR IGNORE INTO ti_feeds (id, name, feed_type, enabled) VALUES (1, 'ThreatFox Recent (Public)', 'threatfox', 1)")
+        # Seeded disabled — public/no-auth so they work the moment a user flips them
+        # on, but auto-adding new IOC volume to an existing deployment without being
+        # asked isn't this migration's call to make.
+        conn.execute("INSERT OR IGNORE INTO ti_feeds (id, name, feed_type, enabled) VALUES (2, 'URLhaus Recent Malicious URLs (Public)', 'urlhaus', 0)")
+        conn.execute("INSERT OR IGNORE INTO ti_feeds (id, name, feed_type, enabled) VALUES (3, 'Feodo Tracker Botnet C2 IPs (Public)', 'feodotracker', 0)")
         conn.commit()
         conn.close()
     except Exception:

@@ -152,4 +152,17 @@ def run_detection_cycle():
     json.dump({"last_id": current_max}, open(STATE_FILE, 'w'))
 
 if __name__ == "__main__":
-    while True: run_detection_cycle(); time.sleep(30)
+    # Threat intel feed auto-sync piggybacks on this loop rather than running as its
+    # own scheduler service — this is the only long-lived background loop deployable
+    # through the existing update.sh pipeline without hand-provisioning a new systemd
+    # unit on the host. sync_due_feeds() is cheap to call every cycle: it's just a
+    # SELECT against ti_feeds unless a feed's own configured interval (as short as 15
+    # minutes) has actually elapsed, so checking every 30s adds negligible overhead.
+    from taxii_client import sync_due_feeds
+    while True:
+        run_detection_cycle()
+        try:
+            sync_due_feeds()
+        except Exception as e:
+            print(f"[-] TI feed auto-sync check failed: {e}")
+        time.sleep(30)
