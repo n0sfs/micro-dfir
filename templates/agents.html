@@ -116,7 +116,10 @@
                 </div>
 
                 <div class="col-lg-8">
-                    <label class="form-label small text-muted mb-1 fw-bold">Output Terminal</label>
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                        <label class="form-label small text-muted mb-0 fw-bold">Output Terminal</label>
+                        <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="loadCommandHistory()" title="Check for new results right now, instead of waiting for the next automatic refresh"><i class="fa-solid fa-rotate me-1"></i>Check Now</button>
+                    </div>
                     <div id="consoleTerminal" class="bg-black border border-secondary rounded p-2 font-monospace small" style="height: 360px; overflow-y:auto; white-space:pre-wrap;">
                         <span class="text-muted">Select an endpoint to begin an interactive session.</span>
                     </div>
@@ -193,7 +196,10 @@ document.addEventListener("DOMContentLoaded", function() {
     loadCommandHistory();
     renderConsoleFavSelect();
     setInterval(loadUniqueEndpoints, 30000);
-    setInterval(loadCommandHistory, 15000);
+    // The agent itself only checks in roughly every 8s, so polling much faster than
+    // that wouldn't surface results any sooner — this just keeps the steady-state
+    // refresh close to that floor instead of the coarser 15s it used to be.
+    setInterval(loadCommandHistory, 8000);
 });
 
 function switchAgentsTab(tab) {
@@ -491,6 +497,29 @@ function renderConsoleTerminal() {
 // funnels through here, and every outcome (queued, rejected by the backend, a network
 // failure, or the endpoint's eventual result) is written into the terminal instead of
 // a separate alert() popup, so the terminal is the single record of what happened.
+// After queuing a command, poll for its result faster than the steady-state 8s
+// interval for a short window — most commands complete within one or two of the
+// endpoint's own check-in cycles, so this is the common case, not the exception.
+// Falls back to the normal interval once the window closes so a slow/hung command
+// doesn't leave the page polling quickly forever.
+let consoleBurstTimer = null;
+let consoleBurstCount = 0;
+const CONSOLE_BURST_INTERVAL_MS = 3000;
+const CONSOLE_BURST_MAX_TICKS = 10;
+
+function startConsoleBurstPolling() {
+    consoleBurstCount = 0;
+    if (consoleBurstTimer) clearInterval(consoleBurstTimer);
+    consoleBurstTimer = setInterval(() => {
+        consoleBurstCount++;
+        loadCommandHistory();
+        if (consoleBurstCount >= CONSOLE_BURST_MAX_TICKS) {
+            clearInterval(consoleBurstTimer);
+            consoleBurstTimer = null;
+        }
+    }, CONSOLE_BURST_INTERVAL_MS);
+}
+
 function queueConsoleCommand(hostname, label, params, display, script) {
     const body = { hostname, label, params: params || {} };
     if (script !== undefined) body.script = script;
@@ -506,6 +535,7 @@ function queueConsoleCommand(hostname, label, params, display, script) {
         if (ok) {
             entry.id = data.id;
             entry.status = 'pending';
+            startConsoleBurstPolling();
         } else {
             entry.status = 'queue_failed';
             entry.stderr = data.error || 'Failed to queue command.';
@@ -542,6 +572,7 @@ function consoleUninstall() {
             if (ok) {
                 entry.id = data.id;
                 entry.status = 'pending';
+                startConsoleBurstPolling();
                 loadUniqueEndpoints();
             } else {
                 entry.status = 'queue_failed';

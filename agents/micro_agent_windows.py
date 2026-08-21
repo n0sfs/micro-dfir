@@ -1,5 +1,5 @@
 # Micro DFIR Windows Agent
-import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, base64
+import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, base64, threading
 
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
@@ -7,7 +7,6 @@ SERVER_URL = 'https://__HOST_URL__/api/agent/config'
 INGEST_URL = 'https://__HOST_URL__/api/ingest'
 RESULT_URL = 'https://__HOST_URL__/api/agent/result'
 SOC_TOKEN = '__SOC_TOKEN__'
-POLL_INTERVAL = 10
 SCRIPT_TIMEOUT_SECONDS = 90
 
 def install_agent():
@@ -29,8 +28,17 @@ def uninstall_agent():
     subprocess.run(f'schtasks /delete /tn "{TASK_NAME}" /f', shell=True, capture_output=True)
 
 def run_remote_script(context, cmd_id, script):
+    # Runs on a background thread (see run_agent()) so a slow or hung command can't
+    # stall the agent's own check-in/log-shipping loop for up to SCRIPT_TIMEOUT_SECONDS —
+    # previously this ran inline in the main loop, so one stuck response action also
+    # delayed every subsequent poll and log upload until it finished or timed out.
     print(f"[*] Executing remote command #{cmd_id}...", flush=True)
-    encoded = base64.b64encode(script.encode('utf-16-le')).decode('ascii')
+    # Suppresses progress-stream output (e.g. Get-FileHash's progress bar), which
+    # otherwise gets serialized as a CLIXML blob appended straight into stdout when
+    # PowerShell runs non-interactively with its output captured — confirmed in
+    # production contaminating a collect_triage result.
+    full_script = "$ProgressPreference = 'SilentlyContinue'\n" + script
+    encoded = base64.b64encode(full_script.encode('utf-16-le')).decode('ascii')
     exit_code, stdout, stderr = 1, '', ''
     try:
         proc = subprocess.run(
@@ -43,13 +51,20 @@ def run_remote_script(context, cmd_id, script):
     except Exception as e:
         stderr = f"Failed to execute command: {e}"
 
-    try:
-        payload = json.dumps({'id': cmd_id, 'exit_code': exit_code, 'stdout': stdout, 'stderr': stderr}).encode('utf-8')
-        req = urllib.request.Request(RESULT_URL, data=payload, headers={'Content-Type': 'application/json', 'X-Agent-Token': SOC_TOKEN})
-        urllib.request.urlopen(req, context=context, timeout=10)
-        print(f"[+] Result for command #{cmd_id} reported (exit {exit_code}).", flush=True)
-    except Exception as e:
-        print(f"[-] Failed to report result for command #{cmd_id}: {e}", flush=True)
+    # A command that ran (or timed out) but whose result never reaches the server sits
+    # "Sent" forever with nothing to show for it — retry the report a couple of times
+    # before giving up, rather than one transient network hiccup silently losing it.
+    payload = json.dumps({'id': cmd_id, 'exit_code': exit_code, 'stdout': stdout, 'stderr': stderr}).encode('utf-8')
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(RESULT_URL, data=payload, headers={'Content-Type': 'application/json', 'X-Agent-Token': SOC_TOKEN})
+            urllib.request.urlopen(req, context=context, timeout=10)
+            print(f"[+] Result for command #{cmd_id} reported (exit {exit_code}).", flush=True)
+            return
+        except Exception as e:
+            print(f"[-] Failed to report result for command #{cmd_id} (attempt {attempt + 1}/3): {e}", flush=True)
+            if attempt < 2:
+                time.sleep(2)
 
 _sent_event_sigs = set()
 _SENT_SIG_CAP = 5000
@@ -102,8 +117,8 @@ def run_agent():
     context = urllib.request.ssl._create_unverified_context()
     active_channels = ['Security', 'System']
     last_config_check = 0
-    LOG_INTERVAL = 15
-    CONFIG_INTERVAL = 15
+    LOG_INTERVAL = 8
+    CONFIG_INTERVAL = 8
     
     while True:
         current_time = time.time()
@@ -125,9 +140,13 @@ def run_agent():
                             return
 
                         # Server pushed a response-action script (process list, isolate, triage collection, etc.)
+                        # Dispatched on a background thread so a slow/hung command can't
+                        # delay this agent's own check-ins or log shipping.
                         if data.get('run_script'):
                             rs = data['run_script']
-                            run_remote_script(context, rs.get('id'), rs.get('script', ''))
+                            threading.Thread(
+                                target=run_remote_script, args=(context, rs.get('id'), rs.get('script', '')), daemon=True
+                            ).start()
 
                         # Update Channels
                         if data.get('channels'):
