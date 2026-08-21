@@ -107,7 +107,18 @@ def run_detection_cycle():
                 for m in cursor.execute(q).fetchall():
                     if any(_exclusion_matches(e, m) for e in rule_exclusions):
                         continue
-                    cursor.execute("INSERT INTO alerts (rule_id, event_id, severity) VALUES (?, ?, ?)", (r['id'], m['id'], severity))
+                    # host/message/username/source_ip are duplicated onto the alert row itself
+                    # (not just left as a join back to the triggering live_logs row) so Log
+                    # Search can list alerts without joining against the multi-million-row
+                    # live_logs table on every query.
+                    m_keys = m.keys()
+                    cursor.execute(
+                        "INSERT INTO alerts (rule_id, event_id, severity, host, message, username, source_ip, destination_ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (r['id'], m['id'], severity, m['host'], m['message'],
+                         m['username'] if 'username' in m_keys else None,
+                         m['source_ip'] if 'source_ip' in m_keys else None,
+                         m['destination_ip'] if 'destination_ip' in m_keys else None)
+                    )
                     try:
                         if soar_api_key:
                             requests.post("http://127.0.0.1:8000/webhook/alert", json={"rule_title": r['title'], "severity": severity, "hostname": m['host'], "agent_id": m['host'], "raw_log": m['message']}, headers={"Authorization": f"Bearer {soar_api_key}"}, timeout=2)
