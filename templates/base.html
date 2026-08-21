@@ -224,15 +224,13 @@ hr{border-color:var(--border);}
             <a href="{{ url_for('reports') }}" class="nav-link {{ 'active' if request.endpoint in ['reports','download_report','trigger_report'] else '' }}"><i class="fa-solid fa-file-pdf"></i><span>Reports</span></a>
 
             <div class="nav-group-label">UEBA</div>
-            <a href="/ueba" class="nav-link {{ 'active' if request.endpoint == 'ueba' else '' }}"><i class="fa-solid fa-user-secret"></i><span>Anomaly Detections</span></a>
-            <a href="/ueba/tuning" class="nav-link {{ 'active' if request.endpoint == 'ueba_tuning' else '' }}"><i class="fa-solid fa-sliders"></i><span>Anomaly Tuning</span></a>
+            <a href="/ueba" class="nav-link {{ 'active' if request.endpoint in ['ueba', 'ueba_tuning'] else '' }}"><i class="fa-solid fa-user-secret"></i><span>UEBA</span></a>
 
             <div class="nav-group-label">EDR</div>
             <a href="/agents" class="nav-link {{ 'active' if request.endpoint == 'agents' else '' }}"><i class="fa-solid fa-laptop-medical"></i><span>Agents</span></a>
 
             <div class="nav-group-label">Threat Intel &amp; Hunting</div>
-            <a href="/threat-intel" class="nav-link {{ 'active' if request.endpoint == 'threat_intel' else '' }}"><i class="fa-solid fa-globe"></i><span>IOCs</span></a>
-            <a href="/hunt" class="nav-link {{ 'active' if request.endpoint == 'hunt' else '' }}"><i class="fa-solid fa-crosshairs"></i><span>Threat Hunt</span></a>
+            <a href="/threat-intel" class="nav-link {{ 'active' if request.endpoint in ['threat_intel', 'hunt'] else '' }}"><i class="fa-solid fa-globe"></i><span>Threat Intel &amp; Hunting</span></a>
         </nav>
 
         <div class="sidebar-bottom">

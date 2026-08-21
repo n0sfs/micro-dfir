@@ -1,89 +1,135 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="page-header">
-    <h2><i class="fa-solid fa-globe me-2"></i>Threat Intelligence — IOCs</h2>
-    <p>Ingested indicators of compromise from configured STIX/TAXII 2.1 and bulk threat-feed sources.</p>
+    <h2><i class="fa-solid fa-globe me-2"></i>Threat Intel &amp; Hunting</h2>
+    <p>Ingested indicators of compromise and on-demand YARA file scanning.</p>
 </div>
+
+<style>
+#tiTabs .nav-link{color:var(--text-muted); border-color:transparent; background:transparent;}
+#tiTabs .nav-link:hover{color:var(--text-secondary); border-color:transparent;}
+#tiTabs .nav-link.active{color:var(--text-primary); background-color:var(--bg-card-alt); border-color:var(--border) var(--border) var(--bg-card-alt);}
+</style>
 
 <div class="row g-3 mb-4">
-    <div class="col-6 col-lg-3">
-        <div class="stat-tile">
-            <div class="stat-label">Total IOCs</div>
-            <div class="stat-value" id="statTotalIocs">—</div>
-        </div>
-    </div>
-    <div class="col-6 col-lg-3">
-        <div class="stat-tile">
-            <div class="stat-label">Active Feeds</div>
-            <div class="stat-value" id="statActiveFeeds">—</div>
-        </div>
-    </div>
-    <div class="col-6 col-lg-3">
-        <div class="stat-tile">
-            <div class="stat-label">Last Sync</div>
-            <div class="stat-value" id="statLastSync" style="font-size:1.05rem;">—</div>
-        </div>
-    </div>
-    <div class="col-6 col-lg-3">
-        <div class="stat-tile">
-            <div class="stat-label">Failing Feeds</div>
-            <div class="stat-value" id="statFailingFeeds">—</div>
-        </div>
-    </div>
-</div>
-
-<div class="card bg-dark border-secondary mb-4">
-    <div class="card-header d-flex justify-content-between align-items-center">
-        <span><i class="fa-solid fa-satellite-dish me-2"></i>Feed Sources</span>
-        {% if current_user.role == 'admin' %}
-        <button class="btn btn-primary btn-sm" onclick="openFeedModal()"><i class="fa-solid fa-plus me-1"></i> Add Feed</button>
-        {% endif %}
-    </div>
-    <div class="card-body p-0">
-        <div class="table-responsive">
-            <table class="table table-dark table-hover mb-0 align-middle">
-                <thead>
-                    <tr>
-                        <th class="ps-3">Name</th>
-                        <th>Type</th>
-                        <th>Source</th>
-                        <th>Status</th>
-                        <th>Last Sync</th>
-                        <th>IOCs</th>
-                        <th style="width:150px;">Actions</th>
-                    </tr>
-                </thead>
-                <tbody id="feedsTableBody">
-                    <tr><td colspan="7" class="text-center text-muted py-4">Loading feeds...</td></tr>
-                </tbody>
-            </table>
-        </div>
-    </div>
+    <div class="col-6 col-lg-3"><div class="stat-tile"><div class="stat-label" id="statLabel0">—</div><div class="stat-value" id="statValue0">—</div></div></div>
+    <div class="col-6 col-lg-3"><div class="stat-tile"><div class="stat-label" id="statLabel1">—</div><div class="stat-value" id="statValue1">—</div></div></div>
+    <div class="col-6 col-lg-3"><div class="stat-tile"><div class="stat-label" id="statLabel2">—</div><div class="stat-value" id="statValue2" style="font-size:1.05rem;">—</div></div></div>
+    <div class="col-6 col-lg-3"><div class="stat-tile"><div class="stat-label" id="statLabel3">—</div><div class="stat-value" id="statValue3">—</div></div></div>
 </div>
 
 <div class="card bg-dark border-secondary">
-    <div class="card-header">
-        <i class="fa-solid fa-list-check me-2"></i>Indicator Browser
+    <div class="card-header border-secondary p-0">
+        <ul class="nav nav-tabs border-0" id="tiTabs">
+            <li class="nav-item"><button type="button" class="nav-link {{ '' if active_tab == 'hunt' else 'active' }}" id="tabBtnIocs" onclick="switchTiTab('iocs')"><i class="fa-solid fa-globe me-2"></i>IOCs</button></li>
+            <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'hunt' else '' }}" id="tabBtnHunt" onclick="switchTiTab('hunt')"><i class="fa-solid fa-crosshairs me-2"></i>Threat Hunt</button></li>
+        </ul>
     </div>
-    <div class="card-body">
-        <input type="text" id="iocSearch" class="form-control bg-dark text-light border-secondary mb-3" placeholder="Search by value, name, or STIX ID..." onkeyup="if(event.key === 'Enter') loadIocs()">
-        <div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
-            <table class="table table-dark table-hover table-sm mb-0 align-middle">
-                <thead>
-                    <tr>
-                        <th>Indicator</th>
-                        <th>Name</th>
-                        <th>Type</th>
-                        <th>First Seen</th>
-                        <th>Status</th>
-                    </tr>
-                </thead>
-                <tbody id="iocTableBody">
-                    <tr><td colspan="5" class="text-center text-muted py-4">Loading indicators...</td></tr>
-                </tbody>
-            </table>
+
+    <!-- IOCs pane -->
+    <div id="paneIocs" style="display:{{ 'none' if active_tab == 'hunt' else 'block' }};">
+        <div class="card-body">
+            <div class="card bg-dark border-secondary mb-4">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span><i class="fa-solid fa-satellite-dish me-2"></i>Feed Sources</span>
+                    {% if current_user.role == 'admin' %}
+                    <button class="btn btn-primary btn-sm" onclick="openFeedModal()"><i class="fa-solid fa-plus me-1"></i> Add Feed</button>
+                    {% endif %}
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-dark table-hover mb-0 align-middle">
+                            <thead>
+                                <tr>
+                                    <th class="ps-3">Name</th>
+                                    <th>Type</th>
+                                    <th>Source</th>
+                                    <th>Status</th>
+                                    <th>Last Sync</th>
+                                    <th>IOCs</th>
+                                    <th style="width:150px;">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="feedsTableBody">
+                                <tr><td colspan="7" class="text-center text-muted py-4">Loading feeds...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card bg-dark border-secondary">
+                <div class="card-header">
+                    <i class="fa-solid fa-list-check me-2"></i>Indicator Browser
+                </div>
+                <div class="card-body">
+                    <input type="text" id="iocSearch" class="form-control bg-dark text-light border-secondary mb-3" placeholder="Search by value, name, or STIX ID..." onkeyup="if(event.key === 'Enter') loadIocs()">
+                    <div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
+                        <table class="table table-dark table-hover table-sm mb-0 align-middle">
+                            <thead>
+                                <tr>
+                                    <th>Indicator</th>
+                                    <th>Name</th>
+                                    <th>Type</th>
+                                    <th>First Seen</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="iocTableBody">
+                                <tr><td colspan="5" class="text-center text-muted py-4">Loading indicators...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div id="iocCountLabel" class="text-muted small mt-2"></div>
+                </div>
+            </div>
         </div>
-        <div id="iocCountLabel" class="text-muted small mt-2"></div>
+    </div>
+
+    <!-- Threat Hunt pane -->
+    <div id="paneHunt" style="display:{{ 'block' if active_tab == 'hunt' else 'none' }};">
+        <div class="card-body">
+            <div class="card bg-dark border-secondary shadow">
+                <div class="card-header bg-secondary text-white">
+                    <h5 class="mb-0"><i class="fa-solid fa-bug"></i> YARA File Scanner</h5>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted small">Upload a file and select the imported YARA rules to scan it against.</p>
+                    <form method="POST" action="{{ url_for('threat_intel') }}" enctype="multipart/form-data">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <div class="mb-3">
+                            <input class="form-control bg-dark text-light border-secondary" type="file" name="scan_file" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label text-info fw-bold">Active Rules ({{ yara_files|length }} loaded)</label>
+                            <div class="d-flex justify-content-between mb-2">
+                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAll(true)">Select All</button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAll(false)">Clear</button>
+                            </div>
+                            <div class="border border-secondary rounded p-2 bg-black" style="max-height: 300px; overflow-y: auto;">
+                                {% for rf in yara_files %}
+                                <div class="form-check">
+                                    <input class="form-check-input rule-checkbox" type="checkbox" name="selected_rules" value="{{ rf }}" id="rule-{{ loop.index }}" checked onchange="updateHuntStats()">
+                                    <label class="form-check-label text-light small" for="rule-{{ loop.index }}">{{ rf }}</label>
+                                </div>
+                                {% else %}
+                                <span class="text-muted small">No YARA rules found under rules/yara_imported.</span>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        <button type="submit" class="btn btn-outline-info w-100"><i class="fa-solid fa-play"></i> Run Scan</button>
+                    </form>
+                    {% if matches %}
+                    <div class="mt-3 text-start font-monospace small">
+                        <div class="text-warning fw-bold mb-1">{{ matches|length }} match(es):</div>
+                        {% for m in matches %}
+                        <div class="text-danger">[{{ m.rule }}] matched {{ m.file }}</div>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
     </div>
 </div>
 
@@ -140,6 +186,57 @@
 
 {% block scripts %}
 <script>
+const YARA_FILES_COUNT = {{ yara_files|length }};
+const LAST_MATCHES_COUNT = {{ matches|length }};
+
+// ---- Tabs + shared stat row (repurposed per active tab, not two separate rows) ----
+let activeTiTab = '{{ "hunt" if active_tab == "hunt" else "iocs" }}';
+
+function switchTiTab(tab) {
+    activeTiTab = tab;
+    const isIocs = tab !== 'hunt';
+    document.getElementById('tabBtnIocs').classList.toggle('active', isIocs);
+    document.getElementById('tabBtnHunt').classList.toggle('active', !isIocs);
+    document.getElementById('paneIocs').style.display = isIocs ? 'block' : 'none';
+    document.getElementById('paneHunt').style.display = isIocs ? 'none' : 'block';
+    updateSharedStats();
+}
+
+function setStatTile(i, label, value, large) {
+    document.getElementById(`statLabel${i}`).innerText = label;
+    document.getElementById(`statValue${i}`).innerText = value;
+    document.getElementById(`statValue${i}`).style.fontSize = large ? '1.6rem' : '1.05rem';
+}
+
+let allFeeds = [];
+let iocTotal = 0;
+
+function updateSharedStats() {
+    if (activeTiTab === 'hunt') {
+        updateHuntStats();
+    } else {
+        setStatTile(0, 'Total IOCs', iocTotal, true);
+        setStatTile(1, 'Active Feeds', allFeeds.filter(f => f.enabled).length, true);
+        const syncs = allFeeds.map(f => f.last_sync).filter(Boolean).sort();
+        setStatTile(2, 'Last Sync', syncs.length ? syncs[syncs.length - 1] : 'Never', false);
+        setStatTile(3, 'Failing Feeds', allFeeds.filter(f => f.last_status && f.last_status !== 'success').length, true);
+    }
+}
+
+function updateHuntStats() {
+    const selected = document.querySelectorAll('.rule-checkbox:checked').length;
+    setStatTile(0, 'YARA Rules Loaded', YARA_FILES_COUNT, true);
+    setStatTile(1, 'Last Scan Matches', LAST_MATCHES_COUNT, true);
+    setStatTile(2, 'Scan Status', LAST_MATCHES_COUNT > 0 ? `${LAST_MATCHES_COUNT} match(es) found` : 'Ready to scan', false);
+    setStatTile(3, 'Rules Selected', selected, true);
+}
+
+function toggleSelectAll(select) {
+    document.querySelectorAll('.rule-checkbox').forEach(cb => cb.checked = select);
+    updateHuntStats();
+}
+
+// ---- IOC Feeds ----
 let feedModal = null;
 let editingFeedId = null;
 
@@ -215,17 +312,12 @@ function statusBadge(status) {
     return `<span class="badge bg-danger" title="${status}">Failed</span>`;
 }
 
-let allFeeds = [];
-
 function loadFeeds() {
     fetch('/api/ti/feeds')
         .then(r => r.json())
         .then(feeds => {
             allFeeds = feeds;
-            document.getElementById('statActiveFeeds').innerText = feeds.filter(f => f.enabled).length;
-            document.getElementById('statFailingFeeds').innerText = feeds.filter(f => f.last_status && f.last_status !== 'success').length;
-            const syncs = feeds.map(f => f.last_sync).filter(Boolean).sort();
-            document.getElementById('statLastSync').innerText = syncs.length ? syncs[syncs.length - 1] : 'Never';
+            updateSharedStats();
 
             const tbody = document.getElementById('feedsTableBody');
             if (feeds.length === 0) {
@@ -259,7 +351,8 @@ function loadIocs() {
     fetch(`/api/ti/iocs?q=${encodeURIComponent(q)}`)
         .then(r => r.json())
         .then(data => {
-            document.getElementById('statTotalIocs').innerText = data.total ?? 0;
+            iocTotal = data.total ?? 0;
+            updateSharedStats();
             document.getElementById('iocCountLabel').innerText = `Showing ${data.iocs.length} of ${data.total} indicators`;
             const tbody = document.getElementById('iocTableBody');
             if (!data.iocs || data.iocs.length === 0) {
@@ -279,6 +372,7 @@ function loadIocs() {
         .catch(err => console.error('Error loading IOCs:', err));
 }
 
+updateHuntStats();
 loadFeeds();
 loadIocs();
 </script>

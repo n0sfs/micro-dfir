@@ -316,23 +316,48 @@ def api_ev(): return jsonify([dict(r) for r in get_db().execute("SELECT * FROM e
 # ==========================================
 # THREAT HUNT & YARA SCANNER
 # ==========================================
-@app.route('/hunt', methods=['GET', 'POST'])
+@app.route('/hunt')
 @login_required
 def hunt():
+    # Threat Hunt is now a tab on the Threat Intel & Hunting page, not its own route —
+    # the scan form posts directly to /threat-intel. This only exists to redirect old
+    # bookmarks/links straight to the right tab instead of 404ing.
+    return redirect(url_for('threat_intel', tab='hunt'))
+
+@app.route('/api/hunt/search')
+@login_required
+def api_hunt():
+    q = f"%{request.args.get('q', '')}%"
+    return jsonify([dict(r) for r in get_db().execute("SELECT * FROM events WHERE message LIKE ? OR app_name LIKE ? OR source_ip LIKE ? ORDER BY timestamp DESC LIMIT 100", (q,q,q)).fetchall()])
+
+@app.route('/api/ti/lookup', methods=['POST'])
+@login_required
+def api_ti(): return jsonify(lookup_ioc(request.get_json().get('ioc')))
+
+
+# ==========================================
+# THREAT INTELLIGENCE — FEEDS & IOCS
+# ==========================================
+@app.route('/threat-intel', methods=['GET', 'POST'])
+@login_required
+def threat_intel():
     import os
-    from flask import request, render_template, flash
+    from flask import request, flash
+
+    active_tab = request.args.get('tab', 'iocs')
+    matches = []
+    yara_files = []
+    yara_available = True
     try:
         import yara
     except ImportError:
-        flash("yara-python is missing. Run: pip install yara-python", "danger")
-        return render_template('hunt.html', matches=[], yara_files=[], current_user=current_user)
-
-    matches = []
-    yara_dir = '/opt/micro-dfir/rules/yara_imported'
+        yara_available = False
+        if request.method == 'POST':
+            flash("yara-python is missing. Run: pip install yara-python", "danger")
 
     # Fetch loaded YARA files for the UI checklist first — this is also the
     # allowlist for which rule paths a scan request may reference.
-    yara_files = []
+    yara_dir = '/opt/micro-dfir/rules/yara_imported'
     if os.path.exists(yara_dir):
         for root, dirs, files in os.walk(yara_dir):
             for file_name in files:
@@ -341,7 +366,8 @@ def hunt():
     yara_files.sort()
     yara_files_set = set(yara_files)
 
-    if request.method == 'POST':
+    if request.method == 'POST' and yara_available:
+        active_tab = 'hunt'
         if not validate_csrf():
             pass
         elif 'scan_file' not in request.files:
@@ -377,26 +403,7 @@ def hunt():
                 else:
                     flash(f"Scanned {file.filename} against {compiled_rules} active rules.", "info")
 
-    return render_template('hunt.html', matches=matches, yara_files=yara_files, current_user=current_user)
-
-@app.route('/api/hunt/search')
-@login_required
-def api_hunt():
-    q = f"%{request.args.get('q', '')}%"
-    return jsonify([dict(r) for r in get_db().execute("SELECT * FROM events WHERE message LIKE ? OR app_name LIKE ? OR source_ip LIKE ? ORDER BY timestamp DESC LIMIT 100", (q,q,q)).fetchall()])
-
-@app.route('/api/ti/lookup', methods=['POST'])
-@login_required
-def api_ti(): return jsonify(lookup_ioc(request.get_json().get('ioc')))
-
-
-# ==========================================
-# THREAT INTELLIGENCE — FEEDS & IOCS
-# ==========================================
-@app.route('/threat-intel')
-@login_required
-def threat_intel():
-    return render_template('threat_intel.html', current_user=current_user)
+    return render_template('threat_intel.html', matches=matches, yara_files=yara_files, active_tab=active_tab, current_user=current_user)
 
 @app.route('/api/ti/feeds', methods=['GET', 'POST'])
 @login_required
@@ -929,7 +936,9 @@ def ueba():
 @app.route('/ueba/tuning')
 @login_required
 def ueba_tuning():
-    return render_template('ueba_tuning.html', current_user=current_user)
+    # Anomaly Detections and Anomaly Tuning are now tabs on one page — redirect old
+    # bookmarks/links straight to the right tab instead of 404ing.
+    return redirect(url_for('ueba', tab='tuning'))
 
 @app.route('/api/ueba/detections')
 @login_required
