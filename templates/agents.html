@@ -120,6 +120,15 @@
                     <div id="consoleTerminal" class="bg-black border border-secondary rounded p-2 font-monospace small" style="height: 360px; overflow-y:auto; white-space:pre-wrap;">
                         <span class="text-muted">Select an endpoint to begin an interactive session.</span>
                     </div>
+
+                    <label for="consoleFavSelect" class="form-label small text-muted mb-1 mt-2">Favorite Commands</label>
+                    <div class="d-flex gap-2">
+                        <select id="consoleFavSelect" class="form-select form-select-sm bg-dark text-light border-secondary"></select>
+                        <button type="button" class="btn btn-sm btn-outline-primary" onclick="insertConsoleFavorite()" title="Insert into command line"><i class="fa-solid fa-arrow-right-to-bracket"></i></button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="saveConsoleFavorite()" title="Save the typed command as a favorite"><i class="fa-solid fa-star"></i></button>
+                        <button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteConsoleFavorite()" title="Delete the selected favorite"><i class="fa-solid fa-trash"></i></button>
+                    </div>
+
                     <div class="input-group input-group-sm mt-2">
                         <span class="input-group-text bg-dark text-success border-secondary font-monospace">PS&gt;</span>
                         <input type="text" id="consoleCmdInput" class="form-control bg-black text-light border-secondary font-monospace" placeholder="Type a PowerShell command and press Enter..." disabled onkeydown="if(event.key==='Enter') consoleSubmitTyped()">
@@ -182,6 +191,7 @@ document.addEventListener("DOMContentLoaded", function() {
 
     loadUniqueEndpoints();
     loadCommandHistory();
+    renderConsoleFavSelect();
     setInterval(loadUniqueEndpoints, 30000);
     setInterval(loadCommandHistory, 15000);
 });
@@ -448,7 +458,11 @@ function onConsoleHostChange() {
 
 function consoleEntryHtml(entry) {
     let out = `<div class="term-line text-success">PS&gt; ${escHtml(entry.display)}</div>`;
-    if (entry.status === 'pending' || entry.status === 'sent') {
+    if (entry.status === 'queuing') {
+        out += `<div class="term-line text-muted">[queuing...]</div>`;
+    } else if (entry.status === 'queue_failed') {
+        out += `<div class="term-line text-danger">${escHtml(entry.stderr)}</div>`;
+    } else if (entry.status === 'pending' || entry.status === 'sent') {
         out += `<div class="term-line text-muted">[waiting for endpoint check-in...]</div>`;
     } else {
         if (entry.stdout) out += `<div class="term-line">${escHtml(entry.stdout)}</div>`;
@@ -473,18 +487,36 @@ function renderConsoleTerminal() {
     term.scrollTop = term.scrollHeight;
 }
 
+// Every command run from the console — canned action, param form, or typed prompt —
+// funnels through here, and every outcome (queued, rejected by the backend, a network
+// failure, or the endpoint's eventual result) is written into the terminal instead of
+// a separate alert() popup, so the terminal is the single record of what happened.
 function queueConsoleCommand(hostname, label, params, display, script) {
     const body = { hostname, label, params: params || {} };
     if (script !== undefined) body.script = script;
+
+    if (!consoleSessions[hostname]) consoleSessions[hostname] = [];
+    const entry = { id: null, status: 'queuing', display, stdout: '', stderr: '' };
+    consoleSessions[hostname].push(entry);
+    if (hostname === consoleSelectedHost) renderConsoleTerminal();
+
     fetch('/api/agent/commands', {
         method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
     }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
-        if (!ok) { alert(data.error || 'Failed to queue command.'); return; }
-        if (!consoleSessions[hostname]) consoleSessions[hostname] = [];
-        consoleSessions[hostname].push({ id: data.id, status: 'pending', display, stdout: '', stderr: '' });
+        if (ok) {
+            entry.id = data.id;
+            entry.status = 'pending';
+        } else {
+            entry.status = 'queue_failed';
+            entry.stderr = data.error || 'Failed to queue command.';
+        }
         if (hostname === consoleSelectedHost) renderConsoleTerminal();
         loadCommandHistory();
-    }).catch(err => alert('Error queuing command: ' + err));
+    }).catch(err => {
+        entry.status = 'queue_failed';
+        entry.stderr = 'Network error: ' + err;
+        if (hostname === consoleSelectedHost) renderConsoleTerminal();
+    });
 }
 
 function consoleRun(label, params, confirmMsg) {
@@ -495,7 +527,32 @@ function consoleRun(label, params, confirmMsg) {
 }
 
 function consoleUninstall() {
-    removeEndpoint(consoleSelectedHost);
+    if (!consoleSelectedHost) return;
+    const hostname = consoleSelectedHost;
+    if (!confirm(`Uninstall the MicroDFIR agent on ${hostname}? It will remove itself on its next check-in.`)) return;
+
+    if (!consoleSessions[hostname]) consoleSessions[hostname] = [];
+    const entry = { id: null, status: 'queuing', display: 'Uninstall-Agent', stdout: '', stderr: '' };
+    consoleSessions[hostname].push(entry);
+    if (hostname === consoleSelectedHost) renderConsoleTerminal();
+
+    fetch(`/api/agent/${encodeURIComponent(hostname)}`, { method: 'DELETE' })
+        .then(r => r.json().then(data => ({ok: r.ok, data})))
+        .then(({ok, data}) => {
+            if (ok) {
+                entry.id = data.id;
+                entry.status = 'pending';
+                loadUniqueEndpoints();
+            } else {
+                entry.status = 'queue_failed';
+                entry.stderr = data.error || 'Failed to queue removal.';
+            }
+            if (hostname === consoleSelectedHost) renderConsoleTerminal();
+        }).catch(err => {
+            entry.status = 'queue_failed';
+            entry.stderr = 'Error removing endpoint: ' + err;
+            if (hostname === consoleSelectedHost) renderConsoleTerminal();
+        });
 }
 
 function consoleShowParamForm(label) {
@@ -550,7 +607,10 @@ function reconcileConsoleSessions() {
     let dirty = false;
     Object.keys(consoleSessions).forEach(host => {
         consoleSessions[host].forEach(entry => {
-            if (entry.status === 'done' || entry.status === 'failed') return;
+            // 'queuing'/'queue_failed' never made it into agent_commands (no id to match
+            // against), and 'done'/'failed' are already terminal — only entries still
+            // waiting on the endpoint need reconciling against the latest history poll.
+            if (entry.status !== 'pending' && entry.status !== 'sent') return;
             const match = cmdHistoryCache.find(c => c.id === entry.id);
             if (match && match.status !== entry.status) {
                 entry.status = match.status;
@@ -561,6 +621,73 @@ function reconcileConsoleSessions() {
         });
     });
     if (dirty) renderConsoleTerminal();
+}
+
+// ---- Favorite PowerShell commands (typed-prompt shortcuts) ----
+const CONSOLE_FAV_KEY = 'microdfir_console_favorites';
+const CONSOLE_FAV_DEFAULTS = [
+    { name: 'List Processes (detailed)', script: "Get-Process | Sort-Object CPU -Descending | Select-Object -First 20 Name,Id,CPU,WorkingSet | Format-Table -AutoSize | Out-String" },
+    { name: 'Network Connections', script: "Get-NetTCPConnection -State Established | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,OwningProcess | Format-Table -AutoSize | Out-String" },
+    { name: 'Local Users', script: "Get-LocalUser | Select-Object Name,Enabled,LastLogon | Format-Table -AutoSize | Out-String" },
+    { name: 'Running Services', script: "Get-Service | Where-Object { $_.Status -eq 'Running' } | Select-Object Name,DisplayName | Format-Table -AutoSize | Out-String" },
+    { name: 'Recent Security Events', script: "Get-WinEvent -LogName Security -MaxEvents 20 | Select-Object TimeCreated,Id,Message | Format-List | Out-String" },
+    { name: 'System Info', script: "Get-ComputerInfo | Select-Object OsName,OsVersion,CsName,OsArchitecture | Format-List | Out-String" },
+    { name: 'Scheduled Tasks (enabled)', script: "Get-ScheduledTask | Where-Object { $_.State -eq 'Ready' } | Select-Object TaskName,State | Format-Table -AutoSize | Out-String" },
+    { name: 'Installed Software', script: "Get-ItemProperty 'HKLM:\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' -ErrorAction SilentlyContinue | Where-Object DisplayName | Select-Object DisplayName,DisplayVersion | Format-Table -AutoSize | Out-String" }
+];
+
+function loadConsoleFavorites() {
+    try {
+        const raw = localStorage.getItem(CONSOLE_FAV_KEY);
+        if (raw) return JSON.parse(raw);
+    } catch (e) {}
+    return CONSOLE_FAV_DEFAULTS.slice();
+}
+
+function saveConsoleFavoritesList(favs) {
+    try { localStorage.setItem(CONSOLE_FAV_KEY, JSON.stringify(favs)); } catch (e) {}
+}
+
+function renderConsoleFavSelect() {
+    const sel = document.getElementById('consoleFavSelect');
+    if (!sel) return;
+    const favs = loadConsoleFavorites();
+    sel.innerHTML = '<option value="">-- Favorite commands --</option>' +
+        favs.map((f, i) => `<option value="${i}">${escHtml(f.name)}</option>`).join('');
+}
+
+function insertConsoleFavorite() {
+    const sel = document.getElementById('consoleFavSelect');
+    if (!sel.value) return;
+    const favs = loadConsoleFavorites();
+    const fav = favs[parseInt(sel.value, 10)];
+    if (!fav) return;
+    document.getElementById('consoleCmdInput').value = fav.script;
+    document.getElementById('consoleCmdInput').focus();
+}
+
+function saveConsoleFavorite() {
+    const script = (document.getElementById('consoleCmdInput').value || '').trim();
+    if (!script) { alert('Type a command in the prompt below first, then save it as a favorite.'); return; }
+    const defaultName = script.length > 40 ? script.slice(0, 40) + '…' : script;
+    const name = prompt('Name this favorite command:', defaultName);
+    if (!name) return;
+    const favs = loadConsoleFavorites();
+    favs.push({ name, script });
+    saveConsoleFavoritesList(favs);
+    renderConsoleFavSelect();
+}
+
+function deleteConsoleFavorite() {
+    const sel = document.getElementById('consoleFavSelect');
+    if (!sel.value) { alert('Select a favorite to delete first.'); return; }
+    const idx = parseInt(sel.value, 10);
+    const favs = loadConsoleFavorites();
+    const fav = favs[idx];
+    if (!fav || !confirm(`Delete favorite "${fav.name}"?`)) return;
+    favs.splice(idx, 1);
+    saveConsoleFavoritesList(favs);
+    renderConsoleFavSelect();
 }
 
 // ---- Command history ----
