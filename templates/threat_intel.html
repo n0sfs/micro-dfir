@@ -9,6 +9,10 @@
 #tiTabs .nav-link{color:var(--text-muted); border-color:transparent; background:transparent;}
 #tiTabs .nav-link:hover{color:var(--text-secondary); border-color:transparent;}
 #tiTabs .nav-link.active{color:var(--text-primary); background-color:var(--bg-card-alt); border-color:var(--border) var(--border) var(--bg-card-alt);}
+#iocTable .ioc-th{white-space:nowrap;}
+#iocTable .th-icon-btn{background:none; border:none; color:var(--text-muted); padding:0 2px; font-size:.72rem; cursor:pointer; line-height:1;}
+#iocTable .th-icon-btn:hover{color:var(--text-secondary);}
+#iocTable .th-icon-btn.active-filter{color:var(--accent);}
 </style>
 
 <div class="row g-3 mb-4">
@@ -65,20 +69,49 @@
                     <i class="fa-solid fa-list-check me-2"></i>Indicator Browser
                 </div>
                 <div class="card-body">
-                    <input type="text" id="iocSearch" class="form-control bg-dark text-light border-secondary mb-3" placeholder="Search by value, name, or STIX ID..." onkeyup="if(event.key === 'Enter') loadIocs()">
+                    <div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
+                        <input type="text" id="iocSearch" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:320px;" placeholder="Search by value, name, or STIX ID..." onkeyup="if(event.key === 'Enter') loadIocs()">
+                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadIocs()"><i class="fa-solid fa-search me-1"></i>Search</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="clearIocFilters()"><i class="fa-solid fa-xmark me-1"></i>Clear Filters</button>
+                    </div>
                     <div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
-                        <table class="table table-dark table-hover table-sm mb-0 align-middle">
+                        <table class="table table-dark table-hover table-sm mb-0 align-middle" id="iocTable">
                             <thead>
                                 <tr>
                                     <th>Indicator</th>
                                     <th>Name</th>
-                                    <th>Type</th>
+                                    <th class="ioc-th">
+                                        <div class="d-flex align-items-center justify-content-between">
+                                            <span>Type</span>
+                                            <div class="dropdown">
+                                                <button type="button" class="th-icon-btn" id="filterBtnType" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                                <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuType" style="min-width:200px;"></div>
+                                            </div>
+                                        </div>
+                                    </th>
+                                    <th class="ioc-th">
+                                        <div class="d-flex align-items-center justify-content-between">
+                                            <span>Source</span>
+                                            <div class="dropdown">
+                                                <button type="button" class="th-icon-btn" id="filterBtnFeed_id" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                                <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuFeed_id" style="min-width:200px;"></div>
+                                            </div>
+                                        </div>
+                                    </th>
                                     <th>First Seen</th>
-                                    <th>Status</th>
+                                    <th class="ioc-th">
+                                        <div class="d-flex align-items-center justify-content-between">
+                                            <span>Status</span>
+                                            <div class="dropdown">
+                                                <button type="button" class="th-icon-btn" id="filterBtnStatus" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                                <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuStatus" style="min-width:150px;"></div>
+                                            </div>
+                                        </div>
+                                    </th>
                                 </tr>
                             </thead>
                             <tbody id="iocTableBody">
-                                <tr><td colspan="5" class="text-center text-muted py-4">Loading indicators...</td></tr>
+                                <tr><td colspan="6" class="text-center text-muted py-4">Loading indicators...</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -400,6 +433,7 @@ function loadFeeds() {
         .then(feeds => {
             allFeeds = feeds;
             updateSharedStats();
+            populateIocFilterMenus();
 
             const tbody = document.getElementById('feedsTableBody');
             if (feeds.length === 0) {
@@ -434,25 +468,111 @@ function loadFeeds() {
         .catch(err => console.error('Error loading feeds:', err));
 }
 
+// ---- Indicator Browser column filters (Type / Source / Status) ----
+// Server-side, not client-side: stix_indicators can hold many more rows than any one
+// page fetched via `limit`, so filtering only what's already loaded would silently
+// miss matches outside the current page. Same combined-AND-conditions pattern as the
+// feeds/rules tables elsewhere in this app.
+let iocFilters = { type: [], feed_id: [], status: [] };
+
+function buildIocFilterMenu(menuId, colKey, options) {
+    const menu = document.getElementById(menuId);
+    if (!menu) return;
+    let html = `<div class="menu-option-list" style="max-height:220px; overflow-y:auto;">`;
+    if (!options.length) {
+        html += `<div class="text-muted small px-1">No options</div>`;
+    }
+    options.forEach((o, i) => {
+        const checked = iocFilters[colKey].includes(String(o.value)) ? 'checked' : '';
+        const cbId = `${menuId}_chk${i}`;
+        const safeVal = escHtml(String(o.value));
+        html += `<div class="form-check">
+            <input class="form-check-input" type="checkbox" data-value="${safeVal}" id="${cbId}" ${checked} onchange="toggleIocFilter('${colKey}', this.dataset.value, this.checked)">
+            <label class="form-check-label small" for="${cbId}">${escHtml(o.label)}</label>
+        </div>`;
+    });
+    html += `</div>`;
+    menu.innerHTML = html;
+}
+
+function updateIocFilterButtonState(colKey) {
+    const cap = colKey.charAt(0).toUpperCase() + colKey.slice(1);
+    const btn = document.getElementById(`filterBtn${cap}`);
+    if (btn) btn.classList.toggle('active-filter', iocFilters[colKey].length > 0);
+}
+
+function toggleIocFilter(colKey, value, checked) {
+    const set = new Set(iocFilters[colKey]);
+    if (checked) set.add(value); else set.delete(value);
+    iocFilters[colKey] = Array.from(set);
+    updateIocFilterButtonState(colKey);
+    loadIocs();
+}
+
+function clearIocFilters() {
+    iocFilters = { type: [], feed_id: [], status: [] };
+    document.getElementById('iocSearch').value = '';
+    ['type', 'feed_id', 'status'].forEach(updateIocFilterButtonState);
+    populateIocFilterMenus();
+    loadIocFacets();
+    loadIocs();
+}
+
+function populateIocFilterMenus() {
+    buildIocFilterMenu('filterMenuFeed_id', 'feed_id', allFeeds.map(f => ({ value: f.id, label: f.name })));
+    buildIocFilterMenu('filterMenuStatus', 'status', [{ value: '0', label: 'Active' }, { value: '1', label: 'Revoked' }]);
+}
+
+function loadIocFacets() {
+    fetch('/api/ti/iocs/facets')
+        .then(r => r.json())
+        .then(data => {
+            buildIocFilterMenu('filterMenuType', 'type', (data.types || []).map(t => ({ value: t, label: t })));
+        })
+        .catch(err => console.error('Error loading IOC facets:', err));
+}
+
+// Same clipping issue solved elsewhere in this app (Agents, Detection Rules) — these
+// menus live inside a scrollable table container, so absolute-positioned dropdowns
+// get cut off without forcing fixed-strategy Popper placement.
+function initIocFilterDropdowns() {
+    document.querySelectorAll('#iocTable thead [data-bs-toggle="dropdown"]').forEach(el => {
+        bootstrap.Dropdown.getOrCreateInstance(el, { popperConfig: { strategy: 'fixed' } });
+    });
+}
+
+function ioTypeBadge(type) {
+    return type ? `<span class="badge bg-secondary">${escHtml(type)}</span>` : '<span class="text-muted">—</span>';
+}
+
 function loadIocs() {
     const q = document.getElementById('iocSearch').value;
-    fetch(`/api/ti/iocs?q=${encodeURIComponent(q)}`)
+    const params = new URLSearchParams();
+    if (q) params.set('q', q);
+    if (iocFilters.type.length) params.set('type', iocFilters.type.join(','));
+    if (iocFilters.feed_id.length) params.set('feed_id', iocFilters.feed_id.join(','));
+    if (iocFilters.status.length) params.set('status', iocFilters.status.join(','));
+    fetch(`/api/ti/iocs?${params.toString()}`)
         .then(r => r.json())
         .then(data => {
             iocTotal = data.total ?? 0;
             updateSharedStats();
-            document.getElementById('iocCountLabel').innerText = `Showing ${data.iocs.length} of ${data.total} indicators`;
+            const filtered = q || iocFilters.type.length || iocFilters.feed_id.length || iocFilters.status.length;
+            document.getElementById('iocCountLabel').innerText = filtered
+                ? `Showing ${data.iocs.length} of ${data.total} matching indicators`
+                : `Showing ${data.iocs.length} of ${data.total} indicators`;
             const tbody = document.getElementById('iocTableBody');
             if (!data.iocs || data.iocs.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">No indicators ingested yet. Add or sync a feed above.</td></tr>';
+                tbody.innerHTML = `<tr><td colspan="6" class="text-center text-muted py-4">${filtered ? 'No indicators match your filters.' : 'No indicators ingested yet. Add or sync a feed above.'}</td></tr>`;
                 return;
             }
             tbody.innerHTML = data.iocs.map(i => `
                 <tr>
-                    <td class="font-monospace small">${i.pattern}</td>
-                    <td>${i.name || ''}</td>
-                    <td><span class="badge bg-secondary">${i.type}</span></td>
-                    <td class="text-nowrap small text-muted">${i.valid_from || ''}</td>
+                    <td class="font-monospace small">${escHtml(i.pattern)}</td>
+                    <td>${escHtml(i.name || '')}</td>
+                    <td>${ioTypeBadge(i.ioc_type)}</td>
+                    <td class="text-muted small">${escHtml(i.source_name || 'Unknown')}</td>
+                    <td class="text-nowrap small text-muted">${escHtml(i.valid_from || '')}</td>
                     <td>${i.revoked ? '<span class="badge bg-secondary">Revoked</span>' : '<span class="badge bg-danger">Active</span>'}</td>
                 </tr>
             `).join('');
@@ -463,5 +583,7 @@ function loadIocs() {
 updateHuntStats();
 loadFeeds();
 loadIocs();
+loadIocFacets();
+initIocFilterDropdowns();
 </script>
 {% endblock %}

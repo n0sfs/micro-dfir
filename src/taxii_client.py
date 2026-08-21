@@ -1,10 +1,21 @@
-import sqlite3, requests, datetime
+import sqlite3, requests, datetime, re
 DB_PATH = "/opt/micro-dfir/siem.db"
 
 def _connect():
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
+
+# STIX patterns look like "[ipv4-addr:value = '1.2.3.4']" or
+# "[domain-name:value = 'evil.com' AND file:hashes.SHA256 = '...']" — pulling the
+# first object-type token out of the pattern is a best-effort classification (a
+# generic TAXII feed doesn't otherwise expose a clean "this is an IP/domain/hash"
+# field the way the other feeds do), not a full STIX pattern parse.
+_STIX_PATTERN_TYPE_RE = re.compile(r'\[\s*([a-zA-Z0-9\-]+):')
+
+def _guess_stix_pattern_type(pattern):
+    m = _STIX_PATTERN_TYPE_RE.match(pattern or '')
+    return m.group(1) if m else 'stix-pattern'
 
 def sync_taxii(feed):
     headers = {"Accept": "application/taxii+json;version=2.1"}
@@ -24,9 +35,11 @@ def sync_taxii(feed):
     conn = _connect(); c = 0
     for obj in objects:
         if obj.get("type") == "indicator":
+            pattern = obj.get("pattern", "")
             conn.execute(
-                "INSERT OR REPLACE INTO stix_indicators (stix_id, type, name, description, pattern, valid_from, revoked) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (obj.get("id"), "indicator", obj.get("name", ""), obj.get("description", ""), obj.get("pattern", ""), obj.get("valid_from", ""), 1 if obj.get("revoked", False) else 0)
+                "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (obj.get("id"), "indicator", _guess_stix_pattern_type(pattern), obj.get("name", ""), obj.get("description", ""),
+                 pattern, obj.get("valid_from", ""), 1 if obj.get("revoked", False) else 0, feed["id"])
             )
             c += 1
     conn.commit(); conn.close()
@@ -45,8 +58,8 @@ def sync_threatfox(feed):
             name = f"{malware} ({e.get('threat_type', 'ioc')})"
             desc = f"ioc_type={e.get('ioc_type')}, confidence={e.get('confidence_level')}"
             conn.execute(
-                "INSERT OR REPLACE INTO stix_indicators (stix_id, type, name, description, pattern, valid_from, revoked) VALUES (?, ?, ?, ?, ?, ?, 0)",
-                (stix_id, "indicator", name, desc, e.get("ioc_value", ""), e.get("first_seen_utc", ""))
+                "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
+                (stix_id, "indicator", e.get("ioc_type", "") or "unknown", name, desc, e.get("ioc_value", ""), e.get("first_seen_utc", ""), feed["id"])
             )
             c += 1
     conn.commit(); conn.close()
@@ -68,8 +81,8 @@ def sync_urlhaus(feed):
             name = e.get("threat") or "malware_download"
             desc = f"reporter={e.get('reporter', '')}" + (f", tags={tags}" if tags else "")
             conn.execute(
-                "INSERT OR REPLACE INTO stix_indicators (stix_id, type, name, description, pattern, valid_from, revoked) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (stix_id, "indicator", name, desc, e.get("url", ""), e.get("dateadded", ""), 1 if e.get("url_status") == "offline" else 0)
+                "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) VALUES (?, ?, 'url', ?, ?, ?, ?, ?, ?)",
+                (stix_id, "indicator", name, desc, e.get("url", ""), e.get("dateadded", ""), 1 if e.get("url_status") == "offline" else 0, feed["id"])
             )
             c += 1
     conn.commit(); conn.close()
@@ -91,8 +104,8 @@ def sync_feodotracker(feed):
         name = f"{e.get('malware') or 'Unknown'} C2"
         desc = f"port={port}, status={e.get('status', '')}, country={e.get('country', '')}, as_name={e.get('as_name', '')}"
         conn.execute(
-            "INSERT OR REPLACE INTO stix_indicators (stix_id, type, name, description, pattern, valid_from, revoked) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (stix_id, "indicator", name, desc, ip, e.get("first_seen", ""), 1 if e.get("status") == "offline" else 0)
+            "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) VALUES (?, ?, 'ip', ?, ?, ?, ?, ?, ?)",
+            (stix_id, "indicator", name, desc, ip, e.get("first_seen", ""), 1 if e.get("status") == "offline" else 0, feed["id"])
         )
         c += 1
     conn.commit(); conn.close()
@@ -117,11 +130,12 @@ def sync_otx(feed):
         pulse_name = pulse.get("name") or "OTX Pulse"
         for ind in pulse.get("indicators", []):
             stix_id = f"otx--{pulse_id}--{ind.get('id', '')}"
+            ind_type = ind.get("type", "") or "unknown"
             conn.execute(
-                "INSERT OR REPLACE INTO stix_indicators (stix_id, type, name, description, pattern, valid_from, revoked) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (stix_id, "indicator", f"{pulse_name} ({ind.get('type', '')})",
+                "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (stix_id, "indicator", ind_type, f"{pulse_name} ({ind_type})",
                  ind.get("description") or pulse.get("description", ""), ind.get("indicator", ""),
-                 ind.get("created", ""), 0 if ind.get("is_active", True) else 1)
+                 ind.get("created", ""), 0 if ind.get("is_active", True) else 1, feed["id"])
             )
             c += 1
     conn.commit(); conn.close()

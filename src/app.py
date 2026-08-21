@@ -511,17 +511,46 @@ def api_ti_iocs():
     db = get_db()
     q = request.args.get('q', '').strip()
     limit = request.args.get('limit', 100, type=int)
+    ioc_types = [t for t in request.args.get('type', '').split(',') if t]
+    feed_ids = [f for f in request.args.get('feed_id', '').split(',') if f]
+    statuses = [s for s in request.args.get('status', '').split(',') if s in ('0', '1')]
+
+    # Aliased (si/tf) since this joins against ti_feeds to resolve each indicator's
+    # source feed name — stix_indicators only ever stored a feed_id, never a name.
     conditions, params = [], []
     if q:
-        conditions.append("(pattern LIKE ? OR name LIKE ? OR stix_id LIKE ?)")
+        conditions.append("(si.pattern LIKE ? OR si.name LIKE ? OR si.stix_id LIKE ?)")
         params.extend([f'%{q}%'] * 3)
+    if ioc_types:
+        conditions.append(f"si.ioc_type IN ({','.join('?' * len(ioc_types))})")
+        params.extend(ioc_types)
+    if feed_ids:
+        conditions.append(f"si.feed_id IN ({','.join('?' * len(feed_ids))})")
+        params.extend(feed_ids)
+    if statuses:
+        conditions.append(f"si.revoked IN ({','.join('?' * len(statuses))})")
+        params.extend(statuses)
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     rows = db.execute(
-        f"SELECT stix_id, type, name, description, pattern, valid_from, revoked, inserted_at FROM stix_indicators {where} ORDER BY inserted_at DESC LIMIT ?",
+        f"SELECT si.stix_id, si.type, si.ioc_type, si.name, si.description, si.pattern, si.valid_from, si.revoked, "
+        f"si.inserted_at, si.feed_id, tf.name AS source_name FROM stix_indicators si "
+        f"LEFT JOIN ti_feeds tf ON si.feed_id = tf.id {where} ORDER BY si.inserted_at DESC LIMIT ?",
         params + [limit]
     ).fetchall()
-    total = db.execute(f"SELECT COUNT(*) FROM stix_indicators {where}", params).fetchone()[0]
+    total = db.execute(f"SELECT COUNT(*) FROM stix_indicators si {where}", params).fetchone()[0]
     return jsonify({'iocs': [dict(r) for r in rows], 'total': total})
+
+@app.route('/api/ti/iocs/facets', methods=['GET'])
+@login_required
+def api_ti_iocs_facets():
+    # The distinct ioc_type values across the *whole* table, not just the currently
+    # loaded page — otherwise the Type filter's option list would silently miss
+    # anything not present in the first `limit` rows.
+    db = get_db()
+    types = [r[0] for r in db.execute(
+        "SELECT DISTINCT ioc_type FROM stix_indicators WHERE ioc_type IS NOT NULL AND ioc_type != '' ORDER BY ioc_type"
+    ).fetchall()]
+    return jsonify({'types': types})
 
 
 @app.route('/api/droprules', methods=['GET', 'POST'])
@@ -1166,6 +1195,25 @@ def migrate_ti_feeds():
         # asked isn't this migration's call to make.
         conn.execute("INSERT OR IGNORE INTO ti_feeds (id, name, feed_type, enabled) VALUES (2, 'URLhaus Recent Malicious URLs (Public)', 'urlhaus', 0)")
         conn.execute("INSERT OR IGNORE INTO ti_feeds (id, name, feed_type, enabled) VALUES (3, 'Feodo Tracker Botnet C2 IPs (Public)', 'feodotracker', 0)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_stix_indicators():
+    # `type` has only ever held the literal STIX object type ("indicator") on every
+    # row from every feed — useless for filtering. ioc_type carries each feed's own
+    # classification (ip, url, domain, FileHash-SHA256, ...) instead. feed_id lets the
+    # IOC browser show and filter by which feed an indicator actually came from,
+    # which the schema never tracked before this.
+    try:
+        import sqlite3
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(stix_indicators)").fetchall()}
+        if 'ioc_type' not in cols:
+            conn.execute("ALTER TABLE stix_indicators ADD COLUMN ioc_type TEXT")
+        if 'feed_id' not in cols:
+            conn.execute("ALTER TABLE stix_indicators ADD COLUMN feed_id INTEGER")
         conn.commit()
         conn.close()
     except Exception:
@@ -2318,6 +2366,7 @@ def delete_agent(hostname):
 # bug bit both _resolve_ingest_port and get_soc_secret when this block sat mid-file.
 migrate_settings()
 migrate_ti_feeds()
+migrate_stix_indicators()
 migrate_agent_commands()
 migrate_alerts_columns()
 migrate_alerts_enrichment()
