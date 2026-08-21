@@ -497,6 +497,29 @@ def api_settings_backup():
     stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     return send_file(DB_PATH, mimetype='application/octet-stream', as_attachment=True, download_name=f'microdfir_backup_{stamp}.db')
 
+@app.route('/api/settings/purge', methods=['POST'])
+@login_required
+def api_settings_purge():
+    from flask import request, jsonify
+    import datetime
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+
+    days = (request.json or {}).get('days', 30)
+    try:
+        days = int(days)
+        if days < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({'error': 'days must be a positive integer'}), 400
+
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+    db = get_db()
+    cur = db.execute("DELETE FROM live_logs WHERE timestamp < ?", (cutoff,))
+    deleted = cur.rowcount
+    db.commit()
+    return jsonify({'status': 'success', 'deleted': deleted, 'cutoff': cutoff})
+
 @app.route("/settings/network", methods=["POST"])
 @login_required
 def settings_network():
