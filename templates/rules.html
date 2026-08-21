@@ -105,19 +105,89 @@
     </div>
 </div>
 
+<style>
+#ruleEditorTabs .nav-link{color:var(--text-muted); border-color:transparent; background:transparent;}
+#ruleEditorTabs .nav-link:hover{color:var(--text-secondary); border-color:transparent;}
+#ruleEditorTabs .nav-link.active{color:var(--text-primary); background-color:var(--bg-card-alt); border-color:var(--border) var(--border) var(--bg-card-alt);}
+</style>
+
 <!-- Rule Editor Modal -->
 <div class="modal fade" id="ruleModal" tabindex="-1">
-  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
     <div class="modal-content bg-dark text-light border-secondary">
       <div class="modal-header border-secondary">
-        <h5 class="modal-title" id="ruleModalTitle">New Sigma Rule</h5>
+        <h5 class="modal-title" id="ruleModalTitle">New Custom Rule</h5>
         <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
         <div id="ruleMetaBox" class="small text-muted mb-2" style="display:none;"></div>
         <div id="ruleReadonlyNotice" class="alert alert-secondary py-2 small" style="display:none;"><i class="fa-solid fa-lock me-1"></i>Sigma-sourced rules are read-only. Clone this rule to create an editable custom copy.</div>
-        <p class="text-muted small">Paste or edit a Sigma rule in YAML format. The rule's <code>title</code> field is used as its display name.</p>
-        <textarea id="ruleYamlInput" class="form-control bg-black text-light border-secondary font-monospace small" rows="18" spellcheck="false" placeholder="title: My Detection Rule&#10;status: experimental&#10;logsource:&#10;  product: windows&#10;  category: process_creation&#10;detection:&#10;  selection:&#10;    CommandLine|contains: 'example'&#10;  condition: selection"></textarea>
+
+        <ul class="nav nav-tabs border-secondary mb-3" id="ruleEditorTabs">
+            <li class="nav-item"><button type="button" class="nav-link active" id="tabBtnBuilder" onclick="switchRuleTab('builder')">Guided Builder</button></li>
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnYaml" onclick="switchRuleTab('yaml')">Raw YAML</button></li>
+        </ul>
+
+        <!-- Guided Builder pane -->
+        <div id="paneBuilder">
+            <div class="row g-2 mb-3">
+                <div class="col-md-6">
+                    <label class="form-label small text-muted mb-1">Rule Title</label>
+                    <input type="text" id="bTitle" class="form-control bg-dark text-light border-secondary" placeholder="e.g. Multiple Failed Logins Followed by Success" oninput="renderYamlPreview()">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small text-muted mb-1">Severity</label>
+                    <select id="bSeverity" class="form-select bg-dark text-light border-secondary" onchange="renderYamlPreview()">
+                        <option value="informational">Informational</option>
+                        <option value="low">Low</option>
+                        <option value="medium" selected>Medium</option>
+                        <option value="high">High</option>
+                        <option value="critical">Critical</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small text-muted mb-1">Platform / Log Source</label>
+                    <input type="text" id="bPlatform" class="form-control bg-dark text-light border-secondary" placeholder="custom" oninput="renderYamlPreview()">
+                </div>
+                <div class="col-md-8">
+                    <label class="form-label small text-muted mb-1">Description</label>
+                    <input type="text" id="bDescription" class="form-control bg-dark text-light border-secondary" placeholder="What this rule detects and why it matters" oninput="renderYamlPreview()">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small text-muted mb-1">MITRE ATT&CK Tags (comma-separated)</label>
+                    <input type="text" id="bMitre" class="form-control bg-dark text-light border-secondary" placeholder="attack.t1110, attack.brute-force" oninput="renderYamlPreview()">
+                </div>
+            </div>
+
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <label class="form-label small text-muted mb-0">Match Conditions <span class="text-muted">— facts this rule looks for</span></label>
+                <div id="groupCombineWrap" style="display:none;">
+                    <span class="small text-muted me-1">Combine groups with:</span>
+                    <select id="bCombine" class="form-select form-select-sm bg-dark text-light border-secondary d-inline-block w-auto" onchange="builderState.combine = this.value; renderYamlPreview();">
+                        <option value="or">ANY group matches (OR)</option>
+                        <option value="and">ALL groups match (AND)</option>
+                    </select>
+                </div>
+            </div>
+            <div id="matchGroups"></div>
+            <button type="button" class="btn btn-sm btn-outline-primary mb-3" onclick="addGroup()"><i class="fa-solid fa-plus me-1"></i> Add OR Group</button>
+
+            <div class="mb-2">
+                <label class="form-label small text-muted mb-0">Exclude <span class="text-muted">— suppress the alert if these also match (optional)</span></label>
+            </div>
+            <div id="excludeGroup"></div>
+            <button type="button" class="btn btn-sm btn-outline-secondary mb-3" id="addExcludeBtn" onclick="enableExclude()"><i class="fa-solid fa-plus me-1"></i> Add Exclusion</button>
+
+            <label class="form-label small text-muted mb-1">Generated YAML Preview</label>
+            <pre id="yamlPreview" class="bg-black border border-secondary rounded p-2 small font-monospace" style="max-height:180px; overflow-y:auto; white-space:pre-wrap;"></pre>
+        </div>
+
+        <!-- Raw YAML pane -->
+        <div id="paneYaml" style="display:none;">
+            <p class="text-muted small">Paste or edit a Sigma rule in YAML format. The rule's <code>title</code> field is used as its display name.</p>
+            <textarea id="ruleYamlInput" class="form-control bg-black text-light border-secondary font-monospace small" rows="18" spellcheck="false" placeholder="title: My Detection Rule&#10;status: experimental&#10;logsource:&#10;  product: windows&#10;  category: process_creation&#10;detection:&#10;  selection:&#10;    CommandLine|contains: 'example'&#10;  condition: selection"></textarea>
+        </div>
+
         <div id="ruleEditorError" class="text-danger small mt-2" style="display:none;"></div>
         <div id="ruleHistoryBox" class="mt-3" style="display:none;">
             <h6 class="text-info mb-2"><i class="fa-solid fa-clock-rotate-left me-1"></i>Edit History</h6>
@@ -139,6 +209,205 @@
 <script>
 let allRules = [];
 let selectedIds = new Set();
+
+// ---- Guided rule builder ----
+const BUILDER_FIELDS = [
+    {value: 'Host', label: 'Host'},
+    {value: 'Channel', label: 'Log Channel / App'},
+    {value: 'EventID', label: 'Event ID'},
+    {value: 'User', label: 'Username'},
+    {value: 'SourceIp', label: 'Source IP'},
+    {value: 'DestinationIp', label: 'Destination IP'},
+    {value: 'Message', label: 'Message contains text'}
+];
+const BUILDER_OPS = [
+    {value: '', label: 'equals'},
+    {value: 'contains', label: 'contains'},
+    {value: 'startswith', label: 'starts with'},
+    {value: 'endswith', label: 'ends with'}
+];
+let builderState = { groups: [[{field: 'Host', op: '', value: ''}]], combine: 'or', excludeEnabled: false, exclude: [] };
+let activeRuleTab = 'builder';
+
+function switchRuleTab(tab) {
+    activeRuleTab = tab;
+    const isBuilder = tab === 'builder';
+    document.getElementById('tabBtnBuilder').classList.toggle('active', isBuilder);
+    document.getElementById('tabBtnYaml').classList.toggle('active', !isBuilder);
+    document.getElementById('paneBuilder').style.display = isBuilder ? 'block' : 'none';
+    document.getElementById('paneYaml').style.display = isBuilder ? 'none' : 'block';
+    if (isBuilder) renderYamlPreview();
+}
+
+function conditionRowHtml(gi, ri, cond, isExclude) {
+    const fieldOpts = BUILDER_FIELDS.map(f => `<option value="${f.value}" ${cond.field === f.value ? 'selected' : ''}>${f.label}</option>`).join('');
+    const opOpts = BUILDER_OPS.map(o => `<option value="${o.value}" ${cond.op === o.value ? 'selected' : ''}>${o.label}</option>`).join('');
+    const removeFn = isExclude ? `removeExcludeRow(${ri})` : `removeCondRow(${gi}, ${ri})`;
+    const fieldFn = isExclude ? `updateExcludeField(${ri}, this.value)` : `updateCondField(${gi}, ${ri}, this.value)`;
+    const opFn = isExclude ? `updateExcludeOp(${ri}, this.value)` : `updateCondOp(${gi}, ${ri}, this.value)`;
+    const valFn = isExclude ? `updateExcludeValue(${ri}, this.value)` : `updateCondValue(${gi}, ${ri}, this.value)`;
+    const safeVal = (cond.value || '').replace(/"/g, '&quot;');
+    return `
+        <div class="row g-2 mb-2 align-items-center">
+            <div class="col-md-3"><select class="form-select form-select-sm bg-dark text-light border-secondary" onchange="${fieldFn}">${fieldOpts}</select></div>
+            <div class="col-md-2"><select class="form-select form-select-sm bg-dark text-light border-secondary" onchange="${opFn}">${opOpts}</select></div>
+            <div class="col-md-6"><input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="value" value="${safeVal}" oninput="${valFn}"></div>
+            <div class="col-md-1"><button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" onclick="${removeFn}"><i class="fa-solid fa-xmark"></i></button></div>
+        </div>
+    `;
+}
+
+function renderGroups() {
+    const wrap = document.getElementById('matchGroups');
+    wrap.innerHTML = builderState.groups.map((rows, gi) => `
+        <div class="border border-secondary rounded p-2 mb-2">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+                <span class="small text-info fw-bold">Group ${gi + 1} <span class="text-muted fw-normal">(all conditions in this group must match)</span></span>
+                ${builderState.groups.length > 1 ? `<button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" onclick="removeGroup(${gi})"><i class="fa-solid fa-trash"></i></button>` : ''}
+            </div>
+            ${rows.map((cond, ri) => conditionRowHtml(gi, ri, cond, false)).join('')}
+            <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 mt-1" onclick="addCondRow(${gi})"><i class="fa-solid fa-plus"></i> Add Condition</button>
+        </div>
+    `).join('');
+    document.getElementById('groupCombineWrap').style.display = builderState.groups.length > 1 ? 'block' : 'none';
+    document.getElementById('bCombine').value = builderState.combine;
+    renderYamlPreview();
+}
+
+function addGroup() { builderState.groups.push([{field: 'Host', op: '', value: ''}]); renderGroups(); }
+function removeGroup(gi) { builderState.groups.splice(gi, 1); renderGroups(); }
+function addCondRow(gi) { builderState.groups[gi].push({field: 'Host', op: '', value: ''}); renderGroups(); }
+function removeCondRow(gi, ri) {
+    builderState.groups[gi].splice(ri, 1);
+    if (builderState.groups[gi].length === 0) builderState.groups[gi].push({field: 'Host', op: '', value: ''});
+    renderGroups();
+}
+function updateCondField(gi, ri, val) { builderState.groups[gi][ri].field = val; renderYamlPreview(); }
+function updateCondOp(gi, ri, val) { builderState.groups[gi][ri].op = val; renderYamlPreview(); }
+function updateCondValue(gi, ri, val) { builderState.groups[gi][ri].value = val; renderYamlPreview(); }
+
+function enableExclude() {
+    builderState.excludeEnabled = true;
+    if (builderState.exclude.length === 0) builderState.exclude.push({field: 'Host', op: '', value: ''});
+    document.getElementById('addExcludeBtn').style.display = 'none';
+    renderExclude();
+}
+function disableExclude() {
+    builderState.excludeEnabled = false;
+    builderState.exclude = [];
+    document.getElementById('addExcludeBtn').style.display = 'inline-block';
+    renderExclude();
+}
+function renderExclude() {
+    const wrap = document.getElementById('excludeGroup');
+    if (!builderState.excludeEnabled) { wrap.innerHTML = ''; renderYamlPreview(); return; }
+    wrap.innerHTML = `
+        <div class="border border-secondary rounded p-2 mb-2">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+                <span class="small text-warning fw-bold">Exclude if all match</span>
+                <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" onclick="disableExclude()"><i class="fa-solid fa-trash"></i></button>
+            </div>
+            ${builderState.exclude.map((cond, ri) => conditionRowHtml(0, ri, cond, true)).join('')}
+            <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 mt-1" onclick="addExcludeRow()"><i class="fa-solid fa-plus"></i> Add Condition</button>
+        </div>
+    `;
+    renderYamlPreview();
+}
+function addExcludeRow() { builderState.exclude.push({field: 'Host', op: '', value: ''}); renderExclude(); }
+function removeExcludeRow(ri) {
+    builderState.exclude.splice(ri, 1);
+    if (builderState.exclude.length === 0) { disableExclude(); return; }
+    renderExclude();
+}
+function updateExcludeField(ri, val) { builderState.exclude[ri].field = val; renderYamlPreview(); }
+function updateExcludeOp(ri, val) { builderState.exclude[ri].op = val; renderYamlPreview(); }
+function updateExcludeValue(ri, val) { builderState.exclude[ri].value = val; renderYamlPreview(); }
+
+function yamlQuote(s) {
+    return "'" + String(s == null ? '' : s).replace(/'/g, "''") + "'";
+}
+
+function buildDetectionYaml() {
+    const lines = [];
+    const groupNames = [];
+    builderState.groups.forEach((rows, gi) => {
+        const validRows = rows.filter(r => r.value && r.value.trim() !== '');
+        if (validRows.length === 0) return;
+        const name = `sel${gi + 1}`;
+        groupNames.push(name);
+        lines.push(`  ${name}:`);
+        validRows.forEach(r => {
+            const key = r.op ? `${r.field}|${r.op}` : r.field;
+            lines.push(`    ${key}: ${yamlQuote(r.value)}`);
+        });
+    });
+
+    let excludeName = null;
+    if (builderState.excludeEnabled) {
+        const validExclude = builderState.exclude.filter(r => r.value && r.value.trim() !== '');
+        if (validExclude.length > 0) {
+            excludeName = 'filter1';
+            lines.push(`  ${excludeName}:`);
+            validExclude.forEach(r => {
+                const key = r.op ? `${r.field}|${r.op}` : r.field;
+                lines.push(`    ${key}: ${yamlQuote(r.value)}`);
+            });
+        }
+    }
+
+    if (groupNames.length === 0) return null;
+    let condition = groupNames.length === 1 ? groupNames[0] : `(${groupNames.join(builderState.combine === 'and' ? ' and ' : ' or ')})`;
+    if (excludeName) condition = `${condition} and not ${excludeName}`;
+    lines.push(`  condition: ${condition}`);
+    return lines.join('\n');
+}
+
+function generateYamlFromBuilder() {
+    const detectionBlock = buildDetectionYaml();
+    if (!detectionBlock) return null;
+
+    const title = document.getElementById('bTitle').value.trim() || 'Untitled Custom Rule';
+    const severity = document.getElementById('bSeverity').value;
+    const platform = document.getElementById('bPlatform').value.trim() || 'custom';
+    const description = document.getElementById('bDescription').value.trim();
+    const mitreRaw = document.getElementById('bMitre').value.trim();
+
+    const parts = [];
+    parts.push(`title: ${yamlQuote(title)}`);
+    if (description) parts.push(`description: ${yamlQuote(description)}`);
+    parts.push('status: experimental');
+    parts.push(`level: ${severity}`);
+    parts.push('logsource:');
+    parts.push('  category: custom');
+    parts.push(`  product: ${yamlQuote(platform)}`);
+    parts.push('detection:');
+    parts.push(detectionBlock);
+    if (mitreRaw) {
+        const tags = mitreRaw.split(',').map(t => t.trim()).filter(Boolean);
+        if (tags.length) {
+            parts.push('tags:');
+            tags.forEach(t => parts.push(`  - ${t}`));
+        }
+    }
+    return parts.join('\n') + '\n';
+}
+
+function renderYamlPreview() {
+    const yaml = generateYamlFromBuilder();
+    document.getElementById('yamlPreview').innerText = yaml || '(Add at least one condition with a value to generate the rule)';
+}
+
+function resetBuilderState() {
+    builderState = { groups: [[{field: 'Host', op: '', value: ''}]], combine: 'or', excludeEnabled: false, exclude: [] };
+    document.getElementById('bTitle').value = '';
+    document.getElementById('bSeverity').value = 'medium';
+    document.getElementById('bPlatform').value = '';
+    document.getElementById('bDescription').value = '';
+    document.getElementById('bMitre').value = '';
+    document.getElementById('addExcludeBtn').style.display = 'inline-block';
+    renderGroups();
+    renderExclude();
+}
 
 async function ld(){
     allRules = await(await fetch('/api/rules')).json(); 
@@ -296,6 +565,8 @@ async function openRuleModal(id) {
     document.getElementById('ruleHistoryBtn').style.display = 'none';
     document.getElementById('ruleCloneBtn').style.display = 'none';
     document.getElementById('ruleSaveBtn').style.display = 'inline-block';
+    document.getElementById('ruleEditorTabs').style.display = 'flex';
+    document.getElementById('tabBtnBuilder').style.display = 'block';
 
     if (editingRuleId) {
         try {
@@ -320,24 +591,43 @@ async function openRuleModal(id) {
                 document.getElementById('ruleReadonlyNotice').style.display = 'block';
                 document.getElementById('ruleSaveBtn').style.display = 'none';
                 document.getElementById('ruleCloneBtn').style.display = 'inline-block';
+                // Sigma rules can't be edited or rebuilt — no point showing the builder tab.
+                document.getElementById('ruleEditorTabs').style.display = 'none';
             } else {
                 document.getElementById('ruleCloneBtn').style.display = 'inline-block';
                 document.getElementById('ruleHistoryBtn').style.display = 'inline-block';
             }
+            // Editing an existing rule always starts on Raw YAML — its content already exists
+            // as YAML and may use syntax the guided builder can't represent; switching to the
+            // builder tab and saving would silently replace it with the builder's output.
+            switchRuleTab('yaml');
         } catch (e) {
             alert('Error loading rule: ' + e);
             return;
         }
     } else {
         document.getElementById('ruleModalTitle').innerText = 'New Custom Rule';
+        resetBuilderState();
+        switchRuleTab('builder');
     }
     ruleModal.show();
 }
 
 async function saveRule() {
-    const ruleYaml = document.getElementById('ruleYamlInput').value;
     const errBox = document.getElementById('ruleEditorError');
     errBox.style.display = 'none';
+
+    let ruleYaml;
+    if (activeRuleTab === 'builder') {
+        ruleYaml = generateYamlFromBuilder();
+        if (!ruleYaml) {
+            errBox.innerText = 'Add at least one match condition with a value before saving.';
+            errBox.style.display = 'block';
+            return;
+        }
+    } else {
+        ruleYaml = document.getElementById('ruleYamlInput').value;
+    }
 
     const url = editingRuleId ? `/api/rules/${editingRuleId}` : '/api/rules';
     const method = editingRuleId ? 'PUT' : 'POST';
