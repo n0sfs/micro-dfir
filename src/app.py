@@ -496,6 +496,44 @@ def api_ueba_detections():
         'latest': latest
     })
 
+UEBA_CONFIG_DEFAULTS = {'ueba_lookback_days': '30', 'ueba_stddev_multiplier': '3', 'ueba_min_baseline': '50'}
+
+@app.route('/api/ueba/config', methods=['GET', 'POST'])
+@login_required
+def api_ueba_config():
+    db = get_db()
+
+    if request.method == 'GET':
+        rows = db.execute(
+            "SELECT key, value FROM settings WHERE key IN ('ueba_lookback_days', 'ueba_stddev_multiplier', 'ueba_min_baseline')"
+        ).fetchall()
+        cfg = {**UEBA_CONFIG_DEFAULTS, **{r['key']: r['value'] for r in rows}}
+        return jsonify({
+            'lookback_days': int(cfg['ueba_lookback_days']),
+            'stddev_multiplier': float(cfg['ueba_stddev_multiplier']),
+            'min_baseline': float(cfg['ueba_min_baseline']),
+        })
+
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+
+    data = request.json or {}
+    try:
+        lookback_days = int(data.get('lookback_days'))
+        stddev_multiplier = float(data.get('stddev_multiplier'))
+        min_baseline = float(data.get('min_baseline'))
+        if not (1 <= lookback_days <= 365): raise ValueError('lookback_days must be 1-365')
+        if not (0.5 <= stddev_multiplier <= 10): raise ValueError('stddev_multiplier must be 0.5-10')
+        if not (0 <= min_baseline <= 1000000): raise ValueError('min_baseline must be 0-1000000')
+    except (TypeError, ValueError) as e:
+        return jsonify({'error': str(e) or 'Invalid config values'}), 400
+
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_lookback_days', ?)", (str(lookback_days),))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_stddev_multiplier', ?)", (str(stddev_multiplier),))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_min_baseline', ?)", (str(min_baseline),))
+    db.commit()
+    return jsonify({'status': 'success'})
+
 
 # ==========================================
 # GLOBAL SETTINGS & AGENT DEPLOYMENT ROUTES
@@ -507,6 +545,9 @@ def migrate_settings():
         cursor = conn.cursor()
         cursor.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('soc_secret', 'YOUR_SECRET_MICRO_SOC_KEY')")
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_lookback_days', '30')")
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_stddev_multiplier', '3')")
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_min_baseline', '50')")
         conn.commit()
         conn.close()
     except Exception:
