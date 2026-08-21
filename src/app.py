@@ -606,6 +606,11 @@ def trigger_report():
 def ueba():
     return render_template('ueba.html', current_user=current_user)
 
+@app.route('/ueba/tuning')
+@login_required
+def ueba_tuning():
+    return render_template('ueba_tuning.html', current_user=current_user)
+
 @app.route('/api/ueba/detections')
 @login_required
 def api_ueba_detections():
