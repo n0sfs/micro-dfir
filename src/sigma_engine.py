@@ -99,6 +99,18 @@ def run_detection_cycle():
     for e in cursor.execute("SELECT rule_id, field, operator, value FROM rule_exclusions WHERE enabled = 1").fetchall():
         exclusions_by_rule.setdefault(e['rule_id'], []).append(e)
 
+    # Evaluate every rule and only collect what needs writing — the actual INSERTs
+    # happen afterward in one short batch, rather than interleaved with rule
+    # evaluation across the whole cycle. sqlite3 auto-opens a write transaction on the
+    # first INSERT and holds the exclusive write lock until commit(), so writing
+    # per-match here used to keep that lock held for as long as the entire sweep took
+    # (potentially hundreds of rules against however many new log rows) instead of
+    # just the brief moment actually spent writing — blocking every other writer,
+    # including agent check-ins, for the whole duration. Reads (rule queries against
+    # recent_events) don't need the write lock at all under WAL mode, so deferring
+    # only the writes shrinks the lock-held window to milliseconds without changing
+    # anything about which alerts get created.
+    pending_alerts = []
     for r in rules:
         try:
             rule_exclusions = exclusions_by_rule.get(r['id'], [])
@@ -114,16 +126,14 @@ def run_detection_cycle():
                     # preserve the original event's own Windows Event ID and channel, distinct
                     # from the rule that fired — both shown in the alert's detail view.
                     m_keys = m.keys()
-                    cursor.execute(
-                        "INSERT INTO alerts (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (r['id'], m['id'], severity, m['host'], m['message'],
-                         m['username'] if 'username' in m_keys else None,
-                         m['source_ip'] if 'source_ip' in m_keys else None,
-                         m['destination_ip'] if 'destination_ip' in m_keys else None,
-                         m['event_id'] if 'event_id' in m_keys else None,
-                         m['app'] if 'app' in m_keys else None)
-                    )
+                    pending_alerts.append((
+                        r['id'], m['id'], severity, m['host'], m['message'],
+                        m['username'] if 'username' in m_keys else None,
+                        m['source_ip'] if 'source_ip' in m_keys else None,
+                        m['destination_ip'] if 'destination_ip' in m_keys else None,
+                        m['event_id'] if 'event_id' in m_keys else None,
+                        m['app'] if 'app' in m_keys else None
+                    ))
                     try:
                         if soar_api_key:
                             requests.post("http://127.0.0.1:8000/webhook/alert", json={"rule_title": r['title'], "severity": severity, "hostname": m['host'], "agent_id": m['host'], "raw_log": m['message']}, headers={"Authorization": f"Bearer {soar_api_key}"}, timeout=2)
@@ -131,6 +141,13 @@ def run_detection_cycle():
                         print(f"[-] SOAR webhook failed for rule '{r['title']}': {e}")
         except Exception as e:
             print(f"[-] Rule '{r['title']}' failed to convert/execute: {e}")
+
+    if pending_alerts:
+        cursor.executemany(
+            "INSERT INTO alerts (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            pending_alerts
+        )
     conn.commit(); conn.close()
     json.dump({"last_id": current_max}, open(STATE_FILE, 'w'))
 
