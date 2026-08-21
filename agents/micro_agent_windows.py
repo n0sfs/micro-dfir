@@ -58,13 +58,27 @@ def _event_signature(host, base, e):
     msg = str(e.get('Message', ''))
     return f"{host}|{base}|{e.get('TimeCreated','')}|{e.get('Id','')}|{msg[:80]}"
 
+_CHANNEL_LOG_NAMES = {
+    'windowsdefender': ('Windows Defender', 'Microsoft-Windows-Windows Defender/Operational'),
+    'sysmon': ('Sysmon', 'Microsoft-Windows-Sysmon/Operational'),
+    'powershell': ('PowerShell', 'Windows PowerShell'),
+}
+
 def fetch_windows_logs(channels, last_seconds):
     logs = []
     host = socket.gethostname()
     for channel in channels:
         channel = channel.strip()
-        base = channel.split(" (")[0].strip()
-        log_name = "Microsoft-Windows-Windows Defender/Operational" if base == "Windows Defender" else "Microsoft-Windows-Sysmon/Operational" if base == "Sysmon" else "Windows PowerShell" if base == "PowerShell" else base
+        raw_base = channel.split(" (")[0].strip()
+        # The server's channel config key ("WindowsDefender", no space — the JSON key the
+        # Log Pipeline UI saves) doesn't match the display name ("Windows Defender", with a
+        # space) that used to be compared against directly, so Get-WinEvent was being asked
+        # for a log named "WindowsDefender" — not a real channel — and silently returned
+        # nothing every cycle. Matching on a space/case-normalized key fixes that regardless
+        # of which form the channel arrives in, and canonicalizes the display name too so
+        # historical and future rows use the same "app" value instead of splitting in two.
+        lookup_key = raw_base.replace(' ', '').replace('-', '').lower()
+        base, log_name = _CHANNEL_LOG_NAMES.get(lookup_key, (raw_base, raw_base))
         cmd = "powershell -Command \"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-WinEvent -FilterHashtable @{LogName='" + log_name + "'; StartTime=(Get-Date).AddSeconds(-" + str(last_seconds) + ")} -ErrorAction SilentlyContinue | Select-Object @{N='TimeCreated';E={$_.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')}}, Id, LevelDisplayName, @{N='User';E={if($_.UserId){try{(New-Object System.Security.Principal.SecurityIdentifier($_.UserId.Value)).Translate([System.Security.Principal.NTAccount]).Value}catch{$_.UserId.Value}}else{'SYSTEM'}}}, Message | ConvertTo-Json -Compress\""
         try:
             out = subprocess.check_output(cmd, shell=True, encoding='utf-8', errors='ignore', stderr=subprocess.DEVNULL).strip()
