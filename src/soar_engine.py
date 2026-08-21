@@ -1,4 +1,4 @@
-import requests, urllib3
+import sqlite3, requests, urllib3
 from fastapi import FastAPI, HTTPException, Security, Depends
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
@@ -6,17 +6,30 @@ from pydantic import BaseModel
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 app = FastAPI(title="Micro DFIR SOAR")
 
-SOAR_API_KEY = "SUPER_SECRET_SOAR_KEY_123"
+DB_PATH = "/opt/micro-dfir/siem.db"
 api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
 
-WAZUH_API_URL = "https://127.0.0.1:55000" 
+# Not yet configured for a real Wazuh deployment — these need to be set to your actual
+# Wazuh API credentials before playbook_isolate_host() will do anything.
+WAZUH_API_URL = "https://127.0.0.1:55000"
 WAZUH_USER = "wazuh-wui"; WAZUH_PASS = "YourWazuhPassword"
 
 class SIEMAlert(BaseModel):
     rule_title: str; severity: str; hostname: str; agent_id: str; raw_log: str
 
+def get_soar_api_key():
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        row = conn.execute("SELECT value FROM settings WHERE key = 'soar_api_key'").fetchone()
+        conn.close()
+        return row[0] if row and row[0] else None
+    except Exception:
+        return None
+
 def get_api_key(api_key_header: str = Security(api_key_header)):
-    if api_key_header != f"Bearer {SOAR_API_KEY}": raise HTTPException(status_code=403, detail="Unauthorized")
+    expected = get_soar_api_key()
+    if not expected or api_key_header != f"Bearer {expected}":
+        raise HTTPException(status_code=403, detail="Unauthorized")
     return api_key_header
 
 def get_wazuh_token():

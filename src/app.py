@@ -23,13 +23,49 @@ from taxii_client import sync_one as ti_sync_one
 import agent_scripts
 
 app = Flask(__name__, template_folder='../templates')
-app.secret_key = '0a3e3de8e8ca7ef43a3bb4645178baa03fa4d3612046968dfeeb86b13f19dd09'
 DB_PATH = "/opt/micro-dfir/siem.db"
+
+def _get_or_create_secret_key():
+    # Generated once per install and persisted in the settings table — a hardcoded
+    # session-signing key shipped in source would let anyone who reads the repo forge
+    # session cookies for any deployment still using the default.
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+        row = conn.execute("SELECT value FROM settings WHERE key = 'flask_secret_key'").fetchone()
+        if row and row[0]:
+            key = row[0]
+        else:
+            key = secrets.token_hex(32)
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('flask_secret_key', ?)", (key,))
+            conn.commit()
+        conn.close()
+        return key
+    except Exception:
+        return secrets.token_hex(32)  # DB not ready yet — sessions won't survive a restart, but the app still runs
+
+app.secret_key = _get_or_create_secret_key()
 app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
-app.config['WEBHOOK_SECRET'] = "YOUR_SECRET_MICRO_SOC_KEY"
 
 login_manager = LoginManager()
 login_manager.init_app(app); login_manager.login_view = 'login'
+
+def csrf_token():
+    from flask import session
+    if 'csrf_token' not in session:
+        session['csrf_token'] = secrets.token_hex(32)
+    return session['csrf_token']
+
+def validate_csrf():
+    from flask import session
+    submitted = request.form.get('csrf_token', '')
+    expected = session.get('csrf_token', '')
+    if not expected or not secrets.compare_digest(submitted, expected):
+        flash('Your session expired or the form was submitted from an unexpected origin. Please try again.', 'danger')
+        return False
+    return True
+
+app.jinja_env.globals['csrf_token'] = csrf_token
 
 class User(UserMixin):
     def __init__(self, id, username, role):
@@ -99,6 +135,8 @@ encoding.codec = "json"
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
+        if not validate_csrf():
+            return render_template('login.html')
         user = get_db().execute("SELECT * FROM users WHERE username = ?", (request.form['username'],)).fetchone()
         if user and check_password_hash(user['password_hash'], request.form['password']):
             login_user(User(user['id'], user['username'], user['role']))
@@ -227,7 +265,9 @@ def hunt():
     yara_files_set = set(yara_files)
 
     if request.method == 'POST':
-        if 'scan_file' not in request.files:
+        if not validate_csrf():
+            pass
+        elif 'scan_file' not in request.files:
             flash("No file uploaded", "danger")
         else:
             file = request.files['scan_file']
@@ -544,6 +584,8 @@ def download_report(filename):
 @login_required
 def trigger_report():
     import subprocess
+    if not validate_csrf():
+        return redirect(url_for('reports'))
     try:
         subprocess.run(["/opt/micro-dfir/venv/bin/python3", "/opt/micro-dfir/src/generate_report.py"], check=True)
         flash("Report successfully generated!", "success")
@@ -630,7 +672,8 @@ def migrate_settings():
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
         cursor = conn.cursor()
         cursor.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
-        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('soc_secret', 'YOUR_SECRET_MICRO_SOC_KEY')")
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('soc_secret', ?)", (secrets.token_hex(16),))
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('soar_api_key', ?)", (secrets.token_hex(24),))
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_lookback_days', '30')")
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_stddev_multiplier', '3')")
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_min_baseline', '50')")
@@ -778,6 +821,26 @@ def api_settings_purge():
     db.commit()
     return jsonify({'status': 'success', 'deleted': deleted, 'cutoff': cutoff})
 
+@app.route('/api/settings/vacuum', methods=['POST'])
+@login_required
+def api_settings_vacuum():
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    import sqlite3
+    try:
+        before = os.path.getsize(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=120)
+        conn.execute('VACUUM')
+        conn.close()
+        after = os.path.getsize(DB_PATH)
+        return jsonify({
+            'status': 'success',
+            'before_mb': round(before / (1024 * 1024), 1),
+            'after_mb': round(after / (1024 * 1024), 1),
+        })
+    except Exception as e:
+        return jsonify({'error': f'Vacuum failed: {e}'}), 500
+
 @app.route("/settings/network", methods=["POST"])
 @login_required
 def settings_network():
@@ -785,6 +848,7 @@ def settings_network():
     from flask import request, flash, redirect, url_for
 
     if current_user.role != "admin": return redirect(url_for("dash"))
+    if not validate_csrf(): return redirect(url_for("settings"))
 
     ui_ip = request.form.get("ui_bind_ip", "0.0.0.0")
     ui_port = request.form.get("ui_port", "5001")
@@ -838,6 +902,16 @@ def agent_config():
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     db.execute('CREATE TABLE IF NOT EXISTS agent_polls (id INTEGER PRIMARY KEY, timestamp TEXT, ip_address TEXT, user_agent TEXT)')
     db.execute('INSERT INTO agent_polls (timestamp, ip_address, user_agent) VALUES (?, ?, ?)', (now, ip, ua))
+
+    # A command marked 'sent' means the response left the server, but if the connection
+    # dropped before the agent actually processed it (or the agent crashed mid-run), it
+    # would otherwise sit "Sent" forever with no result and no way to retry. Requeue
+    # anything that's been sent for more than 5 minutes without a reported result.
+    stale_cutoff = (datetime.datetime.now() - datetime.timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S')
+    db.execute(
+        "UPDATE agent_commands SET status = 'pending' WHERE hostname = ? AND status = 'sent' AND queued_at < ?",
+        (ua, stale_cutoff)
+    )
     db.commit()
 
     cmd_row = db.execute(

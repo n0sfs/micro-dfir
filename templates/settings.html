@@ -357,7 +357,15 @@ function saveToken() {
     }).catch(err => alert('Error saving token: ' + err));
 }
 function backupDB() { window.location.href = '/api/settings/backup'; }
-function vacuumDB() { alert('Vacuum initiated.'); }
+function vacuumDB() {
+    if (!confirm('Vacuum the database now? This rebuilds the file to reclaim disk space and can take a while on a large database — the app may be briefly slower while it runs.')) return;
+    fetch('/api/settings/vacuum', {method: 'POST'})
+        .then(r => r.json().then(data => ({ok: r.ok, data})))
+        .then(({ok, data}) => {
+            if (ok) alert(`Vacuum complete. Database size: ${data.before_mb} MB -> ${data.after_mb} MB.`);
+            else alert(data.error || 'Vacuum failed.');
+        }).catch(err => alert('Error running vacuum: ' + err));
+}
 function purgeOldLogs() {
     if (!confirm('Permanently delete all logs older than 30 days? This cannot be undone.')) return;
     fetch('/api/settings/purge', {
@@ -382,6 +390,7 @@ function purgeOldLogs() {
                 </div>
                 <div class="card-body">
                     <form method="POST" action="/settings/network">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <div class="row">
                             <div class="col-md-6 mb-3">
                                 <label class="form-label text-info">UI Bind IP (Gunicorn)</label>

@@ -1,0 +1,14 @@
+[Unit]
+Description=Micro DFIR Sigma Engine
+After=network.target vector.service microsoc-web.service
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/micro-dfir
+Environment="PATH=/opt/micro-dfir/venv/bin:/usr/bin"
+Environment="PYTHONPATH=/opt/micro-dfir/src"
+ExecStart=/opt/micro-dfir/venv/bin/python3 src/sigma_engine.py
+Restart=always
+RestartSec=10
+[Install]
+WantedBy=multi-user.target
