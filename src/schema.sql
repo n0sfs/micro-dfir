@@ -10,3 +10,5 @@ CREATE TABLE IF NOT EXISTS alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, timesta
 CREATE TABLE IF NOT EXISTS drop_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, field TEXT NOT NULL, operator TEXT NOT NULL, value TEXT NOT NULL, description TEXT, enabled BOOLEAN DEFAULT 1);
 CREATE TABLE IF NOT EXISTS stix_indicators (stix_id TEXT PRIMARY KEY, type TEXT NOT NULL, name TEXT, description TEXT, pattern TEXT NOT NULL, valid_from DATETIME, revoked BOOLEAN DEFAULT 0, inserted_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS idx_stix_pattern ON stix_indicators(pattern);
+CREATE TABLE IF NOT EXISTS ti_feeds (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, feed_type TEXT NOT NULL, discovery_url TEXT, collection_id TEXT, username TEXT, password TEXT, enabled BOOLEAN DEFAULT 1, last_sync DATETIME, last_status TEXT, last_count INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+INSERT OR IGNORE INTO ti_feeds (id, name, feed_type, enabled) VALUES (1, 'ThreatFox Recent (Public)', 'threatfox', 1);

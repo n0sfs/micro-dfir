@@ -19,6 +19,7 @@ from flask import Flask, render_template, request, jsonify, g, redirect, url_for
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from ti_engine import lookup_ioc
 from yara_scanner import scan_file
+from taxii_client import sync_one as ti_sync_one
 
 app = Flask(__name__, template_folder='../templates')
 app.secret_key = '0a3e3de8e8ca7ef43a3bb4645178baa03fa4d3612046968dfeeb86b13f19dd09'
@@ -269,6 +270,90 @@ def api_hunt():
 @app.route('/api/ti/lookup', methods=['POST'])
 @login_required
 def api_ti(): return jsonify(lookup_ioc(request.get_json().get('ioc')))
+
+
+# ==========================================
+# THREAT INTELLIGENCE — FEEDS & IOCS
+# ==========================================
+@app.route('/threat-intel')
+@login_required
+def threat_intel():
+    return render_template('threat_intel.html', current_user=current_user)
+
+@app.route('/api/ti/feeds', methods=['GET', 'POST'])
+@login_required
+def api_ti_feeds():
+    db = get_db()
+    if request.method == 'GET':
+        rows = db.execute(
+            "SELECT id, name, feed_type, discovery_url, collection_id, username, enabled, last_sync, last_status, last_count FROM ti_feeds ORDER BY id DESC"
+        ).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    d = request.json or {}
+    name = (d.get('name') or '').strip()
+    feed_type = d.get('feed_type')
+    if not name or feed_type not in ('taxii', 'threatfox'):
+        return jsonify({'error': 'name and a valid feed_type (taxii/threatfox) are required'}), 400
+    if feed_type == 'taxii' and not (d.get('discovery_url') and d.get('collection_id')):
+        return jsonify({'error': 'TAXII feeds require a discovery_url and collection_id'}), 400
+    db.execute(
+        "INSERT INTO ti_feeds (name, feed_type, discovery_url, collection_id, username, password, enabled) VALUES (?, ?, ?, ?, ?, ?, 1)",
+        (name, feed_type, d.get('discovery_url', ''), d.get('collection_id', ''), d.get('username', ''), d.get('password', ''))
+    )
+    db.commit()
+    return jsonify({'status': 'success'})
+
+@app.route('/api/ti/feeds/<int:fid>', methods=['PUT', 'DELETE'])
+@login_required
+def api_ti_feed_detail(fid):
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    db = get_db()
+    if request.method == 'DELETE':
+        db.execute("DELETE FROM ti_feeds WHERE id = ?", (fid,))
+        db.commit()
+        return jsonify({'ok': 1})
+
+    d = request.json or {}
+    # Blank password means "keep the existing one" rather than clearing it
+    db.execute(
+        "UPDATE ti_feeds SET name=?, discovery_url=?, collection_id=?, username=?, "
+        "password=COALESCE(NULLIF(?, ''), password), enabled=? WHERE id=?",
+        (d.get('name', ''), d.get('discovery_url', ''), d.get('collection_id', ''),
+         d.get('username', ''), d.get('password', ''), 1 if d.get('enabled') else 0, fid)
+    )
+    db.commit()
+    return jsonify({'status': 'success'})
+
+@app.route('/api/ti/feeds/<int:fid>/sync', methods=['POST'])
+@login_required
+def api_ti_feed_sync(fid):
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    result = ti_sync_one(fid)
+    return jsonify(result), (200 if result.get('status') == 'success' else 502)
+
+@app.route('/api/ti/iocs', methods=['GET'])
+@login_required
+def api_ti_iocs():
+    db = get_db()
+    q = request.args.get('q', '').strip()
+    limit = request.args.get('limit', 100, type=int)
+    conditions, params = [], []
+    if q:
+        conditions.append("(pattern LIKE ? OR name LIKE ? OR stix_id LIKE ?)")
+        params.extend([f'%{q}%'] * 3)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    rows = db.execute(
+        f"SELECT stix_id, type, name, description, pattern, valid_from, revoked, inserted_at FROM stix_indicators {where} ORDER BY inserted_at DESC LIMIT ?",
+        params + [limit]
+    ).fetchall()
+    total = db.execute(f"SELECT COUNT(*) FROM stix_indicators {where}", params).fetchone()[0]
+    return jsonify({'iocs': [dict(r) for r in rows], 'total': total})
+
 
 @app.route('/api/droprules', methods=['GET', 'POST'])
 @login_required
@@ -553,7 +638,32 @@ def migrate_settings():
     except Exception:
         pass
 
+def migrate_ti_feeds():
+    try:
+        import sqlite3
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS ti_feeds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            feed_type TEXT NOT NULL,
+            discovery_url TEXT,
+            collection_id TEXT,
+            username TEXT,
+            password TEXT,
+            enabled BOOLEAN DEFAULT 1,
+            last_sync DATETIME,
+            last_status TEXT,
+            last_count INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute("INSERT OR IGNORE INTO ti_feeds (id, name, feed_type, enabled) VALUES (1, 'ThreatFox Recent (Public)', 'threatfox', 1)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 migrate_settings()
+migrate_ti_feeds()
 
 @app.route('/settings', methods=['GET', 'POST'])
 @login_required

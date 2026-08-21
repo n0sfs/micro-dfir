@@ -226,6 +226,9 @@ hr{border-color:var(--border);}
 
             <div class="nav-group-label">UEBA</div>
             <a href="/ueba" class="nav-link {{ 'active' if request.endpoint == 'ueba' else '' }}"><i class="fa-solid fa-user-secret"></i><span>Anomaly Detections</span></a>
+
+            <div class="nav-group-label">Threat Intel</div>
+            <a href="/threat-intel" class="nav-link {{ 'active' if request.endpoint == 'threat_intel' else '' }}"><i class="fa-solid fa-globe"></i><span>IOCs</span></a>
         </nav>
 
         <div class="sidebar-bottom">
