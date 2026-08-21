@@ -100,18 +100,29 @@ def init_db():
 def generate_vector_config():
     db = get_db()
     rules = db.execute("SELECT * FROM drop_rules WHERE enabled = 1").fetchall()
-    
+
     cursor = db.execute("SELECT key, value FROM settings")
     s = {row[0]: row[1] for row in cursor.fetchall()}
     ingest_ip = s.get("ingest_bind_ip", "0.0.0.0")
-    ingest_port = s.get("ingest_port", "5000")
-    
+    ingest_port = _resolve_ingest_port(s.get("ui_port", "5001"))
+    soc_token = get_soc_secret(db) or ''
+
+    # Drop rules are defined (in the Log Pipeline UI) against live_logs' own field names
+    # (app/host/event_id/message), so they're applied AFTER the remap below renames
+    # Vector's raw syslog field names (appname/hostname) into that same shape — matching
+    # them against the pre-remap names (the previous fmap here) silently matched nothing,
+    # since the UI never sends "app_name"/"hostname", only "app"/"host"/"event_id".
     stmts = []
-    fmap = {"app_name": ".appname", "hostname": ".hostname", "severity": ".severity", "message": "string!(.message)"}
     for r in rules:
-        vf = fmap.get(r['field'], ".message")
-        cond = f'{vf} == "{r["value"]}"' if r['operator'] == "equals" else f'includes({vf}, "{r["value"]}")'
-        stmts.append(f"  # {r['description']}\n  if {cond} {{ abort }}")
+        field = r['field'] if r['field'] in ('app', 'host', 'event_id', 'message') else 'message'
+        val = (r['value'] or '').replace('\\', '\\\\').replace('"', '\\"')
+        if r['operator'] == 'equals':
+            cond = f'(to_string(.{field}) ?? "") == "{val}"'
+        else:
+            cond = f'contains((to_string(.{field}) ?? ""), "{val}")'
+        desc = (r['description'] or '').replace('\n', ' ').replace('\r', ' ')
+        stmts.append(f"  # {desc}\n  if {cond} {{ abort }}")
+    drop_block = ('\n' + '\n'.join(stmts)) if stmts else ''
 
     toml = f"""[sources.syslog_in]
 type = "syslog"
@@ -121,16 +132,43 @@ address = "{ingest_ip}:514"
 [transforms.shape_logs]
 type = "remap"
 inputs = ["syslog_in"]
-source = '''\n{chr(10).join(stmts)}\n'''
+source = '''
+  .host = .hostname
+  .app = .appname
+  .event_id = "-"
+  .username = "-"
+  .time = to_string(.timestamp) ?? ""
+{drop_block}
+'''
 
 [sinks.microsoc_out]
 type = "http"
 inputs = ["shape_logs"]
-uri = f"http://127.0.0.1:{ingest_port}/api/ingest"
+uri = "https://127.0.0.1:{ingest_port}/api/ingest"
 encoding.codec = "json"
+tls.verify_certificate = false
+auth.strategy = "bearer"
+auth.token = "{soc_token}"
 """
     with open("/etc/vector/vector.toml", "w") as f: f.write(toml)
     subprocess.run(["systemctl", "reload", "vector"], check=False)
+
+def _resolve_ingest_port(ui_port):
+    # settings.ingest_port only reflects reality while the systemd unit still has the
+    # dual --bind that /settings/network's save flow writes — a plain reinstall
+    # (install.sh) resets the unit to a single bind on ui_port without resetting that
+    # settings row, silently stranding agents on a port nothing listens on (they'd still
+    # get told the stale ingest_port on every check-in via the zero-touch routing below).
+    # Reading the live unit file is the ground truth for what gunicorn actually bound.
+    try:
+        with open('/etc/systemd/system/microsoc-web.service', 'r') as f:
+            svc = f.read()
+        ports = re.findall(r'--bind\s+[^\s:]+:(\d+)', svc)
+        if len(ports) >= 2:
+            return ports[1]
+    except Exception:
+        pass
+    return ui_port
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -175,11 +213,18 @@ def api_ingest():
             return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
 
         data = request.get_json()
-        if not data or 'logs' not in data:
+        # The Windows/Linux agents send {"logs": [...]}, but Vector's http sink (used for
+        # syslog ingestion) posts a bare JSON array of events with no wrapper key — accept
+        # both instead of only the agent's shape.
+        if isinstance(data, list):
+            logs = data
+        elif isinstance(data, dict) and isinstance(data.get('logs'), list):
+            logs = data['logs']
+        else:
             return jsonify({'status': 'error', 'message': 'Missing logs payload'}), 400
 
         count = 0
-        for log in data['logs']:
+        for log in logs:
             ts = log.get('time', datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
             hst = log.get('host', 'UNKNOWN')
             app_n = log.get('app', 'Windows')
@@ -1323,6 +1368,16 @@ migrate_ueba_entities()
 migrate_ueba_math_v2()
 migrate_live_logs_ip_columns()
 
+try:
+    # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every
+    # startup — self-heals a config left stale or hand-patched by a prior bug (wrong
+    # port, wrong scheme, placeholder auth token) without needing an admin to touch a
+    # drop rule or the Network settings form to trigger a regeneration.
+    with app.app_context():
+        generate_vector_config()
+except Exception as e:
+    print(f"Could not regenerate vector.toml at startup: {e}")
+
 @app.route('/settings', methods=['GET', 'POST'])
 @login_required
 def settings():
@@ -1457,23 +1512,6 @@ def settings_network():
 def get_soc_secret(db):
     row = db.execute("SELECT value FROM settings WHERE key = 'soc_secret'").fetchone()
     return row['value'] if row and row['value'] else None
-
-def _resolve_ingest_port(ui_port):
-    # settings.ingest_port only reflects reality while the systemd unit still has the
-    # dual --bind that /settings/network's save flow writes — a plain reinstall
-    # (install.sh) resets the unit to a single bind on ui_port without resetting that
-    # settings row, silently stranding agents on a port nothing listens on (they'd still
-    # get told the stale ingest_port on every check-in via the zero-touch routing below).
-    # Reading the live unit file is the ground truth for what gunicorn actually bound.
-    try:
-        with open('/etc/systemd/system/microsoc-web.service', 'r') as f:
-            svc = f.read()
-        ports = re.findall(r'--bind\s+[^\s:]+:(\d+)', svc)
-        if len(ports) >= 2:
-            return ports[1]
-    except Exception:
-        pass
-    return ui_port
 
 @app.route('/api/agent/config', methods=['GET'])
 def agent_config():
