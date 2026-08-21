@@ -76,8 +76,8 @@
                                 <div class="th-inner">
                                     <span>Source</span>
                                     <div class="dropdown">
-                                        <button type="button" class="th-icon-btn" id="filterBtnSource" data-bs-toggle="dropdown"><i class="fa-solid fa-filter"></i></button>
-                                        <ul class="dropdown-menu dropdown-menu-dark p-1" id="filterMenuSource" style="min-width:150px;"></ul>
+                                        <button type="button" class="th-icon-btn" id="filterBtnSource" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                        <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuSource" style="min-width:190px;"></div>
                                     </div>
                                 </div>
                                 <span class="col-resizer"></span>
@@ -92,8 +92,8 @@
                                 <div class="th-inner">
                                     <span class="th-label" onclick="toggleSort('platform')">Platform <i class="fa-solid fa-sort sort-ic" id="sortIc-platform"></i></span>
                                     <div class="dropdown">
-                                        <button type="button" class="th-icon-btn" id="filterBtnPlatform" data-bs-toggle="dropdown"><i class="fa-solid fa-filter"></i></button>
-                                        <ul class="dropdown-menu dropdown-menu-dark p-1" id="filterMenuPlatform" style="min-width:170px; max-height:260px; overflow-y:auto;"></ul>
+                                        <button type="button" class="th-icon-btn" id="filterBtnPlatform" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                        <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuPlatform" style="min-width:210px;"></div>
                                     </div>
                                 </div>
                                 <span class="col-resizer"></span>
@@ -102,8 +102,8 @@
                                 <div class="th-inner">
                                     <span>MITRE ATT&amp;CK</span>
                                     <div class="dropdown">
-                                        <button type="button" class="th-icon-btn" id="filterBtnMitre" data-bs-toggle="dropdown"><i class="fa-solid fa-filter"></i></button>
-                                        <ul class="dropdown-menu dropdown-menu-dark p-1" id="filterMenuMitre" style="min-width:180px; max-height:260px; overflow-y:auto;"></ul>
+                                        <button type="button" class="th-icon-btn" id="filterBtnMitre" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                        <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuMitre" style="min-width:220px;"></div>
                                     </div>
                                 </div>
                                 <span class="col-resizer"></span>
@@ -112,8 +112,8 @@
                                 <div class="th-inner">
                                     <span class="th-label" onclick="toggleSort('level')">Level <i class="fa-solid fa-sort sort-ic" id="sortIc-level"></i></span>
                                     <div class="dropdown">
-                                        <button type="button" class="th-icon-btn" id="filterBtnLevel" data-bs-toggle="dropdown"><i class="fa-solid fa-filter"></i></button>
-                                        <ul class="dropdown-menu dropdown-menu-dark p-1" id="filterMenuLevel" style="min-width:150px;"></ul>
+                                        <button type="button" class="th-icon-btn" id="filterBtnLevel" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                        <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuLevel" style="min-width:190px;"></div>
                                     </div>
                                 </div>
                                 <span class="col-resizer"></span>
@@ -122,8 +122,8 @@
                                 <div class="th-inner">
                                     <span class="th-label" onclick="toggleSort('status')">Status <i class="fa-solid fa-sort sort-ic" id="sortIc-status"></i></span>
                                     <div class="dropdown">
-                                        <button type="button" class="th-icon-btn" id="filterBtnStatus" data-bs-toggle="dropdown"><i class="fa-solid fa-filter"></i></button>
-                                        <ul class="dropdown-menu dropdown-menu-dark p-1" id="filterMenuStatus" style="min-width:150px;"></ul>
+                                        <button type="button" class="th-icon-btn" id="filterBtnStatus" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                        <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuStatus" style="min-width:190px;"></div>
                                     </div>
                                 </div>
                                 <span class="col-resizer"></span>
@@ -138,8 +138,8 @@
                                 <div class="th-inner">
                                     <span class="th-label" onclick="toggleSort('enabled')">Enabled <i class="fa-solid fa-sort sort-ic" id="sortIc-enabled"></i></span>
                                     <div class="dropdown">
-                                        <button type="button" class="th-icon-btn" id="filterBtnEnabled" data-bs-toggle="dropdown"><i class="fa-solid fa-filter"></i></button>
-                                        <ul class="dropdown-menu dropdown-menu-dark p-1" id="filterMenuEnabled" style="min-width:140px;"></ul>
+                                        <button type="button" class="th-icon-btn" id="filterBtnEnabled" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                        <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuEnabled" style="min-width:170px;"></div>
                                     </div>
                                 </div>
                             </th>
@@ -467,24 +467,72 @@ const STATUS_BADGE = {
     deprecated: 'bg-warning text-dark', unsupported: 'bg-danger'
 };
 
-// ---- Per-column filters, sorting, resize ----
-let colFilters = { source: '', platform: '', mitre: '', level: '', status: '', enabled: '', q: '' };
+// ---- Per-column filters (multi-select with in-menu search), sorting, resize ----
+let colFilters = { source: [], platform: [], mitre: [], level: [], status: [], enabled: [], q: '' };
 let sortState = { key: null, dir: 'asc' };
 
-function buildFilterMenu(menuId, colKey, options, allLabel) {
+function buildMultiFilterMenu(menuId, colKey, options) {
     const menu = document.getElementById(menuId);
-    let html = `<li><button type="button" class="dropdown-item small" onclick="setColFilter('${colKey}','')">${allLabel}</button></li>`;
-    if (options.length) html += '<li><hr class="dropdown-divider my-1"></li>';
-    options.forEach(o => {
-        html += `<li><button type="button" class="dropdown-item small" onclick="setColFilter('${colKey}', '${o.value.replace(/'/g, "\\'")}')">${o.label}</button></li>`;
+    let html = `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-2" placeholder="Search..." oninput="filterMenuOptions('${menuId}', this.value)">`;
+    html += `<div class="d-flex justify-content-between align-items-center mb-1 px-1">
+        <button type="button" class="btn btn-link btn-sm p-0 small" onclick="selectAllVisibleMenuOptions('${menuId}','${colKey}')">Select all visible</button>
+        <button type="button" class="btn btn-link btn-sm p-0 small text-secondary" onclick="clearMenuOptions('${menuId}','${colKey}')">Clear</button>
+    </div>`;
+    html += `<div class="menu-option-list" style="max-height:220px; overflow-y:auto;">`;
+    if (!options.length) {
+        html += `<div class="text-muted small px-1">No options</div>`;
+    }
+    options.forEach((o, i) => {
+        const checked = colFilters[colKey].includes(o.value) ? 'checked' : '';
+        const cbId = `${menuId}_chk${i}`;
+        const safeVal = String(o.value).replace(/"/g, '&quot;');
+        html += `<div class="form-check menu-option-item" data-search="${o.label.toLowerCase()}">
+            <input class="form-check-input" type="checkbox" data-value="${safeVal}" id="${cbId}" ${checked} onchange="toggleMultiFilter('${colKey}', this.dataset.value, this.checked)">
+            <label class="form-check-label small" for="${cbId}">${o.label}</label>
+        </div>`;
     });
+    html += `</div>`;
     menu.innerHTML = html;
 }
 
-function setColFilter(key, val) {
-    colFilters[key] = val;
-    const btn = document.getElementById('filterBtn' + key.charAt(0).toUpperCase() + key.slice(1));
-    if (btn) btn.classList.toggle('active-filter', !!val);
+function filterMenuOptions(menuId, q) {
+    q = q.toLowerCase();
+    document.querySelectorAll(`#${menuId} .menu-option-item`).forEach(el => {
+        el.style.display = el.dataset.search.includes(q) ? '' : 'none';
+    });
+}
+
+function updateFilterButtonState(colKey) {
+    const btn = document.getElementById('filterBtn' + colKey.charAt(0).toUpperCase() + colKey.slice(1));
+    if (btn) btn.classList.toggle('active-filter', colFilters[colKey].length > 0);
+}
+
+function toggleMultiFilter(colKey, value, checked) {
+    const set = new Set(colFilters[colKey]);
+    if (checked) set.add(value); else set.delete(value);
+    colFilters[colKey] = Array.from(set);
+    updateFilterButtonState(colKey);
+    f();
+}
+
+function selectAllVisibleMenuOptions(menuId, colKey) {
+    const set = new Set(colFilters[colKey]);
+    document.querySelectorAll(`#${menuId} .menu-option-item`).forEach(el => {
+        if (el.style.display !== 'none') {
+            const cb = el.querySelector('input[type=checkbox]');
+            cb.checked = true;
+            set.add(cb.dataset.value);
+        }
+    });
+    colFilters[colKey] = Array.from(set);
+    updateFilterButtonState(colKey);
+    f();
+}
+
+function clearMenuOptions(menuId, colKey) {
+    document.querySelectorAll(`#${menuId} input[type=checkbox]`).forEach(cb => { cb.checked = false; });
+    colFilters[colKey] = [];
+    updateFilterButtonState(colKey);
     f();
 }
 
@@ -563,12 +611,12 @@ async function ld(){
         (r.tags || []).forEach(t => { if (/^attack\./i.test(t)) mitres.add(t); });
     });
 
-    buildFilterMenu('filterMenuSource', 'source', [{value: 'sigma', label: 'Sigma'}, {value: 'custom', label: 'Custom'}], 'All Sources');
-    buildFilterMenu('filterMenuPlatform', 'platform', Array.from(platforms).sort().map(p => ({value: p, label: p})), 'All Platforms');
-    buildFilterMenu('filterMenuMitre', 'mitre', Array.from(mitres).sort().map(m => ({value: m, label: m})), 'All MITRE Tags');
-    buildFilterMenu('filterMenuLevel', 'level', ['critical', 'high', 'medium', 'low', 'informational'].map(l => ({value: l, label: l.charAt(0).toUpperCase() + l.slice(1)})), 'All Levels');
-    buildFilterMenu('filterMenuStatus', 'status', Array.from(statuses).sort().map(s => ({value: s, label: s.charAt(0).toUpperCase() + s.slice(1)})), 'All Statuses');
-    buildFilterMenu('filterMenuEnabled', 'enabled', [{value: '1', label: 'Enabled'}, {value: '0', label: 'Disabled'}], 'All');
+    buildMultiFilterMenu('filterMenuSource', 'source', [{value: 'sigma', label: 'Sigma'}, {value: 'custom', label: 'Custom'}]);
+    buildMultiFilterMenu('filterMenuPlatform', 'platform', Array.from(platforms).sort().map(p => ({value: p, label: p})));
+    buildMultiFilterMenu('filterMenuMitre', 'mitre', Array.from(mitres).sort().map(m => ({value: m, label: m})));
+    buildMultiFilterMenu('filterMenuLevel', 'level', ['critical', 'high', 'medium', 'low', 'informational'].map(l => ({value: l, label: l.charAt(0).toUpperCase() + l.slice(1)})));
+    buildMultiFilterMenu('filterMenuStatus', 'status', Array.from(statuses).sort().map(s => ({value: s, label: s.charAt(0).toUpperCase() + s.slice(1)})));
+    buildMultiFilterMenu('filterMenuEnabled', 'enabled', [{value: '1', label: 'Enabled'}, {value: '0', label: 'Disabled'}]);
 
     const enabledCount = allRules.filter(r => r.enabled).length;
     document.getElementById('statTotalRules').innerText = allRules.length;
@@ -639,12 +687,12 @@ function f(){
 
     const filtered = allRules.filter(rl => {
         const matchQ = rl.title.toLowerCase().includes(q);
-        const matchSource = source === "" || rl.source === source;
-        const matchPlat = plat === "" || rl.platform === plat;
-        const matchMitre = mitre === "" || (rl.tags && rl.tags.includes(mitre));
-        const matchLevel = level === "" || rl.level === level;
-        const matchStatus = status === "" || rl.status === status;
-        const matchEnabled = enabled === "" || String(rl.enabled ? 1 : 0) === enabled;
+        const matchSource = source.length === 0 || source.includes(rl.source);
+        const matchPlat = plat.length === 0 || plat.includes(rl.platform);
+        const matchMitre = mitre.length === 0 || (rl.tags && rl.tags.some(t => mitre.includes(t)));
+        const matchLevel = level.length === 0 || level.includes(rl.level);
+        const matchStatus = status.length === 0 || status.includes(rl.status);
+        const matchEnabled = enabled.length === 0 || enabled.includes(String(rl.enabled ? 1 : 0));
         return matchQ && matchSource && matchPlat && matchMitre && matchLevel && matchStatus && matchEnabled;
     });
 
@@ -884,8 +932,20 @@ async function deleteRule(id, title) {
     ld();
 }
 
+function initFilterDropdowns() {
+    // Same clipping issue fixed on the Agents page — these menus now hold a scrollable
+    // checklist that's taller than the old single-click list, so they're even more likely
+    // to get cut off by this table's own scroll container without fixed-strategy Popper
+    // positioning. data-bs-auto-close="outside" (set in HTML) keeps them open while
+    // checking boxes or typing in the in-menu search.
+    document.querySelectorAll('#rulesTable thead [data-bs-toggle="dropdown"]').forEach(el => {
+        bootstrap.Dropdown.getOrCreateInstance(el, { popperConfig: { strategy: 'fixed' } });
+    });
+}
+
 restoreColWidths();
 initColResize();
+initFilterDropdowns();
 ld();
 </script>
 {% endblock %}
