@@ -491,16 +491,7 @@ function renderEndpoints() {
                             <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
                                 <li><a class="dropdown-item text-primary" href="#" onclick="openInConsole(rowHost(this)); return false;"><i class="fa-solid fa-terminal me-2"></i>Interact in Console</a></li>
                                 <li><hr class="dropdown-divider"></li>
-                                <li><a class="dropdown-item" href="#" onclick="queueCommand(rowHost(this), 'list_processes'); return false;"><i class="fa-solid fa-list me-2"></i>List Processes</a></li>
-                                <li><a class="dropdown-item" href="#" onclick="killProcessPrompt(rowHost(this)); return false;"><i class="fa-solid fa-skull me-2"></i>Kill Process (PID)</a></li>
-                                <li><a class="dropdown-item" href="#" onclick="collectFilePrompt(rowHost(this)); return false;"><i class="fa-solid fa-file-arrow-down me-2"></i>Collect File</a></li>
-                                <li><a class="dropdown-item" href="#" onclick="queueCommand(rowHost(this), 'collect_triage'); return false;"><i class="fa-solid fa-microscope me-2"></i>Triage Collection</a></li>
-                                <li><hr class="dropdown-divider"></li>
-                                <li><a class="dropdown-item text-warning" href="#" onclick="queueCommand(rowHost(this), 'isolate_host', {}, 'Isolate this host from the network? Only traffic to/from this SOC server will be allowed.'); return false;"><i class="fa-solid fa-network-wired me-2"></i>Isolate Host</a></li>
-                                <li><a class="dropdown-item text-success" href="#" onclick="queueCommand(rowHost(this), 'restore_network', {}, 'Restore normal network connectivity on this host?'); return false;"><i class="fa-solid fa-wifi me-2"></i>Restore Network</a></li>
                                 <li><a class="dropdown-item text-info" href="#" onclick="queueCommand(rowHost(this), 'upgrade', {}, 'Upgrade the MicroDFIR agent on this host to the latest version? It restarts itself automatically.'); return false;"><i class="fa-solid fa-rotate me-2"></i>Upgrade Agent</a></li>
-                                <li><hr class="dropdown-divider"></li>
-                                <li><a class="dropdown-item text-danger" href="#" onclick="openCustomCmdModalOnConsole(rowHost(this)); return false;"><i class="fa-solid fa-terminal me-2"></i>Custom Command</a></li>
                                 <li><a class="dropdown-item text-danger" href="#" onclick="removeEndpoint(rowHost(this)); return false;"><i class="fa-solid fa-trash me-2"></i>Uninstall Agent</a></li>
                             </ul>
                         </div>
@@ -541,28 +532,6 @@ function queueCommand(hostname, label, params, confirmMsg) {
             alert(data.error || 'Failed to queue command.');
         }
     }).catch(err => alert('Error queuing command: ' + err));
-}
-
-function killProcessPrompt(hostname) {
-    const pid = prompt(`Enter the PID to terminate on ${hostname}:`);
-    if (!pid) return;
-    if (!/^\d+$/.test(pid.trim())) { alert('PID must be a number.'); return; }
-    queueCommand(hostname, 'kill_process', {pid: pid.trim()}, `Terminate PID ${pid} on ${hostname}? This cannot be undone.`);
-}
-
-function collectFilePrompt(hostname) {
-    const path = prompt(`Enter the full path of the file to collect from ${hostname} (max 4MB):`);
-    if (!path) return;
-    queueCommand(hostname, 'collect_file', {path: path.trim()});
-}
-
-// A row's "Custom Command" action opens the interactive console (which has its own
-// typed-command prompt) rather than a separate one-off modal, so the resulting output
-// lands somewhere visible instead of a single-shot alert.
-function openCustomCmdModalOnConsole(hostname) {
-    openInConsole(hostname);
-    const input = document.getElementById('consoleCmdInput');
-    if (input) input.focus();
 }
 
 // ---- Interactive response console ----
