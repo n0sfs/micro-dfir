@@ -134,10 +134,41 @@
 
             <!-- DB Maintenance -->
             <h6 class="text-info mb-3">Database Maintenance & Backups</h6>
-            <p class="text-muted small mb-3">Manage local SQLite database health, generate manual backups, or purge old event logs to free up disk space.</p>
+            <p class="text-muted small mb-3">Manage local SQLite database health and generate manual backups.</p>
             <button class="btn btn-outline-primary btn-sm me-2" onclick="backupDB()"><i class="fa-solid fa-download me-1"></i> Download DB Backup</button>
-            <button class="btn btn-outline-warning btn-sm me-2" onclick="vacuumDB()"><i class="fa-solid fa-broom me-1"></i> Vacuum / Optimize DB</button>
-            <button class="btn btn-outline-danger btn-sm" onclick="purgeOldLogs()"><i class="fa-solid fa-trash-can me-1"></i> Purge Logs > 30 Days</button>
+            <button class="btn btn-outline-warning btn-sm" onclick="vacuumDB()"><i class="fa-solid fa-broom me-1"></i> Vacuum / Optimize DB</button>
+
+            <hr class="border-secondary my-4">
+
+            <!-- Log Retention -->
+            <h6 class="text-info mb-3">Log Retention</h6>
+            <p class="text-muted small mb-3">Choose how long ingested logs are kept. Retention needs vary by policy, industry, and jurisdiction — pick the period that matches your own compliance requirements; these are common reference points, not a recommendation.</p>
+            <div class="row g-2 align-items-end mb-3">
+                <div class="col-auto">
+                    <label class="form-label small text-muted mb-1">Retention period</label>
+                    <select id="retentionDays" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onRetentionSelectChange()" style="min-width:220px;">
+                        <option value="30">30 days</option>
+                        <option value="90">90 days</option>
+                        <option value="180">180 days</option>
+                        <option value="365">1 year (365 days)</option>
+                        <option value="730">2 years (730 days)</option>
+                        <option value="custom">Custom…</option>
+                    </select>
+                </div>
+                <div class="col-auto" id="retentionCustomWrap" style="display:none;">
+                    <label class="form-label small text-muted mb-1">Days</label>
+                    <input type="number" min="1" id="retentionCustomDays" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;">
+                </div>
+                <div class="col-auto">
+                    <button class="btn btn-outline-danger btn-sm" onclick="purgeNow()"><i class="fa-solid fa-trash-can me-1"></i> Purge Now</button>
+                </div>
+            </div>
+            <div class="form-check form-switch mb-2">
+                <input class="form-check-input" type="checkbox" id="retentionAutoEnabled">
+                <label class="form-check-label small" for="retentionAutoEnabled">Automatically purge logs older than the selected period (checked daily)</label>
+            </div>
+            <button class="btn btn-outline-primary btn-sm" onclick="saveRetentionPolicy()"><i class="fa-solid fa-save me-1"></i> Save Retention Policy</button>
+            <div class="small text-muted mt-2" id="retentionStatus"></div>
         </div>
     </div>
 </div>
@@ -199,6 +230,7 @@ document.addEventListener("DOMContentLoaded", function() {
 
     loadMetrics();
     loadUsers();
+    loadRetentionSettings();
     setInterval(loadMetrics, 5000);
 
     let certForm = document.getElementById('certUploadForm');
@@ -346,12 +378,68 @@ function vacuumDB() {
             else alert(data.error || 'Vacuum failed.');
         }).catch(err => alert('Error running vacuum: ' + err));
 }
-function purgeOldLogs() {
-    if (!confirm('Permanently delete all logs older than 30 days? This cannot be undone.')) return;
+// ---- Log Retention ----
+const RETENTION_PRESETS = ['30', '90', '180', '365', '730'];
+
+function loadRetentionSettings() {
+    fetch('/api/settings/retention')
+        .then(r => r.json())
+        .then(data => {
+            const sel = document.getElementById('retentionDays');
+            const customWrap = document.getElementById('retentionCustomWrap');
+            const customInput = document.getElementById('retentionCustomDays');
+            if (data.days && RETENTION_PRESETS.includes(String(data.days))) {
+                sel.value = String(data.days);
+                customWrap.style.display = 'none';
+            } else if (data.days) {
+                sel.value = 'custom';
+                customWrap.style.display = 'block';
+                customInput.value = data.days;
+            } else {
+                sel.value = '30';
+                customWrap.style.display = 'none';
+            }
+            document.getElementById('retentionAutoEnabled').checked = !!data.days;
+            renderRetentionStatus(data);
+        })
+        .catch(e => console.log('Retention settings load issue:', e));
+}
+
+function renderRetentionStatus(data) {
+    const el = document.getElementById('retentionStatus');
+    if (data.days) {
+        const last = data.last_purge ? `Last automatic purge: ${data.last_purge}.` : 'No automatic purge has run yet (checked daily).';
+        el.innerText = `Automatic purge is ON — logs older than ${data.days} day(s) are removed. ${last}`;
+    } else {
+        el.innerText = 'Automatic purge is OFF. Use "Purge Now" for a one-time cleanup.';
+    }
+}
+
+function onRetentionSelectChange() {
+    const sel = document.getElementById('retentionDays');
+    document.getElementById('retentionCustomWrap').style.display = sel.value === 'custom' ? 'block' : 'none';
+}
+
+// Returns a positive integer day count from whichever control is active, or null if
+// the current selection isn't a valid value yet (e.g. Custom with nothing typed in).
+function getSelectedRetentionDays() {
+    const sel = document.getElementById('retentionDays');
+    if (sel.value === 'custom') {
+        const v = parseInt(document.getElementById('retentionCustomDays').value, 10);
+        return (v && v > 0) ? v : null;
+    }
+    const v = parseInt(sel.value, 10);
+    return (v && v > 0) ? v : null;
+}
+
+function purgeNow() {
+    const days = getSelectedRetentionDays();
+    if (!days) { alert('Enter a valid number of days.'); return; }
+    if (!confirm(`Permanently delete all logs older than ${days} day(s)? This cannot be undone.`)) return;
     fetch('/api/settings/purge', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({days: 30})
+        body: JSON.stringify({days: days})
     }).then(r => r.json()).then(res => {
         if (res.status === 'success') {
             alert(`Purged ${res.deleted} log(s) older than ${res.cutoff}. Run "Vacuum / Optimize DB" afterward to reclaim disk space.`);
@@ -359,6 +447,23 @@ function purgeOldLogs() {
             alert(res.error || 'Purge failed.');
         }
     }).catch(err => alert('Error purging logs: ' + err));
+}
+
+function saveRetentionPolicy() {
+    const autoEnabled = document.getElementById('retentionAutoEnabled').checked;
+    const days = autoEnabled ? getSelectedRetentionDays() : null;
+    if (autoEnabled && !days) { alert('Enter a valid number of days.'); return; }
+    fetch('/api/settings/retention', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({days: days})
+    }).then(r => r.json()).then(res => {
+        if (res.status === 'success') {
+            loadRetentionSettings();
+        } else {
+            alert(res.error || 'Failed to save retention policy.');
+        }
+    }).catch(err => alert('Error saving retention policy: ' + err));
 }
 </script>
 {% endblock %}

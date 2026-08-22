@@ -1764,6 +1764,39 @@ def api_settings_purge():
     db.commit()
     return jsonify({'status': 'success', 'deleted': deleted, 'cutoff': cutoff})
 
+@app.route('/api/settings/retention', methods=['GET', 'POST'])
+@login_required
+def api_settings_retention():
+    from flask import request, jsonify
+    db = get_db()
+
+    if request.method == 'GET':
+        days_row = db.execute("SELECT value FROM settings WHERE key = 'log_retention_days'").fetchone()
+        last_row = db.execute("SELECT value FROM settings WHERE key = 'log_retention_last_purge'").fetchone()
+        days = int(days_row['value']) if days_row and days_row['value'] else None
+        return jsonify({'days': days, 'last_purge': last_row['value'] if last_row and last_row['value'] else None})
+
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    d = request.json or {}
+    days = d.get('days')
+    if days in (None, '', 0, '0'):
+        # Explicitly disabling automatic purge — sigma_engine.py's scheduled check
+        # (see run_due_log_purge()) skips entirely when this key is blank, same as a
+        # threat-intel feed left on "Manual only" is never touched by sync_due_feeds().
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('log_retention_days', '')")
+        db.commit()
+        return jsonify({'status': 'success', 'days': None})
+    try:
+        days = int(days)
+        if days < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({'error': 'days must be a positive integer, or omitted/0 to disable automatic purge'}), 400
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('log_retention_days', ?)", (str(days),))
+    db.commit()
+    return jsonify({'status': 'success', 'days': days})
+
 @app.route('/api/settings/vacuum', methods=['POST'])
 @login_required
 def api_settings_vacuum():
