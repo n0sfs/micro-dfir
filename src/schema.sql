@@ -24,3 +24,5 @@ CREATE INDEX IF NOT EXISTS idx_ueba_exclusions_entity ON ueba_exclusions(entity_
 CREATE TABLE IF NOT EXISTS ueba_entity_baselines (entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, current_count INTEGER, baseline_avg REAL, baseline_stddev REAL, threshold REAL, is_anomalous BOOLEAN DEFAULT 0, excluded BOOLEAN DEFAULT 0, days_seen INTEGER, baseline_mode TEXT, computed_at DATETIME, PRIMARY KEY (entity_type, entity_id));
 CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, username TEXT, role TEXT, ip_address TEXT, action TEXT NOT NULL, target_type TEXT, target_id TEXT, details TEXT);
 CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);
+CREATE TABLE IF NOT EXISTS risk_score_events (id INTEGER PRIMARY KEY AUTOINCREMENT, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, indicator TEXT NOT NULL, points INTEGER NOT NULL, detail TEXT, source_table TEXT, source_id TEXT, computed_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS idx_risk_score_events_entity ON risk_score_events(entity_type, entity_id, computed_at);

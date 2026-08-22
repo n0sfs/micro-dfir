@@ -23,6 +23,7 @@
     <div class="card-header border-secondary p-0">
         <ul class="nav nav-tabs border-0" id="uebaTabs">
             <li class="nav-item"><button type="button" class="nav-link active" id="tabBtnDetections" onclick="switchUebaTab('detections')"><i class="fa-solid fa-chart-line me-2"></i>Anomaly Detections</button></li>
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnRisk" onclick="switchUebaTab('risk')"><i class="fa-solid fa-gauge-high me-2"></i>Risk Scoring</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnTuning" onclick="switchUebaTab('tuning')"><i class="fa-solid fa-sliders me-2"></i>Anomaly Tuning</button></li>
         </ul>
     </div>
@@ -49,6 +50,33 @@
                     </tbody>
                 </table>
             </div>
+        </div>
+    </div>
+
+    <!-- Risk Scoring pane -->
+    <div id="paneRisk" style="display:none;">
+        <div class="card-body py-2 px-3 border-bottom border-secondary d-flex justify-content-between align-items-center">
+            <span class="text-muted small"><i class="fa-solid fa-circle-info me-1"></i>Composite point-based risk per entity — Sigma alert severity, IOC sweep hits, sensitive audit actions, and the existing statistical anomalies, summed over a rolling window. Click a row for the full breakdown.</span>
+            <button class="btn btn-outline-secondary btn-sm" onclick="loadRiskScores()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive" style="max-height: 500px; overflow-y: auto;">
+                <table class="table table-dark table-hover mb-0 align-middle">
+                    <thead>
+                        <tr>
+                            <th class="ps-3">Entity</th>
+                            <th>Score</th>
+                            <th>Tier</th>
+                            <th>Contributing Events</th>
+                            <th>Last Activity</th>
+                        </tr>
+                    </thead>
+                    <tbody id="riskScoresTableBody">
+                        <tr><td colspan="5" class="text-center text-muted py-4">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <p class="text-muted small px-3 py-2 mb-0" id="riskScoresWindowNote"></p>
         </div>
     </div>
 
@@ -87,6 +115,32 @@
                     {% if current_user.role == 'admin' %}
                     <button class="btn btn-primary btn-sm mt-3" onclick="saveUebaConfig()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Tuning</button>
                     <span id="cfgSaveMsg" class="small ms-2" style="display:none;"></span>
+                    {% else %}
+                    <p class="text-muted small mt-3 mb-0"><i class="fa-solid fa-lock me-1"></i>Admin role required to change tuning.</p>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div class="card bg-dark border-secondary mb-4">
+                <div class="card-header">
+                    <i class="fa-solid fa-gauge-high me-2"></i>Risk Scoring Configuration
+                </div>
+                <div class="card-body">
+                    <p class="text-muted small mb-3">How composite risk scores are computed — see the Risk Scoring tab for results. The scoring window controls how far back contributing events are summed; point values control how much each indicator (Sigma alert severity, IOC sweep hits, sensitive audit actions, statistical anomalies) contributes.</p>
+                    <div class="row g-3">
+                        <div class="col-md-3">
+                            <label class="form-label">Scoring Window (days)</label>
+                            <input type="number" id="riskCfgWindowDays" class="form-control bg-dark text-light border-secondary" min="1" max="90" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        </div>
+                    </div>
+                    <div class="mt-3">
+                        <label class="form-label small text-muted mb-1">Point values (advanced — indicator/action name : points)</label>
+                        <textarea id="riskCfgPointsJson" class="form-control bg-dark text-light border-secondary font-monospace small" rows="8" spellcheck="false" {{ '' if current_user.role == 'admin' else 'disabled' }}></textarea>
+                        <p class="text-muted small mt-1 mb-0">Edit as JSON — <code>points</code> (per-indicator), <code>sensitive_actions</code> (per audit action type), and <code>tiers</code> (score thresholds for Low/Medium/High/Critical).</p>
+                    </div>
+                    {% if current_user.role == 'admin' %}
+                    <button class="btn btn-primary btn-sm mt-3" onclick="saveRiskConfig()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Risk Scoring Config</button>
+                    <span id="riskCfgSaveMsg" class="small ms-2" style="display:none;"></span>
                     {% else %}
                     <p class="text-muted small mt-3 mb-0"><i class="fa-solid fa-lock me-1"></i>Admin role required to change tuning.</p>
                     {% endif %}
@@ -159,6 +213,19 @@
         </div>
     </div>
 </div>
+
+<!-- Risk Score Detail Modal -->
+<div class="modal fade" id="riskDetailModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title" id="riskDetailModalTitle"><i class="fa-solid fa-gauge-high text-warning me-2"></i>Risk Breakdown</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="riskDetailModalBody"></div>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -170,16 +237,19 @@ function escHtml(s) {
 }
 
 // ---- Tabs + shared stat row (repurposed per active tab, not two separate rows) ----
+const UEBA_TABS = ['detections', 'risk', 'tuning'];
 let activeUebaTab = 'detections';
 let uebaDetectionsData = null;
 
 function switchUebaTab(tab) {
+    if (!UEBA_TABS.includes(tab)) tab = 'detections';
     activeUebaTab = tab;
-    const isDetections = tab !== 'tuning';
-    document.getElementById('tabBtnDetections').classList.toggle('active', isDetections);
-    document.getElementById('tabBtnTuning').classList.toggle('active', !isDetections);
-    document.getElementById('paneDetections').style.display = isDetections ? 'block' : 'none';
-    document.getElementById('paneTuning').style.display = isDetections ? 'none' : 'block';
+    UEBA_TABS.forEach(t => {
+        const cap = t.charAt(0).toUpperCase() + t.slice(1);
+        document.getElementById('tabBtn' + cap).classList.toggle('active', t === tab);
+        document.getElementById('pane' + cap).style.display = (t === tab) ? 'block' : 'none';
+    });
+    if (tab === 'risk' && !riskScoresLoadedOnce) loadRiskScores();
     updateSharedStats();
 }
 
@@ -196,6 +266,12 @@ function updateSharedStats() {
         setStatTile(1, 'Anomalous Now', rows.filter(r => r.is_anomalous).length, true);
         setStatTile(2, 'Excluded', rows.filter(r => r.excluded).length, true);
         setStatTile(3, 'Weekday-Modeled', rows.filter(r => r.baseline_mode === 'weekday').length, true);
+    } else if (activeUebaTab === 'risk') {
+        const rows = riskScoresData || [];
+        setStatTile(0, 'Entities Scored', rows.length, true);
+        setStatTile(1, 'Critical', rows.filter(r => r.tier === 'Critical').length, true);
+        setStatTile(2, 'High', rows.filter(r => r.tier === 'High').length, true);
+        setStatTile(3, 'Top Score', rows.length ? rows[0].score : '—', true);
     } else {
         const d = uebaDetectionsData || {};
         setStatTile(0, 'Total Detections', d.total ?? '—', true);
@@ -239,6 +315,117 @@ function loadUebaDetections() {
             `).join('');
         })
         .catch(err => console.error('Error loading UEBA detections:', err));
+}
+
+// ---- Risk Scoring ----
+let riskScoresData = [];
+let riskScoresLoadedOnce = false;
+
+function riskTierBadge(tier) {
+    const cls = {Critical: 'bg-danger', High: 'bg-danger', Medium: 'bg-warning text-dark', Low: 'bg-secondary'}[tier] || 'bg-secondary';
+    return `<span class="badge ${cls}">${escHtml(tier)}</span>`;
+}
+
+function loadRiskScores() {
+    fetch('/api/ueba/risk-scores')
+        .then(r => r.json())
+        .then(data => {
+            riskScoresData = data.entities || [];
+            riskScoresLoadedOnce = true;
+            updateSharedStats();
+
+            document.getElementById('riskScoresWindowNote').innerText = `Scored over the trailing ${data.window_days} day(s). Recomputed hourly alongside the anomaly models.`;
+            const tbody = document.getElementById('riskScoresTableBody');
+            if (!riskScoresData.length) {
+                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">No entities have scored any risk in this window yet.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = riskScoresData.map(r => `
+                <tr style="cursor:pointer;" onclick="viewRiskScoreDetail('${r.entity_type}', '${escHtml(r.entity_id).replace(/'/g, "\\'")}')">
+                    <td class="ps-3">${entityBadge(r.entity_type)}<strong>${escHtml(r.entity_id)}</strong></td>
+                    <td class="fw-bold">${r.score}</td>
+                    <td>${riskTierBadge(r.tier)}</td>
+                    <td class="text-muted small">${r.event_count}</td>
+                    <td class="text-muted small text-nowrap">${escHtml(r.last_event)}</td>
+                </tr>
+            `).join('');
+        })
+        .catch(err => console.error('Error loading risk scores:', err));
+}
+
+function viewRiskScoreDetail(entityType, entityId) {
+    document.getElementById('riskDetailModalTitle').innerHTML =
+        `<i class="fa-solid fa-gauge-high text-warning me-2"></i>${entityBadge(entityType)}${escHtml(entityId)}`;
+    document.getElementById('riskDetailModalBody').innerHTML = '<p class="text-muted small">Loading…</p>';
+    new bootstrap.Modal(document.getElementById('riskDetailModal')).show();
+
+    fetch(`/api/ueba/risk-scores/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`)
+        .then(r => r.json())
+        .then(data => {
+            const rows = (data.events || []).map(e => `
+                <tr>
+                    <td class="text-nowrap small text-muted">${escHtml(e.computed_at)}</td>
+                    <td class="small">${escHtml(e.indicator)}</td>
+                    <td class="fw-bold">${e.points}</td>
+                    <td class="small text-muted">${escHtml(e.detail || '')}</td>
+                </tr>
+            `).join('');
+            document.getElementById('riskDetailModalBody').innerHTML = `
+                <div class="mb-3"><strong>Total score:</strong> ${data.score} ${riskTierBadge(data.tier)}
+                    <span class="text-muted small ms-2">over the trailing ${data.window_days} day(s)</span></div>
+                <div class="table-responsive">
+                    <table class="table table-dark table-sm table-striped mb-0">
+                        <thead><tr><th>When</th><th>Indicator</th><th>Points</th><th>Detail</th></tr></thead>
+                        <tbody>${rows || '<tr><td colspan="4" class="text-muted small">No contributing events.</td></tr>'}</tbody>
+                    </table>
+                </div>
+            `;
+        })
+        .catch(err => {
+            document.getElementById('riskDetailModalBody').innerHTML = `<p class="text-danger small">Error loading detail: ${escHtml(err)}</p>`;
+        });
+}
+
+function loadRiskConfig() {
+    fetch('/api/ueba/risk-config')
+        .then(r => r.json())
+        .then(cfg => {
+            document.getElementById('riskCfgWindowDays').value = cfg.window_days;
+            document.getElementById('riskCfgPointsJson').value = JSON.stringify(
+                {points: cfg.points, sensitive_actions: cfg.sensitive_actions, tiers: cfg.tiers}, null, 2
+            );
+        })
+        .catch(err => console.error('Error loading risk scoring config:', err));
+}
+
+function saveRiskConfig() {
+    const msg = document.getElementById('riskCfgSaveMsg');
+    let payload;
+    try {
+        payload = JSON.parse(document.getElementById('riskCfgPointsJson').value);
+    } catch (e) {
+        msg.style.display = 'inline'; msg.className = 'small ms-2 text-danger';
+        msg.innerText = 'Invalid JSON: ' + e.message;
+        return;
+    }
+    payload.window_days = parseInt(document.getElementById('riskCfgWindowDays').value, 10);
+
+    fetch('/api/ueba/risk-config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        msg.style.display = 'inline';
+        if (ok) {
+            msg.className = 'small ms-2 text-success';
+            msg.innerText = 'Saved. Applies on the next hourly run.';
+            riskScoresLoadedOnce = false;
+        } else {
+            msg.className = 'small ms-2 text-danger';
+            msg.innerText = data.error || 'Failed to save.';
+        }
+        setTimeout(() => { msg.style.display = 'none'; }, 4000);
+    }).catch(err => toast('Error saving risk scoring config: ' + err, 'danger'));
 }
 
 // ---- Anomaly Tuning ----
@@ -405,9 +592,10 @@ async function deleteUebaExclusion(eid) {
 
 // ---- Init ----
 const _uebaUrlTab = new URLSearchParams(window.location.search).get('tab');
-if (_uebaUrlTab === 'tuning') switchUebaTab('tuning');
+if (_uebaUrlTab === 'tuning' || _uebaUrlTab === 'risk') switchUebaTab(_uebaUrlTab);
 
 loadUebaDetections();
+loadRiskConfig();
 loadUebaConfig();
 loadBaselines();
 loadUebaExclusions();

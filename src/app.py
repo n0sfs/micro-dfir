@@ -1338,6 +1338,110 @@ def api_ueba_config():
     db.commit()
     return jsonify({'status': 'success'})
 
+# Duplicated from ueba_engine.py's RISK_SCORE_DEFAULTS rather than imported -- same
+# reasoning as UEBA_CONFIG_DEFAULTS just above and taxii_client.py's own DB_PATH
+# constant: this module and the standalone engine script each keep their own copy
+# rather than one importing the other.
+RISK_SCORE_DEFAULTS = {
+    'window_days': 7,
+    'points': {
+        'alert_critical': 40, 'alert_high': 25, 'alert_medium': 10, 'alert_low': 5, 'alert_informational': 1,
+        'sweep_hit': 35, 'failed_login': 10,
+        'volume_anomaly_critical': 30, 'volume_anomaly_high': 20, 'volume_anomaly_medium': 10,
+        'new_source_ip': 15, 'first_time_bonus': 15,
+    },
+    'sensitive_actions': {
+        'user_create': 20, 'user_delete': 25, 'user_password_reset': 15,
+        'network_config_change': 20, 'tls_cert_upload': 15, 'soc_token_change': 15,
+        'retention_policy_change': 10, 'manual_log_purge': 15, 'db_vacuum': 5,
+        'sigmahq_import': 5, 'rule_bulk_toggle': 10, 'rule_delete': 8,
+        'drop_rule_delete': 5, 'ti_feed_delete': 5,
+    },
+    'tiers': {'low': 0, 'medium': 20, 'high': 50, 'critical': 100},
+}
+
+def _deep_merge_risk_config(base, override):
+    for k, v in (override or {}).items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            _deep_merge_risk_config(base[k], v)
+        else:
+            base[k] = v
+    return base
+
+def get_risk_score_config(db):
+    import copy as _copy
+    cfg = _copy.deepcopy(RISK_SCORE_DEFAULTS)
+    row = db.execute("SELECT value FROM settings WHERE key = 'risk_score_config'").fetchone()
+    if row and row['value']:
+        try:
+            _deep_merge_risk_config(cfg, json.loads(row['value']))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return cfg
+
+def _risk_tier(score, tiers):
+    if score >= tiers['critical']: return 'Critical'
+    if score >= tiers['high']: return 'High'
+    if score >= tiers['medium']: return 'Medium'
+    return 'Low'
+
+@app.route('/api/ueba/risk-scores', methods=['GET'])
+@login_required
+def api_ueba_risk_scores():
+    db = get_db()
+    cfg = get_risk_score_config(db)
+    rows = db.execute(
+        "SELECT entity_type, entity_id, SUM(points) as score, COUNT(*) as event_count, MAX(computed_at) as last_event "
+        "FROM risk_score_events WHERE computed_at >= datetime('now', ?) "
+        "GROUP BY entity_type, entity_id HAVING score > 0 ORDER BY score DESC LIMIT 200",
+        (f"-{cfg['window_days']} days",)
+    ).fetchall()
+    out = [{**dict(r), 'tier': _risk_tier(r['score'], cfg['tiers'])} for r in rows]
+    return jsonify({'entities': out, 'window_days': cfg['window_days']})
+
+@app.route('/api/ueba/risk-scores/<entity_type>/<path:entity_id>', methods=['GET'])
+@login_required
+def api_ueba_risk_score_detail(entity_type, entity_id):
+    db = get_db()
+    cfg = get_risk_score_config(db)
+    rows = db.execute(
+        "SELECT indicator, points, detail, source_table, source_id, computed_at FROM risk_score_events "
+        "WHERE entity_type = ? AND entity_id = ? AND computed_at >= datetime('now', ?) ORDER BY id DESC",
+        (entity_type, entity_id, f"-{cfg['window_days']} days")
+    ).fetchall()
+    events = [dict(r) for r in rows]
+    score = sum(e['points'] for e in events)
+    return jsonify({'entity_type': entity_type, 'entity_id': entity_id, 'score': score,
+                     'tier': _risk_tier(score, cfg['tiers']), 'events': events, 'window_days': cfg['window_days']})
+
+@app.route('/api/ueba/risk-config', methods=['GET', 'POST'])
+@login_required
+def api_ueba_risk_config():
+    db = get_db()
+    if request.method == 'GET':
+        return jsonify(get_risk_score_config(db))
+
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    data = request.json or {}
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Config must be a JSON object'}), 400
+    # Validate against the default shape before storing -- reject anything that isn't
+    # a plausible partial override rather than silently storing garbage that would
+    # only surface as a confusing failure the next time the engine runs.
+    for section in ('points', 'sensitive_actions', 'tiers'):
+        if section in data and not isinstance(data[section], dict):
+            return jsonify({'error': f"'{section}' must be an object"}), 400
+        for k, v in (data.get(section) or {}).items():
+            if not isinstance(v, (int, float)):
+                return jsonify({'error': f"'{section}.{k}' must be a number"}), 400
+    if 'window_days' in data and not (1 <= int(data['window_days']) <= 90):
+        return jsonify({'error': 'window_days must be 1-90'}), 400
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('risk_score_config', ?)", (json.dumps(data),))
+    db.commit()
+    log_audit('risk_score_config_change', 'settings')
+    return jsonify({'status': 'success'})
+
 
 # ==========================================
 # GLOBAL SETTINGS & AGENT DEPLOYMENT ROUTES
@@ -1729,6 +1833,22 @@ def migrate_audit_log():
             action TEXT NOT NULL, target_type TEXT, target_id TEXT, details TEXT
         )''')
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_risk_scoring():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS risk_score_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
+            indicator TEXT NOT NULL, points INTEGER NOT NULL,
+            detail TEXT, source_table TEXT, source_id TEXT,
+            computed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_score_events_entity ON risk_score_events(entity_type, entity_id, computed_at)")
         conn.commit()
         conn.close()
     except Exception:
@@ -2925,7 +3045,7 @@ def api_agent_result():
     # Cross-checked against the specific command's own hostname (not just "is this
     # token valid at all") so a token bound to one host can't submit a fake result for
     # a command that was queued for a *different* host.
-    cmd = db.execute("SELECT hostname FROM agent_commands WHERE id = ?", (cmd_id,)).fetchone()
+    cmd = db.execute("SELECT hostname, label FROM agent_commands WHERE id = ?", (cmd_id,)).fetchone()
     if not cmd:
         return jsonify({'error': 'Unknown command id'}), 404
     if not _validate_agent_auth(db, request.headers.get('X-Agent-Token'), cmd['hostname']):
@@ -2933,10 +3053,28 @@ def api_agent_result():
 
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     status = 'done' if d.get('exit_code', 1) == 0 else 'failed'
+    stdout = str(d.get('stdout', ''))[:20000]
     db.execute(
         "UPDATE agent_commands SET status = ?, completed_at = ?, exit_code = ?, stdout = ?, stderr = ? WHERE id = ?",
-        (status, now, d.get('exit_code'), str(d.get('stdout', ''))[:20000], str(d.get('stderr', ''))[:5000], cmd_id)
+        (status, now, d.get('exit_code'), stdout, str(d.get('stderr', ''))[:5000], cmd_id)
     )
+    # A confirmed IOC/string-sweep hit today only lives inside this command's own
+    # stdout JSON -- nothing queryable by entity. Mirrors exactly how UEBA anomalies
+    # already surface (events, app_name-tagged) so a hit becomes visible in Log Search
+    # and scorable by the composite risk engine (ueba_engine.py's run_risk_scoring),
+    # instead of only being visible from the Sweep Results view that queued it.
+    if status == 'done' and cmd['label'] in ('ioc_sweep', 'string_sweep'):
+        try:
+            hits = (json.loads(stdout or '{}') or {}).get('hits') or []
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            hits = []
+        if hits:
+            message = f"{cmd['hostname']} (host) — {len(hits)} IOC match(es) found in a {cmd['label']} sweep."
+            db.execute(
+                "INSERT INTO events (timestamp, hostname, entity_type, app_name, severity, message, raw_json) "
+                "VALUES (datetime('now'), ?, 'host', 'ioc_sweep', 'High', ?, ?)",
+                (cmd['hostname'], message, json.dumps({'command_id': cmd_id, 'label': cmd['label'], 'hit_count': len(hits), 'detection_type': 'ioc_sweep_hit'}))
+            )
     db.commit()
     return jsonify({'status': 'success'})
 
@@ -2977,6 +3115,7 @@ migrate_live_logs_ip_columns()
 migrate_agent_versions()
 migrate_agent_tokens()
 migrate_audit_log()
+migrate_risk_scoring()
 
 try:
     # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every
