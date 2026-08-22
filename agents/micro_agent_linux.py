@@ -21,7 +21,12 @@ SERVER_CERT_PEM = """__SERVER_CERT_PEM__"""
 SCRIPT_TIMEOUT_SECONDS = 90
 
 def build_ssl_context():
-    if '__SERVER_CERT_PEM__' in SERVER_CERT_PEM or not SERVER_CERT_PEM.strip():
+    # A structural check (does this look like a real PEM cert?) rather than checking
+    # for the literal placeholder token's absence — _build_agent_source's substitution
+    # is a blind whole-file replace of that exact token, which would otherwise also
+    # rewrite this very check (it contains that same token as a substring) and corrupt
+    # the file into invalid Python the moment a real cert got substituted in.
+    if not SERVER_CERT_PEM.strip().startswith('-----BEGIN CERTIFICATE-----'):
         print("[!] WARNING: no pinned server certificate embedded — falling back to unverified TLS. Re-download the agent package to fix this.", flush=True)
         return ssl._create_unverified_context()
     try:
