@@ -2269,21 +2269,45 @@ def api_settings_metrics():
 @login_required
 def api_settings_cert():
     from flask import request, jsonify
+    import ssl
     if current_user.role != 'admin':
         return jsonify({'error': 'Admin required'}), 403
     if 'cert_file' not in request.files or 'key_file' not in request.files:
         return jsonify({'error': 'Both Certificate and Private Key files are required.'}), 400
-    
+
     cert = request.files['cert_file']
     key = request.files['key_file']
-    
-    cert_dir = '/opt/micro-dfir/certs'
+    cert_bytes = cert.read()
+    key_bytes = key.read()
+
+    # Validate the pair actually loads as a matching cert+key before touching anything
+    # the running server depends on — an unvalidated bad upload here would take down
+    # HTTPS for the entire UI with no way to recover except SSH.
+    with tempfile.NamedTemporaryFile(suffix='.pem') as tmp_cert, tempfile.NamedTemporaryFile(suffix='.pem') as tmp_key:
+        tmp_cert.write(cert_bytes); tmp_cert.flush()
+        tmp_key.write(key_bytes); tmp_key.flush()
+        try:
+            ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(tmp_cert.name, tmp_key.name)
+        except ssl.SSLError as e:
+            return jsonify({'error': f'Invalid certificate/key pair: {e}'}), 400
+
+    # Gunicorn's systemd unit (microsoc-web.service) always points --certfile/--keyfile
+    # at AGENT_TLS_CERT_PATH's directory — the previous /opt/micro-dfir/certs/ location
+    # was never actually read by anything, so an uploaded cert silently never took
+    # effect even after a restart.
+    cert_dir = os.path.dirname(AGENT_TLS_CERT_PATH)
     os.makedirs(cert_dir, exist_ok=True)
-    
-    cert.save(os.path.join(cert_dir, 'cert.pem'))
-    key.save(os.path.join(cert_dir, 'key.pem'))
-    
-    return jsonify({'status': 'success', 'message': 'Certificates updated successfully. Service restart required to apply.'})
+    with open(os.path.join(cert_dir, 'cert.pem'), 'wb') as f:
+        f.write(cert_bytes)
+    with open(os.path.join(cert_dir, 'key.pem'), 'wb') as f:
+        f.write(key_bytes)
+
+    # Same background-restart pattern as Save & Apply Network Settings — the cert files
+    # are only read at process startup, so nothing picks up the change until gunicorn
+    # actually restarts.
+    subprocess.Popen("(sleep 2 && systemctl restart microsoc-web.service) &", shell=True)
+
+    return jsonify({'status': 'success', 'message': 'Certificate validated and applied. The web UI is restarting now — you may need to reconnect in a few seconds.'})
 
 @app.route('/api/settings/users', methods=['GET', 'POST'])
 @login_required
