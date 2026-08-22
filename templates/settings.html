@@ -5,120 +5,139 @@
     <p>Platform security, network bindings, and system preferences.</p>
 </div>
 
-<div class="accordion accordion-flush border border-secondary rounded" id="settingsAccordion">
-    
-    <!-- 1. GENERAL SECURITY & RBAC -->
-    <div class="accordion-item bg-dark border-secondary">
-        <h2 class="accordion-header" id="headingOne">
-            <button class="accordion-button collapsed bg-dark text-light" type="button" data-bs-toggle="collapse" data-bs-target="#collapseOne">
-                <i class="fa-solid fa-shield-halved me-2"></i> General Security & Platform Authentication
-            </button>
-        </h2>
-        <div id="collapseOne" class="accordion-collapse collapse" data-bs-parent="#settingsAccordion">
-            <div class="accordion-body text-light border-top border-secondary">
-                <div class="d-flex justify-content-between align-items-center mb-3">
-                    <span class="text-muted small">Manage platform access, users, and role-based permissions.</span>
-                    <button class="btn btn-sm btn-primary" onclick="showUserModal()"><i class="fa-solid fa-plus me-1"></i> Add User</button>
-                </div>
-                <div class="table-responsive">
-                    <table class="table table-dark table-striped table-hover mb-0 align-middle border border-secondary">
-                        <thead>
-                            <tr>
-                                <th class="ps-3">Username</th>
-                                <th>Role / Group</th>
-                                <th class="text-end pe-3">Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody id="usersTableBody">
-                            <tr><td colspan="3" class="text-center text-muted py-3">Loading users...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
+<style>
+#settingsTabs .nav-link{color:var(--text-muted); border-color:transparent; background:transparent;}
+#settingsTabs .nav-link:hover{color:var(--text-secondary); border-color:transparent;}
+#settingsTabs .nav-link.active{color:var(--text-primary); background-color:var(--bg-card-alt); border-color:var(--border) var(--border) var(--bg-card-alt);}
+</style>
+
+<div class="card bg-dark border-secondary">
+    <div class="card-header border-secondary p-0">
+        <ul class="nav nav-tabs border-0" id="settingsTabs">
+            <li class="nav-item"><button type="button" class="nav-link active" id="tabBtnSecurity" onclick="switchSettingsTab('security')"><i class="fa-solid fa-shield-halved me-2"></i>Security</button></li>
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnNetwork" onclick="switchSettingsTab('network')"><i class="fa-solid fa-network-wired me-2"></i>Network</button></li>
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnSystem" onclick="switchSettingsTab('system')"><i class="fa-solid fa-database me-2"></i>System</button></li>
+        </ul>
+    </div>
+
+    <!-- Security pane -->
+    <div id="paneSecurity">
+        <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <span class="text-muted small">Manage platform access, users, and role-based permissions.</span>
+                <button class="btn btn-sm btn-primary" onclick="showUserModal()"><i class="fa-solid fa-plus me-1"></i> Add User</button>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-dark table-striped table-hover mb-0 align-middle border border-secondary">
+                    <thead>
+                        <tr>
+                            <th class="ps-3">Username</th>
+                            <th>Role / Group</th>
+                            <th class="text-end pe-3">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="usersTableBody">
+                        <tr><td colspan="3" class="text-center text-muted py-3">Loading users...</td></tr>
+                    </tbody>
+                </table>
             </div>
         </div>
     </div>
 
-    <!-- 2. NETWORK & CERTS -->
-    <div class="accordion-item bg-dark border-secondary">
-        <h2 class="accordion-header" id="headingTwo">
-            <button class="accordion-button collapsed bg-dark text-light" type="button" data-bs-toggle="collapse" data-bs-target="#collapseTwo">
-                <i class="fa-solid fa-network-wired me-2"></i> Network & Ingestion Bindings
-            </button>
-        </h2>
-        <div id="collapseTwo" class="accordion-collapse collapse" data-bs-parent="#settingsAccordion">
-            <div class="accordion-body text-light border-top border-secondary">
-                <p class="text-muted small mb-4">Manage current SSL/TLS certificates used for secure HTTPS web access and encrypted agent log ingestion.</p>
-                
+    <!-- Network pane -->
+    <div id="paneNetwork" style="display:none;">
+        <div class="card-body">
+            <p class="text-muted small mb-4">Manage current SSL/TLS certificates used for secure HTTPS web access and encrypted agent log ingestion.</p>
+            <div class="row">
+                <div class="col-md-6">
+                    <h6 class="text-info mb-3">Current Network Bindings</h6>
+                    <ul class="list-group list-group-flush rounded border border-secondary small mb-3">
+                        <li class="list-group-item bg-dark text-light border-secondary"><i class="fa-solid fa-globe me-2 text-muted"></i> Web UI Port: <strong>5001 (HTTPS)</strong></li>
+                        <li class="list-group-item bg-dark text-light border-secondary"><i class="fa-solid fa-satellite-dish me-2 text-muted"></i> Ingestion API Port: <strong>5000 (HTTPS)</strong></li>
+                        <li class="list-group-item bg-dark text-light border-secondary"><i class="fa-solid fa-file-certificate me-2 text-muted"></i> Certificate Path: <strong>/opt/micro-dfir/certs/</strong></li>
+                    </ul>
+                </div>
+                <div class="col-md-6">
+                    <h6 class="text-info mb-3">Upload New Certificates</h6>
+                    <form id="certUploadForm">
+                        <div class="mb-2">
+                            <label class="form-label text-light small mb-1">Public Certificate (.pem / .crt)</label>
+                            <input class="form-control bg-dark text-light border-secondary form-control-sm" type="file" id="certFile" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label text-light small mb-1">Private Key (.pem / .key)</label>
+                            <input class="form-control bg-dark text-light border-secondary form-control-sm" type="file" id="keyFile" required>
+                        </div>
+                        <button type="submit" class="btn btn-outline-success btn-sm w-100"><i class="fa-solid fa-shield-halved me-2"></i>Upload & Apply Certificates</button>
+                    </form>
+                    <div id="certMsg" class="mt-3 small text-center" style="display: none;"></div>
+                </div>
+            </div>
+
+            <hr class="border-secondary my-4">
+
+            <h6 class="text-light mb-3"><i class="fa-solid fa-network-wired me-2"></i>Network Configuration (Control & Data Planes)</h6>
+            <form method="POST" action="/settings/network">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <div class="row">
-                    <div class="col-md-6">
-                        <h6 class="text-info mb-3">Current Network Bindings</h6>
-                        <ul class="list-group list-group-flush rounded border border-secondary small mb-3">
-                            <li class="list-group-item bg-dark text-light border-secondary"><i class="fa-solid fa-globe me-2 text-muted"></i> Web UI Port: <strong>5001 (HTTPS)</strong></li>
-                            <li class="list-group-item bg-dark text-light border-secondary"><i class="fa-solid fa-satellite-dish me-2 text-muted"></i> Ingestion API Port: <strong>5000 (HTTPS)</strong></li>
-                            <li class="list-group-item bg-dark text-light border-secondary"><i class="fa-solid fa-file-certificate me-2 text-muted"></i> Certificate Path: <strong>/opt/micro-dfir/certs/</strong></li>
-                        </ul>
+                    <div class="col-md-6 mb-3">
+                        <label class="form-label text-info">UI Bind IP (Gunicorn)</label>
+                        <input type="text" class="form-control bg-dark text-white border-secondary" name="ui_bind_ip" value="{{ all_settings.get('ui_bind_ip', '0.0.0.0') }}" placeholder="e.g. 192.168.86.100 (Wi-Fi)">
                     </div>
-                    <div class="col-md-6">
-                        <h6 class="text-info mb-3">Upload New Certificates</h6>
-                        <form id="certUploadForm">
-                            <div class="mb-2">
-                                <label class="form-label text-light small mb-1">Public Certificate (.pem / .crt)</label>
-                                <input class="form-control bg-dark text-light border-secondary form-control-sm" type="file" id="certFile" required>
-                            </div>
-                            <div class="mb-3">
-                                <label class="form-label text-light small mb-1">Private Key (.pem / .key)</label>
-                                <input class="form-control bg-dark text-light border-secondary form-control-sm" type="file" id="keyFile" required>
-                            </div>
-                            <button type="submit" class="btn btn-outline-success btn-sm w-100"><i class="fa-solid fa-shield-halved me-2"></i>Upload & Apply Certificates</button>
-                        </form>
-                        <div id="certMsg" class="mt-3 small text-center" style="display: none;"></div>
+                    <div class="col-md-6 mb-3">
+                        <label class="form-label text-info">UI Port</label>
+                        <input type="text" class="form-control bg-dark text-white border-secondary" name="ui_port" value="{{ all_settings.get('ui_port', '5001') }}">
                     </div>
                 </div>
-            </div>
+                <div class="row">
+                    <div class="col-md-6 mb-3">
+                        <label class="form-label text-warning">Ingestion Bind IP (Vector)</label>
+                        <input type="text" class="form-control bg-dark text-white border-secondary" name="ingest_bind_ip" value="{{ all_settings.get('ingest_bind_ip', '0.0.0.0') }}" placeholder="e.g. 192.168.1.50 (Ethernet)">
+                    </div>
+                    <div class="col-md-6 mb-3">
+                        <label class="form-label text-warning">Ingestion Port</label>
+                        <input type="text" class="form-control bg-dark text-white border-secondary" name="ingest_port" value="{{ all_settings.get('ingest_port', '5000') }}">
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary"><i class="fa-solid fa-save me-2"></i>Save & Apply Network Settings</button>
+            </form>
+            <small class="text-muted d-block mt-3"><i class="fa-solid fa-triangle-exclamation me-1"></i><strong>Warning:</strong> Applying changes will instantly reload Vector and restart Gunicorn in the background. You may need to reconnect your browser to the new UI IP and Port.</small>
         </div>
     </div>
 
-    <!-- 3. SYSTEM & STORAGE -->
-    <div class="accordion-item bg-dark border-secondary">
-        <h2 class="accordion-header" id="headingFour">
-            <button class="accordion-button collapsed bg-dark text-light" type="button" data-bs-toggle="collapse" data-bs-target="#collapseFour">
-                <i class="fa-solid fa-database me-2"></i> System & Storage Maintenance
-            </button>
-        </h2>
-        <div id="collapseFour" class="accordion-collapse collapse" data-bs-parent="#settingsAccordion">
-            <div class="accordion-body text-light border-top border-secondary">
-                
-                <!-- New Telemetry -->
-                <div class="row text-center mb-5 mt-2">
-                    <div class="col-md-3 mb-3 mb-md-0">
-                        <h6 class="text-muted small text-uppercase">CPU Load</h6>
-                        <h3 class="text-light" id="met_cpu">--%</h3>
-                        <div class="progress bg-black" style="height: 5px;"><div id="bar_cpu" class="progress-bar bg-info" style="width: 0%"></div></div>
-                    </div>
-                    <div class="col-md-3 mb-3 mb-md-0">
-                        <h6 class="text-muted small text-uppercase">Memory Usage</h6>
-                        <h3 class="text-light" id="met_ram">--%</h3>
-                        <div class="progress bg-black" style="height: 5px;"><div id="bar_ram" class="progress-bar bg-warning" style="width: 0%"></div></div>
-                    </div>
-                    <div class="col-md-3 mb-3 mb-md-0">
-                        <h6 class="text-muted small text-uppercase">Disk Space (<span id="met_disk_free">--</span>GB Free)</h6>
-                        <h3 class="text-light" id="met_disk">--%</h3>
-                        <div class="progress bg-black" style="height: 5px;"><div id="bar_disk" class="progress-bar bg-danger" style="width: 0%"></div></div>
-                    </div>
-                    <div class="col-md-3">
-                        <h6 class="text-muted small text-uppercase">SIEM Database Size</h6>
-                        <h3 class="text-light text-success" id="met_db">-- MB</h3>
-                        <p class="text-muted small mb-0 mt-1">sqlite3 / siem.db</p>
-                    </div>
+    <!-- System pane -->
+    <div id="paneSystem" style="display:none;">
+        <div class="card-body">
+            <!-- Telemetry -->
+            <div class="row text-center mb-5 mt-2">
+                <div class="col-md-3 mb-3 mb-md-0">
+                    <h6 class="text-muted small text-uppercase">CPU Load</h6>
+                    <h3 class="text-light" id="met_cpu">--%</h3>
+                    <div class="progress bg-black" style="height: 5px;"><div id="bar_cpu" class="progress-bar bg-info" style="width: 0%"></div></div>
                 </div>
-
-                <!-- Restored DB Maintenance -->
-                <h6 class="text-info mb-3">Database Maintenance & Backups</h6>
-                <p class="text-muted small mb-3">Manage local SQLite database health, generate manual backups, or purge old event logs to free up disk space.</p>
-                <button class="btn btn-outline-primary btn-sm me-2" onclick="backupDB()"><i class="fa-solid fa-download me-1"></i> Download DB Backup</button>
-                <button class="btn btn-outline-warning btn-sm me-2" onclick="vacuumDB()"><i class="fa-solid fa-broom me-1"></i> Vacuum / Optimize DB</button>
-                <button class="btn btn-outline-danger btn-sm" onclick="purgeOldLogs()"><i class="fa-solid fa-trash-can me-1"></i> Purge Logs > 30 Days</button>
+                <div class="col-md-3 mb-3 mb-md-0">
+                    <h6 class="text-muted small text-uppercase">Memory Usage</h6>
+                    <h3 class="text-light" id="met_ram">--%</h3>
+                    <div class="progress bg-black" style="height: 5px;"><div id="bar_ram" class="progress-bar bg-warning" style="width: 0%"></div></div>
+                </div>
+                <div class="col-md-3 mb-3 mb-md-0">
+                    <h6 class="text-muted small text-uppercase">Disk Space (<span id="met_disk_free">--</span>GB Free)</h6>
+                    <h3 class="text-light" id="met_disk">--%</h3>
+                    <div class="progress bg-black" style="height: 5px;"><div id="bar_disk" class="progress-bar bg-danger" style="width: 0%"></div></div>
+                </div>
+                <div class="col-md-3">
+                    <h6 class="text-muted small text-uppercase">SIEM Database Size</h6>
+                    <h3 class="text-light text-success" id="met_db">-- MB</h3>
+                    <p class="text-muted small mb-0 mt-1">sqlite3 / siem.db</p>
+                </div>
             </div>
+
+            <!-- DB Maintenance -->
+            <h6 class="text-info mb-3">Database Maintenance & Backups</h6>
+            <p class="text-muted small mb-3">Manage local SQLite database health, generate manual backups, or purge old event logs to free up disk space.</p>
+            <button class="btn btn-outline-primary btn-sm me-2" onclick="backupDB()"><i class="fa-solid fa-download me-1"></i> Download DB Backup</button>
+            <button class="btn btn-outline-warning btn-sm me-2" onclick="vacuumDB()"><i class="fa-solid fa-broom me-1"></i> Vacuum / Optimize DB</button>
+            <button class="btn btn-outline-danger btn-sm" onclick="purgeOldLogs()"><i class="fa-solid fa-trash-can me-1"></i> Purge Logs > 30 Days</button>
         </div>
     </div>
 </div>
@@ -134,7 +153,7 @@
       <div class="modal-body">
         <input type="hidden" id="manageUserId">
         <input type="hidden" id="manageUserAction">
-        
+
         <div class="mb-3" id="groupUsername">
             <label class="form-label small">Username</label>
             <input type="text" class="form-control bg-dark text-light border-secondary" id="manageUsername">
@@ -160,10 +179,27 @@
 </div>
 
 <script>
+const SETTINGS_TAB_KEY = 'microdfir_settings_active_tab';
+const SETTINGS_TABS = ['security', 'network', 'system'];
+
+function switchSettingsTab(tab) {
+    if (!SETTINGS_TABS.includes(tab)) tab = 'security';
+    SETTINGS_TABS.forEach(t => {
+        const cap = t.charAt(0).toUpperCase() + t.slice(1);
+        document.getElementById('tabBtn' + cap).classList.toggle('active', t === tab);
+        document.getElementById('pane' + cap).style.display = (t === tab) ? 'block' : 'none';
+    });
+    try { localStorage.setItem(SETTINGS_TAB_KEY, tab); } catch (e) {}
+}
+
 document.addEventListener("DOMContentLoaded", function() {
+    let savedTab = 'security';
+    try { savedTab = localStorage.getItem(SETTINGS_TAB_KEY) || 'security'; } catch (e) {}
+    switchSettingsTab(savedTab);
+
     loadMetrics();
     loadUsers();
-    setInterval(loadMetrics, 5000); 
+    setInterval(loadMetrics, 5000);
 
     let certForm = document.getElementById('certUploadForm');
     if(certForm) {
@@ -266,7 +302,7 @@ function showResetModal(id, username) {
 function submitUserForm() {
     let action = document.getElementById('manageUserAction').value;
     let payload = { action: action };
-    
+
     if(action === 'create') {
         payload.username = document.getElementById('manageUsername').value;
         payload.password = document.getElementById('managePassword').value;
@@ -325,42 +361,4 @@ function purgeOldLogs() {
     }).catch(err => alert('Error purging logs: ' + err));
 }
 </script>
-
-    <div class="row mt-4">
-        <div class="col-12">
-            <div class="card bg-dark text-white border-secondary">
-                <div class="card-header border-secondary d-flex justify-content-between align-items-center">
-                    <h5 class="mb-0"><i class="fa-solid fa-network-wired me-2"></i>Network Configuration (Control & Data Planes)</h5>
-                </div>
-                <div class="card-body">
-                    <form method="POST" action="/settings/network">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                        <div class="row">
-                            <div class="col-md-6 mb-3">
-                                <label class="form-label text-info">UI Bind IP (Gunicorn)</label>
-                                <input type="text" class="form-control bg-dark text-white border-secondary" name="ui_bind_ip" value="{{ all_settings.get('ui_bind_ip', '0.0.0.0') }}" placeholder="e.g. 192.168.86.100 (Wi-Fi)">
-                            </div>
-                            <div class="col-md-6 mb-3">
-                                <label class="form-label text-info">UI Port</label>
-                                <input type="text" class="form-control bg-dark text-white border-secondary" name="ui_port" value="{{ all_settings.get('ui_port', '5001') }}">
-                            </div>
-                        </div>
-                        <div class="row">
-                            <div class="col-md-6 mb-3">
-                                <label class="form-label text-warning">Ingestion Bind IP (Vector)</label>
-                                <input type="text" class="form-control bg-dark text-white border-secondary" name="ingest_bind_ip" value="{{ all_settings.get('ingest_bind_ip', '0.0.0.0') }}" placeholder="e.g. 192.168.1.50 (Ethernet)">
-                            </div>
-                            <div class="col-md-6 mb-3">
-                                <label class="form-label text-warning">Ingestion Port</label>
-                                <input type="text" class="form-control bg-dark text-white border-secondary" name="ingest_port" value="{{ all_settings.get('ingest_port', '5000') }}">
-                            </div>
-                        </div>
-                        <button type="submit" class="btn btn-primary"><i class="fa-solid fa-save me-2"></i>Save & Apply Network Settings</button>
-                    </form>
-                    <small class="text-muted d-block mt-3"><i class="fa-solid fa-triangle-exclamation me-1"></i><strong>Warning:</strong> Applying changes will instantly reload Vector and restart Gunicorn in the background. You may need to reconnect your browser to the new UI IP and Port.</small>
-                </div>
-            </div>
-        </div>
-    </div>
-
 {% endblock %}
