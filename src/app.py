@@ -1940,7 +1940,20 @@ def agent_config():
         (ua,)
     ).fetchone()
     if cmd_row:
-        db.execute("UPDATE agent_commands SET status = 'sent' WHERE id = ?", (cmd_row['id'],))
+        # 'uninstall' and 'upgrade' are fire-and-forget: the agent applies them and
+        # either removes itself or restarts into the new version without ever calling
+        # back to /api/agent/result — there's no client-side code path that reports a
+        # result for either. Marking them 'sent' left them looking like they were still
+        # awaiting a result that would never arrive; the 5-minute stale-command requeue
+        # above would then keep flipping them back to pending and redispatching them
+        # forever, and since they always carry the lowest id in this host's queue, they
+        # permanently blocked every command queued after them from ever being sent.
+        # Marking them 'done' the moment they're actually delivered reflects that the
+        # server's own part is complete once the agent has the instruction in hand.
+        if cmd_row['label'] in ('uninstall', 'upgrade'):
+            db.execute("UPDATE agent_commands SET status = 'done', completed_at = ? WHERE id = ?", (now, cmd_row['id']))
+        else:
+            db.execute("UPDATE agent_commands SET status = 'sent' WHERE id = ?", (cmd_row['id'],))
         db.commit()
         if cmd_row['label'] == 'uninstall':
             return jsonify({'command': 'uninstall'})
