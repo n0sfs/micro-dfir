@@ -1,5 +1,12 @@
-import sqlite3, requests, datetime, re
+import sqlite3, requests, datetime, re, os, shutil, tempfile, zipfile
 DB_PATH = "/opt/micro-dfir/siem.db"
+# Duplicated from app.py's YARA_RULES_DIR rather than imported from it -- this module
+# is deliberately standalone (app.py imports FROM here), same reasoning as DB_PATH
+# above being its own local constant instead of importing app.py's DB path.
+YARA_RULES_DIR = "/opt/micro-dfir/rules/yara_imported"
+YARAIFY_ZIP_URL = "https://yaraify.abuse.ch/download/yaraify-rules.zip"
+_YARAIFY_MAX_DOWNLOAD_BYTES = 250 * 1024 * 1024   # refuse an implausibly large download up front
+_YARAIFY_MAX_EXTRACTED_BYTES = 500 * 1024 * 1024  # zip-bomb guard: cap total decompressed size
 
 def _connect():
     conn = sqlite3.connect(DB_PATH, timeout=30)
@@ -141,6 +148,90 @@ def sync_otx(feed):
     conn.commit(); conn.close()
     return c
 
+def _extract_zip_safely(zip_path, dest_dir, max_total_bytes=_YARAIFY_MAX_EXTRACTED_BYTES):
+    # dest_dir must already exist and be empty. Returns the number of files written.
+    # Two defenses zipfile.extractall() alone doesn't give you, even for a zip from a
+    # reputable source (it could still be tampered with or corrupted in transit):
+    #  - zip-slip: an entry name like '../../etc/cron.d/evil' escaping dest_dir.
+    #  - zip bomb: checked against the REAL decompressed byte count as it streams out,
+    #    not the zip's own declared file_size, which is attacker-controllable metadata.
+    dest_dir = os.path.realpath(dest_dir)
+    written = 0
+    total = 0
+    chunk_size = 1024 * 1024
+    with zipfile.ZipFile(zip_path) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            target = os.path.realpath(os.path.join(dest_dir, info.filename))
+            if target != dest_dir and not target.startswith(dest_dir + os.sep):
+                raise ValueError(f"Refusing to extract unsafe zip entry: {info.filename!r}")
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with zf.open(info) as src, open(target, 'wb') as dst:
+                while True:
+                    chunk = src.read(chunk_size)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_total_bytes:
+                        raise ValueError(f"Zip extracts to more than {max_total_bytes} bytes -- refusing (possible zip bomb)")
+                    dst.write(chunk)
+            written += 1
+    return written
+
+def sync_yaraify(feed):
+    # Unlike the other sync_* functions, this writes files to disk rather than rows
+    # into stix_indicators -- it's the YARA rule content that File Scan and String
+    # Sweep both read from rules/yara_imported/, kept fresh from abuse.ch's YARAify
+    # bulk rule-pack export instead of only whatever's been manually vendored in.
+    api_key = feed["api_key"] if "api_key" in feed.keys() else None
+    if not api_key:
+        raise ValueError("YARAify feeds require an API key")
+    os.makedirs(YARA_RULES_DIR, exist_ok=True)
+    fd, tmp_zip_path = tempfile.mkstemp(suffix=".zip")
+    os.close(fd)
+    extract_dir = None
+    try:
+        with requests.get(YARAIFY_ZIP_URL, headers={"Auth-Key": api_key}, timeout=60, stream=True) as res:
+            res.raise_for_status()
+            content_length = res.headers.get("Content-Length")
+            if content_length and int(content_length) > _YARAIFY_MAX_DOWNLOAD_BYTES:
+                raise ValueError(f"YARAify rule pack is larger than expected ({content_length} bytes) — refusing to download")
+            downloaded = 0
+            with open(tmp_zip_path, "wb") as f:
+                for chunk in res.iter_content(chunk_size=1024 * 1024):
+                    downloaded += len(chunk)
+                    if downloaded > _YARAIFY_MAX_DOWNLOAD_BYTES:
+                        raise ValueError("YARAify rule pack exceeded the maximum expected download size — refusing")
+                    f.write(chunk)
+
+        # Extracted into a temp dir on the SAME filesystem as the final target
+        # (dir=YARA_RULES_DIR) so the swap below is a real atomic os.rename, not a
+        # cross-device copy that could fail or leave a partial directory behind.
+        extract_dir = tempfile.mkdtemp(prefix=".yaraify_extract_", dir=YARA_RULES_DIR)
+        count = _extract_zip_safely(tmp_zip_path, extract_dir)
+        if count == 0:
+            raise ValueError("YARAify rule pack contained no rule files")
+
+        final_dir = os.path.join(YARA_RULES_DIR, "yaraify_synced")
+        stale_dir = final_dir + ".stale"
+        if os.path.isdir(stale_dir):
+            shutil.rmtree(stale_dir)
+        if os.path.isdir(final_dir):
+            os.rename(final_dir, stale_dir)
+        os.rename(extract_dir, final_dir)
+        extract_dir = None
+        if os.path.isdir(stale_dir):
+            shutil.rmtree(stale_dir)
+        return count
+    finally:
+        if extract_dir and os.path.isdir(extract_dir):
+            shutil.rmtree(extract_dir, ignore_errors=True)
+        try:
+            os.remove(tmp_zip_path)
+        except OSError:
+            pass
+
 def sync_feed(feed):
     if feed["feed_type"] == "taxii":
         return sync_taxii(feed)
@@ -152,6 +243,8 @@ def sync_feed(feed):
         return sync_feodotracker(feed)
     elif feed["feed_type"] == "otx":
         return sync_otx(feed)
+    elif feed["feed_type"] == "yaraify":
+        return sync_yaraify(feed)
     elif feed["feed_type"] == "csv":
         # CSV feeds are a one-time snapshot uploaded through /api/ti/feeds/upload_csv —
         # there's no remote source to re-fetch from, so "Sync Now" / sync_all_feeds()

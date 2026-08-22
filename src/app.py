@@ -431,7 +431,7 @@ def threat_intel():
 
     return render_template('threat_intel.html', matches=matches, yara_files=yara_files, active_tab=active_tab, current_user=current_user)
 
-TI_FEED_TYPES = ('taxii', 'threatfox', 'otx', 'urlhaus', 'feodotracker', 'csv')
+TI_FEED_TYPES = ('taxii', 'threatfox', 'otx', 'urlhaus', 'feodotracker', 'yaraify', 'csv')
 
 _CSV_VALUE_COLS = ('value', 'indicator', 'ioc', 'pattern', 'ip', 'url', 'domain', 'hash', 'ioc_value')
 _CSV_TYPE_COLS = ('type', 'ioc_type')
@@ -534,6 +534,8 @@ def api_ti_feeds():
         return jsonify({'error': 'TAXII feeds require a discovery_url and collection_id'}), 400
     if feed_type == 'otx' and not d.get('api_key'):
         return jsonify({'error': 'OTX feeds require an API key'}), 400
+    if feed_type == 'yaraify' and not d.get('api_key'):
+        return jsonify({'error': 'YARAify feeds require an API key'}), 400
     db.execute(
         "INSERT INTO ti_feeds (name, feed_type, discovery_url, collection_id, username, password, api_key, sync_interval_minutes, enabled) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
