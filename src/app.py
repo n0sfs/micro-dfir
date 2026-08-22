@@ -362,6 +362,8 @@ def api_ti(): return jsonify(lookup_ioc(request.get_json().get('ioc')))
 # ==========================================
 # THREAT INTELLIGENCE — FEEDS & IOCS
 # ==========================================
+YARA_RULES_DIR = '/opt/micro-dfir/rules/yara_imported'
+
 @app.route('/threat-intel', methods=['GET', 'POST'])
 @login_required
 def threat_intel():
@@ -381,7 +383,7 @@ def threat_intel():
 
     # Fetch loaded YARA files for the UI checklist first — this is also the
     # allowlist for which rule paths a scan request may reference.
-    yara_dir = '/opt/micro-dfir/rules/yara_imported'
+    yara_dir = YARA_RULES_DIR
     if os.path.exists(yara_dir):
         for root, dirs, files in os.walk(yara_dir):
             for file_name in files:
@@ -437,6 +439,8 @@ _CSV_NAME_COLS = ('name', 'description', 'desc', 'notes')
 _CSV_IPV4_RE = re.compile(r'^\d{1,3}(\.\d{1,3}){3}$')
 _CSV_HASH_RE = re.compile(r'^[a-fA-F0-9]{32}$|^[a-fA-F0-9]{40}$|^[a-fA-F0-9]{64}$')
 _SHA256_HEX_RE = re.compile(r'^[a-fA-F0-9]{64}$')
+_MD5_HEX_RE = re.compile(r'^[a-fA-F0-9]{32}$')
+_SHA1_HEX_RE = re.compile(r'^[a-fA-F0-9]{40}$')
 _CSV_DOMAIN_RE = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$')
 
 def _guess_csv_ioc_type(value):
@@ -2425,6 +2429,102 @@ def _get_live_ioc_sha256_hashes(db):
     ).fetchall()
     return sorted({r['pattern'].strip().lower() for r in rows if _SHA256_HEX_RE.match((r['pattern'] or '').strip())})
 
+def _get_live_ioc_md5_hashes(db):
+    rows = db.execute(
+        "SELECT DISTINCT pattern FROM stix_indicators WHERE revoked = 0 AND LENGTH(pattern) = 32"
+    ).fetchall()
+    return sorted({r['pattern'].strip().lower() for r in rows if _MD5_HEX_RE.match((r['pattern'] or '').strip())})
+
+def _get_live_ioc_sha1_hashes(db):
+    rows = db.execute(
+        "SELECT DISTINCT pattern FROM stix_indicators WHERE revoked = 0 AND LENGTH(pattern) = 40"
+    ).fetchall()
+    return sorted({r['pattern'].strip().lower() for r in rows if _SHA1_HEX_RE.match((r['pattern'] or '').strip())})
+
+_YARA_RULE_NAME_RE = re.compile(r'^\s*rule\s+(\w+)')
+# Matches a plain double-quoted YARA string definition ($name = "literal" <modifiers>),
+# capturing the literal's raw (still-escaped) content and whatever modifier text follows
+# on the same line. Hex patterns ({ .. }) and regex patterns (/../) use different syntax
+# entirely and simply never match this, so they're excluded for free.
+_YARA_STRING_DEF_RE = re.compile(r'^\s*\$\w+\s*=\s*"((?:[^"\\]|\\.)*)"\s*(.*)$')
+# nocase/wide/base64 all change what bytes actually need to be searched for — a plain
+# case-sensitive ASCII substring search (the whole point of keeping this agent-side
+# matcher dependency-free) can't faithfully represent any of them, so those strings are
+# skipped rather than shipped as a pattern that would silently mismatch what YARA means.
+_YARA_SKIP_MODIFIERS = ('nocase', 'wide', 'base64')
+
+def _unescape_yara_string(s):
+    # Minimal YARA string-escape decoding — just enough to recover the real bytes a
+    # literal represents (\", \\, \t, \n, \r, \xHH). Anything else is left as-is; worst
+    # case that produces a pattern with a stray backslash that simply never matches
+    # anything (a safe failure mode — a missed pattern, not a false hit).
+    out = []
+    i = 0
+    mapping = {'\\': '\\', '"': '"', 't': '\t', 'n': '\n', 'r': '\r'}
+    while i < len(s):
+        c = s[i]
+        if c == '\\' and i + 1 < len(s):
+            nxt = s[i + 1]
+            if nxt == 'x' and i + 3 < len(s):
+                try:
+                    out.append(chr(int(s[i + 2:i + 4], 16)))
+                    i += 4
+                    continue
+                except ValueError:
+                    pass
+            if nxt in mapping:
+                out.append(mapping[nxt])
+                i += 2
+                continue
+        out.append(c)
+        i += 1
+    return ''.join(out)
+
+def _get_live_yara_strings(limit=500):
+    # Same "recompute fresh every use" philosophy as the live IOC hash helpers above —
+    # the imported rule files rarely change and the walk is cheap, so there's no reason
+    # to cache a stale list. Sourced from the same rules/yara_imported directory the
+    # File Scan mode already compiles against, so this hunts with the rules actually
+    # loaded in the app, not a separate/parallel rule set.
+    results = []
+    seen = set()
+    if not os.path.isdir(YARA_RULES_DIR):
+        return results
+    for root, dirs, files in os.walk(YARA_RULES_DIR):
+        for fname in sorted(files):
+            if not fname.endswith(('.yar', '.yara')):
+                continue
+            full_path = os.path.join(root, fname)
+            rel_path = os.path.relpath(full_path, YARA_RULES_DIR)
+            try:
+                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    text = f.read()
+            except OSError:
+                continue
+            current_rule = rel_path
+            for line in text.splitlines():
+                rule_m = _YARA_RULE_NAME_RE.match(line)
+                if rule_m:
+                    current_rule = rule_m.group(1)
+                    continue
+                m = _YARA_STRING_DEF_RE.match(line)
+                if not m:
+                    continue
+                raw, tail = m.group(1), m.group(2).lower()
+                if any(mod in tail for mod in _YARA_SKIP_MODIFIERS):
+                    continue
+                value = _unescape_yara_string(raw)
+                if len(value) < 6:
+                    continue
+                key = (current_rule, value)
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append({'rule': current_rule, 'file': rel_path, 'string': value})
+                if len(results) >= limit:
+                    return results
+    return results
+
 AGENT_TLS_CERT_PATH = '/opt/micro-dfir/config/cert.pem'
 
 def _build_agent_source(agent_filename, server_ip, ui_port, ingest_port, soc_token):
@@ -2638,6 +2738,10 @@ def api_agent_commands():
             # sigma_engine.py's IOC-match rule condition recomputes its own IP list
             # fresh every detection cycle rather than freezing it at some earlier point.
             params['hashes'] = _get_live_ioc_sha256_hashes(db)
+            params['md5_hashes'] = _get_live_ioc_md5_hashes(db)
+            params['sha1_hashes'] = _get_live_ioc_sha1_hashes(db)
+        if label == 'string_sweep':
+            params['patterns'] = _get_live_yara_strings()
         if label == 'isolate_host' and not params.get('soc_ip'):
             s = {r[0]: r[1] for r in db.execute("SELECT key, value FROM settings").fetchall()}
             soc_ip = s.get('ingest_bind_ip', '0.0.0.0')

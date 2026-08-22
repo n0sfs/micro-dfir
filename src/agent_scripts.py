@@ -1,14 +1,16 @@
 # Canned response-action templates, one script-builder set per agent OS. Each function
 # returns a ready-to-run script string; the caller is responsible for
 # validating/sanitizing any parameters before formatting. Windows templates are
-# PowerShell (run by the agent via `powershell -EncodedCommand`); Linux templates are
-# bash (run by the agent via `subprocess.run(['bash', '-c', script])`, which sidesteps
-# shell-quoting entirely since the whole script travels as one argument — no
-# encoding step is needed the way PowerShell's -EncodedCommand needs one).
+# PowerShell (written to a temp .ps1 file and run by the agent via `powershell -File`
+# — see run_remote_script() in micro_agent_windows.py); Linux templates are bash (run
+# by the agent via `subprocess.run(['bash', '-c', script])`, which sidesteps
+# shell-quoting entirely since the whole script travels as one argument).
 import re
 
 _IPV4_RE = re.compile(r'^(\d{1,3}\.){3}\d{1,3}$')
 _SHA256_RE = re.compile(r'^[0-9a-fA-F]{64}$')
+_MD5_RE = re.compile(r'^[0-9a-fA-F]{32}$')
+_SHA1_RE = re.compile(r'^[0-9a-fA-F]{40}$')
 
 # ---- Windows (PowerShell) ----
 
@@ -67,25 +69,36 @@ $hash = (Get-FileHash $p -Algorithm SHA256).Hash
 @{{ path=$p; size=$size; sha256=$hash; content_b64=$b64 }} | ConvertTo-Json -Compress
 """
 
-def ioc_sweep(hashes):
-    # Only ever trust hex-shaped 64-char values here regardless of what the caller
-    # passed — hashes ultimately comes from the live threat-intel IOC list, whose
-    # ioc_type labeling is inconsistent across feeds (see _get_live_ioc_sha256_hashes
-    # in app.py), so re-validating by shape at the point the value gets embedded into
-    # a script is the actual safety boundary, not a redundant check.
-    valid = sorted({(h or '').strip().lower() for h in hashes if _SHA256_RE.match((h or '').strip())})
-    if not valid:
-        # A real, expected state (no SHA-256 IOCs currently loaded) — emit a script
-        # that reports that clearly rather than one that silently "succeeds" with a
-        # zero-hit sweep that looks identical to a clean host.
-        return "Write-Output '{\"error\":\"no SHA-256 IOC hashes are currently available to sweep for\"}'"
-    hash_list = ','.join("'" + h + "'" for h in valid)
+def _ps_hashset_literal(values):
+    return ','.join("'" + v + "'" for v in values)
+
+def ioc_sweep(hashes, md5_hashes=None, sha1_hashes=None):
+    # Only ever trust hex-shaped values here regardless of what the caller passed —
+    # these ultimately come from the live threat-intel IOC list, whose ioc_type
+    # labeling is inconsistent across feeds (see _get_live_ioc_*_hashes in app.py), so
+    # re-validating by shape at the point the value gets embedded into a script is the
+    # actual safety boundary, not a redundant check.
+    valid_sha256 = sorted({(h or '').strip().lower() for h in hashes if _SHA256_RE.match((h or '').strip())})
+    valid_md5 = sorted({(h or '').strip().lower() for h in (md5_hashes or []) if _MD5_RE.match((h or '').strip())})
+    valid_sha1 = sorted({(h or '').strip().lower() for h in (sha1_hashes or []) if _SHA1_RE.match((h or '').strip())})
+    if not valid_sha256 and not valid_md5 and not valid_sha1:
+        # A real, expected state (no hash IOCs of any kind currently loaded) — emit a
+        # script that reports that clearly rather than one that silently "succeeds"
+        # with a zero-hit sweep that looks identical to a clean host.
+        return "Write-Output '{\"error\":\"no IOC hashes are currently available to sweep for\"}'"
     # Bounded to common malware-drop locations, recently-modified, executable-ish
     # files under 50MB — a full-disk hash sweep would blow past the agent's 90s
     # command timeout on any real machine, and this is also where live-response
     # triage actually looks first.
-    script = """$hashSet = New-Object System.Collections.Generic.HashSet[string]
-@(__HASHES__) | ForEach-Object { [void]$hashSet.Add($_) }
+    script = """$sha256Set = New-Object System.Collections.Generic.HashSet[string]
+@(__SHA256_HASHES__) | ForEach-Object { [void]$sha256Set.Add($_) }
+$md5Set = New-Object System.Collections.Generic.HashSet[string]
+@(__MD5_HASHES__) | ForEach-Object { [void]$md5Set.Add($_) }
+$sha1Set = New-Object System.Collections.Generic.HashSet[string]
+@(__SHA1_HASHES__) | ForEach-Object { [void]$sha1Set.Add($_) }
+$sha256Algo = [System.Security.Cryptography.SHA256]::Create()
+$md5Algo = [System.Security.Cryptography.MD5]::Create()
+$sha1Algo = [System.Security.Cryptography.SHA1]::Create()
 $paths = @($env:TEMP, $env:APPDATA, $env:ProgramData, (Join-Path $env:USERPROFILE 'Downloads'))
 $cutoff = (Get-Date).AddDays(-14)
 $exts = @('.exe','.dll','.scr','.ps1','.bat','.vbs','.js','.jar','.msi')
@@ -98,16 +111,76 @@ foreach ($p in $paths) {
         ForEach-Object {
             $scanned++
             try {
-                $h = (Get-FileHash -Algorithm SHA256 -Path $_.FullName -ErrorAction Stop).Hash.ToLower()
-                if ($hashSet.Contains($h)) {
-                    $hits += [PSCustomObject]@{ path=$_.FullName; sha256=$h; size=$_.Length; modified=$_.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss') }
+                # Hashed once from a single in-memory read, not three separate
+                # Get-FileHash calls, so adding MD5/SHA1 costs no extra file I/O.
+                $bytes = [IO.File]::ReadAllBytes($_.FullName)
+                $sha256 = [BitConverter]::ToString($sha256Algo.ComputeHash($bytes)).Replace('-', '').ToLower()
+                $md5 = [BitConverter]::ToString($md5Algo.ComputeHash($bytes)).Replace('-', '').ToLower()
+                $sha1 = [BitConverter]::ToString($sha1Algo.ComputeHash($bytes)).Replace('-', '').ToLower()
+                $matched = @()
+                if ($sha256Set.Contains($sha256)) { $matched += 'sha256' }
+                if ($md5Set.Contains($md5)) { $matched += 'md5' }
+                if ($sha1Set.Contains($sha1)) { $matched += 'sha1' }
+                if ($matched.Count -gt 0) {
+                    $hits += [PSCustomObject]@{ path=$_.FullName; sha256=$sha256; md5=$md5; sha1=$sha1; matched=@($matched); size=$_.Length; modified=$_.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss') }
                 }
             } catch {}
         }
 }
-[PSCustomObject]@{ scanned=$scanned; hits=$hits } | ConvertTo-Json -Compress -Depth 4
+[PSCustomObject]@{ scanned=$scanned; hits=$hits } | ConvertTo-Json -Compress -Depth 6
 """
-    return script.replace('__HASHES__', hash_list)
+    return (script.replace('__SHA256_HASHES__', _ps_hashset_literal(valid_sha256))
+                  .replace('__MD5_HASHES__', _ps_hashset_literal(valid_md5))
+                  .replace('__SHA1_HASHES__', _ps_hashset_literal(valid_sha1)))
+
+def _ps_escape_literal(s):
+    return s.replace("'", "''")
+
+def string_sweep(patterns):
+    # patterns: [{rule, file, string}, ...] from the live-imported YARA rule strings
+    # (app.py's _get_live_yara_strings). Deduped by string value for the actual search
+    # list — Select-String only needs the value once — with a value->rule map kept for
+    # hit attribution; if the exact same literal string appears in more than one
+    # imported rule, the first one wins (rare, and not worth complicating the report).
+    seen = {}
+    for p in (patterns or []):
+        val = (p.get('string') or '').strip()
+        if not val or val in seen:
+            continue
+        seen[val] = p.get('rule') or 'unknown'
+    if not seen:
+        return "Write-Output '{\"error\":\"no YARA string patterns are currently available to sweep for\"}'"
+    pattern_list = ','.join("'" + _ps_escape_literal(v) + "'" for v in seen)
+    rule_map = ';'.join("'" + _ps_escape_literal(v) + "'='" + _ps_escape_literal(r) + "'" for v, r in seen.items())
+    # Same bounded scope as ioc_sweep, but a lower size cap — scanning file *content*
+    # for hundreds of literal substrings is heavier per file than hashing, and still
+    # has to fit inside the shared 90s command timeout.
+    script = """$patterns = @(__PATTERNS__)
+$ruleMap = @{__RULEMAP__}
+$paths = @($env:TEMP, $env:APPDATA, $env:ProgramData, (Join-Path $env:USERPROFILE 'Downloads'))
+$cutoff = (Get-Date).AddDays(-14)
+$exts = @('.exe','.dll','.scr','.ps1','.bat','.vbs','.js','.jar','.msi')
+$scanned = 0
+$hits = @()
+foreach ($p in $paths) {
+    if (-not (Test-Path $p)) { continue }
+    Get-ChildItem -Path $p -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -ge $cutoff -and $exts -contains $_.Extension.ToLower() -and $_.Length -lt 10MB } |
+        ForEach-Object {
+            $scanned++
+            try {
+                $found = @(Select-String -SimpleMatch -Pattern $patterns -Path $_.FullName -ErrorAction Stop |
+                    Select-Object -ExpandProperty Pattern -Unique)
+                if ($found.Count -gt 0) {
+                    $matches = @($found | ForEach-Object { [PSCustomObject]@{ rule = $ruleMap[$_]; string = $_ } })
+                    $hits += [PSCustomObject]@{ path=$_.FullName; size=$_.Length; modified=$_.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'); matches=$matches }
+                }
+            } catch {}
+        }
+}
+[PSCustomObject]@{ scanned=$scanned; hits=$hits } | ConvertTo-Json -Compress -Depth 6
+"""
+    return script.replace('__PATTERNS__', pattern_list).replace('__RULEMAP__', rule_map)
 
 # Progress records (e.g. from Get-FileHash on multiple files in collect_triage) get
 # serialized as CLIXML and mixed straight into stdout when PowerShell runs
@@ -124,11 +197,13 @@ WINDOWS_TEMPLATES = {
     'restore_network': (lambda params: _PROGRESS_SILENT + restore_network(), []),
     'collect_triage': (lambda params: _PROGRESS_SILENT + collect_triage(), []),
     'collect_file': (lambda params: _PROGRESS_SILENT + collect_file(params['path']), ['path']),
-    # 'hashes' is always server-populated from the live IOC list right before dispatch
-    # (see app.py's api_agent_commands()), never client-supplied — it's deliberately
-    # not in the required list, since an empty live hash set is a real, valid state
-    # the builder already handles, not a missing-parameter error.
-    'ioc_sweep': (lambda params: _PROGRESS_SILENT + ioc_sweep(params.get('hashes', [])), []),
+    # 'hashes'/'md5_hashes'/'sha1_hashes' and 'patterns' are always server-populated
+    # from the live IOC list / imported YARA rules right before dispatch (see app.py's
+    # api_agent_commands()), never client-supplied — deliberately not in the required
+    # list, since an empty live set is a real, valid state the builder already handles,
+    # not a missing-parameter error.
+    'ioc_sweep': (lambda params: _PROGRESS_SILENT + ioc_sweep(params.get('hashes', []), params.get('md5_hashes', []), params.get('sha1_hashes', [])), []),
+    'string_sweep': (lambda params: _PROGRESS_SILENT + string_sweep(params.get('patterns', [])), []),
 }
 
 # ---- Linux (bash) ----
@@ -218,19 +293,25 @@ else:
 PYEOF
 """
 
-def ioc_sweep_linux(hashes):
-    valid = sorted({(h or '').strip().lower() for h in hashes if _SHA256_RE.match((h or '').strip())})
-    if not valid:
-        return "echo '{\"error\": \"no SHA-256 IOC hashes are currently available to sweep for\"}'"
-    hash_list = ', '.join("'" + h + "'" for h in valid)
+def _py_set_literal(values):
+    return ', '.join(repr(v) for v in values)
+
+def ioc_sweep_linux(hashes, md5_hashes=None, sha1_hashes=None):
+    valid_sha256 = sorted({(h or '').strip().lower() for h in hashes if _SHA256_RE.match((h or '').strip())})
+    valid_md5 = sorted({(h or '').strip().lower() for h in (md5_hashes or []) if _MD5_RE.match((h or '').strip())})
+    valid_sha1 = sorted({(h or '').strip().lower() for h in (sha1_hashes or []) if _SHA1_RE.match((h or '').strip())})
+    if not valid_sha256 and not valid_md5 and not valid_sha1:
+        return "echo '{\"error\": \"no IOC hashes are currently available to sweep for\"}'"
     # Same quoted-heredoc trick as collect_file_linux — no shell expansion happens
-    # inside the block, so the hash list only needs to be valid Python (already
-    # guaranteed: every entry matched _SHA256_RE, so none can break out of the set
-    # literal), not escaped for bash at all.
+    # inside the block, so the hash lists only need to be valid Python (already
+    # guaranteed: every entry matched its length-specific regex, so none can break out
+    # of the set literal), not escaped for bash at all.
     script = """python3 - <<'PYEOF'
 import hashlib, json, os, time
 
-HASHES = {__HASHES__}
+SHA256_HASHES = {__SHA256_HASHES__}
+MD5_HASHES = {__MD5_HASHES__}
+SHA1_HASHES = {__SHA1_HASHES__}
 PATHS = ['/tmp', '/var/tmp', '/dev/shm', os.path.expanduser('~/Downloads')]
 EXTS = {'', '.sh', '.bin', '.elf', '.py', '.php', '.pl', '.out'}
 CUTOFF = time.time() - 14 * 86400
@@ -255,20 +336,90 @@ for base in PATHS:
                 continue
             scanned += 1
             try:
-                h = hashlib.sha256()
+                # Hashed once from a single chunked read, not three separate file
+                # reads, so adding MD5/SHA1 costs no extra I/O.
+                h256, hmd5, h1 = hashlib.sha256(), hashlib.md5(), hashlib.sha1()
                 with open(path, 'rb') as f:
                     for chunk in iter(lambda: f.read(65536), b''):
-                        h.update(chunk)
-                digest = h.hexdigest()
+                        h256.update(chunk); hmd5.update(chunk); h1.update(chunk)
+                d256, dmd5, d1 = h256.hexdigest(), hmd5.hexdigest(), h1.hexdigest()
             except OSError:
                 continue
-            if digest in HASHES:
-                hits.append({'path': path, 'sha256': digest, 'size': st.st_size, 'modified': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_mtime))})
+            matched = []
+            if d256 in SHA256_HASHES: matched.append('sha256')
+            if dmd5 in MD5_HASHES: matched.append('md5')
+            if d1 in SHA1_HASHES: matched.append('sha1')
+            if matched:
+                hits.append({
+                    'path': path, 'sha256': d256, 'md5': dmd5, 'sha1': d1, 'matched': matched,
+                    'size': st.st_size, 'modified': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_mtime)),
+                })
 
 print(json.dumps({'scanned': scanned, 'hits': hits}))
 PYEOF
 """
-    return script.replace('__HASHES__', hash_list)
+    return (script.replace('__SHA256_HASHES__', _py_set_literal(valid_sha256))
+                  .replace('__MD5_HASHES__', _py_set_literal(valid_md5))
+                  .replace('__SHA1_HASHES__', _py_set_literal(valid_sha1)))
+
+def string_sweep_linux(patterns):
+    seen = {}
+    for p in (patterns or []):
+        val = (p.get('string') or '').strip()
+        if not val or val in seen:
+            continue
+        seen[val] = p.get('rule') or 'unknown'
+    if not seen:
+        return "echo '{\"error\": \"no YARA string patterns are currently available to sweep for\"}'"
+    # repr() is valid-Python-literal escaping (quotes, backslashes, control chars) --
+    # patterns are free-form text pulled from rule files, unlike the regex-validated
+    # hash values above, so this needs real escaping rather than trusted-shape values.
+    pattern_map_src = ', '.join(f"{repr(v)}: {repr(r)}" for v, r in seen.items())
+    script = """python3 - <<'PYEOF'
+import json, os, time
+
+PATTERN_RULES = {__PATTERN_MAP__}
+PATTERNS = [(p, p.encode('utf-8', 'ignore')) for p in PATTERN_RULES]
+PATHS = ['/tmp', '/var/tmp', '/dev/shm', os.path.expanduser('~/Downloads')]
+EXTS = {'', '.sh', '.bin', '.elf', '.py', '.php', '.pl', '.out'}
+CUTOFF = time.time() - 14 * 86400
+MAX_SIZE = 10 * 1024 * 1024
+
+scanned = 0
+hits = []
+for base in PATHS:
+    if not os.path.isdir(base):
+        continue
+    for root, dirs, files in os.walk(base):
+        for name in files:
+            path = os.path.join(root, name)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            if st.st_mtime < CUTOFF or st.st_size > MAX_SIZE:
+                continue
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in EXTS:
+                continue
+            scanned += 1
+            try:
+                with open(path, 'rb') as f:
+                    data = f.read()
+            except OSError:
+                continue
+            found = [p for p, b in PATTERNS if b in data]
+            if found:
+                hits.append({
+                    'path': path, 'size': st.st_size,
+                    'modified': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_mtime)),
+                    'matches': [{'rule': PATTERN_RULES[p], 'string': p} for p in found],
+                })
+
+print(json.dumps({'scanned': scanned, 'hits': hits}))
+PYEOF
+"""
+    return script.replace('__PATTERN_MAP__', pattern_map_src)
 
 LINUX_TEMPLATES = {
     'list_processes': (lambda params: list_processes_linux(), []),
@@ -277,7 +428,8 @@ LINUX_TEMPLATES = {
     'restore_network': (lambda params: restore_network_linux(), []),
     'collect_triage': (lambda params: collect_triage_linux(), []),
     'collect_file': (lambda params: collect_file_linux(params['path']), ['path']),
-    'ioc_sweep': (lambda params: ioc_sweep_linux(params.get('hashes', [])), []),
+    'ioc_sweep': (lambda params: ioc_sweep_linux(params.get('hashes', []), params.get('md5_hashes', []), params.get('sha1_hashes', [])), []),
+    'string_sweep': (lambda params: string_sweep_linux(params.get('patterns', [])), []),
 }
 
 TEMPLATES_BY_OS = {'windows': WINDOWS_TEMPLATES, 'linux': LINUX_TEMPLATES}

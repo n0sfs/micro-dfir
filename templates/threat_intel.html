@@ -128,7 +128,8 @@
         <div class="card-body">
             <div class="btn-group btn-group-sm mb-3" role="group">
                 <button type="button" class="btn btn-outline-secondary yara-mode-btn active-filter" data-mode="file" onclick="setYaraScanMode('file')"><i class="fa-solid fa-file-arrow-up me-1"></i>File Scan</button>
-                <button type="button" class="btn btn-outline-secondary yara-mode-btn" data-mode="sweep" onclick="setYaraScanMode('sweep')"><i class="fa-solid fa-magnifying-glass me-1"></i>IOC Hash Sweep</button>
+                <button type="button" class="btn btn-outline-secondary yara-mode-btn" data-mode="ioc_sweep" onclick="setYaraScanMode('ioc_sweep')"><i class="fa-solid fa-magnifying-glass me-1"></i>IOC Hash Sweep</button>
+                <button type="button" class="btn btn-outline-secondary yara-mode-btn" data-mode="string_sweep" onclick="setYaraScanMode('string_sweep')"><i class="fa-solid fa-font me-1"></i>String Sweep <span class="badge bg-secondary ms-1">Beta</span></button>
             </div>
 
             <!-- File Scan mode -->
@@ -175,14 +176,15 @@
                 </div>
             </div>
 
-            <!-- IOC Hash Sweep mode -->
+            <!-- Sweep mode (shared pane for IOC Hash Sweep / String Sweep — only the
+                 dispatch label, description text, and hit-detail rendering differ) -->
             <div id="yaraModeSweep" style="display:none;">
                 <div class="card bg-dark border-secondary shadow">
                     <div class="card-header bg-secondary text-white">
-                        <h5 class="mb-0"><i class="fa-solid fa-magnifying-glass"></i> IOC Hash Sweep</h5>
+                        <h5 class="mb-0" id="sweepPaneTitle"><i class="fa-solid fa-magnifying-glass"></i> IOC Hash Sweep</h5>
                     </div>
                     <div class="card-body">
-                        <p class="text-muted small">Sweep endpoint filesystems for files matching a known-bad SHA-256 hash from the current IOC list — common malware-drop locations, recently-modified files.</p>
+                        <p class="text-muted small" id="sweepPaneDesc">Sweep endpoint filesystems for files matching a known-bad SHA-256/MD5/SHA-1 hash from the current IOC list — common malware-drop locations, recently-modified files.</p>
                         <div class="mb-3">
                             <label class="form-label small text-muted mb-1 d-block">Target</label>
                             <div class="btn-group btn-group-sm" role="group">
@@ -207,6 +209,7 @@
                                 <thead>
                                     <tr>
                                         <th class="ps-3">Host</th>
+                                        <th>Type</th>
                                         <th>Status</th>
                                         <th>Scanned</th>
                                         <th>Hits</th>
@@ -214,7 +217,7 @@
                                     </tr>
                                 </thead>
                                 <tbody id="sweepResultsBody">
-                                    <tr><td colspan="5" class="text-center text-muted py-3">No sweeps run yet.</td></tr>
+                                    <tr><td colspan="6" class="text-center text-muted py-3">No sweeps run yet.</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -377,12 +380,27 @@ function toggleSelectAll(select) {
 // ---- YARA Scanning: File Scan vs IOC Hash Sweep mode ----
 let yaraScanMode = 'file';
 
+const SWEEP_MODE_INFO = {
+    ioc_sweep: {
+        title: '<i class="fa-solid fa-magnifying-glass"></i> IOC Hash Sweep',
+        desc: 'Sweep endpoint filesystems for files matching a known-bad SHA-256/MD5/SHA-1 hash from the current IOC list — common malware-drop locations, recently-modified files.',
+    },
+    string_sweep: {
+        title: '<i class="fa-solid fa-font"></i> String Sweep <span class="badge bg-secondary ms-1">Beta</span>',
+        desc: 'Sweep endpoint filesystems for files containing a literal string pulled from the currently-imported YARA rules — plain ASCII substrings only, no wildcards or boolean rule conditions (a lighter-weight step toward full YARA, not a replacement for it).',
+    },
+};
+
 function setYaraScanMode(mode) {
     yaraScanMode = mode;
+    const isSweep = mode === 'ioc_sweep' || mode === 'string_sweep';
     document.querySelectorAll('.yara-mode-btn').forEach(b => b.classList.toggle('active-filter', b.dataset.mode === mode));
     document.getElementById('yaraModeFile').style.display = mode === 'file' ? 'block' : 'none';
-    document.getElementById('yaraModeSweep').style.display = mode === 'sweep' ? 'block' : 'none';
-    if (mode === 'sweep') {
+    document.getElementById('yaraModeSweep').style.display = isSweep ? 'block' : 'none';
+    if (isSweep) {
+        const info = SWEEP_MODE_INFO[mode];
+        document.getElementById('sweepPaneTitle').innerHTML = info.title;
+        document.getElementById('sweepPaneDesc').innerText = info.desc;
         if (!sweepAgentsLoaded) loadSweepAgents();
         if (!sweepResultsLoadedOnce) loadSweepResults();
     }
@@ -441,21 +459,25 @@ function toggleSweepHost(hostname, checked) {
     if (checked) selectedSweepHosts.add(hostname); else selectedSweepHosts.delete(hostname);
 }
 
-// ---- IOC Hash Sweep: results ----
-// Shows every ioc_sweep command regardless of where it was queued from (this page's
-// "Run Sweep", or the per-host Response Actions console on the Agents page) — both
-// dispatch the identical action, so a hunt result belongs here either way.
+// ---- Sweep results (both IOC Hash Sweep and String Sweep, one shared table) ----
+// Shows every ioc_sweep/string_sweep command regardless of where it was queued from
+// (this page's "Run Sweep", or the per-host Response Actions console on the Agents
+// page) — both dispatch the identical actions, so a hunt result belongs here either
+// way. Fetched as two label-filtered requests in parallel (the commands endpoint only
+// filters on one label at a time) and merged by id, newest first.
 function loadSweepResults() {
-    fetch('/api/agent/commands?label=ioc_sweep&limit=50')
-        .then(r => r.json())
-        .then(rows => {
-            const wasLoadedBefore = sweepResultsLoadedOnce;
-            sweepResultsCache = Array.isArray(rows) ? rows : [];
-            sweepResultsLoadedOnce = true;
-            renderSweepResults();
-            announceNewSweepHits(wasLoadedBefore);
-        })
-        .catch(err => console.error('Error loading sweep results:', err));
+    Promise.all([
+        fetch('/api/agent/commands?label=ioc_sweep&limit=50').then(r => r.json()),
+        fetch('/api/agent/commands?label=string_sweep&limit=50').then(r => r.json()),
+    ]).then(([hashRows, stringRows]) => {
+        const wasLoadedBefore = sweepResultsLoadedOnce;
+        const merged = [...(Array.isArray(hashRows) ? hashRows : []), ...(Array.isArray(stringRows) ? stringRows : [])];
+        merged.sort((a, b) => b.id - a.id);
+        sweepResultsCache = merged.slice(0, 50);
+        sweepResultsLoadedOnce = true;
+        renderSweepResults();
+        announceNewSweepHits(wasLoadedBefore);
+    }).catch(err => console.error('Error loading sweep results:', err));
 }
 
 // Pops a toast the moment a sweep comes back with hits, instead of relying on the user
@@ -469,7 +491,7 @@ function announceNewSweepHits(wasLoadedBefore) {
         if (hitCount === 0 || sweepHitToastedIds.has(c.id)) return;
         sweepHitToastedIds.add(c.id);
         if (!wasLoadedBefore) return;
-        toast(`${c.hostname}: ${hitCount} IOC match${hitCount === 1 ? '' : 'es'} found in the last sweep.`, 'danger', {
+        toast(`${c.hostname}: ${hitCount} match${hitCount === 1 ? '' : 'es'} found in the last sweep.`, 'danger', {
             duration: 0,
             actionLabel: 'View',
             onAction: () => viewSweepHitDetail(c.id)
@@ -497,10 +519,16 @@ function sweepRowStatusBadge(status) {
     return '<span class="badge bg-secondary">Pending</span>';
 }
 
+function sweepTypeBadge(label) {
+    return label === 'string_sweep'
+        ? '<span class="badge bg-info text-dark"><i class="fa-solid fa-font me-1"></i>String</span>'
+        : '<span class="badge bg-primary"><i class="fa-solid fa-hashtag me-1"></i>Hash</span>';
+}
+
 function renderSweepResults() {
     const tbody = document.getElementById('sweepResultsBody');
     if (!sweepResultsCache.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">No sweeps run yet.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">No sweeps run yet.</td></tr>';
         return;
     }
     tbody.innerHTML = sweepResultsCache.map(c => {
@@ -519,6 +547,7 @@ function renderSweepResults() {
         return `
             <tr class="${hitCount > 0 ? 'table-danger' : ''}">
                 <td class="ps-3"><strong>${escHtml(c.hostname)}</strong></td>
+                <td>${sweepTypeBadge(c.label)}</td>
                 <td>${sweepRowStatusBadge(c.status)}</td>
                 <td>${parsed ? escHtml(parsed.scanned) : '—'}</td>
                 <td>${hitsCell}</td>
@@ -533,19 +562,37 @@ function viewSweepHitDetail(id) {
     if (!c) return;
     const parsed = parseSweepStdout(c.stdout);
     if (!parsed) return;
-    const rows = parsed.hits.map(h => `
-        <tr>
-            <td class="font-monospace small">${escHtml(h.path)}</td>
-            <td class="font-monospace small">${escHtml(h.sha256)}</td>
-            <td class="small text-nowrap">${escHtml(h.size)}</td>
-            <td class="small text-nowrap">${escHtml(h.modified)}</td>
-        </tr>
-    `).join('');
+    const isString = c.label === 'string_sweep';
+    let head, rows;
+    if (isString) {
+        head = '<th>Path</th><th>Matched Rule / String</th><th>Size</th><th>Modified</th>';
+        rows = parsed.hits.map(h => `
+            <tr>
+                <td class="font-monospace small">${escHtml(h.path)}</td>
+                <td class="small">${(h.matches || []).map(m => `<div><span class="text-warning">${escHtml(m.rule)}</span>: <span class="font-monospace">"${escHtml(m.string)}"</span></div>`).join('')}</td>
+                <td class="small text-nowrap">${escHtml(h.size)}</td>
+                <td class="small text-nowrap">${escHtml(h.modified)}</td>
+            </tr>
+        `).join('');
+    } else {
+        head = '<th>Path</th><th>SHA-256</th><th>MD5</th><th>SHA-1</th><th>Matched Via</th><th>Size</th><th>Modified</th>';
+        rows = parsed.hits.map(h => `
+            <tr>
+                <td class="font-monospace small">${escHtml(h.path)}</td>
+                <td class="font-monospace small">${escHtml(h.sha256)}</td>
+                <td class="font-monospace small">${escHtml(h.md5)}</td>
+                <td class="font-monospace small">${escHtml(h.sha1)}</td>
+                <td class="small text-nowrap">${(h.matched || []).map(m => `<span class="badge bg-danger me-1">${escHtml(m)}</span>`).join('')}</td>
+                <td class="small text-nowrap">${escHtml(h.size)}</td>
+                <td class="small text-nowrap">${escHtml(h.modified)}</td>
+            </tr>
+        `).join('');
+    }
     document.getElementById('sweepDetailModalBody').innerHTML = `
         <div class="mb-2"><strong>Host:</strong> ${escHtml(c.hostname)}</div>
         <div class="table-responsive">
             <table class="table table-dark table-sm table-striped mb-0">
-                <thead><tr><th>Path</th><th>SHA-256</th><th>Size</th><th>Modified</th></tr></thead>
+                <thead><tr>${head}</tr></thead>
                 <tbody>${rows}</tbody>
             </table>
         </div>
@@ -585,14 +632,18 @@ async function runIocSweep() {
         hosts = Array.from(selectedSweepHosts);
     }
     if (!hosts.length) { toast(sweepTarget === 'all' ? 'No active agent endpoints detected.' : 'Select at least one agent.', 'warning'); return; }
-    if (!(await confirmDialog(`Sweep ${hosts.length} host(s) for files matching a known-bad SHA-256 hash? Each scans common malware-drop locations for recently-modified files.`, {title: 'IOC hash sweep', confirmLabel: 'Sweep'}))) return;
+    const isString = yaraScanMode === 'string_sweep';
+    const confirmMsg = isString
+        ? `Sweep ${hosts.length} host(s) for files containing a literal string from the imported YARA rules? Each scans common malware-drop locations for recently-modified files.`
+        : `Sweep ${hosts.length} host(s) for files matching a known-bad SHA-256/MD5/SHA-1 hash? Each scans common malware-drop locations for recently-modified files.`;
+    if (!(await confirmDialog(confirmMsg, {title: isString ? 'String sweep' : 'IOC hash sweep', confirmLabel: 'Sweep'}))) return;
 
     const msg = document.getElementById('sweepResultMsg');
     msg.style.display = 'none';
     Promise.all(hosts.map(hostname =>
         fetch('/api/agent/commands', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({hostname, label: 'ioc_sweep', params: {}})
+            body: JSON.stringify({hostname, label: yaraScanMode, params: {}})
         }).then(r => r.json().then(data => ({hostname, ok: r.ok, data})))
           .catch(err => ({hostname, ok: false, data: {error: String(err)}}))
     )).then(results => {
