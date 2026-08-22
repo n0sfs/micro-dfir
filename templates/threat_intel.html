@@ -193,12 +193,49 @@
                         <div id="sweepHostPicker" class="border border-secondary rounded p-2 bg-black mb-3" style="display:none; max-height:220px; overflow-y:auto;"></div>
                         <button type="button" class="btn btn-outline-info w-100" onclick="runIocSweep()"><i class="fa-solid fa-play me-1"></i> Run Sweep</button>
                         <div id="sweepResultMsg" style="display:none;" class="mt-3 small"></div>
-                        <p class="text-muted small mt-3 mb-0"><i class="fa-solid fa-circle-info me-1"></i>Results appear per host in Agents → Response Actions → All Response Action History as each endpoint checks in.</p>
+                    </div>
+                </div>
+
+                <div class="card bg-dark border-secondary shadow mt-3">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span><i class="fa-solid fa-list-check me-2"></i>Sweep Results</span>
+                        <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="loadSweepResults()"><i class="fa-solid fa-rotate me-1"></i>Refresh</button>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
+                            <table class="table table-dark table-sm table-hover mb-0 align-middle">
+                                <thead>
+                                    <tr>
+                                        <th class="ps-3">Host</th>
+                                        <th>Status</th>
+                                        <th>Scanned</th>
+                                        <th>Hits</th>
+                                        <th>Queued</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="sweepResultsBody">
+                                    <tr><td colspan="5" class="text-center text-muted py-3">No sweeps run yet.</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
             </div>
         </div>
     </div>
+</div>
+
+<!-- IOC Sweep Hit Detail Modal -->
+<div class="modal fade" id="sweepDetailModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title"><i class="fa-solid fa-triangle-exclamation text-danger me-2"></i>Sweep Hits</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="sweepDetailModalBody"></div>
+    </div>
+  </div>
 </div>
 
 <!-- Add/Edit Feed Modal -->
@@ -345,7 +382,10 @@ function setYaraScanMode(mode) {
     document.querySelectorAll('.yara-mode-btn').forEach(b => b.classList.toggle('active-filter', b.dataset.mode === mode));
     document.getElementById('yaraModeFile').style.display = mode === 'file' ? 'block' : 'none';
     document.getElementById('yaraModeSweep').style.display = mode === 'sweep' ? 'block' : 'none';
-    if (mode === 'sweep' && !sweepAgentsLoaded) loadSweepAgents();
+    if (mode === 'sweep') {
+        if (!sweepAgentsLoaded) loadSweepAgents();
+        if (!sweepResultsLoadedOnce) loadSweepResults();
+    }
 }
 
 // ---- IOC Hash Sweep: target selection + dispatch ----
@@ -358,6 +398,8 @@ let sweepTarget = 'all';
 let sweepAgentsLoaded = false;
 let sweepAgents = [];
 let selectedSweepHosts = new Set();
+let sweepResultsLoadedOnce = false;
+let sweepResultsCache = [];
 
 function setSweepTarget(target) {
     sweepTarget = target;
@@ -395,6 +437,120 @@ function toggleSweepHost(hostname, checked) {
     if (checked) selectedSweepHosts.add(hostname); else selectedSweepHosts.delete(hostname);
 }
 
+// ---- IOC Hash Sweep: results ----
+// Shows every ioc_sweep command regardless of where it was queued from (this page's
+// "Run Sweep", or the per-host Response Actions console on the Agents page) — both
+// dispatch the identical action, so a hunt result belongs here either way.
+function loadSweepResults() {
+    fetch('/api/agent/commands?label=ioc_sweep&limit=50')
+        .then(r => r.json())
+        .then(rows => {
+            sweepResultsCache = Array.isArray(rows) ? rows : [];
+            sweepResultsLoadedOnce = true;
+            renderSweepResults();
+        })
+        .catch(err => console.error('Error loading sweep results:', err));
+}
+
+// Returns {scanned, hits} if stdout parses as a real sweep-result shape, else null --
+// null covers a script that errored before producing JSON (e.g. no SHA-256 IOCs were
+// available yet) or a command still pending/sent with no stdout at all yet.
+function parseSweepStdout(stdout) {
+    if (!stdout) return null;
+    try {
+        const data = JSON.parse(stdout);
+        return (data && Array.isArray(data.hits) && typeof data.scanned === 'number') ? data : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+function sweepRowStatusBadge(status) {
+    if (status === 'done') return '<span class="badge bg-success">Done</span>';
+    if (status === 'failed') return '<span class="badge bg-danger">Failed</span>';
+    if (status === 'sent') return '<span class="badge bg-info text-dark">Sent</span>';
+    return '<span class="badge bg-secondary">Pending</span>';
+}
+
+function renderSweepResults() {
+    const tbody = document.getElementById('sweepResultsBody');
+    if (!sweepResultsCache.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">No sweeps run yet.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = sweepResultsCache.map(c => {
+        const parsed = parseSweepStdout(c.stdout);
+        const hitCount = parsed ? parsed.hits.length : 0;
+        let hitsCell;
+        if (parsed && hitCount > 0) {
+            hitsCell = `<a href="#" class="text-danger fw-bold" onclick="viewSweepHitDetail(${c.id}); return false;"><i class="fa-solid fa-triangle-exclamation me-1"></i>${hitCount} alert${hitCount === 1 ? '' : 's'}</a>`;
+        } else if (parsed) {
+            hitsCell = '<span class="text-success">Clean</span>';
+        } else if (c.status === 'failed') {
+            hitsCell = `<span class="text-danger small">${escHtml(c.stderr || 'error')}</span>`;
+        } else {
+            hitsCell = '—';
+        }
+        return `
+            <tr class="${hitCount > 0 ? 'table-danger' : ''}">
+                <td class="ps-3"><strong>${escHtml(c.hostname)}</strong></td>
+                <td>${sweepRowStatusBadge(c.status)}</td>
+                <td>${parsed ? escHtml(parsed.scanned) : '—'}</td>
+                <td>${hitsCell}</td>
+                <td class="text-nowrap small text-muted">${escHtml(c.queued_at)}</td>
+            </tr>
+        `;
+    }).join('');
+}
+
+function viewSweepHitDetail(id) {
+    const c = sweepResultsCache.find(r => r.id === id);
+    if (!c) return;
+    const parsed = parseSweepStdout(c.stdout);
+    if (!parsed) return;
+    const rows = parsed.hits.map(h => `
+        <tr>
+            <td class="font-monospace small">${escHtml(h.path)}</td>
+            <td class="font-monospace small">${escHtml(h.sha256)}</td>
+            <td class="small text-nowrap">${escHtml(h.size)}</td>
+            <td class="small text-nowrap">${escHtml(h.modified)}</td>
+        </tr>
+    `).join('');
+    document.getElementById('sweepDetailModalBody').innerHTML = `
+        <div class="mb-2"><strong>Host:</strong> ${escHtml(c.hostname)}</div>
+        <div class="table-responsive">
+            <table class="table table-dark table-sm table-striped mb-0">
+                <thead><tr><th>Path</th><th>SHA-256</th><th>Size</th><th>Modified</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>
+    `;
+    new bootstrap.Modal(document.getElementById('sweepDetailModal')).show();
+}
+
+// Commands complete asynchronously as each agent next checks in (usually within 15s) —
+// poll faster than the idle rate for a short window right after queuing so results
+// (and any alerts) show up here without the user having to keep clicking Refresh.
+// Mirrors the identical burst-polling pattern already used by the Agents page's
+// interactive console (see startConsoleBurstPolling() in agents.html).
+let sweepBurstTimer = null;
+let sweepBurstCount = 0;
+const SWEEP_BURST_INTERVAL_MS = 3000;
+const SWEEP_BURST_MAX_TICKS = 10;
+
+function startSweepBurstPolling() {
+    sweepBurstCount = 0;
+    if (sweepBurstTimer) clearInterval(sweepBurstTimer);
+    sweepBurstTimer = setInterval(() => {
+        sweepBurstCount++;
+        loadSweepResults();
+        if (sweepBurstCount >= SWEEP_BURST_MAX_TICKS) {
+            clearInterval(sweepBurstTimer);
+            sweepBurstTimer = null;
+        }
+    }, SWEEP_BURST_INTERVAL_MS);
+}
+
 function runIocSweep() {
     let hosts;
     if (sweepTarget === 'all') {
@@ -422,8 +578,10 @@ function runIocSweep() {
             msg.innerText = `Sweep queued for ${results.length - failed.length}/${results.length} host(s). Failed: ${failed.map(f => `${f.hostname} (${f.data.error || 'error'})`).join(', ')}`;
         } else {
             msg.className = 'mt-3 small text-success';
-            msg.innerText = `Sweep queued for all ${results.length} host(s). Results appear in Agents -> Response Actions as each host checks in.`;
+            msg.innerText = `Sweep queued for all ${results.length} host(s). Results appear below as each host checks in (usually within 15s).`;
         }
+        loadSweepResults();
+        startSweepBurstPolling();
     });
 }
 
