@@ -14,6 +14,10 @@
 .hostname-cell{cursor:default; border-bottom:1px dotted var(--text-muted);}
 #hostInfoMenu{display:none;}
 #hostInfoMenu table td{padding:1px 0;}
+#endpointsTable .endpoint-th{white-space:nowrap;}
+#endpointsTable .th-icon-btn{background:none; border:none; color:var(--text-muted); padding:0 2px; font-size:.72rem; cursor:pointer; line-height:1;}
+#endpointsTable .th-icon-btn:hover{color:var(--text-secondary);}
+#endpointsTable .th-icon-btn.active-filter{color:var(--accent);}
 .console-action-btn{text-align:left;}
 #consoleTerminal .term-line{margin-bottom:2px;}
 #consoleActionsWrap.disabled{opacity:.4; pointer-events:none;}
@@ -68,25 +72,49 @@
                 </div>
                 <span class="text-muted small text-nowrap" id="endpointCountLabel"></span>
             </div>
-            <button class="btn btn-outline-secondary btn-sm" onclick="loadUniqueEndpoints()"><i class="fa-solid fa-rotate me-1"></i> Refresh List</button>
+            <div class="d-flex align-items-center gap-2">
+                <div id="bulkActionBar" class="d-flex align-items-center gap-2" style="display:none;">
+                    <span class="text-muted small text-nowrap" id="bulkSelectedLabel"></span>
+                    <button class="btn btn-outline-info btn-sm" onclick="bulkUpgradeSelected()"><i class="fa-solid fa-rotate me-1"></i> Upgrade Selected</button>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="clearEndpointSelection()"><i class="fa-solid fa-xmark me-1"></i> Clear</button>
+                </div>
+                <button class="btn btn-outline-secondary btn-sm" onclick="loadUniqueEndpoints()"><i class="fa-solid fa-rotate me-1"></i> Refresh List</button>
+            </div>
         </div>
         <div class="card-body p-0">
             <div class="table-responsive" style="max-height: 600px; overflow-y: auto;">
-                <table class="table table-dark table-striped table-hover mb-0 align-middle">
+                <table class="table table-dark table-striped table-hover mb-0 align-middle" id="endpointsTable">
                     <thead>
                         <tr>
+                            <th style="width:34px;"><input class="form-check-input" type="checkbox" id="selectAllEndpoints" title="Select all visible endpoints" onchange="toggleSelectAllEndpoints(this.checked)"></th>
                             <th>Hostname</th>
-                            <th>OS</th>
+                            <th class="endpoint-th">
+                                <div class="d-flex align-items-center justify-content-between">
+                                    <span>OS</span>
+                                    <div class="dropdown">
+                                        <button type="button" class="th-icon-btn" id="filterBtnOs" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                        <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuOs" style="min-width:160px;"></div>
+                                    </div>
+                                </div>
+                            </th>
                             <th>Endpoint IP</th>
                             <th>Status</th>
                             <th>Last Check-in</th>
-                            <th>Version</th>
+                            <th class="endpoint-th">
+                                <div class="d-flex align-items-center justify-content-between">
+                                    <span>Version</span>
+                                    <div class="dropdown">
+                                        <button type="button" class="th-icon-btn" id="filterBtnVersion" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                        <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuVersion" style="min-width:200px;"></div>
+                                    </div>
+                                </div>
+                            </th>
                             <th>Heartbeat</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody id="endpointsTableBody">
-                        <tr><td colspan="8" class="text-center text-muted py-4">Loading active endpoints...</td></tr>
+                        <tr><td colspan="9" class="text-center text-muted py-4">Loading active endpoints...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -232,6 +260,7 @@ document.addEventListener("DOMContentLoaded", function() {
     loadUniqueEndpoints();
     loadCommandHistory();
     renderConsoleFavSelect();
+    initEndpointFilterDropdowns();
     setInterval(loadUniqueEndpoints, 30000);
     // The agent itself only checks in roughly every 8s, so polling much faster than
     // that wouldn't surface results any sooner — this just keeps the steady-state
@@ -415,6 +444,8 @@ function hideHostInfoMenu() {
 
 let allEndpoints = [];
 let endpointStatusFilter = 'all';
+let endpointFilters = { os: [], version: [] };
+let selectedEndpoints = new Set();
 
 function loadUniqueEndpoints() {
     fetch('/api/agent/checkins')
@@ -425,6 +456,11 @@ function loadUniqueEndpoints() {
             // that stopped checking in stays in the list (so it's still visible/actionable)
             // but shouldn't count toward the online tally.
             document.getElementById('statEndpoints').innerText = allEndpoints.filter(d => d.status === 'Online').length;
+            // A host that's dropped out of the list entirely (uninstalled, or just aged
+            // out) shouldn't linger in a bulk selection with no way to deselect it.
+            const stillPresent = new Set(allEndpoints.map(d => d.hostname));
+            selectedEndpoints.forEach(h => { if (!stillPresent.has(h)) selectedEndpoints.delete(h); });
+            populateEndpointFilterMenus();
             renderEndpoints();
             populateConsoleHostSelect();
         });
@@ -449,24 +485,31 @@ function renderEndpoints() {
 
     if (allEndpoints.length === 0) {
         document.getElementById('endpointCountLabel').innerText = '';
-        tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-3">No active agent endpoints detected.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-3">No active agent endpoints detected.</td></tr>';
+        updateSelectAllCheckboxState();
+        updateBulkActionBar();
         return;
     }
 
     const q = (document.getElementById('endpointSearchBox').value || '').trim().toLowerCase();
     let filtered = allEndpoints;
     if (endpointStatusFilter !== 'all') filtered = filtered.filter(dev => dev.status === endpointStatusFilter);
+    if (endpointFilters.os.length) filtered = filtered.filter(dev => endpointFilters.os.includes(dev.os === 'linux' ? 'linux' : 'windows'));
+    if (endpointFilters.version.length) filtered = filtered.filter(dev => endpointFilters.version.includes(dev.version || 'unknown'));
     if (q) filtered = filtered.filter(dev =>
         (dev.hostname || '').toLowerCase().includes(q) ||
         (dev.endpoint_ip || '').toLowerCase().includes(q)
     );
 
-    document.getElementById('endpointCountLabel').innerText = (q || endpointStatusFilter !== 'all')
+    const filtersActive = q || endpointStatusFilter !== 'all' || endpointFilters.os.length || endpointFilters.version.length;
+    document.getElementById('endpointCountLabel').innerText = filtersActive
         ? `${filtered.length} of ${allEndpoints.length} endpoints`
         : `${allEndpoints.length} endpoint${allEndpoints.length === 1 ? '' : 's'}`;
 
     if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-3">No endpoints match your filters.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-3">No endpoints match your filters.</td></tr>';
+        updateSelectAllCheckboxState();
+        updateBulkActionBar();
         return;
     }
 
@@ -476,6 +519,7 @@ function renderEndpoints() {
     // instead of a string-built function call.
     tbody.innerHTML = filtered.map(dev => `
                 <tr data-hostname="${escHtml(dev.hostname)}">
+                    <td><input class="form-check-input endpoint-select-cb" type="checkbox" ${selectedEndpoints.has(dev.hostname) ? 'checked' : ''} onchange="toggleEndpointSelection(rowHost(this), this.checked)"></td>
                     <td>
                         <strong class="hostname-cell" title="${escHtml(hostInfoText(dev))}" oncontextmenu="showHostInfoMenu(event, rowHost(this)); return false;">${escHtml(dev.hostname)}</strong>
                     </td>
@@ -503,6 +547,128 @@ function renderEndpoints() {
     // fixed-strategy positioning so the full "Respond" menu always renders in view.
     tbody.querySelectorAll('[data-bs-toggle="dropdown"]').forEach(el => {
         bootstrap.Dropdown.getOrCreateInstance(el, { popperConfig: { strategy: 'fixed' } });
+    });
+    updateSelectAllCheckboxState();
+    updateBulkActionBar();
+}
+
+// ---- Column filters (OS / Version) ----
+function buildEndpointFilterMenu(menuId, colKey, options) {
+    const menu = document.getElementById(menuId);
+    if (!menu) return;
+    let html = `<div class="menu-option-list" style="max-height:220px; overflow-y:auto;">`;
+    if (!options.length) {
+        html += `<div class="text-muted small px-1">No options</div>`;
+    }
+    options.forEach((o, i) => {
+        const checked = endpointFilters[colKey].includes(String(o.value)) ? 'checked' : '';
+        const cbId = `${menuId}_chk${i}`;
+        const safeVal = escHtml(String(o.value));
+        html += `<div class="form-check">
+            <input class="form-check-input" type="checkbox" data-value="${safeVal}" id="${cbId}" ${checked} onchange="toggleEndpointFilter('${colKey}', this.dataset.value, this.checked)">
+            <label class="form-check-label small" for="${cbId}">${escHtml(o.label)}</label>
+        </div>`;
+    });
+    html += `</div>`;
+    menu.innerHTML = html;
+}
+
+function updateEndpointFilterButtonState(colKey) {
+    const cap = colKey.charAt(0).toUpperCase() + colKey.slice(1);
+    const btn = document.getElementById(`filterBtn${cap}`);
+    if (btn) btn.classList.toggle('active-filter', endpointFilters[colKey].length > 0);
+}
+
+function toggleEndpointFilter(colKey, value, checked) {
+    const set = new Set(endpointFilters[colKey]);
+    if (checked) set.add(value); else set.delete(value);
+    endpointFilters[colKey] = Array.from(set);
+    updateEndpointFilterButtonState(colKey);
+    renderEndpoints();
+}
+
+// Version options come from whatever's actually present in allEndpoints (unlike OS,
+// which is a fixed two-value set) — rebuilt on every load so a newly-seen version
+// shows up as a filterable option without a page refresh.
+function populateEndpointFilterMenus() {
+    buildEndpointFilterMenu('filterMenuOs', 'os', [
+        { value: 'windows', label: 'Windows' },
+        { value: 'linux', label: 'Linux' }
+    ]);
+    const versions = Array.from(new Set(allEndpoints.map(d => d.version || 'unknown'))).sort();
+    buildEndpointFilterMenu('filterMenuVersion', 'version', versions.map(v => ({ value: v, label: v === 'unknown' ? 'Unknown' : v })));
+}
+
+// Same clipping issue solved elsewhere in this app (Threat Intel, Detection Rules) —
+// these menus live inside a scrollable table container, so absolute-positioned
+// dropdowns get cut off without forcing fixed-strategy Popper placement.
+function initEndpointFilterDropdowns() {
+    document.querySelectorAll('#endpointsTable thead [data-bs-toggle="dropdown"]').forEach(el => {
+        bootstrap.Dropdown.getOrCreateInstance(el, { popperConfig: { strategy: 'fixed' } });
+    });
+}
+
+// ---- Bulk selection / batch upgrade ----
+function toggleEndpointSelection(hostname, checked) {
+    if (checked) selectedEndpoints.add(hostname); else selectedEndpoints.delete(hostname);
+    updateSelectAllCheckboxState();
+    updateBulkActionBar();
+}
+
+// Acts on the currently visible (filtered) rows, not the entire endpoint list — so
+// "select all" matches what's actually on screen rather than silently reaching past
+// an active filter.
+function toggleSelectAllEndpoints(checked) {
+    document.querySelectorAll('#endpointsTableBody tr[data-hostname]').forEach(tr => {
+        const hostname = tr.dataset.hostname;
+        if (checked) selectedEndpoints.add(hostname); else selectedEndpoints.delete(hostname);
+    });
+    renderEndpoints();
+}
+
+function updateSelectAllCheckboxState() {
+    const master = document.getElementById('selectAllEndpoints');
+    if (!master) return;
+    const rows = document.querySelectorAll('#endpointsTableBody tr[data-hostname]');
+    const visibleHostnames = Array.from(rows).map(tr => tr.dataset.hostname);
+    const selectedVisible = visibleHostnames.filter(h => selectedEndpoints.has(h));
+    master.checked = visibleHostnames.length > 0 && selectedVisible.length === visibleHostnames.length;
+    master.indeterminate = selectedVisible.length > 0 && selectedVisible.length < visibleHostnames.length;
+}
+
+function updateBulkActionBar() {
+    const bar = document.getElementById('bulkActionBar');
+    if (!bar) return;
+    const n = selectedEndpoints.size;
+    bar.style.display = n > 0 ? 'flex' : 'none';
+    document.getElementById('bulkSelectedLabel').innerText = `${n} selected`;
+}
+
+function clearEndpointSelection() {
+    selectedEndpoints.clear();
+    renderEndpoints();
+}
+
+function bulkUpgradeSelected() {
+    const hosts = Array.from(selectedEndpoints);
+    if (!hosts.length) return;
+    if (!confirm(`Upgrade the MicroDFIR agent on ${hosts.length} selected host(s) to the latest version? Each restarts itself automatically.`)) return;
+    Promise.all(hosts.map(hostname =>
+        fetch('/api/agent/commands', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({hostname, label: 'upgrade', params: {}})
+        }).then(r => r.json().then(data => ({hostname, ok: r.ok, data})))
+          .catch(err => ({hostname, ok: false, data: {error: String(err)}}))
+    )).then(results => {
+        const failed = results.filter(r => !r.ok);
+        if (failed.length) {
+            alert(`Upgrade queued for ${results.length - failed.length}/${results.length} host(s).\nFailed: ${failed.map(f => `${f.hostname} (${f.data.error || 'error'})`).join(', ')}`);
+        } else {
+            alert(`Upgrade queued for all ${results.length} selected host(s). Each applies on its next check-in (usually within 15s).`);
+        }
+        selectedEndpoints.clear();
+        renderEndpoints();
+        loadCommandHistory();
     });
 }
 
