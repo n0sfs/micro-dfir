@@ -75,6 +75,7 @@
             <div class="d-flex align-items-center gap-2">
                 <div id="bulkActionBar" class="d-flex align-items-center gap-2" style="display:none;">
                     <span class="text-muted small text-nowrap" id="bulkSelectedLabel"></span>
+                    <button class="btn btn-outline-light btn-sm" onclick="bulkIocSweep()"><i class="fa-solid fa-magnifying-glass me-1"></i> Sweep for IOCs</button>
                     <button class="btn btn-outline-info btn-sm" onclick="bulkUpgradeSelected()"><i class="fa-solid fa-rotate me-1"></i> Upgrade Selected</button>
                     <button class="btn btn-outline-secondary btn-sm" onclick="clearEndpointSelection()"><i class="fa-solid fa-xmark me-1"></i> Clear</button>
                 </div>
@@ -140,6 +141,7 @@
                             <button type="button" class="btn btn-sm btn-outline-light console-action-btn" onclick="consoleShowParamForm('kill_process')"><i class="fa-solid fa-skull me-2"></i>Kill Process (PID)</button>
                             <button type="button" class="btn btn-sm btn-outline-light console-action-btn" onclick="consoleShowParamForm('collect_file')"><i class="fa-solid fa-file-arrow-down me-2"></i>Collect File</button>
                             <button type="button" class="btn btn-sm btn-outline-light console-action-btn" onclick="consoleRun('collect_triage')"><i class="fa-solid fa-microscope me-2"></i>Triage Collection</button>
+                            <button type="button" class="btn btn-sm btn-outline-light console-action-btn" onclick="consoleRun('ioc_sweep')"><i class="fa-solid fa-magnifying-glass me-2"></i>IOC Hash Sweep</button>
                             <button type="button" class="btn btn-sm btn-outline-warning console-action-btn" onclick="consoleRun('isolate_host', {}, 'Isolate this host from the network? Only traffic to/from this SOC server will be allowed.')"><i class="fa-solid fa-network-wired me-2"></i>Isolate Host</button>
                             <button type="button" class="btn btn-sm btn-outline-success console-action-btn" onclick="consoleRun('restore_network', {}, 'Restore normal network connectivity on this host?')"><i class="fa-solid fa-wifi me-2"></i>Restore Network</button>
                             <button type="button" class="btn btn-sm btn-outline-info console-action-btn" onclick="consoleUpgrade()"><i class="fa-solid fa-rotate me-2"></i>Upgrade Agent</button>
@@ -672,6 +674,33 @@ function bulkUpgradeSelected() {
     });
 }
 
+// Mirrors bulkUpgradeSelected() exactly — same selection state, same per-host
+// Promise.all dispatch, same success/failure summary. The live SHA-256 IOC list is
+// injected server-side per host (see api_agent_commands()'s POST handler), not here —
+// this only ever sends an empty params object.
+function bulkIocSweep() {
+    const hosts = Array.from(selectedEndpoints);
+    if (!hosts.length) return;
+    if (!confirm(`Sweep ${hosts.length} selected host(s) for files matching a known-bad SHA-256 hash? Each scans common malware-drop locations (Temp/Downloads/AppData/ProgramData or /tmp, /var/tmp, ~/Downloads) for recently-modified files.`)) return;
+    Promise.all(hosts.map(hostname =>
+        fetch('/api/agent/commands', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({hostname, label: 'ioc_sweep', params: {}})
+        }).then(r => r.json().then(data => ({hostname, ok: r.ok, data})))
+          .catch(err => ({hostname, ok: false, data: {error: String(err)}}))
+    )).then(results => {
+        const failed = results.filter(r => !r.ok);
+        if (failed.length) {
+            alert(`IOC sweep queued for ${results.length - failed.length}/${results.length} host(s).\nFailed: ${failed.map(f => `${f.hostname} (${f.data.error || 'error'})`).join(', ')}`);
+        } else {
+            alert(`IOC sweep queued for all ${results.length} selected host(s). Results appear in the history below as each host checks in (usually within 15s).`);
+        }
+        selectedEndpoints.clear();
+        renderEndpoints();
+        loadCommandHistory();
+    });
+}
+
 function removeEndpoint(hostname) {
     if (!hostname) return;
     if (!confirm(`Uninstall the MicroDFIR agent on ${hostname}? It will remove itself on its next check-in.`)) return;
@@ -712,6 +741,7 @@ const CONSOLE_ACTION_DISPLAY = {
     windows: {
         list_processes: 'Get-Process (list running processes)',
         collect_triage: 'Collect-Triage (processes, connections, autoruns, users, startup items)',
+        ioc_sweep: 'IOC-Sweep (hash recent files in Temp/Downloads/AppData/ProgramData against known-bad hashes)',
         isolate_host: 'Isolate-Host (block all traffic except this SOC server)',
         restore_network: 'Restore-Network',
         upgrade: 'Upgrade-Agent (fetch latest agent, restart)'
@@ -719,6 +749,7 @@ const CONSOLE_ACTION_DISPLAY = {
     linux: {
         list_processes: 'ps (list running processes)',
         collect_triage: 'Collect-Triage (processes, connections, cron/systemd autostart, users)',
+        ioc_sweep: 'IOC-Sweep (hash recent files in /tmp, /var/tmp, ~/Downloads against known-bad hashes)',
         isolate_host: 'Isolate-Host (iptables: block all traffic except this SOC server)',
         restore_network: 'Restore-Network (iptables: remove isolation rules)',
         upgrade: 'Upgrade-Agent (fetch latest agent, restart)'
@@ -1100,12 +1131,62 @@ function loadCommandHistory() {
         .catch(err => console.error('Error loading command history:', err));
 }
 
+// Returns {scanned, hits} if stdout parses as a real sweep-result shape, else null --
+// null covers a script that errored before producing JSON (e.g. no SHA-256 IOCs were
+// available yet) or hasn't reported back at all, which fall back to the plain raw-text
+// view below rather than a blank/broken table.
+function parseIocSweepResult(stdout) {
+    if (!stdout) return null;
+    try {
+        const data = JSON.parse(stdout);
+        return (data && Array.isArray(data.hits) && typeof data.scanned === 'number') ? data : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+function iocSweepResultHtml(c, parsed) {
+    const header = `<div class="mb-2"><strong>Host:</strong> ${escHtml(c.hostname)} &nbsp; <strong>Scanned:</strong> ${escHtml(parsed.scanned)} file(s) &nbsp; <strong>Hits:</strong> ${escHtml(parsed.hits.length)}</div>`;
+    if (parsed.hits.length === 0) {
+        return header + `<div class="text-success">No files matched a known-bad hash.</div>`;
+    }
+    const rows = parsed.hits.map(h => `
+        <tr>
+            <td class="font-monospace small">${escHtml(h.path)}</td>
+            <td class="font-monospace small">${escHtml(h.sha256)}</td>
+            <td class="small text-nowrap">${escHtml(h.size)}</td>
+            <td class="small text-nowrap">${escHtml(h.modified)}</td>
+        </tr>
+    `).join('');
+    // white-space:normal overrides the modal body's pre-wrap (needed so raw-text
+    // results preserve formatting) which would otherwise apply to this table too.
+    return header + `
+        <div style="white-space:normal;" class="table-responsive">
+            <table class="table table-dark table-sm table-striped mb-0">
+                <thead><tr><th>Path</th><th>SHA-256</th><th>Size</th><th>Modified</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>
+    `;
+}
+
 function viewCommandResult(id) {
     const c = cmdHistoryCache.find(r => r.id === id);
     if (!c) return;
+    const resultBody = document.getElementById('cmdResultBody');
+
+    if (c.label === 'ioc_sweep') {
+        const parsed = parseIocSweepResult(c.stdout);
+        if (parsed) {
+            resultBody.innerHTML = iocSweepResultHtml(c, parsed);
+            new bootstrap.Modal(document.getElementById('cmdResultModal')).show();
+            return;
+        }
+    }
+
     let body = `Host: ${c.hostname}\nAction: ${c.label}\nExit code: ${c.exit_code}\n\n--- STDOUT ---\n${c.stdout || '(empty)'}`;
     if (c.stderr) body += `\n\n--- STDERR ---\n${c.stderr}`;
-    document.getElementById('cmdResultBody').innerText = body;
+    resultBody.innerText = body;
     new bootstrap.Modal(document.getElementById('cmdResultModal')).show();
 }
 </script>
