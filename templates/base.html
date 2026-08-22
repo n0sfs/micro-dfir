@@ -260,6 +260,63 @@ body.sidebar-collapsed .btn-logout span{display:none;}
   .sidebar{width:210px;}
   .main-content{margin-left:210px;padding:18px;}
 }
+
+/* ---------- Toasts (replaces alert()) ---------- */
+.mdfir-toast-stack{
+  position:fixed; top:16px; right:16px; z-index:2000;
+  display:flex; flex-direction:column; gap:8px;
+  width:360px; max-width:calc(100vw - 32px);
+}
+.mdfir-toast{
+  background-color:var(--bg-card); border:1px solid var(--border-light);
+  border-left:3px solid var(--accent);
+  border-radius:var(--radius); box-shadow:0 4px 16px rgba(0,0,0,.4);
+  padding:12px 14px; font-size:.85rem; color:var(--text-primary);
+  display:flex; align-items:flex-start; gap:10px;
+  animation:mdfirToastIn .18s ease;
+}
+.mdfir-toast.success{border-left-color:var(--success);}
+.mdfir-toast.danger{border-left-color:var(--danger);}
+.mdfir-toast.warning{border-left-color:var(--warning);}
+.mdfir-toast.info{border-left-color:var(--info);}
+.mdfir-toast>i{margin-top:2px;flex-shrink:0;}
+.mdfir-toast.success>i{color:var(--success);}
+.mdfir-toast.danger>i{color:var(--danger);}
+.mdfir-toast.warning>i{color:var(--warning);}
+.mdfir-toast.info>i{color:var(--info);}
+.mdfir-toast .mdfir-toast-msg{flex:1;white-space:pre-wrap;word-break:break-word;line-height:1.4;}
+.mdfir-toast .mdfir-toast-close{
+  background:none;border:none;color:var(--text-muted);cursor:pointer;
+  padding:0;line-height:1;font-size:.85rem;flex-shrink:0;
+}
+.mdfir-toast .mdfir-toast-close:hover{color:var(--text-primary);}
+@keyframes mdfirToastIn{from{opacity:0;transform:translateX(14px);}to{opacity:1;transform:translateX(0);}}
+.mdfir-toast.closing{animation:mdfirToastOut .15s ease forwards;}
+@keyframes mdfirToastOut{from{opacity:1;}to{opacity:0;transform:translateX(14px);}}
+
+/* ---------- Confirm dialog (replaces confirm()) ---------- */
+.mdfir-confirm-backdrop{
+  position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:2100;
+  display:flex;align-items:center;justify-content:center;padding:16px;
+  animation:mdfirFadeIn .12s ease;
+}
+@keyframes mdfirFadeIn{from{opacity:0;}to{opacity:1;}}
+.mdfir-confirm-box{
+  background-color:var(--bg-card);border:1px solid var(--border-light);
+  border-radius:var(--radius);box-shadow:0 8px 28px rgba(0,0,0,.55);
+  width:420px;max-width:100%;padding:20px 22px;
+}
+.mdfir-confirm-box .mdfir-confirm-title{
+  display:flex;align-items:center;gap:10px;font-weight:600;font-size:1rem;
+  color:var(--text-primary);margin-bottom:10px;
+}
+.mdfir-confirm-box .mdfir-confirm-title i{color:var(--warning);}
+.mdfir-confirm-box.danger .mdfir-confirm-title i{color:var(--danger);}
+.mdfir-confirm-box .mdfir-confirm-msg{
+  font-size:.85rem;color:var(--text-secondary);white-space:pre-wrap;
+  margin-bottom:20px;line-height:1.5;
+}
+.mdfir-confirm-box .mdfir-confirm-actions{display:flex;justify-content:flex-end;gap:8px;}
 </style>
 </head>
 <body>
@@ -318,6 +375,142 @@ body.sidebar-collapsed .btn-logout span{display:none;}
             const btn = document.getElementById('sidebarToggleBtn');
             if (btn && document.body.classList.contains('sidebar-collapsed')) btn.title = 'Expand sidebar';
         })();
+
+        // ---------- Toast notifications (replaces alert()) ----------
+        var toast = (function() {
+            let stack = null;
+            function getStack() {
+                if (!stack || !document.body.contains(stack)) {
+                    stack = document.createElement('div');
+                    stack.className = 'mdfir-toast-stack';
+                    document.body.appendChild(stack);
+                }
+                return stack;
+            }
+            const ICONS = { success: 'fa-circle-check', danger: 'fa-circle-exclamation', warning: 'fa-triangle-exclamation', info: 'fa-circle-info' };
+            return function toast(message, type, opts) {
+                type = ICONS[type] ? type : 'info';
+                opts = opts || {};
+                const duration = opts.duration != null ? opts.duration : 5000;
+                const el = document.createElement('div');
+                el.className = 'mdfir-toast ' + type;
+                const msgSpan = document.createElement('span');
+                msgSpan.className = 'mdfir-toast-msg';
+                msgSpan.innerText = message == null ? '' : String(message);
+                el.innerHTML = '<i class="fa-solid ' + ICONS[type] + '"></i>';
+                el.appendChild(msgSpan);
+                const closeBtn = document.createElement('button');
+                closeBtn.type = 'button';
+                closeBtn.className = 'mdfir-toast-close';
+                closeBtn.innerHTML = '<i class="fa-solid fa-xmark"></i>';
+                const remove = () => {
+                    if (!el.parentNode) return;
+                    el.classList.add('closing');
+                    setTimeout(() => el.remove(), 160);
+                };
+                closeBtn.onclick = remove;
+                el.appendChild(closeBtn);
+                getStack().appendChild(el);
+                if (duration > 0) setTimeout(remove, duration);
+                return el;
+            };
+        })();
+
+        // ---------- Styled confirm dialog (replaces confirm(), returns a Promise<boolean>) ----------
+        function confirmDialog(message, opts) {
+            opts = opts || {};
+            return new Promise((resolve) => {
+                const backdrop = document.createElement('div');
+                backdrop.className = 'mdfir-confirm-backdrop';
+                const box = document.createElement('div');
+                box.className = 'mdfir-confirm-box' + (opts.danger ? ' danger' : '');
+                const titleIcon = opts.danger ? 'fa-triangle-exclamation' : 'fa-circle-question';
+                const title = document.createElement('div');
+                title.className = 'mdfir-confirm-title';
+                const titleSpan = document.createElement('span');
+                titleSpan.innerText = opts.title ? String(opts.title) : 'Confirm';
+                title.innerHTML = '<i class="fa-solid ' + titleIcon + '"></i>';
+                title.appendChild(titleSpan);
+                const msg = document.createElement('div');
+                msg.className = 'mdfir-confirm-msg';
+                msg.innerText = message == null ? '' : String(message);
+                const actions = document.createElement('div');
+                actions.className = 'mdfir-confirm-actions';
+                const cancelBtn = document.createElement('button');
+                cancelBtn.type = 'button';
+                cancelBtn.className = 'btn btn-outline-secondary btn-sm';
+                cancelBtn.innerText = opts.cancelLabel || 'Cancel';
+                const okBtn = document.createElement('button');
+                okBtn.type = 'button';
+                okBtn.className = 'btn btn-sm ' + (opts.danger ? 'btn-danger' : 'btn-primary');
+                okBtn.innerText = opts.confirmLabel || 'Confirm';
+                actions.appendChild(cancelBtn);
+                actions.appendChild(okBtn);
+                box.appendChild(title);
+                box.appendChild(msg);
+                box.appendChild(actions);
+                backdrop.appendChild(box);
+                document.body.appendChild(backdrop);
+                const cleanup = (result) => { backdrop.remove(); document.removeEventListener('keydown', onKey); resolve(result); };
+                function onKey(e) { if (e.key === 'Escape') cleanup(false); if (e.key === 'Enter') cleanup(true); }
+                document.addEventListener('keydown', onKey);
+                cancelBtn.onclick = () => cleanup(false);
+                okBtn.onclick = () => cleanup(true);
+                backdrop.onclick = (e) => { if (e.target === backdrop) cleanup(false); };
+                okBtn.focus();
+            });
+        }
+
+        // ---------- Styled prompt dialog (replaces prompt(), returns a Promise<string|null>) ----------
+        function promptDialog(message, defaultValue, opts) {
+            opts = opts || {};
+            return new Promise((resolve) => {
+                const backdrop = document.createElement('div');
+                backdrop.className = 'mdfir-confirm-backdrop';
+                const box = document.createElement('div');
+                box.className = 'mdfir-confirm-box';
+                const title = document.createElement('div');
+                title.className = 'mdfir-confirm-title';
+                const titleSpan = document.createElement('span');
+                titleSpan.innerText = opts.title ? String(opts.title) : 'Enter a value';
+                title.innerHTML = '<i class="fa-solid fa-pen"></i>';
+                title.appendChild(titleSpan);
+                const msg = document.createElement('div');
+                msg.className = 'mdfir-confirm-msg';
+                msg.style.marginBottom = '10px';
+                msg.innerText = message == null ? '' : String(message);
+                const input = document.createElement('input');
+                input.type = 'text';
+                input.className = 'form-control form-control-sm mb-3';
+                input.value = defaultValue == null ? '' : String(defaultValue);
+                const actions = document.createElement('div');
+                actions.className = 'mdfir-confirm-actions';
+                const cancelBtn = document.createElement('button');
+                cancelBtn.type = 'button';
+                cancelBtn.className = 'btn btn-outline-secondary btn-sm';
+                cancelBtn.innerText = 'Cancel';
+                const okBtn = document.createElement('button');
+                okBtn.type = 'button';
+                okBtn.className = 'btn btn-sm btn-primary';
+                okBtn.innerText = opts.confirmLabel || 'Save';
+                actions.appendChild(cancelBtn);
+                actions.appendChild(okBtn);
+                box.appendChild(title);
+                box.appendChild(msg);
+                box.appendChild(input);
+                box.appendChild(actions);
+                backdrop.appendChild(box);
+                document.body.appendChild(backdrop);
+                const cleanup = (result) => { backdrop.remove(); document.removeEventListener('keydown', onKey); resolve(result); };
+                function onKey(e) { if (e.key === 'Escape') cleanup(null); if (e.key === 'Enter') cleanup(input.value); }
+                document.addEventListener('keydown', onKey);
+                cancelBtn.onclick = () => cleanup(null);
+                okBtn.onclick = () => cleanup(input.value);
+                backdrop.onclick = (e) => { if (e.target === backdrop) cleanup(null); };
+                input.focus();
+                input.select();
+            });
+        }
     </script>
     {% block scripts %}{% endblock %}
 </body></html>

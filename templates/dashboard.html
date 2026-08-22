@@ -867,8 +867,8 @@ function selectTimePreset(range) {
 function applyCustomRange() {
     const start = document.getElementById('customStart').value;
     const end = document.getElementById('customEnd').value;
-    if (!start && !end) { alert('Pick at least a start or end date/time.'); return; }
-    if (start && end && start > end) { alert('Start must be before end.'); return; }
+    if (!start && !end) { toast('Pick at least a start or end date/time.', 'warning'); return; }
+    if (start && end && start > end) { toast('Start must be before end.', 'warning'); return; }
     timeRangeState = { range: 'custom', start, end };
     setTimeRangeLabel();
     markActivePresetBtn(null);
@@ -906,11 +906,11 @@ function renderFavorites() {
     `).join('');
 }
 
-function saveCurrentAsFavorite() {
+async function saveCurrentAsFavorite() {
     const defaultName = timeRangeState.range === 'custom'
         ? `${timeRangeState.start || '…'} to ${timeRangeState.end || '…'}`
         : (RANGE_LABELS[timeRangeState.range] || timeRangeState.range);
-    const name = prompt('Name this time window:', defaultName);
+    const name = await promptDialog('Name this time window:', defaultName, {title: 'Save favorite'});
     if (!name) return;
     const favs = loadFavorites();
     favs.push({ name, range: timeRangeState.range, start: timeRangeState.start, end: timeRangeState.end });
@@ -1357,7 +1357,7 @@ function addDropRule() {
     let operator = document.getElementById('dropOp').value;
     let value = document.getElementById('dropVal').value.trim();
     let description = document.getElementById('dropDesc').value.trim();
-    if (!value) { alert('Match value is required.'); return; }
+    if (!value) { toast('Match value is required.', 'warning'); return; }
 
     fetch('/api/droprules', {
         method: 'POST',
@@ -1367,15 +1367,15 @@ function addDropRule() {
         document.getElementById('dropVal').value = '';
         document.getElementById('dropDesc').value = '';
         loadDropRules();
-    }).catch(err => alert('Error adding rule: ' + err));
+    }).catch(err => toast('Error adding rule: ' + err, 'danger'));
 }
 
 function toggleDropRule(id) {
     fetch(`/api/droprules/${id}/toggle`, { method: 'PUT' }).then(() => loadDropRules());
 }
 
-function deleteDropRule(id) {
-    if (confirm('Delete this drop rule?')) {
+async function deleteDropRule(id) {
+    if (await confirmDialog('Delete this drop rule?', {title: 'Delete drop rule', danger: true, confirmLabel: 'Delete'})) {
         fetch(`/api/droprules/${id}`, { method: 'DELETE' }).then(() => loadDropRules());
     }
 }
@@ -1416,7 +1416,7 @@ function saveChannels() {
             setTimeout(() => { msg.style.display = 'none'; }, 3000);
         }
         loadChannelSettings();
-    }).catch(err => alert('Error saving channels: ' + err));
+    }).catch(err => toast('Error saving channels: ' + err, 'danger'));
 }
 
 function initPipelineTab() {
@@ -1717,13 +1717,13 @@ async function saveComplianceTags() {
             method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({tags})
         });
         const data = await res.json();
-        if (!res.ok) { alert(data.error || 'Failed to save compliance tags.'); return; }
+        if (!res.ok) { toast(data.error || 'Failed to save compliance tags.', 'danger'); return; }
         const msg = document.getElementById('complianceSaveMsg');
         msg.style.display = 'inline';
         setTimeout(() => { msg.style.display = 'none'; }, 3000);
         ld();
     } catch (e) {
-        alert('Error saving compliance tags: ' + e);
+        toast('Error saving compliance tags: ' + e, 'danger');
     }
 }
 
@@ -1976,14 +1976,14 @@ async function toggleSingle(id, state) {
     const res = await fetch(`/api/rules/${id}/toggle`, {method: 'PUT'});
     if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        alert(err.error || 'Failed to toggle rule.');
+        toast(err.error || 'Failed to toggle rule.', 'danger');
         ld();
     }
 }
 
 async function bulkAction(enable) {
     const ids = Array.from(selectedIds).map(id => parseInt(id));
-    if (ids.length === 0) return alert("Please select at least one rule.");
+    if (ids.length === 0) return toast("Please select at least one rule.", 'warning');
 
     const res = await fetch('/api/rules/bulk_update', {
         method: 'PUT',
@@ -1992,7 +1992,7 @@ async function bulkAction(enable) {
     });
     if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        alert(err.error || 'Failed to update rules.');
+        toast(err.error || 'Failed to update rules.', 'danger');
     }
     ld();
 }
@@ -2031,7 +2031,7 @@ async function openRuleModal(id) {
         try {
             const res = await fetch(`/api/rules/${editingRuleId}`);
             const data = await res.json();
-            if (!res.ok) { alert(data.error || 'Failed to load rule.'); return; }
+            if (!res.ok) { toast(data.error || 'Failed to load rule.', 'danger'); return; }
             document.getElementById('ruleYamlInput').value = data.rule_yaml || '';
             editingRuleSource = data.source || 'sigma';
 
@@ -2064,7 +2064,7 @@ async function openRuleModal(id) {
             // builder tab and saving would silently replace it with the builder's output.
             switchRuleTab('yaml');
         } catch (e) {
-            alert('Error loading rule: ' + e);
+            toast('Error loading rule: ' + e, 'danger');
             return;
         }
     } else {
@@ -2118,7 +2118,7 @@ async function doClone(id) {
     const res = await fetch(`/api/rules/${id}/clone`, {method: 'POST'});
     const data = await res.json();
     if (!res.ok) {
-        alert(data.error || 'Failed to clone rule.');
+        toast(data.error || 'Failed to clone rule.', 'danger');
         return null;
     }
     return data.id;
@@ -2133,7 +2133,7 @@ async function cloneFromModal() {
 }
 
 async function quickClone(id, title) {
-    if (!confirm(`Clone "${title}" into an editable custom copy?`)) return;
+    if (!(await confirmDialog(`Clone "${title}" into an editable custom copy?`, {title: 'Clone rule', confirmLabel: 'Clone'}))) return;
     const newId = await doClone(id);
     if (!newId) return;
     await ld();
@@ -2165,7 +2165,7 @@ async function toggleHistory() {
 }
 
 async function importSigmaHQ() {
-    if (!confirm('Pull the latest ruleset from SigmaHQ? This can take up to a minute — new rules are added disabled, existing ones are updated in place, and your enable/disable choices are preserved.')) return;
+    if (!(await confirmDialog('Pull the latest ruleset from SigmaHQ? This can take up to a minute — new rules are added disabled, existing ones are updated in place, and your enable/disable choices are preserved.', {title: 'Import SigmaHQ ruleset', confirmLabel: 'Import'}))) return;
     const btn = document.getElementById('importSigmaBtn');
     const origHtml = btn.innerHTML;
     btn.disabled = true;
@@ -2174,13 +2174,13 @@ async function importSigmaHQ() {
         const res = await fetch('/api/rules/import/sigmahq', {method: 'POST'});
         const data = await res.json();
         if (!res.ok) {
-            alert(data.error || 'Import failed.');
+            toast(data.error || 'Import failed.', 'danger');
         } else {
-            alert(`Import complete: ${data.inserted} new, ${data.updated} updated, ${data.skipped} skipped, ${data.errors} errors.`);
+            toast(`Import complete: ${data.inserted} new, ${data.updated} updated, ${data.skipped} skipped, ${data.errors} errors.`, 'success', {duration: 8000});
             ld();
         }
     } catch (e) {
-        alert('Import failed: ' + e);
+        toast('Import failed: ' + e, 'danger');
     } finally {
         btn.disabled = false;
         btn.innerHTML = origHtml;
@@ -2188,11 +2188,11 @@ async function importSigmaHQ() {
 }
 
 async function deleteRule(id, title) {
-    if (!confirm(`Delete rule "${title}"? This cannot be undone.`)) return;
+    if (!(await confirmDialog(`Delete rule "${title}"? This cannot be undone.`, {title: 'Delete rule', danger: true, confirmLabel: 'Delete'}))) return;
     const res = await fetch(`/api/rules/${id}`, {method: 'DELETE'});
     if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        alert(err.error || 'Failed to delete rule.');
+        toast(err.error || 'Failed to delete rule.', 'danger');
     }
     ld();
 }
@@ -2399,9 +2399,9 @@ function saveSeverity() {
             setTimeout(() => { msg.style.display = 'none'; }, 3000);
             tuneLoad();
         } else {
-            alert(data.error || 'Failed to save severity override.');
+            toast(data.error || 'Failed to save severity override.', 'danger');
         }
-    }).catch(err => alert('Error saving severity: ' + err));
+    }).catch(err => toast('Error saving severity: ' + err, 'danger'));
 }
 
 function addExclusion() {
@@ -2435,21 +2435,21 @@ function toggleExclusion(eid, enabled) {
     fetch(`/api/rules/exclusions/${eid}`, {
         method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ enabled })
     }).then(() => { if (activeTuneRuleId) { loadExclusions(activeTuneRuleId); tuneLoad(); } })
-      .catch(err => alert('Error updating exclusion: ' + err));
+      .catch(err => toast('Error updating exclusion: ' + err, 'danger'));
 }
 
-function deleteExclusion(eid) {
-    if (!confirm('Delete this exclusion?')) return;
+async function deleteExclusion(eid) {
+    if (!(await confirmDialog('Delete this exclusion?', {title: 'Delete exclusion', danger: true, confirmLabel: 'Delete'}))) return;
     fetch(`/api/rules/exclusions/${eid}`, { method: 'DELETE' })
         .then(() => { if (activeTuneRuleId) { loadExclusions(activeTuneRuleId); tuneLoad(); } })
-        .catch(err => alert('Error deleting exclusion: ' + err));
+        .catch(err => toast('Error deleting exclusion: ' + err, 'danger'));
 }
 
 function toggleTuneRuleEnabled() {
     if (!activeTuneRuleId) return;
     fetch(`/api/rules/${activeTuneRuleId}/toggle`, { method: 'PUT' })
         .then(() => { tuneLoad(); bootstrap.Modal.getInstance(document.getElementById('tuneModal')).hide(); })
-        .catch(err => alert('Error toggling rule: ' + err));
+        .catch(err => toast('Error toggling rule: ' + err, 'danger'));
 }
 
 function initTuningTab() {
