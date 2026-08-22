@@ -1,10 +1,10 @@
 # Micro DFIR Windows Agent
-import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, base64, threading
+import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, tempfile, threading
 
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.08.21.3"
+AGENT_VERSION = "2026.08.21.4"
 
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
@@ -110,11 +110,24 @@ def run_remote_script(context, cmd_id, script):
     # PowerShell runs non-interactively with its output captured — confirmed in
     # production contaminating a collect_triage result.
     full_script = "$ProgressPreference = 'SilentlyContinue'\n" + script
-    encoded = base64.b64encode(full_script.encode('utf-16-le')).decode('ascii')
     exit_code, stdout, stderr = 1, '', ''
+    tmp_path = None
     try:
+        # -EncodedCommand embeds the whole script directly in the process's command-line
+        # arguments, which Windows caps at ~32K characters total (CreateProcess) — fine
+        # for the original small canned actions, but confirmed in production: an
+        # ioc_sweep command carrying a few hundred live IOC hashes blows straight
+        # through that limit and fails with WinError 206 ("filename or extension is too
+        # long") before anything even runs. Writing the script to a temp .ps1 file and
+        # invoking it with -File has no such ceiling, so this scales with the action's
+        # actual content instead of a fixed limit that only gets easier to hit as the
+        # IOC list grows. utf-8-sig (UTF-8 with a BOM) is what makes PowerShell reliably
+        # detect the file as UTF-8 rather than falling back to the system ANSI codepage.
+        fd, tmp_path = tempfile.mkstemp(suffix='.ps1')
+        with os.fdopen(fd, 'w', encoding='utf-8-sig') as f:
+            f.write(full_script)
         proc = subprocess.run(
-            ['powershell', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+            ['powershell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', tmp_path],
             capture_output=True, encoding='utf-8', errors='ignore', timeout=SCRIPT_TIMEOUT_SECONDS
         )
         exit_code, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
@@ -122,6 +135,10 @@ def run_remote_script(context, cmd_id, script):
         stderr = f"Command timed out after {SCRIPT_TIMEOUT_SECONDS}s"
     except Exception as e:
         stderr = f"Failed to execute command: {e}"
+    finally:
+        if tmp_path:
+            try: os.remove(tmp_path)
+            except Exception: pass
 
     # A command that ran (or timed out) but whose result never reaches the server sits
     # "Sent" forever with nothing to show for it — retry the report a couple of times
