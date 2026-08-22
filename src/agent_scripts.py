@@ -8,6 +8,7 @@
 import re
 
 _IPV4_RE = re.compile(r'^(\d{1,3}\.){3}\d{1,3}$')
+_SHA256_RE = re.compile(r'^[0-9a-fA-F]{64}$')
 
 # ---- Windows (PowerShell) ----
 
@@ -66,6 +67,48 @@ $hash = (Get-FileHash $p -Algorithm SHA256).Hash
 @{{ path=$p; size=$size; sha256=$hash; content_b64=$b64 }} | ConvertTo-Json -Compress
 """
 
+def ioc_sweep(hashes):
+    # Only ever trust hex-shaped 64-char values here regardless of what the caller
+    # passed — hashes ultimately comes from the live threat-intel IOC list, whose
+    # ioc_type labeling is inconsistent across feeds (see _get_live_ioc_sha256_hashes
+    # in app.py), so re-validating by shape at the point the value gets embedded into
+    # a script is the actual safety boundary, not a redundant check.
+    valid = sorted({(h or '').strip().lower() for h in hashes if _SHA256_RE.match((h or '').strip())})
+    if not valid:
+        # A real, expected state (no SHA-256 IOCs currently loaded) — emit a script
+        # that reports that clearly rather than one that silently "succeeds" with a
+        # zero-hit sweep that looks identical to a clean host.
+        return "Write-Output '{\"error\":\"no SHA-256 IOC hashes are currently available to sweep for\"}'"
+    hash_list = ','.join("'" + h + "'" for h in valid)
+    # Bounded to common malware-drop locations, recently-modified, executable-ish
+    # files under 50MB — a full-disk hash sweep would blow past the agent's 90s
+    # command timeout on any real machine, and this is also where live-response
+    # triage actually looks first.
+    script = """$hashSet = New-Object System.Collections.Generic.HashSet[string]
+@(__HASHES__) | ForEach-Object { [void]$hashSet.Add($_) }
+$paths = @($env:TEMP, $env:APPDATA, $env:ProgramData, (Join-Path $env:USERPROFILE 'Downloads'))
+$cutoff = (Get-Date).AddDays(-14)
+$exts = @('.exe','.dll','.scr','.ps1','.bat','.vbs','.js','.jar','.msi')
+$scanned = 0
+$hits = @()
+foreach ($p in $paths) {
+    if (-not (Test-Path $p)) { continue }
+    Get-ChildItem -Path $p -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -ge $cutoff -and $exts -contains $_.Extension.ToLower() -and $_.Length -lt 50MB } |
+        ForEach-Object {
+            $scanned++
+            try {
+                $h = (Get-FileHash -Algorithm SHA256 -Path $_.FullName -ErrorAction Stop).Hash.ToLower()
+                if ($hashSet.Contains($h)) {
+                    $hits += [PSCustomObject]@{ path=$_.FullName; sha256=$h; size=$_.Length; modified=$_.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss') }
+                }
+            } catch {}
+        }
+}
+[PSCustomObject]@{ scanned=$scanned; hits=$hits } | ConvertTo-Json -Compress -Depth 4
+"""
+    return script.replace('__HASHES__', hash_list)
+
 # Progress records (e.g. from Get-FileHash on multiple files in collect_triage) get
 # serialized as CLIXML and mixed straight into stdout when PowerShell runs
 # non-interactively with its output captured — confirmed in production, where a
@@ -81,6 +124,11 @@ WINDOWS_TEMPLATES = {
     'restore_network': (lambda params: _PROGRESS_SILENT + restore_network(), []),
     'collect_triage': (lambda params: _PROGRESS_SILENT + collect_triage(), []),
     'collect_file': (lambda params: _PROGRESS_SILENT + collect_file(params['path']), ['path']),
+    # 'hashes' is always server-populated from the live IOC list right before dispatch
+    # (see app.py's api_agent_commands()), never client-supplied — it's deliberately
+    # not in the required list, since an empty live hash set is a real, valid state
+    # the builder already handles, not a missing-parameter error.
+    'ioc_sweep': (lambda params: _PROGRESS_SILENT + ioc_sweep(params.get('hashes', [])), []),
 }
 
 # ---- Linux (bash) ----
@@ -170,6 +218,58 @@ else:
 PYEOF
 """
 
+def ioc_sweep_linux(hashes):
+    valid = sorted({(h or '').strip().lower() for h in hashes if _SHA256_RE.match((h or '').strip())})
+    if not valid:
+        return "echo '{\"error\": \"no SHA-256 IOC hashes are currently available to sweep for\"}'"
+    hash_list = ', '.join("'" + h + "'" for h in valid)
+    # Same quoted-heredoc trick as collect_file_linux — no shell expansion happens
+    # inside the block, so the hash list only needs to be valid Python (already
+    # guaranteed: every entry matched _SHA256_RE, so none can break out of the set
+    # literal), not escaped for bash at all.
+    script = """python3 - <<'PYEOF'
+import hashlib, json, os, time
+
+HASHES = {__HASHES__}
+PATHS = ['/tmp', '/var/tmp', '/dev/shm', os.path.expanduser('~/Downloads')]
+EXTS = {'', '.sh', '.bin', '.elf', '.py', '.php', '.pl', '.out'}
+CUTOFF = time.time() - 14 * 86400
+MAX_SIZE = 50 * 1024 * 1024
+
+scanned = 0
+hits = []
+for base in PATHS:
+    if not os.path.isdir(base):
+        continue
+    for root, dirs, files in os.walk(base):
+        for name in files:
+            path = os.path.join(root, name)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            if st.st_mtime < CUTOFF or st.st_size > MAX_SIZE:
+                continue
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in EXTS:
+                continue
+            scanned += 1
+            try:
+                h = hashlib.sha256()
+                with open(path, 'rb') as f:
+                    for chunk in iter(lambda: f.read(65536), b''):
+                        h.update(chunk)
+                digest = h.hexdigest()
+            except OSError:
+                continue
+            if digest in HASHES:
+                hits.append({'path': path, 'sha256': digest, 'size': st.st_size, 'modified': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_mtime))})
+
+print(json.dumps({'scanned': scanned, 'hits': hits}))
+PYEOF
+"""
+    return script.replace('__HASHES__', hash_list)
+
 LINUX_TEMPLATES = {
     'list_processes': (lambda params: list_processes_linux(), []),
     'kill_process': (lambda params: kill_process_linux(params['pid']), ['pid']),
@@ -177,6 +277,7 @@ LINUX_TEMPLATES = {
     'restore_network': (lambda params: restore_network_linux(), []),
     'collect_triage': (lambda params: collect_triage_linux(), []),
     'collect_file': (lambda params: collect_file_linux(params['path']), ['path']),
+    'ioc_sweep': (lambda params: ioc_sweep_linux(params.get('hashes', [])), []),
 }
 
 TEMPLATES_BY_OS = {'windows': WINDOWS_TEMPLATES, 'linux': LINUX_TEMPLATES}

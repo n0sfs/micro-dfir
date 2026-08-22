@@ -436,6 +436,7 @@ _CSV_TYPE_COLS = ('type', 'ioc_type')
 _CSV_NAME_COLS = ('name', 'description', 'desc', 'notes')
 _CSV_IPV4_RE = re.compile(r'^\d{1,3}(\.\d{1,3}){3}$')
 _CSV_HASH_RE = re.compile(r'^[a-fA-F0-9]{32}$|^[a-fA-F0-9]{40}$|^[a-fA-F0-9]{64}$')
+_SHA256_HEX_RE = re.compile(r'^[a-fA-F0-9]{64}$')
 _CSV_DOMAIN_RE = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$')
 
 def _guess_csv_ioc_type(value):
@@ -2367,6 +2368,17 @@ def _get_host_os(db, hostname):
     ).fetchone()
     return row['os'] if row and row['os'] in ('windows', 'linux') else 'windows'
 
+def _get_live_ioc_sha256_hashes(db):
+    # ioc_type labeling for hashes is inconsistent across feeds ('md5'/'sha1'/'sha256'
+    # from CSV uploads, 'file'/'unknown' from generic TAXII, whatever a live feed's own
+    # vocabulary happens to send) — matching on the pattern value's own shape, the same
+    # approach _guess_csv_ioc_type/_guess_legacy_ioc_type already use, is what actually
+    # catches every feed's SHA-256 IOCs regardless of how each one labeled itself.
+    rows = db.execute(
+        "SELECT DISTINCT pattern FROM stix_indicators WHERE revoked = 0 AND LENGTH(pattern) = 64"
+    ).fetchall()
+    return sorted({r['pattern'].strip().lower() for r in rows if _SHA256_HEX_RE.match((r['pattern'] or '').strip())})
+
 AGENT_TLS_CERT_PATH = '/opt/micro-dfir/config/cert.pem'
 
 def _build_agent_source(agent_filename, server_ip, ui_port, ingest_port, soc_token):
@@ -2538,17 +2550,20 @@ def api_agent_commands():
 
     if request.method == 'GET':
         hostname = request.args.get('hostname', '')
+        label_filter = request.args.get('label', '')
         limit = request.args.get('limit', 30, type=int)
+        conditions, params = [], []
         if hostname:
-            rows = db.execute(
-                "SELECT id, hostname, label, status, queued_by, queued_at, completed_at, exit_code, stdout, stderr FROM agent_commands WHERE hostname = ? ORDER BY id DESC LIMIT ?",
-                (hostname, limit)
-            ).fetchall()
-        else:
-            rows = db.execute(
-                "SELECT id, hostname, label, status, queued_by, queued_at, completed_at, exit_code, stdout, stderr FROM agent_commands ORDER BY id DESC LIMIT ?",
-                (limit,)
-            ).fetchall()
+            conditions.append("hostname = ?")
+            params.append(hostname)
+        if label_filter:
+            conditions.append("label = ?")
+            params.append(label_filter)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        rows = db.execute(
+            f"SELECT id, hostname, label, status, queued_by, queued_at, completed_at, exit_code, stdout, stderr FROM agent_commands {where} ORDER BY id DESC LIMIT ?",
+            params + [limit]
+        ).fetchall()
         return jsonify([dict(r) for r in rows])
 
     if current_user.role != 'admin':
@@ -2571,6 +2586,12 @@ def api_agent_commands():
     elif label in host_templates:
         builder, required = host_templates[label]
         params = d.get('params', {}) or {}
+        if label == 'ioc_sweep':
+            # Always recomputed fresh at dispatch time, never client-supplied — a sweep
+            # queued today reflects whatever's in the IOC browser today, the same way
+            # sigma_engine.py's IOC-match rule condition recomputes its own IP list
+            # fresh every detection cycle rather than freezing it at some earlier point.
+            params['hashes'] = _get_live_ioc_sha256_hashes(db)
         if label == 'isolate_host' and not params.get('soc_ip'):
             s = {r[0]: r[1] for r in db.execute("SELECT key, value FROM settings").fetchall()}
             soc_ip = s.get('ingest_bind_ip', '0.0.0.0')
