@@ -1564,6 +1564,29 @@ def migrate_agent_versions():
     except Exception:
         pass
 
+def migrate_agent_tokens():
+    # Every agent used to share one global secret (soc_secret) as its only credential,
+    # with hostname self-reported and completely unverified — any device holding that
+    # secret could claim to *be* any other enrolled host and pick up its queued
+    # commands. Agents built from now on instead get a unique per-download token, bound
+    # to whichever hostname first authenticates with it (trust-on-first-use) — a second
+    # device presenting that same token under a different hostname is rejected instead
+    # of silently accepted. The old shared secret still works (see _validate_agent_auth)
+    # so already-deployed agents keep functioning until they're re-downloaded/upgraded.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS agent_tokens (
+            token TEXT PRIMARY KEY,
+            hostname TEXT,
+            created_at TEXT NOT NULL,
+            bound_at TEXT,
+            last_seen TEXT
+        )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_ueba_entities():
     # UEBA originally modeled hosts only, with a fixed 'HIGH' severity and no way to
     # quiet a legitimately bursty entity. Adds: entity_type on events (host vs user,
@@ -1805,19 +1828,50 @@ def get_soc_secret(db):
     row = db.execute("SELECT value FROM settings WHERE key = 'soc_secret'").fetchone()
     return row['value'] if row and row['value'] else None
 
+def _validate_agent_auth(db, token, hostname):
+    # Two tiers of credential. The legacy global soc_secret is shared across every
+    # agent and carries no hostname binding — kept working only so already-deployed
+    # agents don't drop off until they're re-downloaded/upgraded onto a per-agent
+    # token. A per-agent token (see migrate_agent_tokens) is unknown to the server
+    # until issued via a real download/upgrade, and gets bound to whichever hostname
+    # first authenticates with it (trust-on-first-use); a second device presenting
+    # that same token under a *different* hostname is a spoofing attempt and is
+    # rejected, not silently accepted the way the shared secret always was.
+    import datetime
+    expected_secret = get_soc_secret(db)
+    if not expected_secret:
+        return True  # no secret configured yet (fresh/unconfigured install) — unchanged from before this existed
+    if token and secrets.compare_digest(token, expected_secret):
+        return True
+    if not token:
+        return False
+    row = db.execute("SELECT hostname FROM agent_tokens WHERE token = ?", (token,)).fetchone()
+    if not row:
+        return False
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    if row['hostname'] is None:
+        db.execute("UPDATE agent_tokens SET hostname = ?, bound_at = ?, last_seen = ? WHERE token = ?", (hostname, now, now, token))
+        db.commit()
+        return True
+    if row['hostname'] != hostname:
+        return False
+    db.execute("UPDATE agent_tokens SET last_seen = ? WHERE token = ?", (now, token))
+    db.commit()
+    return True
+
 @app.route('/api/agent/config', methods=['GET'])
 def agent_config():
     from flask import request, jsonify
     import datetime
     db = get_db()
 
-    expected_token = get_soc_secret(db)
-    if expected_token and request.headers.get('X-Agent-Token') != expected_token:
-        return jsonify({'error': 'Unauthorized'}), 401
-
     ip = request.remote_addr
     agent_host = request.headers.get('X-Agent-Hostname')
     ua = agent_host if agent_host else request.headers.get('User-Agent', 'Unknown')
+
+    if not _validate_agent_auth(db, request.headers.get('X-Agent-Token'), ua):
+        return jsonify({'error': 'Unauthorized'}), 401
+
     # Agents that predate version reporting simply won't send this header — surfaced
     # as "unknown" in the UI rather than guessed at, since that's itself a useful
     # signal that the endpoint hasn't been upgraded since version tracking shipped.
@@ -1862,13 +1916,17 @@ def agent_config():
             # agent overwrites its own installed copy and restarts itself with it.
             # agent_os is this exact check-in's own header, so no extra lookup is
             # needed to know which source file matches the endpoint asking for it.
+            # Re-embeds the agent's *own* current token (whatever it just authenticated
+            # this check-in with) rather than the legacy shared secret, so an agent
+            # already running on a per-agent token doesn't get regressed back onto the
+            # unscoped shared one by upgrading.
             server_ip = request.host.split(':')[0]
             cursor = db.execute("SELECT key, value FROM settings")
             s = {r[0]: r[1] for r in cursor.fetchall()}
             ui_port = s.get("ui_port", "5001")
             ingest_port = _resolve_ingest_port(ui_port)
             agent_filename = 'micro_agent_linux.py' if agent_os == 'linux' else 'micro_agent_windows.py'
-            source = _build_agent_source(agent_filename, server_ip, ui_port, ingest_port, expected_token or '')
+            source = _build_agent_source(agent_filename, server_ip, ui_port, ingest_port, request.headers.get('X-Agent-Token') or '')
             if source:
                 return jsonify({'command': 'upgrade', 'source': source})
         return jsonify({'run_script': {'id': cmd_row['id'], 'script': cmd_row['script']}})
@@ -2285,6 +2343,8 @@ def _get_host_os(db, hostname):
     ).fetchone()
     return row['os'] if row and row['os'] in ('windows', 'linux') else 'windows'
 
+AGENT_TLS_CERT_PATH = '/opt/micro-dfir/config/cert.pem'
+
 def _build_agent_source(agent_filename, server_ip, ui_port, ingest_port, soc_token):
     # Shared by the manual download route and the remote self-upgrade path (agent_config())
     # so both ever inject the placeholders the exact same way.
@@ -2298,6 +2358,16 @@ def _build_agent_source(agent_filename, server_ip, ui_port, ingest_port, soc_tok
     script_data = script_data.replace('https://__HOST_URL__/api/agent/result', f'https://{server_ip}:{ui_port}/api/agent/result')
     script_data = script_data.replace('https://__HOST_URL__/api/ingest', f'https://{server_ip}:{ingest_port}/api/ingest')
     script_data = script_data.replace('__SOC_TOKEN__', soc_token)
+    # The server's cert is self-signed with no CA to chain to and no SAN for the IP
+    # agents actually connect over — pinning this exact cert (see the agent's own
+    # ssl.create_default_context(cadata=...) call) is what makes verification possible
+    # at all here, in place of skipping verification outright.
+    try:
+        with open(AGENT_TLS_CERT_PATH, 'r', encoding='utf-8') as f:
+            cert_pem = f.read()
+    except OSError:
+        cert_pem = ''
+    script_data = script_data.replace('__SERVER_CERT_PEM__', cert_pem.replace('\\', '\\\\').replace('"""', '\\"\\"\\"'))
     return script_data
 
 @app.route('/api/agent/download/<os_type>', methods=['GET'])
@@ -2314,7 +2384,18 @@ def api_download_agent(os_type):
     s = {r[0]: r[1] for r in cursor.fetchall()}
     ui_port = s.get("ui_port", "5001")
     ingest_port = _resolve_ingest_port(ui_port)
-    soc_token = get_soc_secret(db) or ''
+    # A fresh per-agent token for this specific download, not the shared soc_secret —
+    # it's unbound to any hostname until the endpoint it actually gets installed on
+    # first checks in (see _validate_agent_auth), so a leaked token from one download
+    # can't be replayed to impersonate a different already-enrolled host the way the
+    # single shared secret could.
+    import datetime as _dt
+    soc_token = secrets.token_hex(32)
+    db.execute(
+        "INSERT INTO agent_tokens (token, hostname, created_at) VALUES (?, NULL, ?)",
+        (soc_token, _dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    )
+    db.commit()
 
     memory_file = io.BytesIO()
 
@@ -2498,14 +2579,19 @@ def api_agent_commands():
 def api_agent_result():
     import datetime
     db = get_db()
-    expected_token = get_soc_secret(db)
-    if expected_token and request.headers.get('X-Agent-Token') != expected_token:
-        return jsonify({'error': 'Unauthorized'}), 401
-
     d = request.json or {}
     cmd_id = d.get('id')
     if not cmd_id:
         return jsonify({'error': 'id is required'}), 400
+
+    # Cross-checked against the specific command's own hostname (not just "is this
+    # token valid at all") so a token bound to one host can't submit a fake result for
+    # a command that was queued for a *different* host.
+    cmd = db.execute("SELECT hostname FROM agent_commands WHERE id = ?", (cmd_id,)).fetchone()
+    if not cmd:
+        return jsonify({'error': 'Unknown command id'}), 404
+    if not _validate_agent_auth(db, request.headers.get('X-Agent-Token'), cmd['hostname']):
+        return jsonify({'error': 'Unauthorized'}), 401
 
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     status = 'done' if d.get('exit_code', 1) == 0 else 'failed'
@@ -2551,6 +2637,7 @@ migrate_ueba_entities()
 migrate_ueba_math_v2()
 migrate_live_logs_ip_columns()
 migrate_agent_versions()
+migrate_agent_tokens()
 
 try:
     # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every
