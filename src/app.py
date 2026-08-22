@@ -1442,6 +1442,103 @@ def api_ueba_risk_config():
     log_audit('risk_score_config_change', 'settings')
     return jsonify({'status': 'success'})
 
+# ---- Data Insights: per-entity and per-model behavior histograms ----
+# Read-only exploration over data that already exists (live_logs, alerts,
+# risk_score_events, audit_log, ueba_entity_baselines) -- no new tables, no new
+# engine/cron job. Modeled on Exabeam's old Data Insights page (search by model name
+# or by entity), adapted to what this app actually tracks; a geographic/map histogram
+# is deliberately not included -- there's no GeoIP data anywhere in this app to build
+# one from honestly.
+def _histogram(db, query, params, count_key='count'):
+    rows = db.execute(query, params).fetchall()
+    total = sum(r[count_key] for r in rows)
+    return {'rows': [dict(r) for r in rows], 'unique_count': len(rows), 'total_count': total}
+
+@app.route('/api/ueba/insights/entities', methods=['GET'])
+@login_required
+def api_ueba_insights_entities():
+    db = get_db()
+    q = (request.args.get('q') or '').strip()
+    entity_type = request.args.get('type')
+    where, params = [], []
+    if q:
+        where.append("entity_id LIKE ?")
+        params.append(f"%{q}%")
+    if entity_type in ('host', 'user'):
+        where.append("entity_type = ?")
+        params.append(entity_type)
+    where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
+    rows = db.execute(
+        f"SELECT DISTINCT entity_type, entity_id FROM ueba_entity_baselines {where_sql} ORDER BY entity_id LIMIT 50",
+        params
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+@app.route('/api/ueba/insights/entity/<entity_type>/<path:entity_id>', methods=['GET'])
+@login_required
+def api_ueba_insights_entity(entity_type, entity_id):
+    if entity_type not in ('host', 'user'):
+        return jsonify({'error': 'entity_type must be host or user'}), 400
+    db = get_db()
+    col = 'host' if entity_type == 'host' else 'username'
+    other_col = 'username' if entity_type == 'host' else 'host'
+    result = {'entity_type': entity_type, 'entity_id': entity_id, 'related_entity_type': 'user' if other_col == 'username' else 'host'}
+
+    # Activity pattern: day-of-week (0=Sunday) x hour-of-day event counts.
+    tow_rows = db.execute(
+        f"SELECT CAST(strftime('%w', timestamp) AS INTEGER) as dow, CAST(strftime('%H', timestamp) AS INTEGER) as hour, COUNT(*) as count "
+        f"FROM live_logs WHERE {col} = ? GROUP BY dow, hour",
+        (entity_id,)
+    ).fetchall()
+    grid = [[0] * 24 for _ in range(7)]
+    total_events = 0
+    for r in tow_rows:
+        grid[r['dow']][r['hour']] = r['count']
+        total_events += r['count']
+    last_seen = db.execute(f"SELECT MAX(timestamp) as t FROM live_logs WHERE {col} = ?", (entity_id,)).fetchone()
+    result['activity_pattern'] = {'grid': grid, 'total_count': total_events, 'last_seen': last_seen['t'] if last_seen else None}
+
+    for field, key in (('source_ip', 'top_source_ips'), ('destination_ip', 'top_destination_ips')):
+        result[key] = _histogram(db,
+            f"SELECT {field} as value, COUNT(*) as count, MAX(timestamp) as last_seen FROM live_logs "
+            f"WHERE {col} = ? AND {field} IS NOT NULL AND {field} != '' GROUP BY {field} ORDER BY count DESC LIMIT 15",
+            (entity_id,))
+
+    result['top_alerts'] = _histogram(db,
+        f"SELECT rule_name as value, severity, COUNT(*) as count, MAX(timestamp) as last_seen FROM alerts "
+        f"WHERE {col} = ? GROUP BY rule_name, severity ORDER BY count DESC LIMIT 15",
+        (entity_id,))
+
+    result['risk_contributions'] = _histogram(db,
+        "SELECT indicator as value, SUM(points) as points, COUNT(*) as count, MAX(computed_at) as last_seen FROM risk_score_events "
+        "WHERE entity_type = ? AND entity_id = ? GROUP BY indicator ORDER BY points DESC",
+        (entity_type, entity_id))
+
+    result['related_entities'] = _histogram(db,
+        f"SELECT {other_col} as value, COUNT(*) as count, MAX(timestamp) as last_seen FROM live_logs "
+        f"WHERE {col} = ? AND {other_col} IS NOT NULL AND {other_col} NOT IN ('', '-', 'UNKNOWN') "
+        f"GROUP BY {other_col} ORDER BY count DESC LIMIT 15",
+        (entity_id,))
+
+    if entity_type == 'user':
+        result['admin_activity'] = _histogram(db,
+            "SELECT action as value, COUNT(*) as count, MAX(timestamp) as last_seen FROM audit_log "
+            "WHERE username = ? GROUP BY action ORDER BY count DESC",
+            (entity_id,))
+
+    return jsonify(result)
+
+@app.route('/api/ueba/insights/model/<indicator>', methods=['GET'])
+@login_required
+def api_ueba_insights_model(indicator):
+    db = get_db()
+    result = _histogram(db,
+        "SELECT entity_type, entity_id as value, SUM(points) as points, COUNT(*) as count, MAX(computed_at) as last_seen "
+        "FROM risk_score_events WHERE indicator = ? GROUP BY entity_type, entity_id ORDER BY points DESC LIMIT 25",
+        (indicator,))
+    result['indicator'] = indicator
+    return jsonify(result)
+
 
 # ==========================================
 # GLOBAL SETTINGS & AGENT DEPLOYMENT ROUTES
