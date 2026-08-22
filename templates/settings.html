@@ -17,6 +17,9 @@
             <li class="nav-item"><button type="button" class="nav-link active" id="tabBtnSecurity" onclick="switchSettingsTab('security')"><i class="fa-solid fa-shield-halved me-2"></i>Security</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnNetwork" onclick="switchSettingsTab('network')"><i class="fa-solid fa-network-wired me-2"></i>Network</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnSystem" onclick="switchSettingsTab('system')"><i class="fa-solid fa-database me-2"></i>System</button></li>
+            {% if current_user.role == 'admin' %}
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnAudit" onclick="switchSettingsTab('audit')"><i class="fa-solid fa-clipboard-list me-2"></i>Audit Log</button></li>
+            {% endif %}
         </ul>
     </div>
 
@@ -171,6 +174,62 @@
             <div class="small text-muted mt-2" id="retentionStatus"></div>
         </div>
     </div>
+
+    {% if current_user.role == 'admin' %}
+    <!-- Audit Log pane -->
+    <div id="paneAudit" style="display:none;">
+        <div class="card-body">
+            <p class="text-muted small mb-3">Who did what, when — logins, user management, rule changes, threat-intel feed changes, and settings changes. Never automatically purged.</p>
+            <div class="row g-2 align-items-end mb-3">
+                <div class="col-auto">
+                    <label class="form-label small text-muted mb-1">Action</label>
+                    <select id="auditFilterAction" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="applyAuditFilters()" style="min-width:200px;">
+                        <option value="">All actions</option>
+                    </select>
+                </div>
+                <div class="col-auto">
+                    <label class="form-label small text-muted mb-1">Username</label>
+                    <input type="text" id="auditFilterUsername" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:160px;" placeholder="Any user" onchange="applyAuditFilters()">
+                </div>
+                <div class="col-auto">
+                    <label class="form-label small text-muted mb-1">From</label>
+                    <input type="datetime-local" id="auditFilterFrom" class="form-control form-control-sm bg-dark text-light border-secondary" onchange="applyAuditFilters()">
+                </div>
+                <div class="col-auto">
+                    <label class="form-label small text-muted mb-1">To</label>
+                    <input type="datetime-local" id="auditFilterTo" class="form-control form-control-sm bg-dark text-light border-secondary" onchange="applyAuditFilters()">
+                </div>
+                <div class="col-auto">
+                    <button class="btn btn-outline-secondary btn-sm" onclick="clearAuditFilters()"><i class="fa-solid fa-xmark me-1"></i>Clear</button>
+                </div>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-dark table-sm table-hover mb-0 align-middle">
+                    <thead>
+                        <tr>
+                            <th class="ps-3">Timestamp</th>
+                            <th>Actor</th>
+                            <th>Action</th>
+                            <th>Target</th>
+                            <th>Details</th>
+                            <th>IP</th>
+                        </tr>
+                    </thead>
+                    <tbody id="auditLogBody">
+                        <tr><td colspan="6" class="text-center text-muted py-3">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="d-flex justify-content-between align-items-center mt-3">
+                <span class="small text-muted" id="auditLogSummary"></span>
+                <div>
+                    <button class="btn btn-sm btn-outline-secondary me-1" id="auditPrevBtn" onclick="auditLogPage(-1)"><i class="fa-solid fa-chevron-left"></i> Prev</button>
+                    <button class="btn btn-sm btn-outline-secondary" id="auditNextBtn" onclick="auditLogPage(1)">Next <i class="fa-solid fa-chevron-right"></i></button>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
 </div>
 
 <!-- USER MANAGEMENT MODAL -->
@@ -211,15 +270,24 @@
 
 <script>
 const SETTINGS_TAB_KEY = 'microdfir_settings_active_tab';
-const SETTINGS_TABS = ['security', 'network', 'system'];
+// 'audit' is admin-only server-side (see the {% if current_user.role == 'admin' %}
+// guard around its tab button/pane) -- a non-admin's DOM simply won't have those
+// elements, so each lookup below is null-checked rather than assumed to exist.
+const SETTINGS_TABS = ['security', 'network', 'system', 'audit'];
 
 function switchSettingsTab(tab) {
     if (!SETTINGS_TABS.includes(tab)) tab = 'security';
+    let resolvedTab = tab;
     SETTINGS_TABS.forEach(t => {
         const cap = t.charAt(0).toUpperCase() + t.slice(1);
-        document.getElementById('tabBtn' + cap).classList.toggle('active', t === tab);
-        document.getElementById('pane' + cap).style.display = (t === tab) ? 'block' : 'none';
+        const btn = document.getElementById('tabBtn' + cap);
+        const pane = document.getElementById('pane' + cap);
+        if (!btn || !pane) { if (t === tab) resolvedTab = 'security'; return; }
+        btn.classList.toggle('active', t === tab);
+        pane.style.display = (t === tab) ? 'block' : 'none';
     });
+    if (resolvedTab !== tab) switchSettingsTab(resolvedTab);
+    if (tab === 'audit' && document.getElementById('paneAudit')) loadAuditLog();
     try { localStorage.setItem(SETTINGS_TAB_KEY, tab); } catch (e) {}
 }
 
@@ -464,6 +532,89 @@ function saveRetentionPolicy() {
             toast(res.error || 'Failed to save retention policy.', 'danger');
         }
     }).catch(err => toast('Error saving retention policy: ' + err, 'danger'));
+}
+
+// ---- Audit Log ----
+function escHtml(str) {
+    const d = document.createElement('div');
+    d.innerText = str == null ? '' : String(str);
+    return d.innerHTML;
+}
+
+const AUDIT_PAGE_SIZE = 50;
+let auditOffset = 0;
+let auditActionsLoaded = false;
+
+function loadAuditLog() {
+    const params = new URLSearchParams({ limit: AUDIT_PAGE_SIZE, offset: auditOffset });
+    const action = document.getElementById('auditFilterAction').value;
+    if (action) params.set('action', action);
+    const username = document.getElementById('auditFilterUsername').value.trim();
+    if (username) params.set('username', username);
+    const from = document.getElementById('auditFilterFrom').value;
+    if (from) params.set('date_from', from.replace('T', ' ') + ':00');
+    const to = document.getElementById('auditFilterTo').value;
+    if (to) params.set('date_to', to.replace('T', ' ') + ':59');
+
+    fetch('/api/audit-log?' + params.toString())
+        .then(r => r.json())
+        .then(data => {
+            if (!auditActionsLoaded && Array.isArray(data.actions)) {
+                const sel = document.getElementById('auditFilterAction');
+                data.actions.forEach(a => {
+                    const opt = document.createElement('option');
+                    opt.value = a; opt.innerText = a;
+                    sel.appendChild(opt);
+                });
+                auditActionsLoaded = true;
+            }
+            renderAuditLog(data.rows || [], data.total || 0);
+        })
+        .catch(err => {
+            document.getElementById('auditLogBody').innerHTML = `<tr><td colspan="6" class="text-center text-danger py-3">Error loading audit log: ${escHtml(err)}</td></tr>`;
+        });
+}
+
+function renderAuditLog(rows, total) {
+    const tbody = document.getElementById('auditLogBody');
+    if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">No matching audit events.</td></tr>';
+    } else {
+        tbody.innerHTML = rows.map(r => `
+            <tr>
+                <td class="ps-3 text-nowrap small">${escHtml(r.timestamp)}</td>
+                <td class="small">${escHtml(r.username || '(unknown)')}${r.role ? ` <span class="badge bg-secondary">${escHtml(r.role)}</span>` : ''}</td>
+                <td class="small"><span class="badge bg-info text-dark">${escHtml(r.action)}</span></td>
+                <td class="small">${r.target_type ? `${escHtml(r.target_type)}: ` : ''}${escHtml(r.target_id || '')}</td>
+                <td class="small text-muted">${escHtml(r.details || '')}</td>
+                <td class="small text-muted text-nowrap">${escHtml(r.ip_address || '')}</td>
+            </tr>
+        `).join('');
+    }
+    const start = total === 0 ? 0 : auditOffset + 1;
+    const end = Math.min(auditOffset + AUDIT_PAGE_SIZE, total);
+    document.getElementById('auditLogSummary').innerText = `Showing ${start}-${end} of ${total}`;
+    document.getElementById('auditPrevBtn').disabled = auditOffset === 0;
+    document.getElementById('auditNextBtn').disabled = end >= total;
+}
+
+function applyAuditFilters() {
+    auditOffset = 0;
+    loadAuditLog();
+}
+
+function auditLogPage(direction) {
+    auditOffset = Math.max(0, auditOffset + direction * AUDIT_PAGE_SIZE);
+    loadAuditLog();
+}
+
+function clearAuditFilters() {
+    document.getElementById('auditFilterAction').value = '';
+    document.getElementById('auditFilterUsername').value = '';
+    document.getElementById('auditFilterFrom').value = '';
+    document.getElementById('auditFilterTo').value = '';
+    auditOffset = 0;
+    loadAuditLog();
 }
 </script>
 {% endblock %}

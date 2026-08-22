@@ -508,9 +508,14 @@
 <div class="card shadow-sm border-secondary bg-dark text-light mb-4">
     <div class="card-header border-secondary d-flex justify-content-between align-items-center">
         <h5 class="mb-0 text-info"><i class="fa-solid fa-folder-open"></i> Generated PDF Reports</h5>
-        <form method="POST" action="{{ url_for('trigger_report') }}" class="m-0">
+        <form method="POST" action="{{ url_for('trigger_report') }}" class="m-0 d-flex gap-2 align-items-center">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm btn-outline-success"><i class="fa-solid fa-bolt"></i> Generate New Report</button>
+            <select name="type" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;">
+                <option value="security">Security Summary</option>
+                <option value="compliance">Compliance Report</option>
+                <option value="audit">Audit Trail Report</option>
+            </select>
+            <button type="submit" class="btn btn-sm btn-outline-success"><i class="fa-solid fa-bolt"></i> Generate Report</button>
         </form>
     </div>
     <div class="card-body">
@@ -1431,17 +1436,10 @@ const IS_ADMIN = {{ 'true' if current_user.role == 'admin' else 'false' }};
 let allRules = [];
 let selectedIds = new Set();
 
-const COMPLIANCE_FRAMEWORKS = [
-    {value: 'pci_dss', label: 'PCI DSS'},
-    {value: 'hipaa', label: 'HIPAA'},
-    {value: 'nist_800_53', label: 'NIST 800-53'},
-    {value: 'nist_csf', label: 'NIST CSF'},
-    {value: 'iso_27001', label: 'ISO 27001'},
-    {value: 'soc2', label: 'SOC 2'},
-    {value: 'cis_controls', label: 'CIS Controls'},
-    {value: 'gdpr', label: 'GDPR'}
-];
-const COMPLIANCE_LABELS = Object.fromEntries(COMPLIANCE_FRAMEWORKS.map(f => [f.value, f.label]));
+// Sourced from app.py's COMPLIANCE_FRAMEWORKS dict (rendered server-side) instead of a
+// second hardcoded copy here -- the two used to be able to drift out of sync.
+const COMPLIANCE_LABELS = {{ compliance_frameworks|tojson }};
+const COMPLIANCE_FRAMEWORKS = Object.entries(COMPLIANCE_LABELS).map(([value, label]) => ({value, label}));
 
 function escAttr(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');

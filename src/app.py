@@ -195,13 +195,21 @@ def login():
         user = get_db().execute("SELECT * FROM users WHERE username = ?", (request.form['username'],)).fetchone()
         if user and check_password_hash(user['password_hash'], request.form['password']):
             login_user(User(user['id'], user['username'], user['role']))
+            log_audit('login_success', 'user', user['username'])
             return redirect(url_for('dash'))
+        # current_user is still anonymous here -- target_id records what was *typed*,
+        # since that's the only identity available for a failed attempt, and repeated
+        # failures against one username/IP is exactly what this is for spotting.
+        log_audit('login_failed', 'user', request.form.get('username', ''))
         flash('Invalid username or password', 'danger')
     return render_template('login.html')
 
 @app.route('/logout')
 @login_required
-def logout(): logout_user(); return redirect(url_for('login'))
+def logout():
+    log_audit('logout', 'user', current_user.username)
+    logout_user()
+    return redirect(url_for('login'))
 
 # live_logs.source_ip has never been populated by any ingest path — the Windows agent's
 # Get-WinEvent selection doesn't request a network-address property, and nothing extracts
@@ -288,7 +296,7 @@ def dash():
     os.makedirs(report_dir, exist_ok=True)
     pdfs = [f for f in os.listdir(report_dir) if f.endswith('.pdf')]
     pdfs.sort(reverse=True)
-    return render_template('dashboard.html', reports=pdfs, channels=get_agent_channels(), active_tab=active_tab, current_user=current_user)
+    return render_template('dashboard.html', reports=pdfs, channels=get_agent_channels(), active_tab=active_tab, current_user=current_user, compliance_frameworks=COMPLIANCE_FRAMEWORKS)
 
 @app.route('/rules')
 @login_required
@@ -541,6 +549,7 @@ def api_ti_feeds():
          d.get('password', ''), d.get('api_key', ''), _parse_sync_interval(d))
     )
     db.commit()
+    log_audit('ti_feed_create', 'ti_feed', name, f'feed_type={feed_type}')
     return jsonify({'status': 'success'})
 
 @app.route('/api/ti/feeds/<int:fid>', methods=['PUT', 'DELETE'])
@@ -550,12 +559,15 @@ def api_ti_feed_detail(fid):
         return jsonify({'error': 'Admin required'}), 403
     db = get_db()
     if request.method == 'DELETE':
+        feed_row = db.execute("SELECT name FROM ti_feeds WHERE id = ?", (fid,)).fetchone()
         db.execute("DELETE FROM ti_feeds WHERE id = ?", (fid,))
         db.commit()
+        log_audit('ti_feed_delete', 'ti_feed', feed_row['name'] if feed_row else fid)
         return jsonify({'ok': 1})
 
     d = request.json or {}
-    # Blank password/api_key means "keep the existing one" rather than clearing it
+    # Blank password/api_key means "keep the existing one" rather than clearing it --
+    # never log the actual secret value, only that the feed config was edited.
     db.execute(
         "UPDATE ti_feeds SET name=?, discovery_url=?, collection_id=?, username=?, "
         "password=COALESCE(NULLIF(?, ''), password), api_key=COALESCE(NULLIF(?, ''), api_key), "
@@ -565,6 +577,7 @@ def api_ti_feed_detail(fid):
          _parse_sync_interval(d), 1 if d.get('enabled') else 0, fid)
     )
     db.commit()
+    log_audit('ti_feed_update', 'ti_feed', d.get('name', fid))
     return jsonify({'status': 'success'})
 
 @app.route('/api/ti/feeds/<int:fid>/sync', methods=['POST'])
@@ -573,6 +586,7 @@ def api_ti_feed_sync(fid):
     if current_user.role != 'admin':
         return jsonify({'error': 'Admin required'}), 403
     result = ti_sync_one(fid)
+    log_audit('ti_feed_sync', 'ti_feed', fid, str(result.get('count', result.get('message', ''))))
     return jsonify(result), (200 if result.get('status') == 'success' else 502)
 
 @app.route('/api/ti/feeds/upload_csv', methods=['POST'])
@@ -681,19 +695,25 @@ def api_drop_rules():
     if current_user.role != 'admin': return jsonify({"error": "Admin required"}), 403
     d = request.get_json()
     db.execute("INSERT INTO drop_rules (field, operator, value, description, enabled) VALUES (?, ?, ?, ?, 1)", (d.get('field'), d.get('operator'), d.get('value'), d.get('description')))
-    db.commit(); generate_vector_config(); return jsonify({"status": "success"}), 201
+    db.commit(); generate_vector_config()
+    log_audit('drop_rule_create', 'drop_rule', None, f"{d.get('field')} {d.get('operator')} {d.get('value')}")
+    return jsonify({"status": "success"}), 201
 
 @app.route('/api/droprules/<int:rid>/toggle', methods=['PUT'])
 @login_required
-def tog_drop(rid): 
+def tog_drop(rid):
     if current_user.role != 'admin': return jsonify({"error": "Admin required"}), 403
-    get_db().execute("UPDATE drop_rules SET enabled = CASE WHEN enabled = 1 THEN 0 ELSE 1 END WHERE id=?", (rid,)); get_db().commit(); generate_vector_config(); return jsonify({"ok":1})
+    get_db().execute("UPDATE drop_rules SET enabled = CASE WHEN enabled = 1 THEN 0 ELSE 1 END WHERE id=?", (rid,)); get_db().commit(); generate_vector_config()
+    log_audit('drop_rule_toggle', 'drop_rule', rid)
+    return jsonify({"ok":1})
 
 @app.route('/api/droprules/<int:rid>', methods=['DELETE'])
 @login_required
 def del_drop(rid):
     if current_user.role != 'admin': return jsonify({"error": "Admin required"}), 403
-    get_db().execute("DELETE FROM drop_rules WHERE id=?", (rid,)); get_db().commit(); generate_vector_config(); return jsonify({"ok":1})
+    get_db().execute("DELETE FROM drop_rules WHERE id=?", (rid,)); get_db().commit(); generate_vector_config()
+    log_audit('drop_rule_delete', 'drop_rule', rid)
+    return jsonify({"ok":1})
 
 
 # ==========================================
@@ -708,12 +728,39 @@ TUNING_CACHE_TIME = 0
 # Sigma rules carry no compliance-framework metadata (SigmaHQ tags are almost entirely
 # MITRE ATT&CK technique IDs) — there's no authoritative source to auto-map a rule to a
 # framework, so these are assigned by hand per rule and just validated against this set.
-COMPLIANCE_FRAMEWORKS = {'pci_dss', 'hipaa', 'nist_800_53', 'nist_csf', 'iso_27001', 'soc2', 'cis_controls', 'gdpr'}
+# key -> human label. Previously a bare set here with an identical-but-separate labeled
+# list duplicated in dashboard.html's JS (COMPLIANCE_FRAMEWORKS) -- the two could drift.
+# This is now the one source of truth for the app; `in COMPLIANCE_FRAMEWORKS` validation
+# below still works unchanged since `in` on a dict checks its keys.
+COMPLIANCE_FRAMEWORKS = {
+    'pci_dss': 'PCI DSS', 'hipaa': 'HIPAA', 'nist_800_53': 'NIST 800-53',
+    'nist_csf': 'NIST CSF', 'iso_27001': 'ISO 27001', 'soc2': 'SOC 2',
+    'cis_controls': 'CIS Controls', 'gdpr': 'GDPR',
+}
 
 def invalidate_rules_cache():
     global RULES_CACHE, TUNING_CACHE
     RULES_CACHE = None
     TUNING_CACHE = None
+
+# Deliberately never auto-purged (unlike live_logs, which has a configurable retention
+# policy) -- every compliance framework this app tags rules for expects an audit trail
+# retained far longer than raw event logs, and auto-deleting the record of what happened
+# would defeat the point of having one. `details` is a short summary, not a full payload;
+# where a full before/after already exists (rule edits -> sigma_rule_history), this just
+# references it rather than duplicating it.
+def log_audit(action, target_type=None, target_id=None, details=None):
+    try:
+        db = get_db()
+        db.execute(
+            "INSERT INTO audit_log (username, role, ip_address, action, target_type, target_id, details) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (getattr(current_user, 'username', None), getattr(current_user, 'role', None),
+             request.remote_addr, action, target_type, str(target_id) if target_id is not None else None, details)
+        )
+        db.commit()
+    except Exception as e:
+        # Audit logging must never be the reason a real action fails -- print and move on.
+        print(f"[-] log_audit failed for action={action!r}: {e}")
 
 # Sigma's own status vocabulary is stable/test/experimental/deprecated/unsupported --
 # unsupported means "this detection logic can't reliably work" and deprecated means
@@ -841,10 +888,12 @@ def api_rule_detail(rid):
         return jsonify({"error": "Admin required"}), 403
 
     if request.method == 'DELETE':
+        title_row = db.execute("SELECT title FROM sigma_rules WHERE id = ?", (rid,)).fetchone()
         db.execute("DELETE FROM sigma_rules WHERE id = ?", (rid,))
         db.execute("DELETE FROM sigma_rule_history WHERE rule_id = ?", (rid,))
         db.commit()
         invalidate_rules_cache()
+        log_audit('rule_delete', 'rule', rid, title_row['title'] if title_row else None)
         return jsonify({"ok": 1})
 
     # PUT — update an existing rule's title/YAML. Sigma-sourced rules are read-only;
@@ -929,6 +978,7 @@ def api_rule_compliance(rid):
     db.execute("UPDATE sigma_rules SET compliance_tags = ? WHERE id = ?", (','.join(sorted(set(tags))), rid))
     db.commit()
     invalidate_rules_cache()
+    log_audit('rule_compliance_tag', 'rule', rid, ','.join(sorted(set(tags))) or '(cleared)')
     return jsonify({"status": "success"})
 
 @app.route('/api/rules/import/sigmahq', methods=['POST'])
@@ -941,13 +991,16 @@ def api_rules_import_sigmahq():
     except Exception as e:
         return jsonify({"error": f"Import failed: {e}"}), 500
     invalidate_rules_cache()
+    log_audit('sigmahq_import', 'rule', None, f"inserted={stats['inserted']}, updated={stats['updated']}, skipped={stats['skipped']}, errors={stats['errors']}")
     return jsonify({"status": "success", **stats})
 
 @app.route('/api/rules/<int:rid>/toggle', methods=['PUT'])
 @login_required
-def api_r_tog(rid): 
+def api_r_tog(rid):
     if current_user.role != 'admin': return jsonify({"error": "Admin required"}), 403
-    db=get_db(); db.execute("UPDATE sigma_rules SET enabled = CASE WHEN enabled = 1 THEN 0 ELSE 1 END WHERE id=?", (rid,)); db.commit(); invalidate_rules_cache(); return jsonify({"ok":1})
+    db=get_db(); db.execute("UPDATE sigma_rules SET enabled = CASE WHEN enabled = 1 THEN 0 ELSE 1 END WHERE id=?", (rid,)); db.commit(); invalidate_rules_cache()
+    log_audit('rule_toggle', 'rule', rid)
+    return jsonify({"ok":1})
 
 @app.route('/api/rules/bulk_update', methods=['PUT'])
 @login_required
@@ -961,6 +1014,7 @@ def api_rules_bulk():
         placeholders = ','.join('?' for _ in ids)
         db.execute(f"UPDATE sigma_rules SET enabled = ? WHERE id IN ({placeholders})", [enable] + ids)
         db.commit(); invalidate_rules_cache()
+        log_audit('rule_bulk_toggle', 'rule', None, f"{'enabled' if enable else 'disabled'} {len(ids)} rule(s): {ids}")
     return jsonify({"ok": 1})
 
 # ==========================================
@@ -1113,13 +1167,19 @@ def download_report(filename):
     from flask import send_from_directory
     return send_from_directory('/opt/micro-dfir/reports', filename, as_attachment=True)
 
+REPORT_TYPES = ('security', 'compliance', 'audit')
+
 @app.route('/reports/generate', methods=['POST'])
 @login_required
 def trigger_report():
     if not validate_csrf():
         return redirect(url_for('dash', tab='reports'))
+    report_type = request.form.get('type', 'security')
+    if report_type not in REPORT_TYPES:
+        report_type = 'security'
     try:
-        subprocess.run(["/opt/micro-dfir/venv/bin/python3", "/opt/micro-dfir/src/generate_report.py"], check=True)
+        subprocess.run(["/opt/micro-dfir/venv/bin/python3", "/opt/micro-dfir/src/generate_report.py", report_type], check=True)
+        log_audit('report_generate', 'report', report_type)
         flash("Report successfully generated!", "success")
     except Exception as e:
         flash(f"Failed to generate report: {str(e)}", "danger")
@@ -1659,6 +1719,21 @@ def migrate_compliance_tags():
     except Exception:
         pass
 
+def migrate_audit_log():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            username TEXT, role TEXT, ip_address TEXT,
+            action TEXT NOT NULL, target_type TEXT, target_id TEXT, details TEXT
+        )''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def _run_sigmahq_import():
     import urllib.request, zipfile, tempfile, shutil, socket, sqlite3
     import yaml as _yaml
@@ -1714,6 +1789,45 @@ def _run_sigmahq_import():
         shutil.rmtree(t, ignore_errors=True)
     return stats
 
+@app.route('/api/audit-log', methods=['GET'])
+@login_required
+def api_audit_log():
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    db = get_db()
+    where, params = [], []
+    action = request.args.get('action')
+    if action:
+        where.append('action = ?'); params.append(action)
+    username = request.args.get('username')
+    if username:
+        where.append('username = ?'); params.append(username)
+    date_from = request.args.get('date_from')
+    if date_from:
+        where.append('timestamp >= ?'); params.append(date_from)
+    date_to = request.args.get('date_to')
+    if date_to:
+        where.append('timestamp <= ?'); params.append(date_to)
+    where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
+
+    try:
+        limit = min(int(request.args.get('limit', 100)), 500)
+    except (TypeError, ValueError):
+        limit = 100
+    try:
+        offset = max(int(request.args.get('offset', 0)), 0)
+    except (TypeError, ValueError):
+        offset = 0
+
+    total = db.execute(f"SELECT COUNT(*) AS c FROM audit_log {where_sql}", params).fetchone()['c']
+    rows = db.execute(
+        f"SELECT id, timestamp, username, role, ip_address, action, target_type, target_id, details "
+        f"FROM audit_log {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?",
+        params + [limit, offset]
+    ).fetchall()
+    actions = [r['action'] for r in db.execute("SELECT DISTINCT action FROM audit_log ORDER BY action").fetchall()]
+    return jsonify({'rows': [dict(r) for r in rows], 'total': total, 'actions': actions})
+
 @app.route('/settings', methods=['GET', 'POST'])
 @login_required
 def settings():
@@ -1749,6 +1863,7 @@ def api_settings_token():
     db = get_db()
     db.execute("UPDATE settings SET value = ? WHERE key = 'soc_secret'", (token,))
     db.commit()
+    log_audit('soc_token_change', 'settings')  # never log the token value itself
     return jsonify({'status': 'success'})
 
 @app.route('/api/settings/backup', methods=['GET'])
@@ -1782,6 +1897,7 @@ def api_settings_purge():
     cur = db.execute("DELETE FROM live_logs WHERE timestamp < ?", (cutoff,))
     deleted = cur.rowcount
     db.commit()
+    log_audit('manual_log_purge', 'settings', None, f'deleted={deleted}, cutoff={cutoff}')
     return jsonify({'status': 'success', 'deleted': deleted, 'cutoff': cutoff})
 
 @app.route('/api/settings/retention', methods=['GET', 'POST'])
@@ -1806,6 +1922,7 @@ def api_settings_retention():
         # threat-intel feed left on "Manual only" is never touched by sync_due_feeds().
         db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('log_retention_days', '')")
         db.commit()
+        log_audit('retention_policy_change', 'settings', None, 'disabled')
         return jsonify({'status': 'success', 'days': None})
     try:
         days = int(days)
@@ -1815,6 +1932,7 @@ def api_settings_retention():
         return jsonify({'error': 'days must be a positive integer, or omitted/0 to disable automatic purge'}), 400
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('log_retention_days', ?)", (str(days),))
     db.commit()
+    log_audit('retention_policy_change', 'settings', None, f'{days} days')
     return jsonify({'status': 'success', 'days': days})
 
 @app.route('/api/settings/vacuum', methods=['POST'])
@@ -1829,10 +1947,12 @@ def api_settings_vacuum():
         conn.execute('VACUUM')
         conn.close()
         after = os.path.getsize(DB_PATH)
+        before_mb, after_mb = round(before / (1024 * 1024), 1), round(after / (1024 * 1024), 1)
+        log_audit('db_vacuum', 'settings', None, f'{before_mb}MB -> {after_mb}MB')
         return jsonify({
             'status': 'success',
-            'before_mb': round(before / (1024 * 1024), 1),
-            'after_mb': round(after / (1024 * 1024), 1),
+            'before_mb': before_mb,
+            'after_mb': after_mb,
         })
     except Exception as e:
         return jsonify({'error': f'Vacuum failed: {e}'}), 500
@@ -1859,6 +1979,7 @@ def settings_network():
     c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ingest_port', ?)", (ingest_port,))
     conn.commit()
     conn.close()
+    log_audit('network_config_change', 'settings', None, f'ui={ui_ip}:{ui_port}, ingest={ingest_ip}:{ingest_port}')
 
     # 1. Background task to rewrite the Gunicorn systemd file and restart the UI
     import re as sys_re
@@ -2373,6 +2494,7 @@ def api_settings_cert():
     # are only read at process startup, so nothing picks up the change until gunicorn
     # actually restarts.
     subprocess.Popen("(sleep 2 && systemctl restart microsoc-web.service) &", shell=True)
+    log_audit('tls_cert_upload', 'settings')
 
     return jsonify({'status': 'success', 'message': 'Certificate validated and applied. The web UI is restarting now — you may need to reconnect in a few seconds.'})
 
@@ -2401,21 +2523,26 @@ def api_settings_users():
             try:
                 db.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", (username, password, role))
                 db.commit()
+                log_audit('user_create', 'user', username, f'role={role}')
                 return jsonify({'status': 'success'})
             except Exception as e:
                 return jsonify({'error': 'Username may already exist.'}), 400
-                
+
         elif action == 'reset':
             user_id = data.get('id')
             new_password = generate_password_hash(data.get('password'))
+            target_user = db.execute("SELECT username FROM users WHERE id = ?", (user_id,)).fetchone()
             db.execute("UPDATE users SET password_hash = ? WHERE id = ?", (new_password, user_id))
             db.commit()
+            log_audit('user_password_reset', 'user', target_user['username'] if target_user else user_id)
             return jsonify({'status': 'success'})
-            
+
         elif action == 'delete':
             user_id = data.get('id')
+            target_user = db.execute("SELECT username FROM users WHERE id = ?", (user_id,)).fetchone()
             db.execute("DELETE FROM users WHERE id = ?", (user_id,))
             db.commit()
+            log_audit('user_delete', 'user', target_user['username'] if target_user else user_id)
             return jsonify({'status': 'success'})
 
     # GET request
@@ -2849,6 +2976,7 @@ migrate_ueba_math_v2()
 migrate_live_logs_ip_columns()
 migrate_agent_versions()
 migrate_agent_tokens()
+migrate_audit_log()
 
 try:
     # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every
