@@ -257,9 +257,9 @@
         <div class="mb-3">
             <label class="form-label">Feed Type</label>
             <select id="feedType" class="form-select bg-dark text-light border-secondary" onchange="toggleFeedTypeFields()">
-                <option value="threatfox">ThreatFox Recent IOCs (public, no auth)</option>
-                <option value="urlhaus">URLhaus Malicious URLs (public, no auth)</option>
-                <option value="feodotracker">Feodo Tracker Botnet C2 IPs (public, no auth)</option>
+                <option value="threatfox">ThreatFox Recent IOCs (public — API key optional)</option>
+                <option value="urlhaus">URLhaus Malicious URLs (public — API key optional)</option>
+                <option value="feodotracker">Feodo Tracker Botnet C2 IPs (public — API key optional)</option>
                 <option value="otx">AlienVault OTX Subscribed Pulses (API key required)</option>
                 <option value="yaraify">YARAify Bulk YARA Rule Pack (API key required)</option>
                 <option value="taxii">STIX / TAXII 2.1 Server</option>
@@ -297,7 +297,7 @@
         </div>
         <div id="apiKeyField" style="display:none;">
             <div class="mb-3">
-                <label class="form-label">API Key</label>
+                <label class="form-label" id="feedApiKeyLabel">API Key</label>
                 <input type="password" id="feedApiKey" class="form-control bg-dark text-light border-secondary" placeholder="Leave blank to keep existing">
                 <div id="apiKeyStatus" class="form-text text-muted"></div>
             </div>
@@ -670,7 +670,12 @@ function initFeedModal() { if (!feedModal) feedModal = new bootstrap.Modal(docum
 
 // Feed types that need the API key field shown: TAXII servers can optionally use a
 // bearer token instead of basic auth, and OTX requires one outright.
-const FEED_TYPES_WITH_API_KEY = ['taxii', 'otx', 'yaraify'];
+const FEED_TYPES_WITH_API_KEY = ['taxii', 'otx', 'yaraify', 'threatfox', 'urlhaus', 'feodotracker'];
+
+// These 3 keep working with zero configuration (their legacy public export endpoints
+// need no auth) -- a key here only raises the rate limit / attributes requests to your
+// abuse.ch account instead of anonymous access, so it's optional, not required.
+const FEED_TYPES_WITH_OPTIONAL_API_KEY = ['threatfox', 'urlhaus', 'feodotracker'];
 
 function toggleFeedTypeFields() {
     const type = document.getElementById('feedType').value;
@@ -678,6 +683,8 @@ function toggleFeedTypeFields() {
     document.getElementById('csvFields').style.display = isCsv ? 'block' : 'none';
     document.getElementById('taxiiFields').style.display = (!isCsv && type === 'taxii') ? 'block' : 'none';
     document.getElementById('apiKeyField').style.display = (!isCsv && FEED_TYPES_WITH_API_KEY.includes(type)) ? 'block' : 'none';
+    document.getElementById('feedApiKeyLabel').innerText = FEED_TYPES_WITH_OPTIONAL_API_KEY.includes(type)
+        ? 'API Key (optional — raises the rate limit)' : 'API Key';
     // A CSV upload is a one-time snapshot with no remote source to poll, so auto-sync
     // scheduling doesn't apply to it (see the 'csv' branch in taxii_client.sync_feed).
     document.getElementById('syncIntervalField').style.display = isCsv ? 'none' : 'block';
