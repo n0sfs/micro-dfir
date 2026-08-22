@@ -278,7 +278,7 @@ function saveUebaConfig() {
             msg.innerText = data.error || 'Failed to save.';
         }
         setTimeout(() => { msg.style.display = 'none'; }, 4000);
-    }).catch(err => alert('Error saving config: ' + err));
+    }).catch(err => toast('Error saving config: ' + err, 'danger'));
 }
 
 let allBaselines = [];
@@ -393,14 +393,14 @@ function toggleUebaExclusion(eid, enabled) {
     fetch(`/api/ueba/exclusions/${eid}`, {
         method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled})
     }).then(() => { loadUebaExclusions(); loadBaselines(); })
-      .catch(err => alert('Error updating exclusion: ' + err));
+      .catch(err => toast('Error updating exclusion: ' + err, 'danger'));
 }
 
-function deleteUebaExclusion(eid) {
-    if (!confirm('Delete this exclusion?')) return;
+async function deleteUebaExclusion(eid) {
+    if (!(await confirmDialog('Delete this exclusion?', {title: 'Delete exclusion', danger: true, confirmLabel: 'Delete'}))) return;
     fetch(`/api/ueba/exclusions/${eid}`, {method: 'DELETE'})
         .then(() => { loadUebaExclusions(); loadBaselines(); })
-        .catch(err => alert('Error deleting exclusion: ' + err));
+        .catch(err => toast('Error deleting exclusion: ' + err, 'danger'));
 }
 
 // ---- Init ----

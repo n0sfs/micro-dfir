@@ -551,16 +551,16 @@ function startSweepBurstPolling() {
     }, SWEEP_BURST_INTERVAL_MS);
 }
 
-function runIocSweep() {
+async function runIocSweep() {
     let hosts;
     if (sweepTarget === 'all') {
-        if (!sweepAgentsLoaded) { alert('Still loading the agent list — try again in a moment.'); return; }
+        if (!sweepAgentsLoaded) { toast('Still loading the agent list — try again in a moment.', 'warning'); return; }
         hosts = sweepAgents.map(a => a.hostname);
     } else {
         hosts = Array.from(selectedSweepHosts);
     }
-    if (!hosts.length) { alert(sweepTarget === 'all' ? 'No active agent endpoints detected.' : 'Select at least one agent.'); return; }
-    if (!confirm(`Sweep ${hosts.length} host(s) for files matching a known-bad SHA-256 hash? Each scans common malware-drop locations for recently-modified files.`)) return;
+    if (!hosts.length) { toast(sweepTarget === 'all' ? 'No active agent endpoints detected.' : 'Select at least one agent.', 'warning'); return; }
+    if (!(await confirmDialog(`Sweep ${hosts.length} host(s) for files matching a known-bad SHA-256 hash? Each scans common malware-drop locations for recently-modified files.`, {title: 'IOC hash sweep', confirmLabel: 'Sweep'}))) return;
 
     const msg = document.getElementById('sweepResultMsg');
     msg.style.display = 'none';
@@ -690,9 +690,9 @@ async function toggleFeedEnabled(id, checked) {
                 sync_interval_minutes: feed.sync_interval_minutes, enabled: checked
             })
         });
-        if (!res.ok) { const err = await res.json().catch(() => ({})); alert(err.error || 'Failed to update feed.'); }
+        if (!res.ok) { const err = await res.json().catch(() => ({})); toast(err.error || 'Failed to update feed.', 'danger'); }
     } catch (e) {
-        alert('Error: ' + e);
+        toast('Error: ' + e, 'danger');
     } finally {
         loadFeeds();
     }
@@ -704,9 +704,9 @@ async function syncFeedNow(id, btn) {
     try {
         const res = await fetch(`/api/ti/feeds/${id}/sync`, {method: 'POST'});
         const data = await res.json();
-        if (!res.ok) alert(data.message || 'Sync failed.');
+        if (!res.ok) toast(data.message || 'Sync failed.', 'danger');
     } catch (e) {
-        alert('Sync error: ' + e);
+        toast('Sync error: ' + e, 'danger');
     } finally {
         btn.disabled = false; btn.innerHTML = original;
         loadFeeds(); loadIocs();
@@ -714,9 +714,9 @@ async function syncFeedNow(id, btn) {
 }
 
 async function deleteFeed(id, name) {
-    if (!confirm(`Delete feed "${name}"? Previously ingested IOCs from it are kept.`)) return;
+    if (!(await confirmDialog(`Delete feed "${name}"? Previously ingested IOCs from it are kept.`, {title: 'Delete feed', danger: true, confirmLabel: 'Delete'}))) return;
     const res = await fetch(`/api/ti/feeds/${id}`, {method: 'DELETE'});
-    if (!res.ok) { const err = await res.json().catch(() => ({})); alert(err.error || 'Failed to delete feed.'); }
+    if (!res.ok) { const err = await res.json().catch(() => ({})); toast(err.error || 'Failed to delete feed.', 'danger'); }
     loadFeeds();
 }
 

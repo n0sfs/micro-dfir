@@ -353,13 +353,13 @@ function submitUserForm() {
             userModal.hide();
             loadUsers();
         } else {
-            alert(res.error || 'Operation failed.');
+            toast(res.error || 'Operation failed.', 'danger');
         }
     });
 }
 
-function deleteUser(id, username) {
-    if(confirm(`Are you sure you want to delete user ${username}?`)) {
+async function deleteUser(id, username) {
+    if(await confirmDialog(`Are you sure you want to delete user ${username}?`, {title: 'Delete user', danger: true, confirmLabel: 'Delete'})) {
         fetch('/api/settings/users', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -369,14 +369,14 @@ function deleteUser(id, username) {
 }
 
 function backupDB() { window.location.href = '/api/settings/backup'; }
-function vacuumDB() {
-    if (!confirm('Vacuum the database now? This rebuilds the file to reclaim disk space and can take a while on a large database — the app may be briefly slower while it runs.')) return;
+async function vacuumDB() {
+    if (!(await confirmDialog('Vacuum the database now? This rebuilds the file to reclaim disk space and can take a while on a large database — the app may be briefly slower while it runs.', {title: 'Vacuum database', confirmLabel: 'Vacuum'}))) return;
     fetch('/api/settings/vacuum', {method: 'POST'})
         .then(r => r.json().then(data => ({ok: r.ok, data})))
         .then(({ok, data}) => {
-            if (ok) alert(`Vacuum complete. Database size: ${data.before_mb} MB -> ${data.after_mb} MB.`);
-            else alert(data.error || 'Vacuum failed.');
-        }).catch(err => alert('Error running vacuum: ' + err));
+            if (ok) toast(`Vacuum complete. Database size: ${data.before_mb} MB -> ${data.after_mb} MB.`, 'success');
+            else toast(data.error || 'Vacuum failed.', 'danger');
+        }).catch(err => toast('Error running vacuum: ' + err, 'danger'));
 }
 // ---- Log Retention ----
 const RETENTION_PRESETS = ['30', '90', '180', '365', '730'];
@@ -432,27 +432,27 @@ function getSelectedRetentionDays() {
     return (v && v > 0) ? v : null;
 }
 
-function purgeNow() {
+async function purgeNow() {
     const days = getSelectedRetentionDays();
-    if (!days) { alert('Enter a valid number of days.'); return; }
-    if (!confirm(`Permanently delete all logs older than ${days} day(s)? This cannot be undone.`)) return;
+    if (!days) { toast('Enter a valid number of days.', 'warning'); return; }
+    if (!(await confirmDialog(`Permanently delete all logs older than ${days} day(s)? This cannot be undone.`, {title: 'Purge logs', danger: true, confirmLabel: 'Purge'}))) return;
     fetch('/api/settings/purge', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({days: days})
     }).then(r => r.json()).then(res => {
         if (res.status === 'success') {
-            alert(`Purged ${res.deleted} log(s) older than ${res.cutoff}. Run "Vacuum / Optimize DB" afterward to reclaim disk space.`);
+            toast(`Purged ${res.deleted} log(s) older than ${res.cutoff}. Run "Vacuum / Optimize DB" afterward to reclaim disk space.`, 'success', {duration: 8000});
         } else {
-            alert(res.error || 'Purge failed.');
+            toast(res.error || 'Purge failed.', 'danger');
         }
-    }).catch(err => alert('Error purging logs: ' + err));
+    }).catch(err => toast('Error purging logs: ' + err, 'danger'));
 }
 
 function saveRetentionPolicy() {
     const autoEnabled = document.getElementById('retentionAutoEnabled').checked;
     const days = autoEnabled ? getSelectedRetentionDays() : null;
-    if (autoEnabled && !days) { alert('Enter a valid number of days.'); return; }
+    if (autoEnabled && !days) { toast('Enter a valid number of days.', 'warning'); return; }
     fetch('/api/settings/retention', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -461,9 +461,9 @@ function saveRetentionPolicy() {
         if (res.status === 'success') {
             loadRetentionSettings();
         } else {
-            alert(res.error || 'Failed to save retention policy.');
+            toast(res.error || 'Failed to save retention policy.', 'danger');
         }
-    }).catch(err => alert('Error saving retention policy: ' + err));
+    }).catch(err => toast('Error saving retention policy: ' + err, 'danger'));
 }
 </script>
 {% endblock %}

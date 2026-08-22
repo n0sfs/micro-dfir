@@ -297,15 +297,15 @@ function generateToken() {
 
 function saveToken() {
     let token = document.getElementById('socToken').value.trim();
-    if (!token) { alert('Token cannot be empty.'); return; }
+    if (!token) { toast('Token cannot be empty.', 'warning'); return; }
     fetch('/api/settings/token', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({token: token})
     }).then(r => r.json()).then(res => {
-        if (res.status === 'success') alert('Token saved. Re-download agent packages to pick up the new token.');
-        else alert(res.error || 'Failed to save token.');
-    }).catch(err => alert('Error saving token: ' + err));
+        if (res.status === 'success') toast('Token saved. Re-download agent packages to pick up the new token.', 'success');
+        else toast(res.error || 'Failed to save token.', 'danger');
+    }).catch(err => toast('Error saving token: ' + err, 'danger'));
 }
 
 function rowHost(el) {
@@ -650,10 +650,10 @@ function clearEndpointSelection() {
     renderEndpoints();
 }
 
-function bulkUpgradeSelected() {
+async function bulkUpgradeSelected() {
     const hosts = Array.from(selectedEndpoints);
     if (!hosts.length) return;
-    if (!confirm(`Upgrade the MicroDFIR agent on ${hosts.length} selected host(s) to the latest version? Each restarts itself automatically.`)) return;
+    if (!(await confirmDialog(`Upgrade the MicroDFIR agent on ${hosts.length} selected host(s) to the latest version? Each restarts itself automatically.`, {title: 'Upgrade agents', confirmLabel: 'Upgrade'}))) return;
     Promise.all(hosts.map(hostname =>
         fetch('/api/agent/commands', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -663,9 +663,9 @@ function bulkUpgradeSelected() {
     )).then(results => {
         const failed = results.filter(r => !r.ok);
         if (failed.length) {
-            alert(`Upgrade queued for ${results.length - failed.length}/${results.length} host(s).\nFailed: ${failed.map(f => `${f.hostname} (${f.data.error || 'error'})`).join(', ')}`);
+            toast(`Upgrade queued for ${results.length - failed.length}/${results.length} host(s).\nFailed: ${failed.map(f => `${f.hostname} (${f.data.error || 'error'})`).join(', ')}`, 'warning', {duration: 8000});
         } else {
-            alert(`Upgrade queued for all ${results.length} selected host(s). Each applies on its next check-in (usually within 15s).`);
+            toast(`Upgrade queued for all ${results.length} selected host(s). Each applies on its next check-in (usually within 15s).`, 'success');
         }
         selectedEndpoints.clear();
         renderEndpoints();
@@ -673,32 +673,32 @@ function bulkUpgradeSelected() {
     });
 }
 
-function removeEndpoint(hostname) {
+async function removeEndpoint(hostname) {
     if (!hostname) return;
-    if (!confirm(`Uninstall the MicroDFIR agent on ${hostname}? It will remove itself on its next check-in.`)) return;
+    if (!(await confirmDialog(`Uninstall the MicroDFIR agent on ${hostname}? It will remove itself on its next check-in.`, {title: 'Uninstall agent', danger: true, confirmLabel: 'Uninstall'}))) return;
     fetch(`/api/agent/${encodeURIComponent(hostname)}`, { method: 'DELETE' })
         .then(r => r.json())
         .then(res => {
             if (res.status === 'success') loadUniqueEndpoints();
-            else alert(res.error || 'Failed to queue removal.');
-        }).catch(err => alert('Error removing endpoint: ' + err));
+            else toast(res.error || 'Failed to queue removal.', 'danger');
+        }).catch(err => toast('Error removing endpoint: ' + err, 'danger'));
 }
 
 // ---- Response actions (per-row dropdown on the Agents pane) ----
-function queueCommand(hostname, label, params, confirmMsg) {
-    if (confirmMsg && !confirm(confirmMsg)) return;
+async function queueCommand(hostname, label, params, confirmMsg) {
+    if (confirmMsg && !(await confirmDialog(confirmMsg, {title: 'Confirm action', danger: true}))) return;
     fetch('/api/agent/commands', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({hostname, label, params: params || {}})
     }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
         if (ok) {
-            alert(`"${label}" queued for ${hostname}. It will run on the endpoint's next check-in (usually within 15s).`);
+            toast(`"${label}" queued for ${hostname}. It will run on the endpoint's next check-in (usually within 15s).`, 'success');
             loadCommandHistory();
         } else {
-            alert(data.error || 'Failed to queue command.');
+            toast(data.error || 'Failed to queue command.', 'danger');
         }
-    }).catch(err => alert('Error queuing command: ' + err));
+    }).catch(err => toast('Error queuing command: ' + err, 'danger'));
 }
 
 // ---- Interactive response console ----
@@ -869,9 +869,9 @@ function queueConsoleCommand(hostname, label, params, display, script) {
     });
 }
 
-function consoleRun(label, params, confirmMsg) {
+async function consoleRun(label, params, confirmMsg) {
     if (!consoleSelectedHost) return;
-    if (confirmMsg && !confirm(confirmMsg)) return;
+    if (confirmMsg && !(await confirmDialog(confirmMsg, {title: 'Confirm action', danger: true}))) return;
     document.getElementById('consoleParamForm').style.display = 'none';
     queueConsoleCommand(consoleSelectedHost, label, params || {}, CONSOLE_ACTION_DISPLAY[consoleSelectedOS()][label] || label);
 }
@@ -881,10 +881,10 @@ function consoleUpgrade() {
     consoleRun('upgrade', {}, `Upgrade the MicroDFIR agent on ${consoleSelectedHost} to the latest version? It restarts itself automatically.`);
 }
 
-function consoleUninstall() {
+async function consoleUninstall() {
     if (!consoleSelectedHost) return;
     const hostname = consoleSelectedHost;
-    if (!confirm(`Uninstall the MicroDFIR agent on ${hostname}? It will remove itself on its next check-in.`)) return;
+    if (!(await confirmDialog(`Uninstall the MicroDFIR agent on ${hostname}? It will remove itself on its next check-in.`, {title: 'Uninstall agent', danger: true, confirmLabel: 'Uninstall'}))) return;
 
     if (!consoleSessions[hostname]) consoleSessions[hostname] = [];
     const entry = { id: null, status: 'queuing', display: 'Uninstall-Agent', stdout: '', stderr: '' };
@@ -933,10 +933,10 @@ function consoleShowParamForm(label) {
     wrap.style.display = 'block';
 }
 
-function submitKillProcess() {
+async function submitKillProcess() {
     const pid = (document.getElementById('paramPid').value || '').trim();
-    if (!/^\d+$/.test(pid)) { alert('PID must be a number.'); return; }
-    if (!confirm(`Terminate PID ${pid} on ${consoleSelectedHost}? This cannot be undone.`)) return;
+    if (!/^\d+$/.test(pid)) { toast('PID must be a number.', 'warning'); return; }
+    if (!(await confirmDialog(`Terminate PID ${pid} on ${consoleSelectedHost}? This cannot be undone.`, {title: 'Terminate process', danger: true, confirmLabel: 'Terminate'}))) return;
     queueConsoleCommand(consoleSelectedHost, 'kill_process', {pid}, `Stop-Process -Id ${pid} -Force`);
     document.getElementById('consoleParamForm').style.display = 'none';
 }
@@ -1041,11 +1041,11 @@ function insertConsoleFavorite() {
     document.getElementById('consoleCmdInput').focus();
 }
 
-function saveConsoleFavorite() {
+async function saveConsoleFavorite() {
     const script = (document.getElementById('consoleCmdInput').value || '').trim();
-    if (!script) { alert('Type a command in the prompt below first, then save it as a favorite.'); return; }
+    if (!script) { toast('Type a command in the prompt below first, then save it as a favorite.', 'warning'); return; }
     const defaultName = script.length > 40 ? script.slice(0, 40) + '…' : script;
-    const name = prompt('Name this favorite command:', defaultName);
+    const name = await promptDialog('Name this favorite command:', defaultName, {title: 'Save favorite'});
     if (!name) return;
     const favs = loadConsoleFavorites();
     favs.push({ name, script, os: consoleSelectedOS() });
@@ -1053,13 +1053,13 @@ function saveConsoleFavorite() {
     renderConsoleFavSelect();
 }
 
-function deleteConsoleFavorite() {
+async function deleteConsoleFavorite() {
     const sel = document.getElementById('consoleFavSelect');
-    if (!sel.value) { alert('Select a favorite to delete first.'); return; }
+    if (!sel.value) { toast('Select a favorite to delete first.', 'warning'); return; }
     const idx = parseInt(sel.value, 10);
     const favs = loadConsoleFavorites();
     const fav = favs[idx];
-    if (!fav || !confirm(`Delete favorite "${fav.name}"?`)) return;
+    if (!fav || !(await confirmDialog(`Delete favorite "${fav.name}"?`, {title: 'Delete favorite', danger: true, confirmLabel: 'Delete'}))) return;
     favs.splice(idx, 1);
     saveConsoleFavoritesList(favs);
     renderConsoleFavSelect();
