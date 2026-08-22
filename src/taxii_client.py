@@ -4,7 +4,11 @@ DB_PATH = "/opt/micro-dfir/siem.db"
 # is deliberately standalone (app.py imports FROM here), same reasoning as DB_PATH
 # above being its own local constant instead of importing app.py's DB path.
 YARA_RULES_DIR = "/opt/micro-dfir/rules/yara_imported"
-YARAIFY_ZIP_URL = "https://yaraify.abuse.ch/download/yaraify-rules.zip"
+# Confirmed live: this specific bulk-download endpoint needs no Auth-Key at all (the
+# YARAify API docs' own "download all rules" section shows a plain unauthenticated
+# curl example, and its "Download all YARA rules" link resolves here) -- unlike every
+# other YARAify endpoint (hash lookups, rule submission, etc.), which do require one.
+YARAIFY_ZIP_URL = "https://yaraify.abuse.ch/yarahub/yaraify-rules.zip"
 _YARAIFY_MAX_DOWNLOAD_BYTES = 250 * 1024 * 1024   # refuse an implausibly large download up front
 _YARAIFY_MAX_EXTRACTED_BYTES = 500 * 1024 * 1024  # zip-bomb guard: cap total decompressed size
 
@@ -192,15 +196,14 @@ def sync_yaraify(feed):
     # into stix_indicators -- it's the YARA rule content that File Scan and String
     # Sweep both read from rules/yara_imported/, kept fresh from abuse.ch's YARAify
     # bulk rule-pack export instead of only whatever's been manually vendored in.
-    api_key = feed["api_key"] if "api_key" in feed.keys() else None
-    if not api_key:
-        raise ValueError("YARAify feeds require an API key")
     os.makedirs(YARA_RULES_DIR, exist_ok=True)
     fd, tmp_zip_path = tempfile.mkstemp(suffix=".zip")
     os.close(fd)
     extract_dir = None
     try:
-        with requests.get(YARAIFY_ZIP_URL, headers={"Auth-Key": api_key}, timeout=60, stream=True) as res:
+        # No auth required for this endpoint, but sending one if configured is
+        # harmless and matches every other abuse.ch feed's optional-Auth-Key pattern.
+        with requests.get(YARAIFY_ZIP_URL, headers=_abuse_ch_headers(feed), timeout=60, stream=True) as res:
             res.raise_for_status()
             content_length = res.headers.get("Content-Length")
             if content_length and int(content_length) > _YARAIFY_MAX_DOWNLOAD_BYTES:

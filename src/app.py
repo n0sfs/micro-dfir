@@ -534,8 +534,6 @@ def api_ti_feeds():
         return jsonify({'error': 'TAXII feeds require a discovery_url and collection_id'}), 400
     if feed_type == 'otx' and not d.get('api_key'):
         return jsonify({'error': 'OTX feeds require an API key'}), 400
-    if feed_type == 'yaraify' and not d.get('api_key'):
-        return jsonify({'error': 'YARAify feeds require an API key'}), 400
     db.execute(
         "INSERT INTO ti_feeds (name, feed_type, discovery_url, collection_id, username, password, api_key, sync_interval_minutes, enabled) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
