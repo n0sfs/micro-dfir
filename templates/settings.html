@@ -270,9 +270,9 @@
 
 <script>
 const SETTINGS_TAB_KEY = 'microdfir_settings_active_tab';
-// 'audit' is admin-only server-side (see the {% if current_user.role == 'admin' %}
-// guard around its tab button/pane) -- a non-admin's DOM simply won't have those
-// elements, so each lookup below is null-checked rather than assumed to exist.
+// 'audit' is admin-only server-side (see the admin-role Jinja guard around its tab
+// button/pane above) -- a non-admin's DOM simply won't have those elements, so each
+// lookup below is null-checked rather than assumed to exist.
 const SETTINGS_TABS = ['security', 'network', 'system', 'audit'];
 
 function switchSettingsTab(tab) {
