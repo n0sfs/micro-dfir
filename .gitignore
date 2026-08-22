@@ -13,6 +13,7 @@ logs/
 sigma_state.json
 reports/*.pdf
 bin/
+rules/yara_imported/yaraify_synced/
 
 # Sensitive SSL/TLS Configs & Keys
 config/cert.pem

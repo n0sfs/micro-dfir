@@ -261,6 +261,7 @@
                 <option value="urlhaus">URLhaus Malicious URLs (public, no auth)</option>
                 <option value="feodotracker">Feodo Tracker Botnet C2 IPs (public, no auth)</option>
                 <option value="otx">AlienVault OTX Subscribed Pulses (API key required)</option>
+                <option value="yaraify">YARAify Bulk YARA Rule Pack (API key required)</option>
                 <option value="taxii">STIX / TAXII 2.1 Server</option>
                 <option value="csv">CSV File Upload</option>
             </select>
@@ -669,7 +670,7 @@ function initFeedModal() { if (!feedModal) feedModal = new bootstrap.Modal(docum
 
 // Feed types that need the API key field shown: TAXII servers can optionally use a
 // bearer token instead of basic auth, and OTX requires one outright.
-const FEED_TYPES_WITH_API_KEY = ['taxii', 'otx'];
+const FEED_TYPES_WITH_API_KEY = ['taxii', 'otx', 'yaraify'];
 
 function toggleFeedTypeFields() {
     const type = document.getElementById('feedType').value;
@@ -810,11 +811,12 @@ function statusBadge(status) {
 
 const FEED_TYPE_LABELS = {
     threatfox: 'ThreatFox', taxii: 'STIX/TAXII 2.1', otx: 'AlienVault OTX',
-    urlhaus: 'URLhaus', feodotracker: 'Feodo Tracker', csv: 'CSV Upload'
+    urlhaus: 'URLhaus', feodotracker: 'Feodo Tracker', yaraify: 'YARAify', csv: 'CSV Upload'
 };
 const FEED_TYPE_SOURCES = {
     threatfox: 'threatfox.abuse.ch (public)', urlhaus: 'urlhaus.abuse.ch (public)',
     feodotracker: 'feodotracker.abuse.ch (public)', otx: 'otx.alienvault.com (API key)',
+    yaraify: 'yaraify.abuse.ch (API key) — syncs YARA rule files, not IOCs',
     csv: 'Uploaded file (one-time snapshot)'
 };
 
@@ -852,7 +854,7 @@ function loadFeeds() {
                     <td>${statusBadge(f.last_status)}</td>
                     <td class="text-nowrap small">${escHtml(f.last_sync) || '—'}</td>
                     <td class="text-nowrap small">${syncIntervalLabel(f.sync_interval_minutes)}</td>
-                    <td>${f.last_count ?? 0}</td>
+                    <td>${f.feed_type === 'yaraify' ? `${f.last_count ?? 0} rule(s)` : (f.last_count ?? 0)}</td>
                     <td class="text-nowrap">
                         ${isAdmin ? `
                         ${f.feed_type !== 'csv' ? `
