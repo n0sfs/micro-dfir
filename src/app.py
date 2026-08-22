@@ -715,6 +715,29 @@ def invalidate_rules_cache():
     RULES_CACHE = None
     TUNING_CACHE = None
 
+# Sigma's own status vocabulary is stable/test/experimental/deprecated/unsupported --
+# unsupported means "this detection logic can't reliably work" and deprecated means
+# "superseded by another rule", which are technically distinct, but from a "should I
+# still rely on this rule" triage standpoint they're the same answer, so both collapse
+# into one bucket here rather than needing two badges/filters that mean the same thing
+# in practice.
+_STATUS_ALIASES = {'unsupported': 'deprecated'}
+
+def _normalize_rule_status(raw):
+    s = (raw or '').strip().lower()
+    return _STATUS_ALIASES.get(s, s) or 'unknown'
+
+# Extracts a single-line "key: value" metadata field from raw Sigma rule YAML without
+# a full YAML parse (this whole block trades correctness for speed across thousands of
+# cached rules). Anchored to the start of a line (^, MULTILINE) so a nested/indented
+# field that merely ends in the same word -- e.g. a detection field named
+# ResponseStatus: or release_date: -- can't be mistaken for the real top-level
+# metadata key, and trailing inline comments (# ...) are excluded from the captured
+# value rather than becoming part of it.
+def _extract_yaml_field(key, text):
+    m = re.search(rf'^{key}:\s*([^\n\r#]+)', text, re.MULTILINE)
+    return m.group(1).strip().strip("'\"") if m else None
+
 @app.route('/api/rules', methods=['GET', 'POST'])
 @login_required
 def api_rules():
@@ -735,13 +758,10 @@ def api_rules():
             rid = r['id']
             ry = r['rule_yaml']
             try:
-                c_match = re.search(r'category:\s*([^\n\r]+)', ry)
-                cat = c_match.group(1).strip().strip("'\"") if c_match else 'unknown'
+                cat = _extract_yaml_field('category', ry) or 'unknown'
+                platform = (_extract_yaml_field('product', ry) or 'Global').title()
 
-                p_match = re.search(r'product:\s*([^\n\r]+)', ry)
-                platform = p_match.group(1).strip().strip("'\"").title() if p_match else 'Global'
-
-                t_match = re.search(r'tags:\s*\n((\s+-\s*[^\n\r]+\n?)+)', ry)
+                t_match = re.search(r'^tags:\s*\n((\s+-\s*[^\n\r]+\n?)+)', ry, re.MULTILINE)
                 tags = [t.strip().strip('- ') for t in t_match.group(1).split('\n') if t.strip()] if t_match else []
 
                 rule_type = "Generic"
@@ -753,14 +773,11 @@ def api_rules():
                         rule_type = "Threat Hunting"
                         break
 
-                lv_match = re.search(r'level:\s*([^\n\r]+)', ry)
-                level = lv_match.group(1).strip().strip("'\"").lower() if lv_match else 'medium'
+                level = (_extract_yaml_field('level', ry) or 'medium').lower()
+                status = _normalize_rule_status(_extract_yaml_field('status', ry))
 
-                st_match = re.search(r'status:\s*([^\n\r]+)', ry)
-                status = st_match.group(1).strip().strip("'\"").lower() if st_match else 'unknown'
-
-                d_match = re.search(r'modified:\s*([0-9]{4}[-/][0-9]{2}[-/][0-9]{2})', ry) or \
-                          re.search(r'date:\s*([0-9]{4}[-/][0-9]{2}[-/][0-9]{2})', ry)
+                d_match = re.search(r'^modified:\s*([0-9]{4}[-/][0-9]{2}[-/][0-9]{2})', ry, re.MULTILINE) or \
+                          re.search(r'^date:\s*([0-9]{4}[-/][0-9]{2}[-/][0-9]{2})', ry, re.MULTILINE)
                 rule_date = d_match.group(1).replace('/', '-') if d_match else None
             except Exception:
                 rule_type, platform, cat, tags = "Generic", "Global", "unknown", []
@@ -977,8 +994,7 @@ def api_rules_tuning():
     out = []
     for r in rows:
         ry = r['rule_yaml'] or ''
-        lv_match = re.search(r'level:\s*([^\n\r]+)', ry)
-        level = lv_match.group(1).strip().strip("'\"").lower() if lv_match else 'medium'
+        level = (_extract_yaml_field('level', ry) or 'medium').lower()
         out.append({
             "id": r['id'], "title": r['title'], "source": r['source'] or 'sigma',
             "enabled": r['enabled'], "level": level, "severity_override": r['severity_override'],
