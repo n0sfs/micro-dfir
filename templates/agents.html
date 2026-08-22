@@ -75,7 +75,6 @@
             <div class="d-flex align-items-center gap-2">
                 <div id="bulkActionBar" class="d-flex align-items-center gap-2" style="display:none;">
                     <span class="text-muted small text-nowrap" id="bulkSelectedLabel"></span>
-                    <button class="btn btn-outline-light btn-sm" onclick="bulkIocSweep()"><i class="fa-solid fa-magnifying-glass me-1"></i> Sweep for IOCs</button>
                     <button class="btn btn-outline-info btn-sm" onclick="bulkUpgradeSelected()"><i class="fa-solid fa-rotate me-1"></i> Upgrade Selected</button>
                     <button class="btn btn-outline-secondary btn-sm" onclick="clearEndpointSelection()"><i class="fa-solid fa-xmark me-1"></i> Clear</button>
                 </div>
@@ -667,33 +666,6 @@ function bulkUpgradeSelected() {
             alert(`Upgrade queued for ${results.length - failed.length}/${results.length} host(s).\nFailed: ${failed.map(f => `${f.hostname} (${f.data.error || 'error'})`).join(', ')}`);
         } else {
             alert(`Upgrade queued for all ${results.length} selected host(s). Each applies on its next check-in (usually within 15s).`);
-        }
-        selectedEndpoints.clear();
-        renderEndpoints();
-        loadCommandHistory();
-    });
-}
-
-// Mirrors bulkUpgradeSelected() exactly — same selection state, same per-host
-// Promise.all dispatch, same success/failure summary. The live SHA-256 IOC list is
-// injected server-side per host (see api_agent_commands()'s POST handler), not here —
-// this only ever sends an empty params object.
-function bulkIocSweep() {
-    const hosts = Array.from(selectedEndpoints);
-    if (!hosts.length) return;
-    if (!confirm(`Sweep ${hosts.length} selected host(s) for files matching a known-bad SHA-256 hash? Each scans common malware-drop locations (Temp/Downloads/AppData/ProgramData or /tmp, /var/tmp, ~/Downloads) for recently-modified files.`)) return;
-    Promise.all(hosts.map(hostname =>
-        fetch('/api/agent/commands', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({hostname, label: 'ioc_sweep', params: {}})
-        }).then(r => r.json().then(data => ({hostname, ok: r.ok, data})))
-          .catch(err => ({hostname, ok: false, data: {error: String(err)}}))
-    )).then(results => {
-        const failed = results.filter(r => !r.ok);
-        if (failed.length) {
-            alert(`IOC sweep queued for ${results.length - failed.length}/${results.length} host(s).\nFailed: ${failed.map(f => `${f.hostname} (${f.data.error || 'error'})`).join(', ')}`);
-        } else {
-            alert(`IOC sweep queued for all ${results.length} selected host(s). Results appear in the history below as each host checks in (usually within 15s).`);
         }
         selectedEndpoints.clear();
         renderEndpoints();

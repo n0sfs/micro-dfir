@@ -13,6 +13,7 @@
 #iocTable .th-icon-btn{background:none; border:none; color:var(--text-muted); padding:0 2px; font-size:.72rem; cursor:pointer; line-height:1;}
 #iocTable .th-icon-btn:hover{color:var(--text-secondary);}
 #iocTable .th-icon-btn.active-filter{color:var(--accent);}
+.yara-mode-btn.active-filter, .sweep-target-btn.active-filter{background-color:var(--accent); border-color:var(--accent); color:#fff;}
 </style>
 
 <div class="row g-3 mb-4">
@@ -26,7 +27,7 @@
     <div class="card-header border-secondary p-0">
         <ul class="nav nav-tabs border-0" id="tiTabs">
             <li class="nav-item"><button type="button" class="nav-link {{ '' if active_tab == 'hunt' else 'active' }}" id="tabBtnIocs" onclick="switchTiTab('iocs')"><i class="fa-solid fa-globe me-2"></i>IOCs</button></li>
-            <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'hunt' else '' }}" id="tabBtnHunt" onclick="switchTiTab('hunt')"><i class="fa-solid fa-crosshairs me-2"></i>Threat Hunt</button></li>
+            <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'hunt' else '' }}" id="tabBtnHunt" onclick="switchTiTab('hunt')"><i class="fa-solid fa-magnifying-glass me-2"></i>YARA Scanning</button></li>
         </ul>
     </div>
 
@@ -122,47 +123,78 @@
         </div>
     </div>
 
-    <!-- Threat Hunt pane -->
+    <!-- YARA Scanning pane -->
     <div id="paneHunt" style="display:{{ 'block' if active_tab == 'hunt' else 'none' }};">
         <div class="card-body">
-            <div class="card bg-dark border-secondary shadow">
-                <div class="card-header bg-secondary text-white">
-                    <h5 class="mb-0"><i class="fa-solid fa-bug"></i> YARA File Scanner</h5>
-                </div>
-                <div class="card-body">
-                    <p class="text-muted small">Upload a file and select the imported YARA rules to scan it against.</p>
-                    <form method="POST" action="{{ url_for('threat_intel') }}" enctype="multipart/form-data">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                        <div class="mb-3">
-                            <input class="form-control bg-dark text-light border-secondary" type="file" name="scan_file" required>
-                        </div>
-                        <div class="mb-3">
-                            <label class="form-label text-info fw-bold">Active Rules ({{ yara_files|length }} loaded)</label>
-                            <div class="d-flex justify-content-between mb-2">
-                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAll(true)">Select All</button>
-                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAll(false)">Clear</button>
-                            </div>
-                            <div class="border border-secondary rounded p-2 bg-black" style="max-height: 300px; overflow-y: auto;">
-                                {% for rf in yara_files %}
-                                <div class="form-check">
-                                    <input class="form-check-input rule-checkbox" type="checkbox" name="selected_rules" value="{{ rf }}" id="rule-{{ loop.index }}" checked onchange="updateHuntStats()">
-                                    <label class="form-check-label text-light small" for="rule-{{ loop.index }}">{{ rf }}</label>
-                                </div>
-                                {% else %}
-                                <span class="text-muted small">No YARA rules found under rules/yara_imported.</span>
-                                {% endfor %}
-                            </div>
-                        </div>
-                        <button type="submit" class="btn btn-outline-info w-100"><i class="fa-solid fa-play"></i> Run Scan</button>
-                    </form>
-                    {% if matches %}
-                    <div class="mt-3 text-start font-monospace small">
-                        <div class="text-warning fw-bold mb-1">{{ matches|length }} match(es):</div>
-                        {% for m in matches %}
-                        <div class="text-danger">[{{ m.rule }}] matched {{ m.file }}</div>
-                        {% endfor %}
+            <div class="btn-group btn-group-sm mb-3" role="group">
+                <button type="button" class="btn btn-outline-secondary yara-mode-btn active-filter" data-mode="file" onclick="setYaraScanMode('file')"><i class="fa-solid fa-file-arrow-up me-1"></i>File Scan</button>
+                <button type="button" class="btn btn-outline-secondary yara-mode-btn" data-mode="sweep" onclick="setYaraScanMode('sweep')"><i class="fa-solid fa-magnifying-glass me-1"></i>IOC Hash Sweep</button>
+            </div>
+
+            <!-- File Scan mode -->
+            <div id="yaraModeFile">
+                <div class="card bg-dark border-secondary shadow">
+                    <div class="card-header bg-secondary text-white">
+                        <h5 class="mb-0"><i class="fa-solid fa-bug"></i> YARA File Scanner</h5>
                     </div>
-                    {% endif %}
+                    <div class="card-body">
+                        <p class="text-muted small">Upload a file and select the imported YARA rules to scan it against.</p>
+                        <form method="POST" action="{{ url_for('threat_intel') }}" enctype="multipart/form-data">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <div class="mb-3">
+                                <input class="form-control bg-dark text-light border-secondary" type="file" name="scan_file" required>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label text-info fw-bold">Active Rules ({{ yara_files|length }} loaded)</label>
+                                <div class="d-flex justify-content-between mb-2">
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAll(true)">Select All</button>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAll(false)">Clear</button>
+                                </div>
+                                <div class="border border-secondary rounded p-2 bg-black" style="max-height: 300px; overflow-y: auto;">
+                                    {% for rf in yara_files %}
+                                    <div class="form-check">
+                                        <input class="form-check-input rule-checkbox" type="checkbox" name="selected_rules" value="{{ rf }}" id="rule-{{ loop.index }}" checked onchange="updateHuntStats()">
+                                        <label class="form-check-label text-light small" for="rule-{{ loop.index }}">{{ rf }}</label>
+                                    </div>
+                                    {% else %}
+                                    <span class="text-muted small">No YARA rules found under rules/yara_imported.</span>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            <button type="submit" class="btn btn-outline-info w-100"><i class="fa-solid fa-play"></i> Run Scan</button>
+                        </form>
+                        {% if matches %}
+                        <div class="mt-3 text-start font-monospace small">
+                            <div class="text-warning fw-bold mb-1">{{ matches|length }} match(es):</div>
+                            {% for m in matches %}
+                            <div class="text-danger">[{{ m.rule }}] matched {{ m.file }}</div>
+                            {% endfor %}
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+
+            <!-- IOC Hash Sweep mode -->
+            <div id="yaraModeSweep" style="display:none;">
+                <div class="card bg-dark border-secondary shadow">
+                    <div class="card-header bg-secondary text-white">
+                        <h5 class="mb-0"><i class="fa-solid fa-magnifying-glass"></i> IOC Hash Sweep</h5>
+                    </div>
+                    <div class="card-body">
+                        <p class="text-muted small">Sweep endpoint filesystems for files matching a known-bad SHA-256 hash from the current IOC list — common malware-drop locations, recently-modified files.</p>
+                        <div class="mb-3">
+                            <label class="form-label small text-muted mb-1 d-block">Target</label>
+                            <div class="btn-group btn-group-sm" role="group">
+                                <button type="button" class="btn btn-outline-secondary sweep-target-btn active-filter" data-target="all" onclick="setSweepTarget('all')">All Agents</button>
+                                <button type="button" class="btn btn-outline-secondary sweep-target-btn" data-target="selected" onclick="setSweepTarget('selected')">Selected Agents</button>
+                            </div>
+                        </div>
+                        <div id="sweepHostPicker" class="border border-secondary rounded p-2 bg-black mb-3" style="display:none; max-height:220px; overflow-y:auto;"></div>
+                        <button type="button" class="btn btn-outline-info w-100" onclick="runIocSweep()"><i class="fa-solid fa-play me-1"></i> Run Sweep</button>
+                        <div id="sweepResultMsg" style="display:none;" class="mt-3 small"></div>
+                        <p class="text-muted small mt-3 mb-0"><i class="fa-solid fa-circle-info me-1"></i>Results appear per host in Agents → Response Actions → All Response Action History as each endpoint checks in.</p>
+                    </div>
                 </div>
             </div>
         </div>
@@ -303,6 +335,96 @@ function updateHuntStats() {
 function toggleSelectAll(select) {
     document.querySelectorAll('.rule-checkbox').forEach(cb => cb.checked = select);
     updateHuntStats();
+}
+
+// ---- YARA Scanning: File Scan vs IOC Hash Sweep mode ----
+let yaraScanMode = 'file';
+
+function setYaraScanMode(mode) {
+    yaraScanMode = mode;
+    document.querySelectorAll('.yara-mode-btn').forEach(b => b.classList.toggle('active-filter', b.dataset.mode === mode));
+    document.getElementById('yaraModeFile').style.display = mode === 'file' ? 'block' : 'none';
+    document.getElementById('yaraModeSweep').style.display = mode === 'sweep' ? 'block' : 'none';
+    if (mode === 'sweep' && !sweepAgentsLoaded) loadSweepAgents();
+}
+
+// ---- IOC Hash Sweep: target selection + dispatch ----
+// Queues the same 'ioc_sweep' response action already used from the Agents page's
+// Response Actions console (see agents.html) — this is just a different launch point
+// (all/selected agents, from the hunting workflow) for the exact same agent-side
+// action and server-side dispatch; results still land in the one place all response
+// actions do, Agents -> Response Actions -> All Response Action History.
+let sweepTarget = 'all';
+let sweepAgentsLoaded = false;
+let sweepAgents = [];
+let selectedSweepHosts = new Set();
+
+function setSweepTarget(target) {
+    sweepTarget = target;
+    document.querySelectorAll('.sweep-target-btn').forEach(b => b.classList.toggle('active-filter', b.dataset.target === target));
+    document.getElementById('sweepHostPicker').style.display = target === 'selected' ? 'block' : 'none';
+    if (target === 'selected' && !sweepAgentsLoaded) loadSweepAgents();
+}
+
+function loadSweepAgents() {
+    fetch('/api/agent/checkins')
+        .then(r => r.json())
+        .then(data => {
+            sweepAgents = Array.isArray(data) ? data : [];
+            sweepAgentsLoaded = true;
+            renderSweepHostPicker();
+        })
+        .catch(err => console.error('Error loading agents for sweep:', err));
+}
+
+function renderSweepHostPicker() {
+    const wrap = document.getElementById('sweepHostPicker');
+    if (!sweepAgents.length) {
+        wrap.innerHTML = '<span class="text-muted small">No active agent endpoints detected.</span>';
+        return;
+    }
+    wrap.innerHTML = sweepAgents.map((a, i) => `
+        <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="sweepHost${i}" data-hostname="${escHtml(a.hostname)}" onchange="toggleSweepHost(this.dataset.hostname, this.checked)">
+            <label class="form-check-label small" for="sweepHost${i}">${escHtml(a.hostname)} <span class="text-muted">(${escHtml(a.os === 'linux' ? 'Linux' : 'Windows')}, ${escHtml(a.status)})</span></label>
+        </div>
+    `).join('');
+}
+
+function toggleSweepHost(hostname, checked) {
+    if (checked) selectedSweepHosts.add(hostname); else selectedSweepHosts.delete(hostname);
+}
+
+function runIocSweep() {
+    let hosts;
+    if (sweepTarget === 'all') {
+        if (!sweepAgentsLoaded) { alert('Still loading the agent list — try again in a moment.'); return; }
+        hosts = sweepAgents.map(a => a.hostname);
+    } else {
+        hosts = Array.from(selectedSweepHosts);
+    }
+    if (!hosts.length) { alert(sweepTarget === 'all' ? 'No active agent endpoints detected.' : 'Select at least one agent.'); return; }
+    if (!confirm(`Sweep ${hosts.length} host(s) for files matching a known-bad SHA-256 hash? Each scans common malware-drop locations for recently-modified files.`)) return;
+
+    const msg = document.getElementById('sweepResultMsg');
+    msg.style.display = 'none';
+    Promise.all(hosts.map(hostname =>
+        fetch('/api/agent/commands', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({hostname, label: 'ioc_sweep', params: {}})
+        }).then(r => r.json().then(data => ({hostname, ok: r.ok, data})))
+          .catch(err => ({hostname, ok: false, data: {error: String(err)}}))
+    )).then(results => {
+        const failed = results.filter(r => !r.ok);
+        msg.style.display = 'block';
+        if (failed.length) {
+            msg.className = 'mt-3 small text-warning';
+            msg.innerText = `Sweep queued for ${results.length - failed.length}/${results.length} host(s). Failed: ${failed.map(f => `${f.hostname} (${f.data.error || 'error'})`).join(', ')}`;
+        } else {
+            msg.className = 'mt-3 small text-success';
+            msg.innerText = `Sweep queued for all ${results.length} host(s). Results appear in Agents -> Response Actions as each host checks in.`;
+        }
+    });
 }
 
 // ---- IOC Feeds ----
