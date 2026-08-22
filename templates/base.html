@@ -285,6 +285,7 @@ body.sidebar-collapsed .btn-logout span{display:none;}
 .mdfir-toast.warning>i{color:var(--warning);}
 .mdfir-toast.info>i{color:var(--info);}
 .mdfir-toast .mdfir-toast-msg{flex:1;white-space:pre-wrap;word-break:break-word;line-height:1.4;}
+.mdfir-toast .mdfir-toast-action{flex-shrink:0;padding:2px 10px;font-size:.75rem;}
 .mdfir-toast .mdfir-toast-close{
   background:none;border:none;color:var(--text-muted);cursor:pointer;
   padding:0;line-height:1;font-size:.85rem;flex-shrink:0;
@@ -399,15 +400,23 @@ body.sidebar-collapsed .btn-logout span{display:none;}
                 msgSpan.innerText = message == null ? '' : String(message);
                 el.innerHTML = '<i class="fa-solid ' + ICONS[type] + '"></i>';
                 el.appendChild(msgSpan);
-                const closeBtn = document.createElement('button');
-                closeBtn.type = 'button';
-                closeBtn.className = 'mdfir-toast-close';
-                closeBtn.innerHTML = '<i class="fa-solid fa-xmark"></i>';
                 const remove = () => {
                     if (!el.parentNode) return;
                     el.classList.add('closing');
                     setTimeout(() => el.remove(), 160);
                 };
+                if (opts.actionLabel && typeof opts.onAction === 'function') {
+                    const actionBtn = document.createElement('button');
+                    actionBtn.type = 'button';
+                    actionBtn.className = 'mdfir-toast-action btn btn-sm btn-outline-light';
+                    actionBtn.innerText = opts.actionLabel;
+                    actionBtn.onclick = () => { opts.onAction(); remove(); };
+                    el.appendChild(actionBtn);
+                }
+                const closeBtn = document.createElement('button');
+                closeBtn.type = 'button';
+                closeBtn.className = 'mdfir-toast-close';
+                closeBtn.innerHTML = '<i class="fa-solid fa-xmark"></i>';
                 closeBtn.onclick = remove;
                 el.appendChild(closeBtn);
                 getStack().appendChild(el);
