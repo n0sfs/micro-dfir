@@ -1684,9 +1684,12 @@ const LEVEL_BADGE = {
     critical: 'bg-danger', high: 'bg-danger', medium: 'bg-warning text-dark',
     low: 'bg-info text-dark', informational: 'bg-secondary'
 };
+// 'unsupported' isn't a separate key here -- the backend already folds it into
+// 'deprecated' (see _normalize_rule_status in app.py) before this ever renders, since
+// both mean "don't rely on this rule" from a triage standpoint.
 const STATUS_BADGE = {
     stable: 'bg-success', test: 'bg-info text-dark', experimental: 'bg-secondary',
-    deprecated: 'bg-warning text-dark', unsupported: 'bg-danger'
+    deprecated: 'bg-warning text-dark'
 };
 
 function complianceTagsHtml(tags) {
