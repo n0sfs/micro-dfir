@@ -400,6 +400,10 @@ let sweepAgents = [];
 let selectedSweepHosts = new Set();
 let sweepResultsLoadedOnce = false;
 let sweepResultsCache = [];
+// Command ids we've already surfaced a hit toast for — populated with every hit already
+// on the page on first load (so re-opening the tab doesn't re-alert on old history), then
+// grown as each newly-completed sweep comes back dirty during polling.
+let sweepHitToastedIds = new Set();
 
 function setSweepTarget(target) {
     sweepTarget = target;
@@ -445,11 +449,32 @@ function loadSweepResults() {
     fetch('/api/agent/commands?label=ioc_sweep&limit=50')
         .then(r => r.json())
         .then(rows => {
+            const wasLoadedBefore = sweepResultsLoadedOnce;
             sweepResultsCache = Array.isArray(rows) ? rows : [];
             sweepResultsLoadedOnce = true;
             renderSweepResults();
+            announceNewSweepHits(wasLoadedBefore);
         })
         .catch(err => console.error('Error loading sweep results:', err));
+}
+
+// Pops a toast the moment a sweep comes back with hits, instead of relying on the user
+// to notice the red row in the results table. Hits already present on the very first
+// load are marked as seen without alerting (that's history, not a new finding) — only
+// hits that newly appear after that (i.e. while polling after a queued sweep) alert.
+function announceNewSweepHits(wasLoadedBefore) {
+    sweepResultsCache.forEach(c => {
+        const parsed = parseSweepStdout(c.stdout);
+        const hitCount = parsed ? parsed.hits.length : 0;
+        if (hitCount === 0 || sweepHitToastedIds.has(c.id)) return;
+        sweepHitToastedIds.add(c.id);
+        if (!wasLoadedBefore) return;
+        toast(`${c.hostname}: ${hitCount} IOC match${hitCount === 1 ? '' : 'es'} found in the last sweep.`, 'danger', {
+            duration: 0,
+            actionLabel: 'View',
+            onAction: () => viewSweepHitDetail(c.id)
+        });
+    });
 }
 
 // Returns {scanned, hits} if stdout parses as a real sweep-result shape, else null --
