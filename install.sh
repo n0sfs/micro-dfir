@@ -1,4 +1,3 @@
-cat << 'EOF' > install.sh
 #!/bin/bash
 if [ "$EUID" -ne 0 ]; then echo "Please run as root (sudo bash install.sh)"; exit 1; fi
 
@@ -69,4 +68,3 @@ systemctl enable --now microsoc-soar.service
 
 echo "[+] Deployment Complete!"
 echo "[+] Micro DFIR Dashboard: https://<nuc-ip>:5001"
-EOF
