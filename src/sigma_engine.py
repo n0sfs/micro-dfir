@@ -8,6 +8,19 @@ from sigma.processing.pipeline import ProcessingPipeline, ProcessingItem
 DB_PATH = "/opt/micro-dfir/siem.db"
 STATE_FILE = os.path.join(os.path.dirname(DB_PATH), "sigma_state.json")
 
+# pysigma's SQLite backend correctly translates a Sigma rule's |re field modifier into
+# SQLite's `value REGEXP 'pattern'` syntax -- but SQLite only recognizes REGEXP as sugar
+# for a registered function, it doesn't implement one itself, so every |re rule silently
+# produced zero detections (every cycle, forever) until a REGEXP function is registered
+# on the connection. SQLite calls this as regexp(pattern, value), matching X REGEXP Y.
+def _sqlite_regexp(pattern, value):
+    # A malformed pattern from a rule's own YAML must not abort the whole detection
+    # cycle for every other rule -- fails closed (no match) instead of raising.
+    try:
+        return re.search(pattern, value or '') is not None
+    except re.error:
+        return False
+
 # live_logs/recent_events is a flat SIEM-style table (timestamp, host, app, severity,
 # event_id, username, source_ip, destination_ip, message) with no per-field structured data
 # for most Sigma fields — there's no CommandLine, Image, TargetFilename, etc. column to map
@@ -127,7 +140,9 @@ def _substitute_ioc_placeholder(rule_yaml_text, cursor, cache):
 
 def run_detection_cycle():
     if not os.path.exists(DB_PATH): return
-    conn = sqlite3.connect(DB_PATH, timeout=30); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
+    conn = sqlite3.connect(DB_PATH, timeout=30); conn.row_factory = sqlite3.Row
+    conn.create_function('REGEXP', 2, _sqlite_regexp)
+    cursor = conn.cursor()
     last_id = json.load(open(STATE_FILE)).get("last_id", 0) if os.path.exists(STATE_FILE) else 0
     soar_api_key = _get_soar_api_key(cursor)
 
