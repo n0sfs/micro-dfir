@@ -52,8 +52,16 @@ def sync_taxii(feed):
     conn.commit(); conn.close()
     return c
 
+# ThreatFox/URLhaus/Feodo Tracker's legacy "export"/"downloads" endpoints (used below)
+# stay public even without a key -- an Auth-Key here is optional, not required, and
+# only buys a higher rate limit / requests counted against your own abuse.ch account
+# instead of anonymous access. Same abuse.ch Auth-Key as the YARAify feed accepts.
+def _abuse_ch_headers(feed):
+    api_key = feed["api_key"] if "api_key" in feed.keys() else None
+    return {"Auth-Key": api_key} if api_key else {}
+
 def sync_threatfox(feed):
-    res = requests.get("https://threatfox.abuse.ch/export/json/recent/", timeout=20)
+    res = requests.get("https://threatfox.abuse.ch/export/json/recent/", headers=_abuse_ch_headers(feed), timeout=20)
     res.raise_for_status()
     data = res.json()
     conn = _connect(); c = 0
@@ -76,7 +84,7 @@ def sync_threatfox(feed):
 # a JSON object keyed by url_id, each value a one-element list of
 # {dateadded, url, url_status, last_online, threat, tags, urlhaus_link, reporter}.
 def sync_urlhaus(feed):
-    res = requests.get("https://urlhaus.abuse.ch/downloads/json_recent/", timeout=20)
+    res = requests.get("https://urlhaus.abuse.ch/downloads/json_recent/", headers=_abuse_ch_headers(feed), timeout=20)
     res.raise_for_status()
     data = res.json()
     conn = _connect(); c = 0
@@ -99,7 +107,7 @@ def sync_urlhaus(feed):
 # a JSON array of {ip_address, port, status, hostname, as_number, as_name, country,
 # first_seen, last_online, malware}.
 def sync_feodotracker(feed):
-    res = requests.get("https://feodotracker.abuse.ch/downloads/ipblocklist.json", timeout=20)
+    res = requests.get("https://feodotracker.abuse.ch/downloads/ipblocklist.json", headers=_abuse_ch_headers(feed), timeout=20)
     res.raise_for_status()
     data = res.json()
     conn = _connect(); c = 0
