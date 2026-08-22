@@ -4,7 +4,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, ssl, threading
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.08.21.1"
+AGENT_VERSION = "2026.08.21.2"
 
 INSTALL_DIR = "/opt/microdfir-agent"
 SERVICE_NAME = "microdfir-agent"
@@ -13,7 +13,27 @@ SERVER_URL = 'https://__HOST_URL__/api/agent/config'
 INGEST_URL = 'https://__HOST_URL__/api/ingest'
 RESULT_URL = 'https://__HOST_URL__/api/agent/result'
 SOC_TOKEN = '__SOC_TOKEN__'
+# The server's own cert, pinned so the agent can verify it without a real CA (it's
+# self-signed) — see build_ssl_context() below. Left as the literal placeholder if the
+# script is run without ever going through the server's build step (e.g. tampered with
+# by hand), in which case the agent falls back to unverified rather than refusing to run.
+SERVER_CERT_PEM = """__SERVER_CERT_PEM__"""
 SCRIPT_TIMEOUT_SECONDS = 90
+
+def build_ssl_context():
+    if '__SERVER_CERT_PEM__' in SERVER_CERT_PEM or not SERVER_CERT_PEM.strip():
+        print("[!] WARNING: no pinned server certificate embedded — falling back to unverified TLS. Re-download the agent package to fix this.", flush=True)
+        return ssl._create_unverified_context()
+    try:
+        # The cert is self-signed with no SAN, so there's no hostname to check against —
+        # trusting only this exact pinned cert as its own CA (cert-chain verification
+        # stays on) is what replaces hostname matching here.
+        context = ssl.create_default_context(cadata=SERVER_CERT_PEM)
+        context.check_hostname = False
+        return context
+    except ssl.SSLError as e:
+        print(f"[!] WARNING: failed to load the pinned server certificate ({e}) — falling back to unverified TLS.", flush=True)
+        return ssl._create_unverified_context()
 
 def install_agent():
     # Installing over an already-running instance (managed by systemd) just means
@@ -162,7 +182,7 @@ def fetch_journal_logs(last_seconds):
 def run_agent():
     global INGEST_URL
     print("[*] Agent starting up! Initializing...", flush=True)
-    context = ssl._create_unverified_context()
+    context = build_ssl_context()
     last_config_check = 0
     LOG_INTERVAL = 8
     CONFIG_INTERVAL = 8
