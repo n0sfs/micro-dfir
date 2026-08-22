@@ -1,9 +1,58 @@
-import os, json, sqlite3, duckdb
+import copy, os, json, sqlite3, duckdb
 DB_PATH = "/opt/micro-dfir/siem.db"
 UEBA_DEFAULTS = {
     'ueba_lookback_days': 30, 'ueba_stddev_multiplier': 3.0, 'ueba_min_baseline': 50.0,
     'ueba_min_days_observed': 4, 'ueba_new_ip_enabled': 1,
 }
+
+# Point values an admin can retune without a schema change -- one JSON settings blob
+# rather than ~15 individual keys the way UEBA_DEFAULTS above does it, since that
+# one-key-per-value shape doesn't scale cleanly to this many tunables and a new
+# indicator's weight shouldn't need a migration to add. Deep-merged over a POSTed
+# partial config (see get_risk_score_config) so adding a new indicator later doesn't
+# break an already-saved config that predates it.
+RISK_SCORE_DEFAULTS = {
+    'window_days': 7,
+    'points': {
+        'alert_critical': 40, 'alert_high': 25, 'alert_medium': 10, 'alert_low': 5, 'alert_informational': 1,
+        'sweep_hit': 35,
+        'failed_login': 10,
+        'volume_anomaly_critical': 30, 'volume_anomaly_high': 20, 'volume_anomaly_medium': 10,
+        'new_source_ip': 15,
+        'first_time_bonus': 15,
+    },
+    # Only these audit_log actions score their actor -- routine/low-signal ones (e.g.
+    # ti_feed_sync) are deliberately left out rather than scored at zero, so the
+    # indicator list this produces stays meaningful instead of noisy.
+    'sensitive_actions': {
+        'user_create': 20, 'user_delete': 25, 'user_password_reset': 15,
+        'network_config_change': 20, 'tls_cert_upload': 15, 'soc_token_change': 15,
+        'retention_policy_change': 10, 'manual_log_purge': 15, 'db_vacuum': 5,
+        'sigmahq_import': 5, 'rule_bulk_toggle': 10, 'rule_delete': 8,
+        'drop_rule_delete': 5, 'ti_feed_delete': 5,
+    },
+    'tiers': {'low': 0, 'medium': 20, 'high': 50, 'critical': 100},
+}
+
+def _deep_merge(base, override):
+    for k, v in (override or {}).items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            _deep_merge(base[k], v)
+        else:
+            base[k] = v
+    return base
+
+def get_risk_score_config():
+    cfg = copy.deepcopy(RISK_SCORE_DEFAULTS)
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        row = conn.execute("SELECT value FROM settings WHERE key = 'risk_score_config'").fetchone()
+        conn.close()
+        if row and row[0]:
+            _deep_merge(cfg, json.loads(row[0]))
+    except Exception:
+        pass
+    return cfg
 # 0.6745 is the standard consistency constant that scales MAD to be comparable to a
 # stddev for a normal distribution, so the existing stddev_multiplier setting keeps its
 # original meaning now that baselines use median/MAD instead of mean/stddev.
@@ -138,6 +187,7 @@ def _run_new_source_ip_model(con, cfg):
 def run_ueba_models():
     try:
         cfg = get_ueba_config()
+        risk_cfg = get_risk_score_config()
         excluded = _get_exclusions()
         con = duckdb.connect(database=':memory:'); con.execute("INSTALL sqlite; LOAD sqlite;")
         con.execute(f"ATTACH '{DB_PATH}' AS siem (TYPE SQLITE);")
@@ -186,6 +236,14 @@ def run_ueba_models():
                 "VALUES (datetime('now'), ?, ?, 'duckdb_ueba', ?, ?, ?)",
                 (r['entity_id'], r['entity_type'], severity, message, json.dumps({**r, 'detection_type': 'volume_baseline'}))
             )
+            # This statistical anomaly is one of six risk-score indicators (see
+            # run_risk_scoring below for the fact-based ones) -- scored right here from
+            # the same computation rather than re-deriving it from raw_json later.
+            pts = risk_cfg['points'].get(f'volume_anomaly_{severity.lower()}', risk_cfg['points']['volume_anomaly_medium'])
+            conn.execute(
+                "INSERT INTO risk_score_events (entity_type, entity_id, indicator, points, detail, source_table, source_id) VALUES (?,?,?,?,?,?,?)",
+                (r['entity_type'], r['entity_id'], 'volume_anomaly', pts, message, 'ueba_entity_baselines', None)
+            )
         for h in new_ip_hits:
             message = (f"{h['username']} (user) was active from a source IP not seen for this user in the past "
                        f"{cfg['lookback_days']} days: {h['source_ip']} ({h['count']} events today).")
@@ -194,10 +252,126 @@ def run_ueba_models():
                 "VALUES (datetime('now'), ?, 'user', 'duckdb_ueba', 'Medium', ?, ?)",
                 (h['username'], message, json.dumps({**h, 'detection_type': 'new_source_ip'}))
             )
+            conn.execute(
+                "INSERT INTO risk_score_events (entity_type, entity_id, indicator, points, detail, source_table, source_id) VALUES (?,?,?,?,?,?,?)",
+                ('user', h['username'], 'new_source_ip', risk_cfg['points']['new_source_ip'], message, 'events', None)
+            )
         conn.commit()
     except Exception as e:
         print(f"[-] UEBA failed to persist anomalies: {e}")
     finally:
         conn.close()
 
-if __name__ == "__main__": run_ueba_models()
+# ---- Composite risk scoring (fact-based indicators) ----
+# Sigma alerts / audit actions / sweep hits are scanned incrementally -- each source
+# never gets re-scored twice -- via a high-water-mark id per source stored in the
+# settings table, the same pattern sigma_engine.py already uses (STATE_FILE's last_id)
+# for its own incremental live_logs scan.
+_RISK_MARK_KEYS = {
+    'alert': 'risk_scoring_last_alert_id',
+    'audit': 'risk_scoring_last_audit_id',
+    'sweep': 'risk_scoring_last_sweep_cmd_id',
+}
+
+def _get_risk_marks(conn):
+    marks = {}
+    for name, key in _RISK_MARK_KEYS.items():
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        try:
+            marks[name] = int(row['value']) if row and row['value'] else 0
+        except (TypeError, ValueError):
+            marks[name] = 0
+    return marks
+
+def _save_risk_marks(conn, marks):
+    for name, key in _RISK_MARK_KEYS.items():
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(marks[name])))
+
+# Both host and username get scored independently from the same alert -- an alert is
+# relevant to both entities' risk posture, the same way the existing volume-baseline
+# model already treats host and user as independently-modeled entity types from the
+# same live_logs stream.
+def _score_alerts(conn, cfg, last_id):
+    rows = conn.execute("SELECT id, host, username, severity, rule_name FROM alerts WHERE id > ?", (last_id,)).fetchall()
+    events, max_id = [], last_id
+    for r in rows:
+        max_id = max(max_id, r['id'])
+        pts = cfg['points'].get(f"alert_{(r['severity'] or '').lower()}", cfg['points']['alert_medium'])
+        detail = f"{r['rule_name'] or 'Sigma alert'} ({r['severity'] or 'unknown'})"
+        for entity_type, entity_id in (('host', r['host']), ('user', r['username'])):
+            if not entity_id or entity_id in ('', '-', 'UNKNOWN'):
+                continue
+            events.append((entity_type, entity_id, 'sigma_alert', pts, detail, 'alerts', str(r['id'])))
+    return events, max_id
+
+def _score_audit(conn, cfg, last_id):
+    rows = conn.execute("SELECT id, username, action, target_id FROM audit_log WHERE id > ?", (last_id,)).fetchall()
+    events, max_id = [], last_id
+    for r in rows:
+        max_id = max(max_id, r['id'])
+        if r['action'] == 'login_failed':
+            actor = r['target_id'] or '(unknown)'
+            events.append(('user', actor, 'failed_login', cfg['points']['failed_login'], 'Failed login attempt', 'audit_log', str(r['id'])))
+            continue
+        if not r['username']:
+            continue
+        sens_pts = cfg['sensitive_actions'].get(r['action'])
+        if sens_pts is None:
+            continue
+        events.append(('user', r['username'], 'sensitive_action', sens_pts, f"Performed sensitive action: {r['action']}", 'audit_log', str(r['id'])))
+        # The "is this normal for THIS entity" check: has this specific actor ever
+        # performed this action type before (anywhere in audit_log's history, not just
+        # the current scoring window)? A first occurrence is the direct implementation
+        # of "an admin who routinely does this scores normally; their first time doesn't."
+        prior = conn.execute(
+            "SELECT COUNT(*) as c FROM audit_log WHERE username = ? AND action = ? AND id < ?",
+            (r['username'], r['action'], r['id'])
+        ).fetchone()['c']
+        if prior == 0:
+            events.append(('user', r['username'], 'first_time_action', cfg['points']['first_time_bonus'],
+                           f"First recorded '{r['action']}' by this user", 'audit_log', str(r['id'])))
+    return events, max_id
+
+def _score_sweeps(conn, cfg, last_id):
+    rows = conn.execute(
+        "SELECT id, hostname, stdout FROM agent_commands WHERE id > ? AND label IN ('ioc_sweep','string_sweep') AND status = 'done'",
+        (last_id,)
+    ).fetchall()
+    events, max_id = [], last_id
+    for r in rows:
+        max_id = max(max_id, r['id'])
+        try:
+            hits = (json.loads(r['stdout'] or '{}') or {}).get('hits') or []
+        except (json.JSONDecodeError, TypeError):
+            hits = []
+        if not hits:
+            continue
+        events.append(('host', r['hostname'], 'ioc_sweep_hit', cfg['points']['sweep_hit'],
+                       f"{len(hits)} IOC match(es) found in a sweep", 'agent_commands', str(r['id'])))
+    return events, max_id
+
+def run_risk_scoring():
+    cfg = get_risk_score_config()
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        marks = _get_risk_marks(conn)
+        alert_events, marks['alert'] = _score_alerts(conn, cfg, marks['alert'])
+        audit_events, marks['audit'] = _score_audit(conn, cfg, marks['audit'])
+        sweep_events, marks['sweep'] = _score_sweeps(conn, cfg, marks['sweep'])
+        all_events = alert_events + audit_events + sweep_events
+        if all_events:
+            conn.executemany(
+                "INSERT INTO risk_score_events (entity_type, entity_id, indicator, points, detail, source_table, source_id) VALUES (?,?,?,?,?,?,?)",
+                all_events
+            )
+        _save_risk_marks(conn, marks)
+        conn.commit()
+    except Exception as e:
+        print(f"[-] Risk scoring run failed: {e}")
+    finally:
+        conn.close()
+
+if __name__ == "__main__":
+    run_ueba_models()
+    run_risk_scoring()
