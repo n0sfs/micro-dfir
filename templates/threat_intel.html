@@ -542,6 +542,11 @@ function renderSweepResults() {
             hitsCell = '<span class="text-success">Clean</span>';
         } else if (c.status === 'failed') {
             hitsCell = `<span class="text-danger small">${escHtml(c.stderr || 'error')}</span>`;
+        } else if (c.status === 'done') {
+            // The command ran and exited cleanly, but its stdout didn't parse as a real
+            // {scanned, hits} result -- rather than a silent, indistinguishable-from-
+            // "no data yet" dash, surface that raw output so it's actually diagnosable.
+            hitsCell = `<a href="#" class="text-warning small" onclick="viewSweepRawResult(${c.id}); return false;"><i class="fa-solid fa-circle-question me-1"></i>Unrecognized output</a>`;
         } else {
             hitsCell = '—';
         }
@@ -556,6 +561,21 @@ function renderSweepResults() {
             </tr>
         `;
     }).join('');
+}
+
+// For a command that ran (status=done, not failed/timed-out) but whose stdout didn't
+// match the expected {scanned, hits} shape -- shows the raw stdout/stderr as-is so a
+// parse failure is actually debuggable instead of looking identical to "no data yet".
+function viewSweepRawResult(id) {
+    const c = sweepResultsCache.find(r => r.id === id);
+    if (!c) return;
+    document.getElementById('sweepDetailModalBody').innerHTML = `
+        <div class="mb-2"><strong>Host:</strong> ${escHtml(c.hostname)}</div>
+        <div class="mb-2 text-muted small">This command's output didn't match the expected result format. Raw output below:</div>
+        <div class="mb-2"><strong class="small text-muted">stdout</strong><pre class="bg-black border border-secondary rounded p-2 small" style="white-space:pre-wrap; max-height:300px; overflow-y:auto;">${escHtml(c.stdout) || '<em class="text-muted">(empty)</em>'}</pre></div>
+        <div><strong class="small text-muted">stderr</strong><pre class="bg-black border border-secondary rounded p-2 small" style="white-space:pre-wrap; max-height:200px; overflow-y:auto;">${escHtml(c.stderr) || '<em class="text-muted">(empty)</em>'}</pre></div>
+    `;
+    new bootstrap.Modal(document.getElementById('sweepDetailModal')).show();
 }
 
 function viewSweepHitDetail(id) {
