@@ -61,7 +61,7 @@
     <!-- Risk Scoring pane -->
     <div id="paneRisk" style="display:none;">
         <div class="card-body py-2 px-3 border-bottom border-secondary d-flex justify-content-between align-items-center">
-            <span class="text-muted small"><i class="fa-solid fa-circle-info me-1"></i>Composite point-based risk per entity — Sigma alert severity, IOC sweep hits, sensitive audit actions, and the existing statistical anomalies, summed over a rolling window. Click a row for the full breakdown.</span>
+            <span class="text-muted small"><i class="fa-solid fa-circle-info me-1"></i>Composite point-based risk per entity — Sigma alert severity, IOC sweep hits, custom alert rule matches, failed logins, and the existing statistical anomalies, summed over a rolling window. Click a row for the full breakdown.</span>
             <button class="btn btn-outline-secondary btn-sm" onclick="loadRiskScores()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
         </div>
         <div class="card-body p-0">
@@ -102,7 +102,7 @@
                     <select id="insightsModelSelect" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="loadModelInsights(this.value)">
                         <option value="sigma_alert">Sigma Alert</option>
                         <option value="ioc_sweep_hit">IOC/String Sweep Hit</option>
-                        <option value="sensitive_action">Sensitive Admin Action</option>
+                        <option value="custom_alert_rule">Custom Alert Rule</option>
                         <option value="failed_login">Failed Login</option>
                         <option value="first_time_action">First-Time Action</option>
                         <option value="volume_anomaly">Volume Anomaly</option>
@@ -252,7 +252,7 @@
 
             <div class="card bg-dark border-secondary">
                 <div class="card-header">
-                    <i class="fa-solid fa-list-check me-2"></i>Rules <span class="text-muted small fw-normal">— condition-based scoring against audit log actions or Sigma alerts. Each triggered rule adds its points to the matching entity; a first-time bonus can also apply when this is the first time this exact rule has matched for that entity.</span>
+                    <i class="fa-solid fa-list-check me-2"></i>Rules <span class="text-muted small fw-normal">— condition-based scoring against Sigma alerts (audit log rules are not supported yet). Each triggered rule adds its points to the matching entity; a first-time bonus can also apply when this is the first time this exact rule has matched for that entity.</span>
                 </div>
                 <div class="card-body">
                     <div class="table-responsive mb-3">
@@ -270,7 +270,6 @@
                         <div class="col-md-2">
                             <label class="form-label small text-muted mb-1">Source</label>
                             <select id="arSource" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onAnomalyRuleSourceChange()">
-                                <option value="audit_log">Audit Log</option>
                                 <option value="alerts">Sigma Alert</option>
                             </select>
                         </div>
@@ -382,8 +381,8 @@ function updateSharedStats() {
         const rows = anomalyRulesData || [];
         setStatTile(0, 'Total Rules', rows.length, true);
         setStatTile(1, 'Enabled', rows.filter(r => r.enabled).length, true);
-        setStatTile(2, 'Audit Log Rules', rows.filter(r => r.source === 'audit_log').length, true);
-        setStatTile(3, 'Alert Rules', rows.filter(r => r.source === 'alerts').length, true);
+        setStatTile(2, 'Disabled', rows.filter(r => !r.enabled).length, true);
+        setStatTile(3, 'With First-Time Bonus', rows.filter(r => r.first_time_bonus_points).length, true);
     } else {
         const d = uebaDetectionsData || {};
         setStatTile(0, 'Total Detections', d.total ?? '—', true);
@@ -544,7 +543,7 @@ function saveRiskConfig() {
 let insightsMode = 'entity';
 let insightsSearchDebounce = null;
 const INSIGHTS_MODEL_LABELS = {
-    sigma_alert: 'Sigma Alert', ioc_sweep_hit: 'IOC/String Sweep Hit', sensitive_action: 'Sensitive Admin Action',
+    sigma_alert: 'Sigma Alert', ioc_sweep_hit: 'IOC/String Sweep Hit', custom_alert_rule: 'Custom Alert Rule',
     failed_login: 'Failed Login', first_time_action: 'First-Time Action', volume_anomaly: 'Volume Anomaly', new_source_ip: 'New Source IP',
 };
 const DOW_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -847,7 +846,6 @@ async function deleteUebaExclusion(eid) {
 // the same way this codebase already duplicates small shared constants across files
 // rather than importing across module/language boundaries.
 const ANOMALY_RULE_SOURCES_JS = {
-    audit_log: {fields: ['action', 'username', 'role', 'target_type', 'target_id'], entity_fields: ['username', 'target_id']},
     alerts: {fields: ['severity', 'rule_name', 'host', 'username', 'source_ip', 'destination_ip'], entity_fields: ['host', 'username']},
 };
 let anomalyRulesData = [];
@@ -862,7 +860,7 @@ function onAnomalyRuleSourceChange() {
 }
 
 function anomalyRuleSourceLabel(s) {
-    return s === 'alerts' ? 'Sigma Alert' : 'Audit Log';
+    return s === 'alerts' ? 'Sigma Alert' : s;
 }
 
 function renderAnomalyRules() {
