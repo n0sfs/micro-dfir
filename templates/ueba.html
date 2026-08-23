@@ -341,7 +341,7 @@
         </div>
         <div class="mt-3">
             <div class="d-flex justify-content-between align-items-center mb-1">
-                <label class="form-label small text-muted mb-0">Conditions <span class="fw-normal">— all must match (AND)</span></label>
+                <label class="form-label small text-muted mb-0">Conditions <span class="fw-normal">— combined left-to-right, top to bottom (no grouping)</span></label>
                 <button type="button" class="btn btn-sm btn-outline-primary py-0 px-2" onclick="addAnomalyRuleCondition()"><i class="fa-solid fa-plus me-1"></i>Add Condition</button>
             </div>
             <div id="arConditionsList"></div>
@@ -993,6 +993,7 @@ const ANOMALY_RULE_OPERATORS_JS = [
     ['equals', 'equals'], ['not_equals', 'not equals'], ['contains', 'contains'],
     ['starts_with', 'starts with'], ['ends_with', 'ends with'],
 ];
+const ANOMALY_RULE_LOGIC_OPS_JS = ['AND', 'OR'];
 let anomalyRulesData = [];
 let anomalyRulesLoadedOnce = false;
 let arQuickFilter = 'all';
@@ -1014,18 +1015,28 @@ function onAnomalyRuleSourceChange() {
     renderArConditions();
 }
 
+// Conditions combine left-to-right using each row's own connector -- no operator
+// precedence or parenthesized grouping, matching _rule_matches_all() in
+// src/ueba_engine.py (A AND B OR C means (A AND B) OR C, evaluated strictly in order).
 function renderArConditions() {
     const container = document.getElementById('arConditionsList');
     if (!container) return;
     const src = ANOMALY_RULE_SOURCES_JS[document.getElementById('arSource').value];
     container.innerHTML = arConditions.map((c, i) => `
         <div class="row g-2 align-items-center mb-2">
-            <div class="col-4">
+            <div class="col-2">
+                ${i === 0
+                    ? `<span class="badge bg-secondary w-100 py-2">If</span>`
+                    : `<select class="form-select form-select-sm bg-dark text-light border-secondary" onchange="arConditions[${i}].logic = this.value">
+                        ${ANOMALY_RULE_LOGIC_OPS_JS.map(op => `<option value="${op}" ${(c.logic || 'AND') === op ? 'selected' : ''}>${op}</option>`).join('')}
+                       </select>`}
+            </div>
+            <div class="col-3">
                 <select class="form-select form-select-sm bg-dark text-light border-secondary" onchange="arConditions[${i}].field = this.value">
                     ${src.fields.map(f => `<option value="${f}" ${c.field === f ? 'selected' : ''}>${f}</option>`).join('')}
                 </select>
             </div>
-            <div class="col-3">
+            <div class="col-2">
                 <select class="form-select form-select-sm bg-dark text-light border-secondary" onchange="arConditions[${i}].operator = this.value">
                     ${ANOMALY_RULE_OPERATORS_JS.map(([val, label]) => `<option value="${val}" ${c.operator === val ? 'selected' : ''}>${label}</option>`).join('')}
                 </select>
@@ -1042,7 +1053,7 @@ function renderArConditions() {
 
 function addAnomalyRuleCondition() {
     const src = ANOMALY_RULE_SOURCES_JS[document.getElementById('arSource').value];
-    arConditions.push({ field: src.fields[0], operator: 'equals', value: '' });
+    arConditions.push({ field: src.fields[0], operator: 'equals', value: '', logic: 'AND' });
     renderArConditions();
 }
 
@@ -1050,6 +1061,15 @@ function removeAnomalyRuleCondition(i) {
     if (arConditions.length <= 1) return;
     arConditions.splice(i, 1);
     renderArConditions();
+}
+
+// Mirrors _condition_summary() in src/app.py -- first condition shown bare, every
+// subsequent one prefixed with its own logic connector (left-to-right, no grouping).
+function conditionSummaryHtml(conditions) {
+    return conditions.map((c, i) => {
+        const prefix = i === 0 ? '' : `${escHtml(c.logic || 'AND')} `;
+        return `${prefix}${escHtml(c.field)} ${escHtml(c.operator)} ${escHtml(c.value)}`;
+    }).join(' ');
 }
 
 function anomalyRuleSourceLabel(s) {
@@ -1105,7 +1125,7 @@ function arRenderTable(rows) {
     tbody.innerHTML = rows.map(r => `<tr>
         <td>${escHtml(r.name)}</td>
         <td class="small text-muted">${anomalyRuleSourceLabel(r.source)}</td>
-        <td class="small"><code>${(r.conditions || []).map(c => `${escHtml(c.field)} ${escHtml(c.operator)} ${escHtml(c.value)}`).join(' AND ')}</code></td>
+        <td class="small"><code>${conditionSummaryHtml(r.conditions || [])}</code></td>
         <td class="small">${entityTypeBadge(r.entity_type)}${escHtml(r.entity_field)}</td>
         <td>${r.points}</td>
         <td class="small text-muted">${r.first_time_bonus_points ?? '—'}</td>
@@ -1146,8 +1166,8 @@ function openAnomalyRuleModal(rule) {
     document.getElementById('arSource').value = rule ? rule.source : 'alerts';
     const src = ANOMALY_RULE_SOURCES_JS[document.getElementById('arSource').value];
     arConditions = (rule && rule.conditions && rule.conditions.length)
-        ? rule.conditions.map(c => ({ field: c.field, operator: c.operator, value: c.value }))
-        : [{ field: src.fields[0], operator: 'equals', value: '' }];
+        ? rule.conditions.map(c => ({ field: c.field, operator: c.operator, value: c.value, logic: c.logic || 'AND' }))
+        : [{ field: src.fields[0], operator: 'equals', value: '', logic: 'AND' }];
     onAnomalyRuleSourceChange();
     document.getElementById('arEntityField').value = rule ? rule.entity_field : document.getElementById('arEntityField').value;
     document.getElementById('arPoints').value = rule ? rule.points : '10';
@@ -1158,7 +1178,7 @@ function openAnomalyRuleModal(rule) {
 
 function saveAnomalyRuleModal() {
     const bonusRaw = document.getElementById('arBonus').value.trim();
-    const conditions = arConditions.map(c => ({ field: c.field, operator: c.operator, value: String(c.value || '').trim() }));
+    const conditions = arConditions.map(c => ({ field: c.field, operator: c.operator, value: String(c.value || '').trim(), logic: c.logic || 'AND' }));
     const payload = {
         name: document.getElementById('arName').value.trim(),
         source: document.getElementById('arSource').value,

@@ -1390,6 +1390,11 @@ ANOMALY_RULE_SOURCES = {
 }
 ANOMALY_RULE_OPERATORS = ('equals', 'not_equals', 'contains', 'starts_with', 'ends_with')
 ANOMALY_RULE_ENTITY_TYPES = ('user', 'host')
+# How a condition combines with the one before it in the list. Evaluated strictly
+# left-to-right (no parentheses/precedence) -- see _rule_matches_all() in
+# ueba_engine.py. The first condition's own logic value is stored but ignored (nothing
+# precedes it to combine with).
+ANOMALY_RULE_LOGIC_OPS = ('AND', 'OR')
 
 ANOMALY_RULES_CACHE = None
 ANOMALY_RULES_CACHE_TIME = 0
@@ -1499,6 +1504,8 @@ def _validate_anomaly_rule(d):
             return f"condition operator must be one of {', '.join(ANOMALY_RULE_OPERATORS)}"
         if not str(c.get('value', '')).strip():
             return 'condition value is required'
+        if c.get('logic', 'AND') not in ANOMALY_RULE_LOGIC_OPS:
+            return f"condition logic must be one of {', '.join(ANOMALY_RULE_LOGIC_OPS)}"
     if d.get('entity_field') not in allowed['entity_fields']:
         return f"entity_field must be one of {', '.join(allowed['entity_fields'])} for source '{source}'"
     if d.get('entity_type') not in ANOMALY_RULE_ENTITY_TYPES:
@@ -1515,13 +1522,17 @@ def _validate_anomaly_rule(d):
     return None
 
 def _condition_summary(conditions):
-    return ' AND '.join(f"{c['field']} {c['operator']} {c['value']}" for c in conditions)
+    parts = []
+    for i, c in enumerate(conditions):
+        prefix = '' if i == 0 else f"{c.get('logic', 'AND')} "
+        parts.append(f"{prefix}{c['field']} {c['operator']} {c['value']}")
+    return ' '.join(parts)
 
 def _replace_anomaly_rule_conditions(db, rule_id, conditions):
     db.execute("DELETE FROM anomaly_rule_conditions WHERE rule_id = ?", (rule_id,))
     db.executemany(
-        "INSERT INTO anomaly_rule_conditions (rule_id, field, operator, value) VALUES (?, ?, ?, ?)",
-        [(rule_id, c['field'], c['operator'], str(c['value'])) for c in conditions]
+        "INSERT INTO anomaly_rule_conditions (rule_id, field, operator, value, logic) VALUES (?, ?, ?, ?, ?)",
+        [(rule_id, c['field'], c['operator'], str(c['value']), c.get('logic', 'AND')) for c in conditions]
     )
 
 # Match counts are LEFT JOINed off risk_score_events.rule_id the same way
@@ -1552,8 +1563,8 @@ def api_anomaly_rules():
             return jsonify(ANOMALY_RULES_CACHE)
         rules = [dict(r) for r in db.execute(_ANOMALY_RULES_TUNING_SQL).fetchall()]
         conds_by_rule = {}
-        for c in db.execute("SELECT rule_id, field, operator, value FROM anomaly_rule_conditions ORDER BY id").fetchall():
-            conds_by_rule.setdefault(c['rule_id'], []).append({'field': c['field'], 'operator': c['operator'], 'value': c['value']})
+        for c in db.execute("SELECT rule_id, field, operator, value, logic FROM anomaly_rule_conditions ORDER BY id").fetchall():
+            conds_by_rule.setdefault(c['rule_id'], []).append({'field': c['field'], 'operator': c['operator'], 'value': c['value'], 'logic': c['logic']})
         for r in rules:
             r['conditions'] = conds_by_rule.get(r['id'], [])
         ANOMALY_RULES_CACHE = rules
@@ -2160,6 +2171,7 @@ def migrate_anomaly_rule_conditions():
         conn.execute('''CREATE TABLE IF NOT EXISTS anomaly_rule_conditions (
             id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id INTEGER NOT NULL,
             field TEXT NOT NULL, operator TEXT NOT NULL DEFAULT 'equals', value TEXT NOT NULL,
+            logic TEXT NOT NULL DEFAULT 'AND',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )''')
         conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_rule_conditions_rule ON anomaly_rule_conditions(rule_id)")
@@ -2199,6 +2211,21 @@ def migrate_anomaly_rule_conditions():
             FROM anomaly_rules''')
         conn.execute("DROP TABLE anomaly_rules")
         conn.execute("ALTER TABLE anomaly_rules_new RENAME TO anomaly_rules")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# Separate from migrate_anomaly_rule_conditions() above: that migration's own CREATE
+# TABLE IF NOT EXISTS already includes the logic column for a fresh install, but an
+# install that ran the pre-OR-support version of that migration already has the table
+# without it -- ADD COLUMN is the only piece needed to bring it current.
+def migrate_anomaly_rule_conditions_logic():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(anomaly_rule_conditions)").fetchall()]
+        if 'logic' not in cols:
+            conn.execute("ALTER TABLE anomaly_rule_conditions ADD COLUMN logic TEXT NOT NULL DEFAULT 'AND'")
         conn.commit()
         conn.close()
     except Exception:
@@ -3499,6 +3526,7 @@ migrate_audit_log()
 migrate_risk_scoring()
 migrate_anomaly_rules()
 migrate_anomaly_rule_conditions()
+migrate_anomaly_rule_conditions_logic()
 migrate_risk_score_events_rule_id()
 
 try:

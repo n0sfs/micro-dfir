@@ -28,8 +28,10 @@ CREATE TABLE IF NOT EXISTS risk_score_events (id INTEGER PRIMARY KEY AUTOINCREME
 CREATE INDEX IF NOT EXISTS idx_risk_score_events_entity ON risk_score_events(entity_type, entity_id, computed_at);
 CREATE INDEX IF NOT EXISTS idx_risk_score_events_rule ON risk_score_events(rule_id);
 CREATE TABLE IF NOT EXISTS anomaly_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, source TEXT NOT NULL, entity_field TEXT NOT NULL, entity_type TEXT NOT NULL, points INTEGER NOT NULL, first_time_bonus_points INTEGER, enabled BOOLEAN DEFAULT 1, created_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_by TEXT, updated_at DATETIME);
--- One rule can require several conditions to all match (AND) -- mirrors rule_exclusions'
--- own rule_id/field/operator/value shape above, the same one-to-many-conditions pattern
--- already established for Sigma rule exclusions, reused here instead of inventing a new one.
-CREATE TABLE IF NOT EXISTS anomaly_rule_conditions (id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id INTEGER NOT NULL, field TEXT NOT NULL, operator TEXT NOT NULL DEFAULT 'equals', value TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+-- A rule's conditions combine left-to-right via each condition's own logic (AND/OR,
+-- default AND; the first condition's logic is stored but ignored, nothing precedes it)
+-- -- mirrors rule_exclusions' own rule_id/field/operator/value shape above, the same
+-- one-to-many-conditions pattern already established for Sigma rule exclusions, reused
+-- here instead of inventing a new one.
+CREATE TABLE IF NOT EXISTS anomaly_rule_conditions (id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id INTEGER NOT NULL, field TEXT NOT NULL, operator TEXT NOT NULL DEFAULT 'equals', value TEXT NOT NULL, logic TEXT NOT NULL DEFAULT 'AND', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS idx_anomaly_rule_conditions_rule ON anomaly_rule_conditions(rule_id);
