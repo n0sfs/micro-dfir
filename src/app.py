@@ -1364,6 +1364,13 @@ ANOMALY_RULE_SOURCES = {
 ANOMALY_RULE_OPERATORS = ('equals', 'not_equals', 'contains')
 ANOMALY_RULE_ENTITY_TYPES = ('user', 'host')
 
+ANOMALY_RULES_CACHE = None
+ANOMALY_RULES_CACHE_TIME = 0
+
+def invalidate_anomaly_rules_cache():
+    global ANOMALY_RULES_CACHE
+    ANOMALY_RULES_CACHE = None
+
 def _deep_merge_risk_config(base, override):
     for k, v in (override or {}).items():
         if isinstance(v, dict) and isinstance(base.get(k), dict):
@@ -1474,12 +1481,36 @@ def _validate_anomaly_rule(d, partial=False):
             return 'first_time_bonus_points must be a number'
     return None
 
+# Match counts are LEFT JOINed off risk_score_events.rule_id the same way
+# /api/rules/tuning joins alerts.rule_id against sigma_rules -- see ANOMALY_RULES_CACHE
+# below for the matching cache pattern (same RULES_CACHE_TTL, invalidated on any write).
+_ANOMALY_RULES_TUNING_SQL = """
+    SELECT ar.*,
+           COALESCE(c7.cnt, 0) as matches_7d,
+           COALESCE(c30.cnt, 0) as matches_30d,
+           COALESCE(ctot.cnt, 0) as matches_total,
+           lm.last_matched
+    FROM anomaly_rules ar
+    LEFT JOIN (SELECT rule_id, COUNT(*) cnt FROM risk_score_events WHERE rule_id IS NOT NULL AND computed_at >= datetime('now', '-7 days') GROUP BY rule_id) c7 ON c7.rule_id = ar.id
+    LEFT JOIN (SELECT rule_id, COUNT(*) cnt FROM risk_score_events WHERE rule_id IS NOT NULL AND computed_at >= datetime('now', '-30 days') GROUP BY rule_id) c30 ON c30.rule_id = ar.id
+    LEFT JOIN (SELECT rule_id, COUNT(*) cnt FROM risk_score_events WHERE rule_id IS NOT NULL GROUP BY rule_id) ctot ON ctot.rule_id = ar.id
+    LEFT JOIN (SELECT rule_id, MAX(computed_at) last_matched FROM risk_score_events WHERE rule_id IS NOT NULL GROUP BY rule_id) lm ON lm.rule_id = ar.id
+    ORDER BY matches_30d DESC, ar.name ASC
+"""
+
 @app.route('/api/ueba/anomaly-rules', methods=['GET', 'POST'])
 @login_required
 def api_anomaly_rules():
+    global ANOMALY_RULES_CACHE, ANOMALY_RULES_CACHE_TIME
     db = get_db()
     if request.method == 'GET':
-        return jsonify([dict(r) for r in db.execute("SELECT * FROM anomaly_rules ORDER BY id DESC").fetchall()])
+        import time
+        if ANOMALY_RULES_CACHE is not None and (time.time() - ANOMALY_RULES_CACHE_TIME) < RULES_CACHE_TTL:
+            return jsonify(ANOMALY_RULES_CACHE)
+        out = [dict(r) for r in db.execute(_ANOMALY_RULES_TUNING_SQL).fetchall()]
+        ANOMALY_RULES_CACHE = out
+        ANOMALY_RULES_CACHE_TIME = time.time()
+        return jsonify(ANOMALY_RULES_CACHE)
     if current_user.role != 'admin':
         return jsonify({'error': 'Admin required'}), 403
     d = request.get_json() or {}
@@ -1494,6 +1525,7 @@ def api_anomaly_rules():
         (d['name'].strip(), d['source'], d['field'], d['operator'], str(d['value']), d['entity_field'], d['entity_type'], int(d['points']), bonus, current_user.username)
     )
     db.commit()
+    invalidate_anomaly_rules_cache()
     log_audit('anomaly_rule_create', 'anomaly_rule', None, f"{d['name']}: {d['field']} {d['operator']} {d['value']} -> {d['points']} pts")
     return jsonify({'status': 'success'}), 201
 
@@ -1506,6 +1538,7 @@ def api_anomaly_rule_detail(rid):
     if request.method == 'DELETE':
         db.execute("DELETE FROM anomaly_rules WHERE id = ?", (rid,))
         db.commit()
+        invalidate_anomaly_rules_cache()
         log_audit('anomaly_rule_delete', 'anomaly_rule', rid)
         return jsonify({'ok': 1})
 
@@ -1515,6 +1548,7 @@ def api_anomaly_rule_detail(rid):
     if set(d.keys()) <= {'enabled'}:
         db.execute("UPDATE anomaly_rules SET enabled = ? WHERE id = ?", (1 if d.get('enabled') else 0, rid))
         db.commit()
+        invalidate_anomaly_rules_cache()
         log_audit('anomaly_rule_toggle', 'anomaly_rule', rid)
         return jsonify({'ok': 1})
 
@@ -1530,6 +1564,7 @@ def api_anomaly_rule_detail(rid):
          int(d['points']), bonus, 1 if d.get('enabled', True) else 0, current_user.username, rid)
     )
     db.commit()
+    invalidate_anomaly_rules_cache()
     log_audit('anomaly_rule_update', 'anomaly_rule', rid, f"{d['name']}: {d['field']} {d['operator']} {d['value']} -> {d['points']} pts")
     return jsonify({'status': 'success'})
 
@@ -2058,6 +2093,19 @@ def migrate_anomaly_rules():
         # was pulled back out shortly after shipping -- Sigma alerts only for now. Clean
         # up any rows a prior deploy already seeded; harmless no-op once none remain.
         conn.execute("DELETE FROM anomaly_rules WHERE source = 'audit_log'")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_risk_score_events_rule_id():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        try:
+            conn.execute("ALTER TABLE risk_score_events ADD COLUMN rule_id INTEGER")
+        except Exception:
+            pass
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_score_events_rule ON risk_score_events(rule_id)")
         conn.commit()
         conn.close()
     except Exception:
@@ -3326,6 +3374,7 @@ migrate_agent_tokens()
 migrate_audit_log()
 migrate_risk_scoring()
 migrate_anomaly_rules()
+migrate_risk_score_events_rule_id()
 
 try:
     # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every
