@@ -277,8 +277,8 @@ def run_ueba_models():
             # the same computation rather than re-deriving it from raw_json later.
             pts = risk_cfg['points'].get(f'volume_anomaly_{severity.lower()}', risk_cfg['points']['volume_anomaly_medium'])
             conn.execute(
-                "INSERT INTO risk_score_events (entity_type, entity_id, indicator, points, detail, source_table, source_id) VALUES (?,?,?,?,?,?,?)",
-                (r['entity_type'], r['entity_id'], 'volume_anomaly', pts, message, 'ueba_entity_baselines', None)
+                "INSERT INTO risk_score_events (entity_type, entity_id, indicator, points, detail, source_table, source_id, rule_id) VALUES (?,?,?,?,?,?,?,?)",
+                (r['entity_type'], r['entity_id'], 'volume_anomaly', pts, message, 'ueba_entity_baselines', None, None)
             )
         for h in new_ip_hits:
             message = (f"{h['username']} (user) was active from a source IP not seen for this user in the past "
@@ -289,8 +289,8 @@ def run_ueba_models():
                 (h['username'], message, json.dumps({**h, 'detection_type': 'new_source_ip'}))
             )
             conn.execute(
-                "INSERT INTO risk_score_events (entity_type, entity_id, indicator, points, detail, source_table, source_id) VALUES (?,?,?,?,?,?,?)",
-                ('user', h['username'], 'new_source_ip', risk_cfg['points']['new_source_ip'], message, 'events', None)
+                "INSERT INTO risk_score_events (entity_type, entity_id, indicator, points, detail, source_table, source_id, rule_id) VALUES (?,?,?,?,?,?,?,?)",
+                ('user', h['username'], 'new_source_ip', risk_cfg['points']['new_source_ip'], message, 'events', None, None)
             )
         conn.commit()
     except Exception as e:
@@ -340,7 +340,7 @@ def _score_alerts(conn, cfg, last_id):
         for entity_type, entity_id in (('host', r['host']), ('user', r['username'])):
             if not entity_id or entity_id in ('', '-', 'UNKNOWN'):
                 continue
-            events.append((entity_type, entity_id, 'sigma_alert', pts, detail, 'alerts', str(r['id'])))
+            events.append((entity_type, entity_id, 'sigma_alert', pts, detail, 'alerts', str(r['id']), None))
         # Custom alert rules add on top of the flat severity score above rather than
         # replace it -- a noteworthy pattern (e.g. a specific rule_name) can be weighted
         # heavier without changing how every other alert of the same severity scores.
@@ -351,10 +351,10 @@ def _score_alerts(conn, cfg, last_id):
             if not entity_id:
                 continue
             events.append((rule['entity_type'], entity_id, 'custom_alert_rule', rule['points'],
-                           f"Matched rule '{rule['name']}'", 'alerts', str(r['id'])))
+                           f"Matched rule '{rule['name']}'", 'alerts', str(r['id']), rule['id']))
             if rule['first_time_bonus_points'] and not _rule_ever_matched_before(conn, 'alerts', rule, entity_id, r['id']):
                 events.append((rule['entity_type'], entity_id, 'first_time_action', rule['first_time_bonus_points'],
-                               f"First match of rule '{rule['name']}' by this entity", 'alerts', str(r['id'])))
+                               f"First match of rule '{rule['name']}' by this entity", 'alerts', str(r['id']), rule['id']))
     return events, max_id
 
 # Anomaly rules don't cover audit_log for now (Sigma alerts only) -- this indicator
@@ -365,7 +365,7 @@ def _score_audit(conn, cfg, last_id):
     for r in rows:
         max_id = max(max_id, r['id'])
         actor = r['target_id'] or '(unknown)'
-        events.append(('user', actor, 'failed_login', cfg['points']['failed_login'], 'Failed login attempt', 'audit_log', str(r['id'])))
+        events.append(('user', actor, 'failed_login', cfg['points']['failed_login'], 'Failed login attempt', 'audit_log', str(r['id']), None))
     return events, max_id
 
 def _score_sweeps(conn, cfg, last_id):
@@ -383,7 +383,7 @@ def _score_sweeps(conn, cfg, last_id):
         if not hits:
             continue
         events.append(('host', r['hostname'], 'ioc_sweep_hit', cfg['points']['sweep_hit'],
-                       f"{len(hits)} IOC match(es) found in a sweep", 'agent_commands', str(r['id'])))
+                       f"{len(hits)} IOC match(es) found in a sweep", 'agent_commands', str(r['id']), None))
     return events, max_id
 
 def run_risk_scoring():
@@ -398,7 +398,7 @@ def run_risk_scoring():
         all_events = alert_events + audit_events + sweep_events
         if all_events:
             conn.executemany(
-                "INSERT INTO risk_score_events (entity_type, entity_id, indicator, points, detail, source_table, source_id) VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO risk_score_events (entity_type, entity_id, indicator, points, detail, source_table, source_id, rule_id) VALUES (?,?,?,?,?,?,?,?)",
                 all_events
             )
         _save_risk_marks(conn, marks)

@@ -273,62 +273,102 @@
                     <i class="fa-solid fa-list-check me-2"></i>Rules <span class="text-muted small fw-normal">— condition-based scoring against Sigma alerts (audit log rules are not supported yet). Each triggered rule adds its points to the matching entity; a first-time bonus can also apply when this is the first time this exact rule has matched for that entity.</span>
                 </div>
                 <div class="card-body">
-                    <div class="table-responsive mb-3">
-                        <table class="table table-dark table-sm align-middle mb-0">
-                            <thead><tr><th>Name</th><th>Source</th><th>Condition</th><th>Entity</th><th>Points</th><th>First-Time Bonus</th><th>Enabled</th><th></th></tr></thead>
-                            <tbody id="anomalyRulesTableBody"><tr><td colspan="8" class="text-center text-muted py-4">Loading…</td></tr></tbody>
+                    <div class="d-flex flex-wrap gap-2 mb-3 align-items-center bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
+                        <input type="text" id="arSearchBox" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width: 240px;" placeholder="Search rule names..." oninput="arQ = this.value.toLowerCase(); arApplyFilters();">
+                        <div class="btn-group btn-group-sm" role="group">
+                            <button type="button" class="btn btn-outline-secondary ar-quick-filter-btn active-filter" data-arqf="all" onclick="setArQuickFilter('all')">All</button>
+                            <button type="button" class="btn btn-outline-secondary ar-quick-filter-btn" data-arqf="never" onclick="setArQuickFilter('never')">Never Matched</button>
+                            <button type="button" class="btn btn-outline-secondary ar-quick-filter-btn" data-arqf="recent" onclick="setArQuickFilter('recent')">Matched Recently</button>
+                            <button type="button" class="btn btn-outline-secondary ar-quick-filter-btn" data-arqf="disabled" onclick="setArQuickFilter('disabled')">Disabled</button>
+                        </div>
+                        <span class="ms-auto text-muted small" id="arRowCountLabel"></span>
+                        {% if current_user.role == 'admin' %}
+                        <button type="button" class="btn btn-sm btn-primary" onclick="openAnomalyRuleModal()"><i class="fa-solid fa-plus me-1"></i> Add Rule</button>
+                        {% endif %}
+                    </div>
+                    <div class="table-responsive mb-0">
+                        <table class="table table-dark table-hover table-sm align-middle mb-0" id="anomalyRulesTable">
+                            <thead>
+                                <tr>
+                                    <th class="th-label" style="cursor:pointer;" onclick="arToggleSort('name')">Name <i class="fa-solid fa-sort sort-ic" id="sortIc-ar-name"></i></th>
+                                    <th>Source</th>
+                                    <th>Condition</th>
+                                    <th>Entity</th>
+                                    <th class="th-label" style="cursor:pointer;" onclick="arToggleSort('points')">Points <i class="fa-solid fa-sort sort-ic" id="sortIc-ar-points"></i></th>
+                                    <th>First-Time Bonus</th>
+                                    <th class="th-label" style="cursor:pointer;" onclick="arToggleSort('matches_7d')">Matches (7d) <i class="fa-solid fa-sort sort-ic" id="sortIc-ar-matches_7d"></i></th>
+                                    <th class="th-label" style="cursor:pointer;" onclick="arToggleSort('matches_30d')">Matches (30d) <i class="fa-solid fa-sort sort-ic" id="sortIc-ar-matches_30d"></i></th>
+                                    <th class="th-label" style="cursor:pointer;" onclick="arToggleSort('last_matched')">Last Matched <i class="fa-solid fa-sort sort-ic" id="sortIc-ar-last_matched"></i></th>
+                                    <th>Enabled</th>
+                                    <th style="width:90px;"></th>
+                                </tr>
+                            </thead>
+                            <tbody id="anomalyRulesTableBody"><tr><td colspan="11" class="text-center text-muted py-4">Loading…</td></tr></tbody>
                         </table>
                     </div>
-                    {% if current_user.role == 'admin' %}
-                    <div class="row g-2 align-items-end bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
-                        <div class="col-md-2">
-                            <label class="form-label small text-muted mb-1">Name</label>
-                            <input type="text" id="arName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Bulk rule deletion">
-                        </div>
-                        <div class="col-md-2">
-                            <label class="form-label small text-muted mb-1">Source</label>
-                            <select id="arSource" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onAnomalyRuleSourceChange()">
-                                <option value="alerts">Sigma Alert</option>
-                            </select>
-                        </div>
-                        <div class="col-md-2">
-                            <label class="form-label small text-muted mb-1">Field</label>
-                            <select id="arField" class="form-select form-select-sm bg-dark text-light border-secondary"></select>
-                        </div>
-                        <div class="col-md-1">
-                            <label class="form-label small text-muted mb-1">Operator</label>
-                            <select id="arOperator" class="form-select form-select-sm bg-dark text-light border-secondary">
-                                <option value="equals">equals</option>
-                                <option value="not_equals">not equals</option>
-                                <option value="contains">contains</option>
-                            </select>
-                        </div>
-                        <div class="col-md-2">
-                            <label class="form-label small text-muted mb-1">Value</label>
-                            <input type="text" id="arValue" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. rule_bulk_toggle">
-                        </div>
-                        <div class="col-md-2">
-                            <label class="form-label small text-muted mb-1">Score Entity</label>
-                            <select id="arEntityField" class="form-select form-select-sm bg-dark text-light border-secondary"></select>
-                        </div>
-                        <div class="col-md-1">
-                            <label class="form-label small text-muted mb-1">Points</label>
-                            <input type="number" id="arPoints" class="form-control form-control-sm bg-dark text-light border-secondary" value="10" min="1" step="1">
-                        </div>
-                        <div class="col-md-2 mt-2">
-                            <label class="form-label small text-muted mb-1">First-Time Bonus (optional)</label>
-                            <input type="number" id="arBonus" class="form-control form-control-sm bg-dark text-light border-secondary" min="0" step="1" placeholder="none">
-                        </div>
-                        <div class="col-md-2 mt-2">
-                            <button type="button" class="btn btn-sm btn-outline-primary w-100" onclick="addAnomalyRule()"><i class="fa-solid fa-plus me-1"></i> Add Rule</button>
-                        </div>
-                    </div>
-                    <div id="arError" class="text-danger small mt-2" style="display:none;"></div>
-                    {% endif %}
                 </div>
             </div>
         </div>
     </div>
+</div>
+
+<!-- Anomaly Rule Add/Edit Modal -->
+<div class="modal fade" id="anomalyRuleModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title" id="anomalyRuleModalTitle"><i class="fa-solid fa-list-check me-2"></i>Add Rule</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="row g-3">
+            <div class="col-md-6">
+                <label class="form-label small text-muted mb-1">Name</label>
+                <input type="text" id="arName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Mimikatz detected bonus">
+            </div>
+            <div class="col-md-6">
+                <label class="form-label small text-muted mb-1">Source</label>
+                <select id="arSource" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onAnomalyRuleSourceChange()">
+                    <option value="alerts">Sigma Alert</option>
+                </select>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label small text-muted mb-1">Field</label>
+                <select id="arField" class="form-select form-select-sm bg-dark text-light border-secondary"></select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small text-muted mb-1">Operator</label>
+                <select id="arOperator" class="form-select form-select-sm bg-dark text-light border-secondary">
+                    <option value="equals">equals</option>
+                    <option value="not_equals">not equals</option>
+                    <option value="contains">contains</option>
+                </select>
+            </div>
+            <div class="col-md-5">
+                <label class="form-label small text-muted mb-1">Value</label>
+                <input type="text" id="arValue" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Mimikatz">
+            </div>
+            <div class="col-md-4">
+                <label class="form-label small text-muted mb-1">Score Entity</label>
+                <select id="arEntityField" class="form-select form-select-sm bg-dark text-light border-secondary"></select>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label small text-muted mb-1">Points</label>
+                <input type="number" id="arPoints" class="form-control form-control-sm bg-dark text-light border-secondary" value="10" min="1" step="1">
+            </div>
+            <div class="col-md-4">
+                <label class="form-label small text-muted mb-1">First-Time Bonus (optional)</label>
+                <input type="number" id="arBonus" class="form-control form-control-sm bg-dark text-light border-secondary" min="0" step="1" placeholder="none">
+            </div>
+        </div>
+        <div id="arError" class="text-danger small mt-3" style="display:none;"></div>
+      </div>
+      <div class="modal-footer border-secondary">
+        <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary btn-sm" onclick="saveAnomalyRuleModal()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Rule</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Risk Score Detail Modal -->
@@ -873,6 +913,10 @@ const ANOMALY_RULE_SOURCES_JS = {
 };
 let anomalyRulesData = [];
 let anomalyRulesLoadedOnce = false;
+let arQuickFilter = 'all';
+let arQ = '';
+let arSortState = { key: 'matches_30d', dir: 'desc' };
+let arEditingId = null;
 
 function onAnomalyRuleSourceChange() {
     const src = ANOMALY_RULE_SOURCES_JS[document.getElementById('arSource').value];
@@ -886,23 +930,69 @@ function anomalyRuleSourceLabel(s) {
     return s === 'alerts' ? 'Sigma Alert' : s;
 }
 
-function renderAnomalyRules() {
+function setArQuickFilter(name) {
+    arQuickFilter = name;
+    document.querySelectorAll('.ar-quick-filter-btn').forEach(b => b.classList.toggle('active-filter', b.dataset.arqf === name));
+    arApplyFilters();
+}
+
+function arApplyFilters() {
+    let rows = anomalyRulesData;
+    if (arQuickFilter === 'never') rows = rows.filter(r => r.matches_total === 0);
+    else if (arQuickFilter === 'recent') rows = rows.filter(r => r.matches_7d > 0);
+    else if (arQuickFilter === 'disabled') rows = rows.filter(r => !r.enabled);
+    if (arQ) rows = rows.filter(r => r.name.toLowerCase().includes(arQ));
+    arRenderTable(arApplySort(rows));
+}
+
+function arApplySort(rows) {
+    const { key, dir } = arSortState;
+    const sorted = rows.slice().sort((a, b) => {
+        let av = a[key], bv = b[key];
+        if (typeof av === 'string') av = av.toLowerCase();
+        if (typeof bv === 'string') bv = bv.toLowerCase();
+        if (av === null || av === undefined) av = '';
+        if (bv === null || bv === undefined) bv = '';
+        if (av < bv) return dir === 'asc' ? -1 : 1;
+        if (av > bv) return dir === 'asc' ? 1 : -1;
+        return 0;
+    });
+    return sorted;
+}
+
+function arToggleSort(key) {
+    if (arSortState.key === key) arSortState.dir = arSortState.dir === 'asc' ? 'desc' : 'asc';
+    else { arSortState.key = key; arSortState.dir = 'asc'; }
+    document.querySelectorAll('#anomalyRulesTable .sort-ic').forEach(i => i.classList.remove('active-sort'));
+    const ic = document.getElementById('sortIc-ar-' + key);
+    if (ic) ic.classList.add('active-sort');
+    arApplyFilters();
+}
+
+function arRenderTable(rows) {
     const tbody = document.getElementById('anomalyRulesTableBody');
-    if (!anomalyRulesData.length) {
-        tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-4">No rules yet.</td></tr>';
+    document.getElementById('arRowCountLabel').innerText = `${rows.length} of ${anomalyRulesData.length} rules`;
+    if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted py-4">No rules match this filter.</td></tr>';
         return;
     }
-    tbody.innerHTML = anomalyRulesData.map(r => `<tr>
+    tbody.innerHTML = rows.map(r => `<tr>
         <td>${escHtml(r.name)}</td>
         <td class="small text-muted">${anomalyRuleSourceLabel(r.source)}</td>
         <td class="small"><code>${escHtml(r.field)} ${escHtml(r.operator)} ${escHtml(r.value)}</code></td>
         <td class="small">${entityTypeBadge(r.entity_type)}${escHtml(r.entity_field)}</td>
         <td>${r.points}</td>
         <td class="small text-muted">${r.first_time_bonus_points ?? '—'}</td>
+        <td>${r.matches_7d}</td>
+        <td>${r.matches_30d}</td>
+        <td class="small text-muted">${r.last_matched ? escHtml(r.last_matched) : '—'}</td>
         <td>${IS_ADMIN
             ? `<input type="checkbox" class="form-check-input" ${r.enabled ? 'checked' : ''} onchange="toggleAnomalyRule(${r.id}, this.checked)">`
             : (r.enabled ? '<span class="badge bg-success">On</span>' : '<span class="badge bg-secondary">Off</span>')}</td>
-        <td>${IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteAnomalyRule(${r.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
+        <td class="text-nowrap">${IS_ADMIN ? `
+            <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="openAnomalyRuleModalById(${r.id})"><i class="fa-solid fa-pen"></i></button>
+            <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" onclick="deleteAnomalyRule(${r.id})"><i class="fa-solid fa-trash"></i></button>
+        ` : ''}</td>
     </tr>`).join('');
 }
 
@@ -910,12 +1000,36 @@ function loadAnomalyRules() {
     fetch('/api/ueba/anomaly-rules').then(r => r.json()).then(rows => {
         anomalyRulesData = rows || [];
         anomalyRulesLoadedOnce = true;
-        renderAnomalyRules();
+        arApplyFilters();
         updateSharedStats();
     }).catch(err => console.error('Error loading anomaly rules:', err));
 }
 
-function addAnomalyRule() {
+// Row edit buttons pass only a numeric id (openAnomalyRuleModalById), never the rule
+// object itself -- serializing untrusted rule data (name/value) straight into an
+// onclick attribute would be an XSS vector the moment either field contained a quote.
+function openAnomalyRuleModalById(id) {
+    openAnomalyRuleModal(anomalyRulesData.find(r => r.id === id));
+}
+
+function openAnomalyRuleModal(rule) {
+    arEditingId = rule ? rule.id : null;
+    document.getElementById('anomalyRuleModalTitle').innerHTML = rule
+        ? '<i class="fa-solid fa-pen me-2"></i>Edit Rule' : '<i class="fa-solid fa-list-check me-2"></i>Add Rule';
+    document.getElementById('arName').value = rule ? rule.name : '';
+    document.getElementById('arSource').value = rule ? rule.source : 'alerts';
+    onAnomalyRuleSourceChange();
+    document.getElementById('arField').value = rule ? rule.field : document.getElementById('arField').value;
+    document.getElementById('arOperator').value = rule ? rule.operator : 'equals';
+    document.getElementById('arValue').value = rule ? rule.value : '';
+    document.getElementById('arEntityField').value = rule ? rule.entity_field : document.getElementById('arEntityField').value;
+    document.getElementById('arPoints').value = rule ? rule.points : '10';
+    document.getElementById('arBonus').value = (rule && rule.first_time_bonus_points != null) ? rule.first_time_bonus_points : '';
+    document.getElementById('arError').style.display = 'none';
+    new bootstrap.Modal(document.getElementById('anomalyRuleModal')).show();
+}
+
+function saveAnomalyRuleModal() {
     const bonusRaw = document.getElementById('arBonus').value.trim();
     const payload = {
         name: document.getElementById('arName').value.trim(),
@@ -932,17 +1046,16 @@ function addAnomalyRule() {
     errBox.style.display = 'none';
     if (!payload.name) { errBox.innerText = 'Name is required.'; errBox.style.display = 'block'; return; }
     if (!payload.value) { errBox.innerText = 'Value is required.'; errBox.style.display = 'block'; return; }
-    fetch('/api/ueba/anomaly-rules', {
-        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    const url = arEditingId ? `/api/ueba/anomaly-rules/${arEditingId}` : '/api/ueba/anomaly-rules';
+    const method = arEditingId ? 'PUT' : 'POST';
+    fetch(url, {
+        method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
     }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
         if (ok) {
-            document.getElementById('arName').value = '';
-            document.getElementById('arValue').value = '';
-            document.getElementById('arPoints').value = '10';
-            document.getElementById('arBonus').value = '';
+            bootstrap.Modal.getInstance(document.getElementById('anomalyRuleModal')).hide();
             loadAnomalyRules();
         } else {
-            errBox.innerText = data.error || 'Failed to add rule.'; errBox.style.display = 'block';
+            errBox.innerText = data.error || 'Failed to save rule.'; errBox.style.display = 'block';
         }
     }).catch(err => { errBox.innerText = 'Error: ' + err; errBox.style.display = 'block'; });
 }
