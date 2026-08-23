@@ -33,41 +33,72 @@ ANOMALY_RULE_SOURCES = {
     'alerts': {'fields': ('severity', 'rule_name', 'host', 'username', 'source_ip', 'destination_ip'), 'entity_fields': ('host', 'username')},
 }
 
-def _rule_matches(rule, row):
-    if rule['field'] not in row.keys():
+def _condition_matches(condition, row):
+    if condition['field'] not in row.keys():
         return False
-    row_value = row[rule['field']]
+    row_value = row[condition['field']]
     row_value = '' if row_value is None else str(row_value)
-    target = rule['value'] or ''
-    op = rule['operator']
+    target = condition['value'] or ''
+    op = condition['operator']
     if op == 'equals':
         return row_value == target
     if op == 'not_equals':
         return row_value != target
     if op == 'contains':
         return target.lower() in row_value.lower()
+    if op == 'starts_with':
+        return row_value.lower().startswith(target.lower())
+    if op == 'ends_with':
+        return row_value.lower().endswith(target.lower())
     return False
+
+# A rule matches only when EVERY one of its conditions matches (AND) -- e.g. "severity
+# equals Critical AND rule_name contains Mimikatz" requires both, not either. A rule
+# with no conditions at all never matches (safe default, not "matches everything").
+def _rule_matches_all(conditions, row):
+    if not conditions:
+        return False
+    return all(_condition_matches(c, row) for c in conditions)
 
 def _load_anomaly_rules(conn, source):
     allowed = ANOMALY_RULE_SOURCES.get(source)
     if not allowed:
         return []
     rows = conn.execute(
-        "SELECT id, name, field, operator, value, entity_field, entity_type, points, first_time_bonus_points "
+        "SELECT id, name, entity_field, entity_type, points, first_time_bonus_points "
         "FROM anomaly_rules WHERE source = ? AND enabled = 1",
         (source,)
     ).fetchall()
-    return [r for r in rows if r['field'] in allowed['fields'] and r['entity_field'] in allowed['entity_fields']]
+    rules = []
+    for r in rows:
+        if r['entity_field'] not in allowed['entity_fields']:
+            continue
+        cond_rows = conn.execute(
+            "SELECT field, operator, value FROM anomaly_rule_conditions WHERE rule_id = ?", (r['id'],)
+        ).fetchall()
+        conditions = [dict(c) for c in cond_rows]
+        # Defense in depth: every condition's field must be in this source's allowlist.
+        # A rule with any invalid condition is excluded entirely rather than silently
+        # dropping just that one condition, which would weaken an AND into something
+        # looser than what was actually configured (and, for entity_field elsewhere,
+        # is exactly the check that keeps a stored value safe to interpolate into SQL).
+        if not conditions or any(c['field'] not in allowed['fields'] for c in conditions):
+            continue
+        rule = dict(r)
+        rule['conditions'] = conditions
+        rules.append(rule)
+    return rules
 
-# "Is this normal for THIS entity" for a custom rule: has this exact rule ever matched
-# for this entity before (anywhere in the source table's history, not just the current
-# scoring window)? Generalizes the old fixed "same username + same action" check to any
-# rule condition, so a first occurrence -- not just a first-time action -- earns the bonus.
+# "Is this normal for THIS entity" for a custom rule: has this exact rule (all of its
+# conditions, AND-combined) ever matched for this entity before (anywhere in the source
+# table's history, not just the current scoring window)? Generalizes the old fixed
+# "same username + same action" check to any rule condition, so a first occurrence --
+# not just a first-time action -- earns the bonus.
 def _rule_ever_matched_before(conn, table, rule, entity_id, before_id):
     prior_rows = conn.execute(
         f"SELECT * FROM {table} WHERE {rule['entity_field']} = ? AND id < ?", (entity_id, before_id)
     ).fetchall()
-    return any(_rule_matches(rule, pr) for pr in prior_rows)
+    return any(_rule_matches_all(rule['conditions'], pr) for pr in prior_rows)
 
 def _deep_merge(base, override):
     for k, v in (override or {}).items():
@@ -344,7 +375,7 @@ def _score_alerts(conn, cfg, last_id):
         # replace it -- a noteworthy pattern (e.g. a specific rule_name) can be weighted
         # heavier without changing how every other alert of the same severity scores.
         for rule in rules:
-            if not _rule_matches(rule, r):
+            if not _rule_matches_all(rule['conditions'], r):
                 continue
             entity_id = r[rule['entity_field']]
             if not entity_id:
