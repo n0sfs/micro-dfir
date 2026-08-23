@@ -196,7 +196,7 @@ def login():
         if user and check_password_hash(user['password_hash'], request.form['password']):
             login_user(User(user['id'], user['username'], user['role']))
             log_audit('login_success', 'user', user['username'])
-            return redirect(url_for('dash'))
+            return redirect(url_for('home'))
         # current_user is still anonymous here -- target_id records what was *typed*,
         # since that's the only identity available for a failed attempt, and repeated
         # failures against one username/IP is exactly what this is for spotting.
@@ -288,7 +288,7 @@ def api_ingest():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/')
+@app.route('/siem')
 @login_required
 def dash():
     active_tab = request.args.get('tab', 'search')
@@ -297,6 +297,33 @@ def dash():
     pdfs = [f for f in os.listdir(report_dir) if f.endswith('.pdf')]
     pdfs.sort(reverse=True)
     return render_template('dashboard.html', reports=pdfs, channels=get_agent_channels(), active_tab=active_tab, current_user=current_user, compliance_frameworks=COMPLIANCE_FRAMEWORKS)
+
+# Home count queries reuse existing canonical data sources rather than new bookkeeping:
+# ueba_entity_baselines is already this app's registry of every host/user the UEBA
+# model tracks (Anomaly Detections tab and Data Insights already treat it that way).
+@app.route('/')
+@login_required
+def home():
+    return render_template('home.html', current_user=current_user)
+
+@app.route('/api/home/stats')
+@login_required
+def api_home_stats():
+    db = get_db()
+    hosts_tracked = db.execute("SELECT COUNT(*) FROM ueba_entity_baselines WHERE entity_type = 'host'").fetchone()[0]
+    users_tracked = db.execute("SELECT COUNT(*) FROM ueba_entity_baselines WHERE entity_type = 'user'").fetchone()[0]
+    # "today" = calendar day, matching /api/ueba/detections' own today count rather than
+    # a rolling 24h window, so this tile and that tab's stat always agree with each other.
+    events_today = db.execute("SELECT COUNT(*) FROM live_logs WHERE date(timestamp) = date('now')").fetchone()[0]
+    alerts_unacknowledged = db.execute("SELECT COUNT(*) FROM alerts WHERE acknowledged = 0").fetchone()[0]
+    anomalies_today = db.execute(
+        "SELECT COUNT(*) FROM events WHERE app_name = 'duckdb_ueba' AND date(timestamp) = date('now')"
+    ).fetchone()[0]
+    return jsonify({
+        'hosts_tracked': hosts_tracked, 'users_tracked': users_tracked,
+        'events_today': events_today, 'alerts_unacknowledged': alerts_unacknowledged,
+        'anomalies_today': anomalies_today,
+    })
 
 @app.route('/rules')
 @login_required
@@ -2340,7 +2367,7 @@ def settings_network():
     import sqlite3, subprocess
     from flask import request, flash, redirect, url_for
 
-    if current_user.role != "admin": return redirect(url_for("dash"))
+    if current_user.role != "admin": return redirect(url_for("home"))
     if not validate_csrf(): return redirect(url_for("settings"))
 
     ui_ip = request.form.get("ui_bind_ip", "0.0.0.0")
