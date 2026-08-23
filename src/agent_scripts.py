@@ -171,13 +171,23 @@ def string_sweep(patterns):
     # below, combined with a lower pattern cap and size cap (see _get_live_yara_strings
     # in app.py and the 5MB threshold here) to keep total worst-case time well inside
     # the agent's command timeout even on a machine with many candidate files.
+    # Real production output (95 files scanned, generic strings like "Microsoft" and
+    # "Uninstall" still in the pattern set at the time) produced a single-file result
+    # with 100+ matched patterns and a total payload well past the server's stdout
+    # storage cap -- silently truncated mid-string into invalid JSON, which is worse
+    # than an intentional, visible limit. Both caps below are enforced with an explicit
+    # count/flag in the output so the UI can say "showing 8 of 143 matches" rather than
+    # just quietly dropping data and looking identical to a small, complete result.
     script = """$patterns = @(__PATTERNS__)
 $ruleMap = @{__RULEMAP__}
 $paths = @($env:TEMP, $env:APPDATA, $env:ProgramData, (Join-Path $env:USERPROFILE 'Downloads'))
 $cutoff = (Get-Date).AddDays(-14)
 $exts = @('.exe','.dll','.scr','.ps1','.bat','.vbs','.js','.jar','.msi')
+$maxHits = 50
+$maxMatchesPerFile = 8
 $scanned = 0
 $hits = @()
+$totalMatchingFiles = 0
 foreach ($p in $paths) {
     if (-not (Test-Path $p)) { continue }
     Get-ChildItem -Path $p -Recurse -File -ErrorAction SilentlyContinue |
@@ -188,13 +198,18 @@ foreach ($p in $paths) {
                 $content = [IO.File]::ReadAllText($_.FullName)
                 $found = @($patterns | Where-Object { $content.Contains($_) })
                 if ($found.Count -gt 0) {
-                    $matches = @($found | ForEach-Object { [PSCustomObject]@{ rule = $ruleMap[$_]; string = $_ } })
-                    $hits += [PSCustomObject]@{ path=$_.FullName; size=$_.Length; modified=$_.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'); matches=$matches }
+                    $totalMatchingFiles++
+                    if ($hits.Count -lt $maxHits) {
+                        $matchCount = $found.Count
+                        $foundCapped = @($found | Select-Object -First $maxMatchesPerFile)
+                        $matches = @($foundCapped | ForEach-Object { [PSCustomObject]@{ rule = $ruleMap[$_]; string = $_ } })
+                        $hits += [PSCustomObject]@{ path=$_.FullName; size=$_.Length; modified=$_.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'); matches=$matches; match_count=$matchCount; matches_truncated=($matchCount -gt $maxMatchesPerFile) }
+                    }
                 }
             } catch {}
         }
 }
-[PSCustomObject]@{ scanned=$scanned; hits=$hits } | ConvertTo-Json -Compress -Depth 6
+[PSCustomObject]@{ scanned=$scanned; hits=$hits; total_matching_files=$totalMatchingFiles; hits_truncated=($totalMatchingFiles -gt $maxHits) } | ConvertTo-Json -Compress -Depth 6
 """
     return script.replace('__PATTERNS__', pattern_list).replace('__RULEMAP__', rule_map)
 

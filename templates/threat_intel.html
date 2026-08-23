@@ -534,7 +534,10 @@ function renderSweepResults() {
     }
     tbody.innerHTML = sweepResultsCache.map(c => {
         const parsed = parseSweepStdout(c.stdout);
-        const hitCount = parsed ? parsed.hits.length : 0;
+        // total_matching_files (when present) is the true count even if the hits array
+        // itself was capped -- always show the real number in the summary, not just how
+        // many made it into the (possibly truncated) detail list.
+        const hitCount = parsed ? (typeof parsed.total_matching_files === 'number' ? parsed.total_matching_files : parsed.hits.length) : 0;
         let hitsCell;
         if (parsed && hitCount > 0) {
             hitsCell = `<a href="#" class="text-danger fw-bold" onclick="viewSweepHitDetail(${c.id}); return false;"><i class="fa-solid fa-triangle-exclamation me-1"></i>${hitCount} alert${hitCount === 1 ? '' : 's'}</a>`;
@@ -590,7 +593,10 @@ function viewSweepHitDetail(id) {
         rows = parsed.hits.map(h => `
             <tr>
                 <td class="font-monospace small">${escHtml(h.path)}</td>
-                <td class="small">${(h.matches || []).map(m => `<div><span class="text-warning">${escHtml(m.rule)}</span>: <span class="font-monospace">"${escHtml(m.string)}"</span></div>`).join('')}</td>
+                <td class="small">
+                    ${(h.matches || []).map(m => `<div><span class="text-warning">${escHtml(m.rule)}</span>: <span class="font-monospace">"${escHtml(m.string)}"</span></div>`).join('')}
+                    ${h.matches_truncated ? `<div class="text-muted fst-italic">showing first ${(h.matches || []).length} of ${h.match_count} matched patterns</div>` : ''}
+                </td>
                 <td class="small text-nowrap">${escHtml(h.size)}</td>
                 <td class="small text-nowrap">${escHtml(h.modified)}</td>
             </tr>
@@ -609,8 +615,12 @@ function viewSweepHitDetail(id) {
             </tr>
         `).join('');
     }
+    const hitsTruncatedNote = parsed.hits_truncated
+        ? `<div class="mb-2 text-warning small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Showing the first ${parsed.hits.length} of ${parsed.total_matching_files} matching files — this pattern set is matching very broadly on this host, worth reviewing which rules are contributing the most noise.</div>`
+        : '';
     document.getElementById('sweepDetailModalBody').innerHTML = `
         <div class="mb-2"><strong>Host:</strong> ${escHtml(c.hostname)}</div>
+        ${hitsTruncatedNote}
         <div class="table-responsive">
             <table class="table table-dark table-sm table-striped mb-0">
                 <thead><tr>${head}</tr></thead>
