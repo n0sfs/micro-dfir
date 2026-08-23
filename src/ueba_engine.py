@@ -19,7 +19,6 @@ RISK_SCORE_DEFAULTS = {
         'failed_login': 10,
         'volume_anomaly_critical': 30, 'volume_anomaly_high': 20, 'volume_anomaly_medium': 10,
         'new_source_ip': 15,
-        'first_time_bonus': 15,
     },
     'tiers': {'low': 0, 'medium': 20, 'high': 50, 'critical': 100},
 }

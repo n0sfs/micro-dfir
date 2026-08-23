@@ -244,23 +244,29 @@
         <div class="card-body">
             <div class="card bg-dark border-secondary mb-4">
                 <div class="card-header">
-                    <i class="fa-solid fa-gauge-high me-2"></i>Scoring Settings
+                    <i class="fa-solid fa-gauge-high me-2"></i>Dynamic Scoring
                 </div>
                 <div class="card-body">
                     <p class="text-muted small mb-3">How composite risk scores are computed — see the Risk Scoring tab for results. The scoring window controls how far back contributing events are summed; point values control the flat per-indicator contribution (Sigma alert severity, IOC sweep hits, statistical anomalies). Sensitive-action and custom scoring now lives in the rules below instead of this JSON.</p>
-                    <div class="row g-3">
+                    <div class="row g-3 mb-4">
                         <div class="col-md-3">
                             <label class="form-label">Scoring Window (days)</label>
-                            <input type="number" id="riskCfgWindowDays" class="form-control bg-dark text-light border-secondary" min="1" max="90" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                            <input type="number" id="riskCfgWindowDays" class="form-control bg-dark text-light border-secondary" min="1" max="90" oninput="onDynamicScoringFieldChange()" {{ '' if current_user.role == 'admin' else 'disabled' }}>
                         </div>
                     </div>
-                    <div class="mt-3">
-                        <label class="form-label small text-muted mb-1">Point values (advanced — indicator name : points)</label>
-                        <textarea id="riskCfgPointsJson" class="form-control bg-dark text-light border-secondary font-monospace small" rows="8" spellcheck="false" {{ '' if current_user.role == 'admin' else 'disabled' }}></textarea>
-                        <p class="text-muted small mt-1 mb-0">Edit as JSON — <code>points</code> (per-indicator) and <code>tiers</code> (score thresholds for Low/Medium/High/Critical).</p>
+                    <div class="row g-4">
+                        <div class="col-lg-6">
+                            <label class="form-label small text-muted mb-2">Point Values &amp; Tiers</label>
+                            <div id="dynamicScoringForm"></div>
+                        </div>
+                        <div class="col-lg-6">
+                            <label class="form-label small text-muted mb-1">Raw JSON</label>
+                            <textarea id="riskCfgPointsJson" class="form-control bg-dark text-light border-secondary font-monospace small" rows="16" spellcheck="false" oninput="onDynamicScoringJsonChange()" {{ '' if current_user.role == 'admin' else 'disabled' }}></textarea>
+                            <p class="small mt-1 mb-0" id="dynamicScoringJsonStatus">&nbsp;</p>
+                        </div>
                     </div>
                     {% if current_user.role == 'admin' %}
-                    <button class="btn btn-primary btn-sm mt-3" onclick="saveRiskConfig()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Scoring Settings</button>
+                    <button class="btn btn-primary btn-sm mt-3" onclick="saveRiskConfig()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Dynamic Scoring</button>
                     <span id="riskCfgSaveMsg" class="small ms-2" style="display:none;"></span>
                     {% else %}
                     <p class="text-muted small mt-3 mb-0"><i class="fa-solid fa-lock me-1"></i>Admin role required to change scoring settings.</p>
@@ -560,14 +566,93 @@ function viewRiskScoreDetail(entityType, entityId) {
         });
 }
 
+// ---- Dynamic Scoring: labeled fields <-> raw JSON, kept in sync both directions ----
+// Grouped for readability rather than one flat list -- matches how the indicators are
+// actually described elsewhere in this app (Risk Scoring tab, Data Insights labels).
+const DYNAMIC_SCORING_FIELDS = [
+    { group: 'Sigma Alert Severity', key: 'points', fields: [
+        {k: 'alert_critical', label: 'Critical'}, {k: 'alert_high', label: 'High'},
+        {k: 'alert_medium', label: 'Medium'}, {k: 'alert_low', label: 'Low'},
+        {k: 'alert_informational', label: 'Informational'},
+    ]},
+    { group: 'Statistical Anomaly Severity', key: 'points', fields: [
+        {k: 'volume_anomaly_critical', label: 'Critical'}, {k: 'volume_anomaly_high', label: 'High'},
+        {k: 'volume_anomaly_medium', label: 'Medium'},
+    ]},
+    { group: 'Other Indicators', key: 'points', fields: [
+        {k: 'failed_login', label: 'Failed Login'}, {k: 'sweep_hit', label: 'IOC/String Sweep Hit'},
+        {k: 'new_source_ip', label: 'New Source IP'},
+    ]},
+    { group: 'Score Tiers (thresholds)', key: 'tiers', fields: [
+        {k: 'low', label: 'Low'}, {k: 'medium', label: 'Medium'},
+        {k: 'high', label: 'High'}, {k: 'critical', label: 'Critical'},
+    ]},
+];
+
+function renderDynamicScoringForm(cfg) {
+    const container = document.getElementById('dynamicScoringForm');
+    container.innerHTML = DYNAMIC_SCORING_FIELDS.map(section => `
+        <div class="mb-3">
+            <div class="text-muted small mb-1">${escHtml(section.group)}</div>
+            <div class="row g-2">
+                ${section.fields.map(f => `
+                    <div class="col-6 col-md-4">
+                        <label class="form-label small mb-1">${escHtml(f.label)}</label>
+                        <input type="number" step="1" class="form-control form-control-sm bg-dark text-light border-secondary"
+                               data-dsgroup="${section.key}" data-dskey="${f.k}"
+                               value="${(cfg[section.key] && cfg[section.key][f.k]) ?? 0}"
+                               oninput="onDynamicScoringFieldChange()" ${IS_ADMIN ? '' : 'disabled'}>
+                    </div>
+                `).join('')}
+            </div>
+        </div>
+    `).join('');
+}
+
+function readDynamicScoringForm() {
+    const cfg = {points: {}, tiers: {}};
+    document.querySelectorAll('#dynamicScoringForm input[data-dsgroup]').forEach(input => {
+        cfg[input.dataset.dsgroup][input.dataset.dskey] = parseInt(input.value, 10) || 0;
+    });
+    return cfg;
+}
+
+// A field edit regenerates the JSON textarea to match -- this is a plain .value
+// assignment, not a simulated keystroke, so it does NOT re-fire the textarea's own
+// oninput handler and can't loop back into onDynamicScoringJsonChange().
+function onDynamicScoringFieldChange() {
+    document.getElementById('riskCfgPointsJson').value = JSON.stringify(readDynamicScoringForm(), null, 2);
+    document.getElementById('dynamicScoringJsonStatus').innerHTML = '&nbsp;';
+}
+
+// Editing the JSON directly re-renders the form fields to match, but only once it
+// parses as a plausible {points, tiers} object -- an in-progress/invalid edit leaves
+// the form alone (no flicker to zeros) and just shows a small status note instead.
+function onDynamicScoringJsonChange() {
+    const status = document.getElementById('dynamicScoringJsonStatus');
+    let parsed;
+    try {
+        parsed = JSON.parse(document.getElementById('riskCfgPointsJson').value);
+    } catch (e) {
+        status.innerHTML = `<span class="text-danger">Invalid JSON: ${escHtml(e.message)}</span>`;
+        return;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        status.innerHTML = '<span class="text-danger">Must be a JSON object with points/tiers.</span>';
+        return;
+    }
+    renderDynamicScoringForm(parsed);
+    status.innerHTML = '&nbsp;';
+}
+
 function loadRiskConfig() {
     fetch('/api/ueba/risk-config')
         .then(r => r.json())
         .then(cfg => {
             document.getElementById('riskCfgWindowDays').value = cfg.window_days;
-            document.getElementById('riskCfgPointsJson').value = JSON.stringify(
-                {points: cfg.points, tiers: cfg.tiers}, null, 2
-            );
+            const shaped = {points: cfg.points, tiers: cfg.tiers};
+            renderDynamicScoringForm(shaped);
+            document.getElementById('riskCfgPointsJson').value = JSON.stringify(shaped, null, 2);
         })
         .catch(err => console.error('Error loading risk scoring config:', err));
 }
