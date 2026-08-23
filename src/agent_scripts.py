@@ -154,7 +154,23 @@ def string_sweep(patterns):
     rule_map = ';'.join("'" + _ps_escape_literal(v) + "'='" + _ps_escape_literal(r) + "'" for v, r in seen.items())
     # Same bounded scope as ioc_sweep, but a lower size cap — scanning file *content*
     # for hundreds of literal substrings is heavier per file than hashing, and still
-    # has to fit inside the shared 90s command timeout.
+    # has to fit inside the agent's command timeout.
+    #
+    # This used to pass the whole $patterns array straight to a single Select-String
+    # call (-SimpleMatch -Pattern $patterns), which looks like one pass but isn't:
+    # PowerShell checks every line against *each* pattern independently, so cost scales
+    # with file_size * pattern_count -- confirmed in production, every run timed out
+    # with 0 files reported scanned. The first fix attempt combined the patterns into
+    # one [regex] alternation instead -- correct in principle, but measured empirically
+    # (real generated script, real ~2MB files) at only ~3s/file: .NET's backtracking
+    # regex engine doesn't turn a large literal alternation into a single efficient
+    # pass the way a proper multi-pattern search (e.g. Aho-Corasick) would, so it still
+    # scales with pattern count under the hood. A plain per-pattern String.Contains()
+    # loop measured ~2.8x faster than that at the same scale (Contains uses .NET's own
+    # optimized substring search rather than a regex engine at all) and is what's used
+    # below, combined with a lower pattern cap and size cap (see _get_live_yara_strings
+    # in app.py and the 5MB threshold here) to keep total worst-case time well inside
+    # the agent's command timeout even on a machine with many candidate files.
     script = """$patterns = @(__PATTERNS__)
 $ruleMap = @{__RULEMAP__}
 $paths = @($env:TEMP, $env:APPDATA, $env:ProgramData, (Join-Path $env:USERPROFILE 'Downloads'))
@@ -165,12 +181,12 @@ $hits = @()
 foreach ($p in $paths) {
     if (-not (Test-Path $p)) { continue }
     Get-ChildItem -Path $p -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.LastWriteTime -ge $cutoff -and $exts -contains $_.Extension.ToLower() -and $_.Length -lt 10MB } |
+        Where-Object { $_.LastWriteTime -ge $cutoff -and $exts -contains $_.Extension.ToLower() -and $_.Length -lt 5MB } |
         ForEach-Object {
             $scanned++
             try {
-                $found = @(Select-String -SimpleMatch -Pattern $patterns -Path $_.FullName -ErrorAction Stop |
-                    Select-Object -ExpandProperty Pattern -Unique)
+                $content = [IO.File]::ReadAllText($_.FullName)
+                $found = @($patterns | Where-Object { $content.Contains($_) })
                 if ($found.Count -gt 0) {
                     $matches = @($found | ForEach-Object { [PSCustomObject]@{ rule = $ruleMap[$_]; string = $_ } })
                     $hits += [PSCustomObject]@{ path=$_.FullName; size=$_.Length; modified=$_.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'); matches=$matches }

@@ -3027,12 +3027,17 @@ def _unescape_yara_string(s):
         i += 1
     return ''.join(out)
 
-def _get_live_yara_strings(limit=500):
+def _get_live_yara_strings(limit=150):
     # Same "recompute fresh every use" philosophy as the live IOC hash helpers above —
     # the imported rule files rarely change and the walk is cheap, so there's no reason
     # to cache a stale list. Sourced from the same rules/yara_imported directory the
     # File Scan mode already compiles against, so this hunts with the rules actually
     # loaded in the app, not a separate/parallel rule set.
+    #
+    # Capped well below the old 500 -- string_sweep's per-file cost in agent_scripts.py
+    # scales with pattern count no matter how it's implemented (Contains-loop, regex,
+    # or otherwise), so this cap is what actually keeps a real sweep inside the agent's
+    # command timeout, not just an implementation detail of the search algorithm.
     results = []
     seen = set()
     if not os.path.isdir(YARA_RULES_DIR):
