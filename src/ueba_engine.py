@@ -52,13 +52,24 @@ def _condition_matches(condition, row):
         return row_value.lower().endswith(target.lower())
     return False
 
-# A rule matches only when EVERY one of its conditions matches (AND) -- e.g. "severity
-# equals Critical AND rule_name contains Mimikatz" requires both, not either. A rule
-# with no conditions at all never matches (safe default, not "matches everything").
+# Conditions combine left-to-right via each condition's own logic (AND/OR) -- e.g.
+# "severity equals Critical" + "rule_name contains Mimikatz" (logic=AND) requires both;
+# swapping that second condition's logic to OR means either alone is enough. There is
+# no operator precedence or parenthesized grouping: each condition folds strictly onto
+# the running result of everything before it, left to right (A AND B OR C means
+# (A AND B) OR C, not A AND (B OR C)). The first condition's own logic value is stored
+# but ignored -- nothing precedes it to combine with. A rule with no conditions at all
+# never matches (safe default, not "matches everything").
 def _rule_matches_all(conditions, row):
     if not conditions:
         return False
-    return all(_condition_matches(c, row) for c in conditions)
+    result = _condition_matches(conditions[0], row)
+    for c in conditions[1:]:
+        if (c.get('logic') or 'AND').upper() == 'OR':
+            result = result or _condition_matches(c, row)
+        else:
+            result = result and _condition_matches(c, row)
+    return result
 
 def _load_anomaly_rules(conn, source):
     allowed = ANOMALY_RULE_SOURCES.get(source)
@@ -74,7 +85,7 @@ def _load_anomaly_rules(conn, source):
         if r['entity_field'] not in allowed['entity_fields']:
             continue
         cond_rows = conn.execute(
-            "SELECT field, operator, value FROM anomaly_rule_conditions WHERE rule_id = ?", (r['id'],)
+            "SELECT field, operator, value, logic FROM anomaly_rule_conditions WHERE rule_id = ?", (r['id'],)
         ).fetchall()
         conditions = [dict(c) for c in cond_rows]
         # Defense in depth: every condition's field must be in this source's allowlist.
