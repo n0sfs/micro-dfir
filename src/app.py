@@ -1350,15 +1350,18 @@ RISK_SCORE_DEFAULTS = {
         'volume_anomaly_critical': 30, 'volume_anomaly_high': 20, 'volume_anomaly_medium': 10,
         'new_source_ip': 15, 'first_time_bonus': 15,
     },
-    'sensitive_actions': {
-        'user_create': 20, 'user_delete': 25, 'user_password_reset': 15,
-        'network_config_change': 20, 'tls_cert_upload': 15, 'soc_token_change': 15,
-        'retention_policy_change': 10, 'manual_log_purge': 15, 'db_vacuum': 5,
-        'sigmahq_import': 5, 'rule_bulk_toggle': 10, 'rule_delete': 8,
-        'drop_rule_delete': 5, 'ti_feed_delete': 5,
-    },
     'tiers': {'low': 0, 'medium': 20, 'high': 50, 'critical': 100},
 }
+
+# Which columns an anomaly_rules row is allowed to reference for each source table --
+# enforced at rule-CRUD time here, and re-checked defensively in ueba_engine.py before
+# ever interpolating a stored entity_field into a raw SQL column reference.
+ANOMALY_RULE_SOURCES = {
+    'audit_log': {'fields': ('action', 'username', 'role', 'target_type', 'target_id'), 'entity_fields': ('username', 'target_id')},
+    'alerts': {'fields': ('severity', 'rule_name', 'host', 'username', 'source_ip', 'destination_ip'), 'entity_fields': ('host', 'username')},
+}
+ANOMALY_RULE_OPERATORS = ('equals', 'not_equals', 'contains')
+ANOMALY_RULE_ENTITY_TYPES = ('user', 'host')
 
 def _deep_merge_risk_config(base, override):
     for k, v in (override or {}).items():
@@ -1429,7 +1432,7 @@ def api_ueba_risk_config():
     # Validate against the default shape before storing -- reject anything that isn't
     # a plausible partial override rather than silently storing garbage that would
     # only surface as a confusing failure the next time the engine runs.
-    for section in ('points', 'sensitive_actions', 'tiers'):
+    for section in ('points', 'tiers'):
         if section in data and not isinstance(data[section], dict):
             return jsonify({'error': f"'{section}' must be an object"}), 400
         for k, v in (data.get(section) or {}).items():
@@ -1440,6 +1443,93 @@ def api_ueba_risk_config():
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('risk_score_config', ?)", (json.dumps(data),))
     db.commit()
     log_audit('risk_score_config_change', 'settings')
+    return jsonify({'status': 'success'})
+
+def _validate_anomaly_rule(d, partial=False):
+    source = d.get('source')
+    allowed = ANOMALY_RULE_SOURCES.get(source)
+    if not allowed:
+        return f"source must be one of {', '.join(ANOMALY_RULE_SOURCES)}"
+    if not (d.get('name') or '').strip():
+        return 'name is required'
+    if d.get('field') not in allowed['fields']:
+        return f"field must be one of {', '.join(allowed['fields'])} for source '{source}'"
+    if d.get('operator') not in ANOMALY_RULE_OPERATORS:
+        return f"operator must be one of {', '.join(ANOMALY_RULE_OPERATORS)}"
+    if not str(d.get('value', '')).strip():
+        return 'value is required'
+    if d.get('entity_field') not in allowed['entity_fields']:
+        return f"entity_field must be one of {', '.join(allowed['entity_fields'])} for source '{source}'"
+    if d.get('entity_type') not in ANOMALY_RULE_ENTITY_TYPES:
+        return f"entity_type must be one of {', '.join(ANOMALY_RULE_ENTITY_TYPES)}"
+    try:
+        int(d.get('points'))
+    except (TypeError, ValueError):
+        return 'points must be a number'
+    if d.get('first_time_bonus_points') not in (None, ''):
+        try:
+            int(d.get('first_time_bonus_points'))
+        except (TypeError, ValueError):
+            return 'first_time_bonus_points must be a number'
+    return None
+
+@app.route('/api/ueba/anomaly-rules', methods=['GET', 'POST'])
+@login_required
+def api_anomaly_rules():
+    db = get_db()
+    if request.method == 'GET':
+        return jsonify([dict(r) for r in db.execute("SELECT * FROM anomaly_rules ORDER BY id DESC").fetchall()])
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    d = request.get_json() or {}
+    err = _validate_anomaly_rule(d)
+    if err:
+        return jsonify({'error': err}), 400
+    bonus = d.get('first_time_bonus_points')
+    bonus = int(bonus) if bonus not in (None, '') else None
+    db.execute(
+        "INSERT INTO anomaly_rules (name, source, field, operator, value, entity_field, entity_type, points, first_time_bonus_points, enabled, created_by) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+        (d['name'].strip(), d['source'], d['field'], d['operator'], str(d['value']), d['entity_field'], d['entity_type'], int(d['points']), bonus, current_user.username)
+    )
+    db.commit()
+    log_audit('anomaly_rule_create', 'anomaly_rule', None, f"{d['name']}: {d['field']} {d['operator']} {d['value']} -> {d['points']} pts")
+    return jsonify({'status': 'success'}), 201
+
+@app.route('/api/ueba/anomaly-rules/<int:rid>', methods=['PUT', 'DELETE'])
+@login_required
+def api_anomaly_rule_detail(rid):
+    db = get_db()
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    if request.method == 'DELETE':
+        db.execute("DELETE FROM anomaly_rules WHERE id = ?", (rid,))
+        db.commit()
+        log_audit('anomaly_rule_delete', 'anomaly_rule', rid)
+        return jsonify({'ok': 1})
+
+    d = request.get_json() or {}
+    # A bare {"enabled": ...} toggle request skips full validation, matching the
+    # exclusions/drop-rules toggle pattern -- a full edit still gets full validation.
+    if set(d.keys()) <= {'enabled'}:
+        db.execute("UPDATE anomaly_rules SET enabled = ? WHERE id = ?", (1 if d.get('enabled') else 0, rid))
+        db.commit()
+        log_audit('anomaly_rule_toggle', 'anomaly_rule', rid)
+        return jsonify({'ok': 1})
+
+    err = _validate_anomaly_rule(d)
+    if err:
+        return jsonify({'error': err}), 400
+    bonus = d.get('first_time_bonus_points')
+    bonus = int(bonus) if bonus not in (None, '') else None
+    db.execute(
+        "UPDATE anomaly_rules SET name=?, source=?, field=?, operator=?, value=?, entity_field=?, entity_type=?, points=?, "
+        "first_time_bonus_points=?, enabled=?, updated_by=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        (d['name'].strip(), d['source'], d['field'], d['operator'], str(d['value']), d['entity_field'], d['entity_type'],
+         int(d['points']), bonus, 1 if d.get('enabled', True) else 0, current_user.username, rid)
+    )
+    db.commit()
+    log_audit('anomaly_rule_update', 'anomaly_rule', rid, f"{d['name']}: {d['field']} {d['operator']} {d['value']} -> {d['points']} pts")
     return jsonify({'status': 'success'})
 
 # ---- Data Insights: per-entity and per-model behavior histograms ----
@@ -1946,6 +2036,46 @@ def migrate_risk_scoring():
             computed_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )''')
         conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_score_events_entity ON risk_score_events(entity_type, entity_id, computed_at)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# The 14 action -> points values that used to live in the hardcoded
+# RISK_SCORE_DEFAULTS['sensitive_actions'] dict, now real editable rows -- seeded once
+# so existing scoring behavior is preserved out of the box; every one also gets the
+# same first_time_bonus_points (15) every sensitive action already carried before this.
+_ANOMALY_RULE_SEED_ACTIONS = {
+    'user_create': 20, 'user_delete': 25, 'user_password_reset': 15,
+    'network_config_change': 20, 'tls_cert_upload': 15, 'soc_token_change': 15,
+    'retention_policy_change': 10, 'manual_log_purge': 15, 'db_vacuum': 5,
+    'sigmahq_import': 5, 'rule_bulk_toggle': 10, 'rule_delete': 8,
+    'drop_rule_delete': 5, 'ti_feed_delete': 5,
+}
+_ANOMALY_RULE_SEED_FIRST_TIME_BONUS = 15
+
+def migrate_anomaly_rules():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS anomaly_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL, source TEXT NOT NULL, field TEXT NOT NULL,
+            operator TEXT NOT NULL DEFAULT 'equals', value TEXT NOT NULL,
+            entity_field TEXT NOT NULL, entity_type TEXT NOT NULL, points INTEGER NOT NULL,
+            first_time_bonus_points INTEGER, enabled BOOLEAN DEFAULT 1,
+            created_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_by TEXT, updated_at DATETIME
+        )''')
+        # Only seed a genuinely empty table -- never re-seed over an admin's own edits
+        # (including having deleted a starter rule on purpose).
+        count = conn.execute("SELECT COUNT(*) FROM anomaly_rules").fetchone()[0]
+        if count == 0:
+            conn.executemany(
+                "INSERT INTO anomaly_rules (name, source, field, operator, value, entity_field, entity_type, points, first_time_bonus_points) "
+                "VALUES (?, 'audit_log', 'action', 'equals', ?, 'username', 'user', ?, ?)",
+                [(f"Sensitive action: {action}", action, points, _ANOMALY_RULE_SEED_FIRST_TIME_BONUS)
+                 for action, points in _ANOMALY_RULE_SEED_ACTIONS.items()]
+            )
         conn.commit()
         conn.close()
     except Exception:
@@ -3213,6 +3343,7 @@ migrate_agent_versions()
 migrate_agent_tokens()
 migrate_audit_log()
 migrate_risk_scoring()
+migrate_anomaly_rules()
 
 try:
     # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every

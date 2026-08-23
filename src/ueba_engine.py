@@ -21,18 +21,53 @@ RISK_SCORE_DEFAULTS = {
         'new_source_ip': 15,
         'first_time_bonus': 15,
     },
-    # Only these audit_log actions score their actor -- routine/low-signal ones (e.g.
-    # ti_feed_sync) are deliberately left out rather than scored at zero, so the
-    # indicator list this produces stays meaningful instead of noisy.
-    'sensitive_actions': {
-        'user_create': 20, 'user_delete': 25, 'user_password_reset': 15,
-        'network_config_change': 20, 'tls_cert_upload': 15, 'soc_token_change': 15,
-        'retention_policy_change': 10, 'manual_log_purge': 15, 'db_vacuum': 5,
-        'sigmahq_import': 5, 'rule_bulk_toggle': 10, 'rule_delete': 8,
-        'drop_rule_delete': 5, 'ti_feed_delete': 5,
-    },
     'tiers': {'low': 0, 'medium': 20, 'high': 50, 'critical': 100},
 }
+
+# Which columns an anomaly_rules row is allowed to reference for each source table --
+# enforced again here (not just at rule-CRUD time in app.py) because entity_field ends
+# up interpolated into a raw SQL column reference below, so a stored value must be
+# re-validated against this allowlist before it's ever trusted, defense in depth.
+ANOMALY_RULE_SOURCES = {
+    'audit_log': {'fields': ('action', 'username', 'role', 'target_type', 'target_id'), 'entity_fields': ('username', 'target_id')},
+    'alerts': {'fields': ('severity', 'rule_name', 'host', 'username', 'source_ip', 'destination_ip'), 'entity_fields': ('host', 'username')},
+}
+
+def _rule_matches(rule, row):
+    if rule['field'] not in row.keys():
+        return False
+    row_value = row[rule['field']]
+    row_value = '' if row_value is None else str(row_value)
+    target = rule['value'] or ''
+    op = rule['operator']
+    if op == 'equals':
+        return row_value == target
+    if op == 'not_equals':
+        return row_value != target
+    if op == 'contains':
+        return target.lower() in row_value.lower()
+    return False
+
+def _load_anomaly_rules(conn, source):
+    allowed = ANOMALY_RULE_SOURCES.get(source)
+    if not allowed:
+        return []
+    rows = conn.execute(
+        "SELECT id, name, field, operator, value, entity_field, entity_type, points, first_time_bonus_points "
+        "FROM anomaly_rules WHERE source = ? AND enabled = 1",
+        (source,)
+    ).fetchall()
+    return [r for r in rows if r['field'] in allowed['fields'] and r['entity_field'] in allowed['entity_fields']]
+
+# "Is this normal for THIS entity" for a custom rule: has this exact rule ever matched
+# for this entity before (anywhere in the source table's history, not just the current
+# scoring window)? Generalizes the old fixed "same username + same action" check to any
+# rule condition, so a first occurrence -- not just a first-time action -- earns the bonus.
+def _rule_ever_matched_before(conn, table, rule, entity_id, before_id):
+    prior_rows = conn.execute(
+        f"SELECT * FROM {table} WHERE {rule['entity_field']} = ? AND id < ?", (entity_id, before_id)
+    ).fetchall()
+    return any(_rule_matches(rule, pr) for pr in prior_rows)
 
 def _deep_merge(base, override):
     for k, v in (override or {}).items():
@@ -292,8 +327,11 @@ def _save_risk_marks(conn, marks):
 # model already treats host and user as independently-modeled entity types from the
 # same live_logs stream.
 def _score_alerts(conn, cfg, last_id):
-    rows = conn.execute("SELECT id, host, username, severity, rule_name FROM alerts WHERE id > ?", (last_id,)).fetchall()
+    rows = conn.execute("SELECT id, host, username, severity, rule_name, source_ip, destination_ip FROM alerts WHERE id > ?", (last_id,)).fetchall()
     events, max_id = [], last_id
+    if not rows:
+        return events, max_id
+    rules = _load_anomaly_rules(conn, 'alerts')
     for r in rows:
         max_id = max(max_id, r['id'])
         pts = cfg['points'].get(f"alert_{(r['severity'] or '').lower()}", cfg['points']['alert_medium'])
@@ -302,34 +340,47 @@ def _score_alerts(conn, cfg, last_id):
             if not entity_id or entity_id in ('', '-', 'UNKNOWN'):
                 continue
             events.append((entity_type, entity_id, 'sigma_alert', pts, detail, 'alerts', str(r['id'])))
+        # Custom alert rules add on top of the flat severity score above rather than
+        # replace it -- a noteworthy pattern (e.g. a specific rule_name) can be weighted
+        # heavier without changing how every other alert of the same severity scores.
+        for rule in rules:
+            if not _rule_matches(rule, r):
+                continue
+            entity_id = r[rule['entity_field']]
+            if not entity_id:
+                continue
+            events.append((rule['entity_type'], entity_id, 'sensitive_action', rule['points'],
+                           f"Matched rule '{rule['name']}'", 'alerts', str(r['id'])))
+            if rule['first_time_bonus_points'] and not _rule_ever_matched_before(conn, 'alerts', rule, entity_id, r['id']):
+                events.append((rule['entity_type'], entity_id, 'first_time_action', rule['first_time_bonus_points'],
+                               f"First match of rule '{rule['name']}' by this entity", 'alerts', str(r['id'])))
     return events, max_id
 
 def _score_audit(conn, cfg, last_id):
-    rows = conn.execute("SELECT id, username, action, target_id FROM audit_log WHERE id > ?", (last_id,)).fetchall()
+    rows = conn.execute("SELECT id, username, role, action, target_type, target_id FROM audit_log WHERE id > ?", (last_id,)).fetchall()
     events, max_id = [], last_id
+    if not rows:
+        return events, max_id
+    rules = _load_anomaly_rules(conn, 'audit_log')
     for r in rows:
         max_id = max(max_id, r['id'])
         if r['action'] == 'login_failed':
             actor = r['target_id'] or '(unknown)'
             events.append(('user', actor, 'failed_login', cfg['points']['failed_login'], 'Failed login attempt', 'audit_log', str(r['id'])))
-            continue
-        if not r['username']:
-            continue
-        sens_pts = cfg['sensitive_actions'].get(r['action'])
-        if sens_pts is None:
-            continue
-        events.append(('user', r['username'], 'sensitive_action', sens_pts, f"Performed sensitive action: {r['action']}", 'audit_log', str(r['id'])))
-        # The "is this normal for THIS entity" check: has this specific actor ever
-        # performed this action type before (anywhere in audit_log's history, not just
-        # the current scoring window)? A first occurrence is the direct implementation
-        # of "an admin who routinely does this scores normally; their first time doesn't."
-        prior = conn.execute(
-            "SELECT COUNT(*) as c FROM audit_log WHERE username = ? AND action = ? AND id < ?",
-            (r['username'], r['action'], r['id'])
-        ).fetchone()['c']
-        if prior == 0:
-            events.append(('user', r['username'], 'first_time_action', cfg['points']['first_time_bonus'],
-                           f"First recorded '{r['action']}' by this user", 'audit_log', str(r['id'])))
+        for rule in rules:
+            if not _rule_matches(rule, r):
+                continue
+            entity_id = r[rule['entity_field']]
+            if not entity_id:
+                continue
+            events.append((rule['entity_type'], entity_id, 'sensitive_action', rule['points'],
+                           f"Matched rule '{rule['name']}'", 'audit_log', str(r['id'])))
+            # The "is this normal for THIS entity" check: has this exact rule ever matched
+            # for this entity before? An admin who routinely does this scores normally;
+            # their first time doesn't.
+            if rule['first_time_bonus_points'] and not _rule_ever_matched_before(conn, 'audit_log', rule, entity_id, r['id']):
+                events.append((rule['entity_type'], entity_id, 'first_time_action', rule['first_time_bonus_points'],
+                               f"First match of rule '{rule['name']}' by this entity", 'audit_log', str(r['id'])))
     return events, max_id
 
 def _score_sweeps(conn, cfg, last_id):
