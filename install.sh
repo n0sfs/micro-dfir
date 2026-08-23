@@ -49,11 +49,13 @@ echo "[*] Initializing Database & Administrator..."
 venv/bin/python -c "import sys; sys.path.append('src'); from app import init_db; init_db()"
 venv/bin/python src/setup_admin.py
 venv/bin/python src/import_sigmahq.py
+venv/bin/python src/geoip_update.py
 
 echo "[*] Setting up Automation Cron Jobs..."
 (crontab -l 2>/dev/null | grep -v "ueba_engine.py"; echo "0 * * * * $SOC_DIR/venv/bin/python3 $SOC_DIR/src/ueba_engine.py >> /var/log/microdfir-ueba.log 2>&1") | crontab -
 (crontab -l 2>/dev/null | grep -v "taxii_client.py"; echo "0 2 * * * $SOC_DIR/venv/bin/python3 $SOC_DIR/src/taxii_client.py >> /var/log/microdfir-taxii.log 2>&1") | crontab -
 (crontab -l 2>/dev/null | grep -v "generate_report.py"; echo "0 1 1 * * $SOC_DIR/venv/bin/python3 $SOC_DIR/src/generate_report.py >> /var/log/microdfir-report.log 2>&1") | crontab -
+(crontab -l 2>/dev/null | grep -v "geoip_update.py"; echo "0 3 1 * * $SOC_DIR/venv/bin/python3 $SOC_DIR/src/geoip_update.py >> /var/log/microdfir-geoip.log 2>&1") | crontab -
 
 echo "[*] Installing Systemd Services..."
 cp config/microsoc-web.service /etc/systemd/system/
