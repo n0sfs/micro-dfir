@@ -292,11 +292,7 @@ def api_ingest():
 @login_required
 def dash():
     active_tab = request.args.get('tab', 'search')
-    report_dir = '/opt/micro-dfir/reports'
-    os.makedirs(report_dir, exist_ok=True)
-    pdfs = [f for f in os.listdir(report_dir) if f.endswith('.pdf')]
-    pdfs.sort(reverse=True)
-    return render_template('dashboard.html', reports=pdfs, channels=get_agent_channels(), active_tab=active_tab, current_user=current_user, compliance_frameworks=COMPLIANCE_FRAMEWORKS)
+    return render_template('dashboard.html', channels=get_agent_channels(), active_tab=active_tab, current_user=current_user, compliance_frameworks=COMPLIANCE_FRAMEWORKS)
 
 # Home count queries reuse existing canonical data sources rather than new bookkeeping:
 # ueba_entity_baselines is already this app's registry of every host/user the UEBA
@@ -1188,11 +1184,21 @@ def api_yara_scan():
 @login_required
 def reports(): return redirect(url_for('dash', tab='reports'))
 
-@app.route('/reports/download/<filename>')
+# Keyed off the report_history row's id, not a user-supplied filename -- the old
+# <filename> route took whatever the client sent straight into send_from_directory
+# with no validation at all (a real path-traversal bug). Looking the filename up
+# server-side from the id removes user-controlled path input entirely rather than
+# just sanitizing it, and doubles as the natural place to detect a file that's been
+# deleted from disk since it was generated.
+@app.route('/reports/download/<int:history_id>')
 @login_required
-def download_report(filename):
+def download_report(history_id):
     from flask import send_from_directory
-    return send_from_directory('/opt/micro-dfir/reports', filename, as_attachment=True)
+    row = get_db().execute("SELECT filename FROM report_history WHERE id = ?", (history_id,)).fetchone()
+    if not row or not os.path.exists(os.path.join('/opt/micro-dfir/reports', row['filename'])):
+        flash("Report file not found.", "warning")
+        return redirect(url_for('dash', tab='reports'))
+    return send_from_directory('/opt/micro-dfir/reports', row['filename'], as_attachment=True)
 
 REPORT_TYPES = ('security', 'compliance', 'audit')
 
@@ -1205,13 +1211,67 @@ def trigger_report():
     if report_type not in REPORT_TYPES:
         report_type = 'security'
     try:
-        subprocess.run(["/opt/micro-dfir/venv/bin/python3", "/opt/micro-dfir/src/generate_report.py", report_type], check=True)
+        subprocess.run(
+            ["/opt/micro-dfir/venv/bin/python3", "/opt/micro-dfir/src/generate_report.py",
+             report_type, f"--user={current_user.username}", "--source=manual"],
+            check=True, timeout=120
+        )
         log_audit('report_generate', 'report', report_type)
         flash("Report successfully generated!", "success")
+    except subprocess.TimeoutExpired:
+        flash("Report generation timed out.", "danger")
     except Exception as e:
         flash(f"Failed to generate report: {str(e)}", "danger")
     return redirect(url_for('dash', tab='reports'))
 
+@app.route('/api/reports/history', methods=['GET'])
+@login_required
+def api_report_history():
+    rows = [dict(r) for r in get_db().execute(
+        "SELECT id, report_type, filename, status, triggered_by, trigger_source, "
+        "started_at, completed_at, file_size_bytes, error_message "
+        "FROM report_history ORDER BY id DESC LIMIT 100"
+    ).fetchall()]
+    for r in rows:
+        r['file_exists'] = bool(r['filename']) and os.path.exists(os.path.join('/opt/micro-dfir/reports', r['filename']))
+    return jsonify({'history': rows})
+
+@app.route('/api/settings/report-branding', methods=['GET', 'POST'])
+@login_required
+def api_report_branding():
+    db = get_db()
+    if request.method == 'GET':
+        return jsonify(get_report_branding_config(db))
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    cfg = get_report_branding_config(db)
+    cfg['company_name'] = (request.form.get('company_name') or REPORT_BRANDING_DEFAULTS['company_name']).strip()[:120]
+    cfg['footer_text'] = (request.form.get('footer_text') or REPORT_BRANDING_DEFAULTS['footer_text']).strip()[:200]
+    accent = (request.form.get('accent_color') or '').strip()
+    if re.match(r'^#[0-9a-fA-F]{6}$', accent):
+        cfg['accent_color'] = accent
+    logo_file = request.files.get('logo')
+    if logo_file and logo_file.filename:
+        ext = logo_file.filename.rsplit('.', 1)[-1].lower() if '.' in logo_file.filename else ''
+        if ext not in REPORT_BRANDING_ALLOWED_LOGO_EXT:
+            return jsonify({'error': f"Logo must be one of: {', '.join(sorted(REPORT_BRANDING_ALLOWED_LOGO_EXT))}"}), 400
+        os.makedirs(REPORT_BRANDING_DIR, exist_ok=True)
+        fname = secure_filename(f"logo.{ext}")
+        logo_file.save(os.path.join(REPORT_BRANDING_DIR, fname))
+        cfg['logo_filename'] = fname
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('report_branding_config', ?)", (json.dumps(cfg),))
+    db.commit()
+    log_audit('report_branding_change', 'settings')
+    return jsonify({'status': 'success', 'config': cfg})
+
+@app.route('/settings/branding/logo')
+@login_required
+def report_branding_logo():
+    from flask import send_from_directory
+    cfg = get_report_branding_config(get_db())
+    if not cfg.get('logo_filename'):
+        return '', 404
+    return send_from_directory(REPORT_BRANDING_DIR, cfg['logo_filename'])
 
 # ==========================================
 # UEBA — BEHAVIORAL ANOMALY DETECTIONS
@@ -1418,6 +1478,28 @@ def get_risk_score_config(db):
     if row and row['value']:
         try:
             _deep_merge_risk_config(cfg, json.loads(row['value']))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return cfg
+
+# Report PDF branding -- same settings-table JSON-blob pattern as risk_score_config
+# above, just a flat dict (no nested deep-merge needed). Mirrored in
+# generate_report.py's own REPORT_BRANDING_DEFAULTS/REPORT_BRANDING_DIR since that
+# script has no Flask app context to import this from (cron invokes it directly).
+REPORT_BRANDING_DIR = "/opt/micro-dfir/data/branding"
+REPORT_BRANDING_ALLOWED_LOGO_EXT = {'png', 'jpg', 'jpeg'}
+REPORT_BRANDING_DEFAULTS = {
+    "company_name": "Micro DFIR", "logo_filename": None,
+    "footer_text": "Generated by Micro DFIR SOAR Engine", "accent_color": "#0d6efd",
+}
+
+def get_report_branding_config(db):
+    import copy as _copy
+    cfg = _copy.deepcopy(REPORT_BRANDING_DEFAULTS)
+    row = db.execute("SELECT value FROM settings WHERE key = 'report_branding_config'").fetchone()
+    if row and row['value']:
+        try:
+            cfg.update(json.loads(row['value']))
         except (json.JSONDecodeError, TypeError):
             pass
     return cfg
@@ -2239,6 +2321,21 @@ def migrate_risk_score_events_rule_id():
         except Exception:
             pass
         conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_score_events_rule ON risk_score_events(rule_id)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_report_history():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS report_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, report_type TEXT NOT NULL, filename TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'success', triggered_by TEXT, trigger_source TEXT NOT NULL DEFAULT 'manual',
+            started_at DATETIME, completed_at DATETIME, file_size_bytes INTEGER, error_message TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_report_history_type_time ON report_history(report_type, created_at)")
         conn.commit()
         conn.close()
     except Exception:
@@ -3528,6 +3625,7 @@ migrate_anomaly_rules()
 migrate_anomaly_rule_conditions()
 migrate_anomaly_rule_conditions_logic()
 migrate_risk_score_events_rule_id()
+migrate_report_history()
 
 try:
     # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every

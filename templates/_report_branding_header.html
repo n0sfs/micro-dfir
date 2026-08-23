@@ -1,0 +1,5 @@
+<div class="header">
+    {% if branding.logo_data_uri %}<img src="{{ branding.logo_data_uri }}">{% endif %}
+    <h1>{{ branding.company_name }}</h1>
+    <p>{{ report_title }} | {{ date_generated }}{% if report_subtitle %} | {{ report_subtitle }}{% endif %}</p>
+</div>

@@ -519,30 +519,21 @@
         </form>
     </div>
     <div class="card-body">
-        {% if reports %}
         <div class="table-responsive">
             <table class="table table-dark table-hover table-sm align-middle">
                 <thead>
                     <tr>
-                        <th>File Name</th>
+                        <th>Type</th>
+                        <th>Generated</th>
+                        <th>Triggered By</th>
+                        <th>Status</th>
+                        <th>Size</th>
                         <th class="text-end">Action</th>
                     </tr>
                 </thead>
-                <tbody>
-                    {% for r in reports %}
-                    <tr>
-                        <td><i class="fa-regular fa-file-pdf text-danger me-2"></i> {{ r }}</td>
-                        <td class="text-end">
-                            <a href="{{ url_for('download_report', filename=r) }}" class="btn btn-sm btn-outline-primary"><i class="fa-solid fa-download"></i> Download</a>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
+                <tbody id="reportHistoryBody"><tr><td colspan="6" class="text-center text-muted py-4">Loading…</td></tr></tbody>
             </table>
         </div>
-        {% else %}
-        <p class="text-muted small mb-0"><i class="fa-solid fa-circle-info text-info me-1"></i> No reports generated yet. Automated reports run on the 1st of every month.</p>
-        {% endif %}
     </div>
 </div>
 </div>
@@ -779,7 +770,8 @@ function setStatTile(i, label, value, large) {
     if (vEl) { vEl.innerText = value; vEl.style.fontSize = large ? '1.05rem' : ''; }
 }
 
-const REPORTS_DATA = { total: {{ reports|length }}, latest: {{ (reports[0].replace('Security_Report_', '').replace('.pdf', '').replace('_', '-') if reports else 'None yet')|tojson }} };
+const REPORT_TYPE_LABELS = { security: 'Security Summary', compliance: 'Compliance Report', audit: 'Audit Trail Report' };
+let reportHistoryData = [];
 let searchStats = {};
 let pipelineStats = {};
 
@@ -806,9 +798,11 @@ function updateSharedStats(tab) {
         setStatTile(2, 'Noisy (7d ≥ 50 alerts)', allTuning.filter(r => r.alerts_7d >= 50).length);
         setStatTile(3, 'Active Exclusions', allTuning.reduce((sum, r) => sum + (r.exclusion_count || 0), 0));
     } else if (tab === 'reports') {
-        setStatTile(0, 'Total Reports', REPORTS_DATA.total);
-        setStatTile(1, 'Latest Report', REPORTS_DATA.latest, true);
-        setStatTile(2, 'Auto-Generation', '1st of month', true);
+        const successCount = reportHistoryData.filter(h => h.status === 'success').length;
+        const latest = reportHistoryData[0];
+        setStatTile(0, 'Total Reports', successCount);
+        setStatTile(1, 'Latest Report', latest ? (REPORT_TYPE_LABELS[latest.report_type] || latest.report_type) : 'None yet', true);
+        setStatTile(2, 'Last Generated', latest ? (latest.completed_at || latest.started_at || '—').split(' ')[0] : '—', true);
         setStatTile(3, 'Format', 'PDF', true);
     }
 }
@@ -2461,7 +2455,34 @@ function initTuningTab() {
 // REPORTS TAB
 // =====================================================================
 function initReportsTab() {
-    updateSharedStats('reports');
+    fetch('/api/reports/history').then(r => r.json()).then(d => {
+        reportHistoryData = d.history || [];
+        renderReportHistory();
+        updateSharedStats('reports');
+    }).catch(err => console.error('Error loading report history:', err));
+}
+
+function formatReportSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+function renderReportHistory() {
+    const body = document.getElementById('reportHistoryBody');
+    if (!reportHistoryData.length) {
+        body.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4"><i class="fa-solid fa-circle-info text-info me-1"></i>No reports generated yet.</td></tr>';
+        return;
+    }
+    body.innerHTML = reportHistoryData.map(h => `
+        <tr>
+            <td><i class="fa-regular fa-file-pdf text-danger me-2"></i>${escHtml(REPORT_TYPE_LABELS[h.report_type] || h.report_type)}</td>
+            <td class="small text-muted">${escHtml(h.completed_at || h.started_at || '')}</td>
+            <td class="small">${h.triggered_by ? escHtml(h.triggered_by) : '<span class="text-muted">scheduled</span>'}</td>
+            <td>${h.status === 'success' ? '<span class="badge bg-success">Success</span>' : `<span class="badge bg-danger" title="${escHtml(h.error_message || '')}">Failed</span>`}</td>
+            <td class="small text-muted">${h.file_size_bytes ? formatReportSize(h.file_size_bytes) : '—'}</td>
+            <td class="text-end">${h.file_exists ? `<a href="/reports/download/${h.id}" class="btn btn-sm btn-outline-primary"><i class="fa-solid fa-download"></i> Download</a>` : '<span class="text-muted small">File deleted</span>'}</td>
+        </tr>`).join('');
 }
 
 // =====================================================================
