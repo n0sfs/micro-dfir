@@ -1356,8 +1356,9 @@ RISK_SCORE_DEFAULTS = {
 # Which columns an anomaly_rules row is allowed to reference for each source table --
 # enforced at rule-CRUD time here, and re-checked defensively in ueba_engine.py before
 # ever interpolating a stored entity_field into a raw SQL column reference.
+# Sigma alerts only for now -- audit_log-sourced rules were pulled back out shortly
+# after shipping; may return as a source later.
 ANOMALY_RULE_SOURCES = {
-    'audit_log': {'fields': ('action', 'username', 'role', 'target_type', 'target_id'), 'entity_fields': ('username', 'target_id')},
     'alerts': {'fields': ('severity', 'rule_name', 'host', 'username', 'source_ip', 'destination_ip'), 'entity_fields': ('host', 'username')},
 }
 ANOMALY_RULE_OPERATORS = ('equals', 'not_equals', 'contains')
@@ -2041,19 +2042,6 @@ def migrate_risk_scoring():
     except Exception:
         pass
 
-# The 14 action -> points values that used to live in the hardcoded
-# RISK_SCORE_DEFAULTS['sensitive_actions'] dict, now real editable rows -- seeded once
-# so existing scoring behavior is preserved out of the box; every one also gets the
-# same first_time_bonus_points (15) every sensitive action already carried before this.
-_ANOMALY_RULE_SEED_ACTIONS = {
-    'user_create': 20, 'user_delete': 25, 'user_password_reset': 15,
-    'network_config_change': 20, 'tls_cert_upload': 15, 'soc_token_change': 15,
-    'retention_policy_change': 10, 'manual_log_purge': 15, 'db_vacuum': 5,
-    'sigmahq_import': 5, 'rule_bulk_toggle': 10, 'rule_delete': 8,
-    'drop_rule_delete': 5, 'ti_feed_delete': 5,
-}
-_ANOMALY_RULE_SEED_FIRST_TIME_BONUS = 15
-
 def migrate_anomaly_rules():
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
@@ -2066,16 +2054,10 @@ def migrate_anomaly_rules():
             created_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_by TEXT, updated_at DATETIME
         )''')
-        # Only seed a genuinely empty table -- never re-seed over an admin's own edits
-        # (including having deleted a starter rule on purpose).
-        count = conn.execute("SELECT COUNT(*) FROM anomaly_rules").fetchone()[0]
-        if count == 0:
-            conn.executemany(
-                "INSERT INTO anomaly_rules (name, source, field, operator, value, entity_field, entity_type, points, first_time_bonus_points) "
-                "VALUES (?, 'audit_log', 'action', 'equals', ?, 'username', 'user', ?, ?)",
-                [(f"Sensitive action: {action}", action, points, _ANOMALY_RULE_SEED_FIRST_TIME_BONUS)
-                 for action, points in _ANOMALY_RULE_SEED_ACTIONS.items()]
-            )
+        # audit_log support (and the 14 sensitive-action rows this originally seeded)
+        # was pulled back out shortly after shipping -- Sigma alerts only for now. Clean
+        # up any rows a prior deploy already seeded; harmless no-op once none remain.
+        conn.execute("DELETE FROM anomaly_rules WHERE source = 'audit_log'")
         conn.commit()
         conn.close()
     except Exception:

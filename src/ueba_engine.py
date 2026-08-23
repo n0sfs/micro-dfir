@@ -28,8 +28,9 @@ RISK_SCORE_DEFAULTS = {
 # enforced again here (not just at rule-CRUD time in app.py) because entity_field ends
 # up interpolated into a raw SQL column reference below, so a stored value must be
 # re-validated against this allowlist before it's ever trusted, defense in depth.
+# Sigma alerts only for now -- audit_log-sourced rules were pulled back out shortly
+# after shipping; may return as a source later.
 ANOMALY_RULE_SOURCES = {
-    'audit_log': {'fields': ('action', 'username', 'role', 'target_type', 'target_id'), 'entity_fields': ('username', 'target_id')},
     'alerts': {'fields': ('severity', 'rule_name', 'host', 'username', 'source_ip', 'destination_ip'), 'entity_fields': ('host', 'username')},
 }
 
@@ -349,38 +350,22 @@ def _score_alerts(conn, cfg, last_id):
             entity_id = r[rule['entity_field']]
             if not entity_id:
                 continue
-            events.append((rule['entity_type'], entity_id, 'sensitive_action', rule['points'],
+            events.append((rule['entity_type'], entity_id, 'custom_alert_rule', rule['points'],
                            f"Matched rule '{rule['name']}'", 'alerts', str(r['id'])))
             if rule['first_time_bonus_points'] and not _rule_ever_matched_before(conn, 'alerts', rule, entity_id, r['id']):
                 events.append((rule['entity_type'], entity_id, 'first_time_action', rule['first_time_bonus_points'],
                                f"First match of rule '{rule['name']}' by this entity", 'alerts', str(r['id'])))
     return events, max_id
 
+# Anomaly rules don't cover audit_log for now (Sigma alerts only) -- this indicator
+# stays a flat, hardcoded failed-login counter rather than a rule-engine consumer.
 def _score_audit(conn, cfg, last_id):
-    rows = conn.execute("SELECT id, username, role, action, target_type, target_id FROM audit_log WHERE id > ?", (last_id,)).fetchall()
+    rows = conn.execute("SELECT id, action, target_id FROM audit_log WHERE id > ? AND action = 'login_failed'", (last_id,)).fetchall()
     events, max_id = [], last_id
-    if not rows:
-        return events, max_id
-    rules = _load_anomaly_rules(conn, 'audit_log')
     for r in rows:
         max_id = max(max_id, r['id'])
-        if r['action'] == 'login_failed':
-            actor = r['target_id'] or '(unknown)'
-            events.append(('user', actor, 'failed_login', cfg['points']['failed_login'], 'Failed login attempt', 'audit_log', str(r['id'])))
-        for rule in rules:
-            if not _rule_matches(rule, r):
-                continue
-            entity_id = r[rule['entity_field']]
-            if not entity_id:
-                continue
-            events.append((rule['entity_type'], entity_id, 'sensitive_action', rule['points'],
-                           f"Matched rule '{rule['name']}'", 'audit_log', str(r['id'])))
-            # The "is this normal for THIS entity" check: has this exact rule ever matched
-            # for this entity before? An admin who routinely does this scores normally;
-            # their first time doesn't.
-            if rule['first_time_bonus_points'] and not _rule_ever_matched_before(conn, 'audit_log', rule, entity_id, r['id']):
-                events.append((rule['entity_type'], entity_id, 'first_time_action', rule['first_time_bonus_points'],
-                               f"First match of rule '{rule['name']}' by this entity", 'audit_log', str(r['id'])))
+        actor = r['target_id'] or '(unknown)'
+        events.append(('user', actor, 'failed_login', cfg['points']['failed_login'], 'Failed login attempt', 'audit_log', str(r['id'])))
     return events, max_id
 
 def _score_sweeps(conn, cfg, last_id):
