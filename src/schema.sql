@@ -35,3 +35,9 @@ CREATE TABLE IF NOT EXISTS anomaly_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, 
 -- here instead of inventing a new one.
 CREATE TABLE IF NOT EXISTS anomaly_rule_conditions (id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id INTEGER NOT NULL, field TEXT NOT NULL, operator TEXT NOT NULL DEFAULT 'equals', value TEXT NOT NULL, logic TEXT NOT NULL DEFAULT 'AND', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS idx_anomaly_rule_conditions_rule ON anomaly_rule_conditions(rule_id);
+-- One row per report generation attempt, whether triggered from the Reports tab or by
+-- a scheduled cron run of generate_report.py -- replaces the old "just os.listdir() the
+-- reports folder" approach with real history (who/when/status), and doubles as the
+-- lookup table download_report() keys off of instead of a raw user-supplied filename.
+CREATE TABLE IF NOT EXISTS report_history (id INTEGER PRIMARY KEY AUTOINCREMENT, report_type TEXT NOT NULL, filename TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'success', triggered_by TEXT, trigger_source TEXT NOT NULL DEFAULT 'manual', started_at DATETIME, completed_at DATETIME, file_size_bytes INTEGER, error_message TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS idx_report_history_type_time ON report_history(report_type, created_at);
