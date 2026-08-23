@@ -4,7 +4,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, tem
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.08.21.4"
+AGENT_VERSION = "2026.08.23.1"
 
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
@@ -17,7 +17,10 @@ SOC_TOKEN = '__SOC_TOKEN__'
 # script is run without ever going through the server's build step (e.g. tampered with
 # by hand), in which case the agent falls back to unverified rather than refusing to run.
 SERVER_CERT_PEM = """__SERVER_CERT_PEM__"""
-SCRIPT_TIMEOUT_SECONDS = 90
+# Was 90s -- too tight for string_sweep (content search across many files is inherently
+# heavier than ioc_sweep's single-pass hashing, and 90s wasn't enough margin even after
+# fixing string_sweep's own O(pattern_count) blowup, see agent_scripts.py).
+SCRIPT_TIMEOUT_SECONDS = 180
 
 def build_ssl_context():
     # A structural check (does this look like a real PEM cert?) rather than checking
