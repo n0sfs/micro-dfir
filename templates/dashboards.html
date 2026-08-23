@@ -1,0 +1,288 @@
+{% extends "base.html" %}
+{% block content %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<div class="page-header d-flex justify-content-between align-items-start flex-wrap gap-2">
+    <div>
+        <h2><i class="fa-solid fa-chart-line me-2"></i>Dashboards</h2>
+        <p>Visual analytics across alerts, risk, detections, and endpoint health.</p>
+    </div>
+    <select id="dashRangeSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" onchange="loadAllDashboards()">
+        <option value="7d">Last 7 days</option>
+        <option value="30d" selected>Last 30 days</option>
+        <option value="90d">Last 90 days</option>
+    </select>
+</div>
+
+<div class="row g-3">
+    <div class="col-lg-8">
+        <div class="card bg-dark border-secondary h-100">
+            <div class="card-header border-secondary"><i class="fa-solid fa-chart-area me-2"></i>Alert Volume Trend</div>
+            <div class="card-body" style="height:260px;"><canvas id="alertTrendChart"></canvas></div>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="card bg-dark border-secondary h-100">
+            <div class="card-header border-secondary"><i class="fa-solid fa-chart-pie me-2"></i>Severity Breakdown</div>
+            <div class="card-body" style="height:260px;"><canvas id="severityChart"></canvas></div>
+        </div>
+    </div>
+
+    <div class="col-lg-8">
+        <div class="card bg-dark border-secondary h-100">
+            <div class="card-header border-secondary"><i class="fa-solid fa-gauge-high me-2"></i>Risk Score Trend</div>
+            <div class="card-body" style="height:260px;"><canvas id="riskTrendChart"></canvas></div>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="card bg-dark border-secondary h-100">
+            <div class="card-header border-secondary"><i class="fa-solid fa-user-secret me-2"></i>Top Risky Entities</div>
+            <div class="card-body p-0" style="max-height:260px; overflow-y:auto;">
+                <table class="table table-dark table-hover table-sm align-middle mb-0">
+                    <thead><tr><th>Entity</th><th>Score</th><th>Tier</th></tr></thead>
+                    <tbody id="topRiskBody"><tr><td colspan="3" class="text-center text-muted py-3">Loading…</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-4">
+        <div class="card bg-dark border-secondary h-100">
+            <div class="card-header border-secondary"><i class="fa-solid fa-list-check me-2"></i>Top-Firing Anomaly Rules</div>
+            <div class="card-body" style="height:240px;"><canvas id="anomalyRulesChart"></canvas></div>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="card bg-dark border-secondary h-100">
+            <div class="card-header border-secondary"><i class="fa-solid fa-earth-americas me-2"></i>Top Source Countries</div>
+            <div class="card-body" style="height:240px;"><canvas id="countriesChart"></canvas></div>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="card bg-dark border-secondary h-100">
+            <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+                <span><i class="fa-solid fa-laptop-medical me-2"></i>EDR Agent Status</span>
+                <span class="badge bg-secondary" title="Reflects current status, not the selected time range above">Live</span>
+            </div>
+            <div class="card-body" style="height:240px; position:relative;">
+                <canvas id="agentStatusChart"></canvas>
+                <p id="agentStatusEmpty" class="text-muted small text-center mb-0 pt-4" style="display:none;">No agents have checked in yet.</p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function escHtml(s) {
+    return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function titleCase(s) {
+    return (s || 'Unknown').replace(/\w\S*/g, t => t.charAt(0).toUpperCase() + t.slice(1).toLowerCase());
+}
+
+let DASH_CHARTS = {};
+
+function destroyChart(key) {
+    if (DASH_CHARTS[key]) { DASH_CHARTS[key].destroy(); delete DASH_CHARTS[key]; }
+}
+
+// Reads the app's own theme CSS custom properties (already flipped by base.html's
+// light/dark toggle -- see :root / html[data-bs-theme="light"] in base.html) instead
+// of hardcoding a light and a dark palette here. Whatever the current theme is, these
+// colors are already correct for it.
+function chartTheme() {
+    const cs = getComputedStyle(document.documentElement);
+    const v = (name, fallback) => (cs.getPropertyValue(name) || '').trim() || fallback;
+    return {
+        text: v('--text-secondary', '#96a0b0'),
+        grid: v('--border', '#232a35'),
+        accent: v('--accent', '#3b82f6'),
+        success: v('--success', '#22c55e'),
+        warning: v('--warning', '#f59e0b'),
+        danger: v('--danger', '#ef4444'),
+        info: v('--info', '#38bdf8'),
+        muted: v('--text-muted', '#5e6b7d'),
+    };
+}
+
+function currentDashRange() {
+    return document.getElementById('dashRangeSelect').value;
+}
+
+function baseLineOptions(c) {
+    return {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+            x: { grid: { color: c.grid }, ticks: { color: c.text, maxTicksLimit: 10 } },
+            y: { grid: { color: c.grid }, ticks: { color: c.text }, beginAtZero: true },
+        },
+    };
+}
+
+function baseHBarOptions(c) {
+    return {
+        indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+            x: { grid: { color: c.grid }, ticks: { color: c.text }, beginAtZero: true },
+            y: { grid: { display: false }, ticks: { color: c.text, autoSkip: false } },
+        },
+    };
+}
+
+function loadAlertTrend() {
+    fetch(`/api/dashboards/alert-trend?range=${currentDashRange()}`).then(r => r.json()).then(d => {
+        const c = chartTheme();
+        destroyChart('alertTrend');
+        DASH_CHARTS.alertTrend = new Chart(document.getElementById('alertTrendChart').getContext('2d'), {
+            type: 'line',
+            data: { labels: d.trend.map(x => x.t_bucket), datasets: [{
+                label: 'Alerts', data: d.trend.map(x => x.count),
+                borderColor: c.accent, backgroundColor: c.accent + '26',
+                borderWidth: 2, fill: true, tension: 0.25, pointRadius: 2,
+            }] },
+            options: baseLineOptions(c),
+        });
+    }).catch(err => console.error('Error loading alert trend:', err));
+}
+
+function severityColor(sev, c) {
+    const s = (sev || '').toLowerCase();
+    if (s === 'critical' || s === 'high') return c.danger;
+    if (s === 'medium') return c.warning;
+    if (s === 'low') return c.muted;
+    return c.info; // informational / anything unrecognized
+}
+
+function loadSeverity() {
+    fetch(`/api/dashboards/alert-severity?range=${currentDashRange()}`).then(r => r.json()).then(d => {
+        const c = chartTheme();
+        destroyChart('severity');
+        DASH_CHARTS.severity = new Chart(document.getElementById('severityChart').getContext('2d'), {
+            type: 'doughnut',
+            data: {
+                labels: d.severity.map(x => titleCase(x.severity)),
+                datasets: [{ data: d.severity.map(x => x.count), backgroundColor: d.severity.map(x => severityColor(x.severity, c)), borderColor: 'transparent' }],
+            },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: c.text, boxWidth: 12 } } } },
+        });
+    }).catch(err => console.error('Error loading severity breakdown:', err));
+}
+
+function loadRiskTrend() {
+    fetch(`/api/dashboards/risk-trend?range=${currentDashRange()}`).then(r => r.json()).then(d => {
+        const c = chartTheme();
+        destroyChart('riskTrend');
+        DASH_CHARTS.riskTrend = new Chart(document.getElementById('riskTrendChart').getContext('2d'), {
+            type: 'line',
+            data: { labels: d.trend.map(x => x.day), datasets: [{
+                label: 'Risk Points', data: d.trend.map(x => x.total_points),
+                borderColor: c.warning, backgroundColor: c.warning + '26',
+                borderWidth: 2, fill: true, tension: 0.25, pointRadius: 2,
+            }] },
+            options: baseLineOptions(c),
+        });
+    }).catch(err => console.error('Error loading risk trend:', err));
+}
+
+function entityIcon(t) {
+    return t === 'host' ? '<i class="fa-solid fa-desktop text-info me-1"></i>' : '<i class="fa-solid fa-user text-warning me-1"></i>';
+}
+
+function tierBadgeClass(tier) {
+    return { Critical: 'bg-danger', High: 'bg-danger', Medium: 'bg-warning text-dark', Low: 'bg-secondary' }[tier] || 'bg-secondary';
+}
+
+function loadTopRisk() {
+    fetch(`/api/dashboards/top-risk-entities?range=${currentDashRange()}`).then(r => r.json()).then(d => {
+        const body = document.getElementById('topRiskBody');
+        if (!d.entities.length) {
+            body.innerHTML = '<tr><td colspan="3" class="text-center text-muted py-3">No risk activity in this window.</td></tr>';
+            return;
+        }
+        body.innerHTML = d.entities.map(e => `
+            <tr>
+                <td class="small">${entityIcon(e.entity_type)}${escHtml(e.entity_id)}</td>
+                <td>${e.score}</td>
+                <td><span class="badge ${tierBadgeClass(e.tier)}">${escHtml(e.tier)}</span></td>
+            </tr>`).join('');
+    }).catch(err => console.error('Error loading top risk entities:', err));
+}
+
+function loadAnomalyRules() {
+    fetch(`/api/dashboards/top-anomaly-rules?range=${currentDashRange()}`).then(r => r.json()).then(d => {
+        const c = chartTheme();
+        destroyChart('anomalyRules');
+        DASH_CHARTS.anomalyRules = new Chart(document.getElementById('anomalyRulesChart').getContext('2d'), {
+            type: 'bar',
+            data: { labels: d.rules.map(x => x.name), datasets: [{ label: 'Matches', data: d.rules.map(x => x.matches), backgroundColor: c.accent }] },
+            options: baseHBarOptions(c),
+        });
+    }).catch(err => console.error('Error loading top anomaly rules:', err));
+}
+
+function loadCountries() {
+    fetch(`/api/dashboards/top-countries?range=${currentDashRange()}`).then(r => r.json()).then(d => {
+        const c = chartTheme();
+        destroyChart('countries');
+        DASH_CHARTS.countries = new Chart(document.getElementById('countriesChart').getContext('2d'), {
+            type: 'bar',
+            data: { labels: d.countries.map(x => x.country || x.iso_code), datasets: [{ label: 'Alerts', data: d.countries.map(x => x.count), backgroundColor: c.info }] },
+            options: baseHBarOptions(c),
+        });
+    }).catch(err => console.error('Error loading top countries:', err));
+}
+
+function loadAgentStatus() {
+    fetch('/api/dashboards/agent-status').then(r => r.json()).then(d => {
+        const canvas = document.getElementById('agentStatusChart');
+        const empty = document.getElementById('agentStatusEmpty');
+        destroyChart('agentStatus');
+        if (!d.total) {
+            canvas.style.display = 'none';
+            empty.style.display = 'block';
+            return;
+        }
+        canvas.style.display = '';
+        empty.style.display = 'none';
+        const c = chartTheme();
+        const order = ['Online', 'Idle', 'Offline', 'Unknown'];
+        const colorMap = { Online: c.success, Idle: c.warning, Offline: c.danger, Unknown: c.muted };
+        const labels = order.filter(k => d.status_counts[k] > 0);
+        DASH_CHARTS.agentStatus = new Chart(canvas.getContext('2d'), {
+            type: 'doughnut',
+            data: { labels, datasets: [{ data: labels.map(k => d.status_counts[k]), backgroundColor: labels.map(k => colorMap[k]), borderColor: 'transparent' }] },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: c.text, boxWidth: 12 } } } },
+        });
+    }).catch(err => console.error('Error loading agent status:', err));
+}
+
+function loadAllDashboards() {
+    loadAlertTrend();
+    loadSeverity();
+    loadRiskTrend();
+    loadTopRisk();
+    loadAnomalyRules();
+    loadCountries();
+    loadAgentStatus(); // deliberately not range-parameterized -- see the "Live" badge
+}
+
+document.addEventListener('DOMContentLoaded', loadAllDashboards);
+
+// Charts are built once with whatever theme was active at load time -- re-run
+// everything when the shared toggle flips so colors stay correct, without touching
+// base.html's toggleTheme() itself (this page just wraps the global it already
+// exposes, same pattern this app uses when a page needs to react to an event a
+// shared component doesn't natively emit).
+if (typeof window.toggleTheme === 'function') {
+    const _origToggleTheme = window.toggleTheme;
+    window.toggleTheme = function() {
+        _origToggleTheme();
+        loadAllDashboards();
+    };
+}
+</script>
+{% endblock %}

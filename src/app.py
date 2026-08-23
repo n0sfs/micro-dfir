@@ -342,6 +342,11 @@ def agents():
     s = {r[0]: r[1] for r in db.execute("SELECT key, value FROM settings").fetchall()}
     return render_template('agents.html', soc_token=s.get('soc_secret', ''), current_user=current_user)
 
+@app.route('/dashboards')
+@login_required
+def dashboards_page():
+    return render_template('dashboards.html', current_user=current_user)
+
 @app.route('/api/alerts')
 @login_required
 def api_alerts():
@@ -1808,6 +1813,157 @@ def api_ueba_insights_model(indicator):
         (indicator,))
     result['indicator'] = indicator
     return jsonify(result)
+
+
+# ==========================================
+# DASHBOARDS — CROSS-CUTTING ANALYTICS
+# ==========================================
+# A separate BI-style page from Home (which stays a lightweight, user-customizable
+# landing tile strip) -- these endpoints all share one time-range selector (7/30/90
+# days) rather than each having their own, so DASHBOARD_RANGES/_dashboard_window_days
+# is the one thing every route below has in common.
+DASHBOARD_RANGES = {'7d': 7, '30d': 30, '90d': 90}
+
+def _dashboard_window_days(req):
+    return DASHBOARD_RANGES.get(req.args.get('range', '30d'), 30)
+
+@app.route('/api/dashboards/alert-trend', methods=['GET'])
+@login_required
+def api_dashboard_alert_trend():
+    days = _dashboard_window_days(request)
+    # Same granularity-scales-with-range idea as /api/logs/timeline, just simplified
+    # to this page's 3 fixed ranges instead of that endpoint's much larger range set.
+    bucket = "strftime('%Y-%m-%d %H:00', timestamp)" if days <= 7 else "strftime('%Y-%m-%d', timestamp)"
+    rows = get_db().execute(
+        f"SELECT {bucket} as t_bucket, COUNT(*) as count FROM alerts "
+        f"WHERE timestamp >= datetime('now', ?) GROUP BY t_bucket ORDER BY t_bucket ASC",
+        (f'-{days} days',)
+    ).fetchall()
+    return jsonify({'trend': [dict(r) for r in rows]})
+
+@app.route('/api/dashboards/alert-severity', methods=['GET'])
+@login_required
+def api_dashboard_alert_severity():
+    days = _dashboard_window_days(request)
+    # Grouped case-insensitively (alerts.severity casing isn't guaranteed consistent --
+    # ueba_engine.py's own scoring already has to .lower() it for the same reason) so a
+    # rule that writes "high" and one that writes "High" don't split into two slices.
+    rows = get_db().execute(
+        "SELECT severity, COUNT(*) as count FROM alerts "
+        "WHERE timestamp >= datetime('now', ?) GROUP BY LOWER(COALESCE(severity, 'unknown')) ORDER BY count DESC",
+        (f'-{days} days',)
+    ).fetchall()
+    return jsonify({'severity': [dict(r) for r in rows]})
+
+@app.route('/api/dashboards/risk-trend', methods=['GET'])
+@login_required
+def api_dashboard_risk_trend():
+    days = _dashboard_window_days(request)
+    rows = get_db().execute(
+        "SELECT date(computed_at) as day, SUM(points) as total_points FROM risk_score_events "
+        "WHERE computed_at >= datetime('now', ?) GROUP BY day ORDER BY day ASC",
+        (f'-{days} days',)
+    ).fetchall()
+    return jsonify({'trend': [dict(r) for r in rows]})
+
+@app.route('/api/dashboards/top-risk-entities', methods=['GET'])
+@login_required
+def api_dashboard_top_risk_entities():
+    days = _dashboard_window_days(request)
+    db = get_db()
+    cfg = get_risk_score_config(db)
+    rows = db.execute(
+        "SELECT entity_type, entity_id, SUM(points) as score, COUNT(*) as event_count, MAX(computed_at) as last_event "
+        "FROM risk_score_events WHERE computed_at >= datetime('now', ?) "
+        "GROUP BY entity_type, entity_id HAVING score > 0 ORDER BY score DESC LIMIT 10",
+        (f'-{days} days',)
+    ).fetchall()
+    out = [{**dict(r), 'tier': _risk_tier(r['score'], cfg['tiers'])} for r in rows]
+    return jsonify({'entities': out})
+
+@app.route('/api/dashboards/top-anomaly-rules', methods=['GET'])
+@login_required
+def api_dashboard_top_anomaly_rules():
+    days = _dashboard_window_days(request)
+    rows = get_db().execute(
+        "SELECT ar.id, ar.name, ar.entity_type, COUNT(rse.id) as matches "
+        "FROM anomaly_rules ar JOIN risk_score_events rse ON rse.rule_id = ar.id "
+        "WHERE rse.computed_at >= datetime('now', ?) AND ar.enabled = 1 "
+        "GROUP BY ar.id ORDER BY matches DESC LIMIT 10",
+        (f'-{days} days',)
+    ).fetchall()
+    return jsonify({'rules': [dict(r) for r in rows]})
+
+_TOP_COUNTRIES_CACHE = {}
+
+# Dedupe source IPs BEFORE doing any mmdb lookups -- a naive per-alert-row lookup on a
+# 90-day window with thousands of alerts would mean thousands of redundant lookups for
+# the same handful of IPs. `ip_counts` is already the SQL-deduped (source_ip, count)
+# rows (capped at 500 distinct IPs by the caller's query); `lookup_fn` is injected so
+# this can be unit tested without a real GeoIP database on disk.
+def _aggregate_country_counts(ip_counts, lookup_fn):
+    country_counts = {}
+    for source_ip, count in ip_counts:
+        iso, name = lookup_fn(source_ip)
+        if not iso:
+            continue  # private/reserved/unresolvable IPs excluded, not bucketed as "Unknown"
+        entry = country_counts.setdefault(iso, {'iso_code': iso, 'country': name, 'count': 0})
+        entry['count'] += count
+    return sorted(country_counts.values(), key=lambda c: c['count'], reverse=True)[:10]
+
+@app.route('/api/dashboards/top-countries', methods=['GET'])
+@login_required
+def api_dashboard_top_countries():
+    from geoip import lookup_country
+    import time
+    days = _dashboard_window_days(request)
+    cached = _TOP_COUNTRIES_CACHE.get(days)
+    if cached and (time.time() - cached[0]) < RULES_CACHE_TTL:
+        return jsonify(cached[1])
+    rows = get_db().execute(
+        "SELECT source_ip, COUNT(*) as count FROM alerts "
+        "WHERE timestamp >= datetime('now', ?) AND source_ip IS NOT NULL AND source_ip != '' "
+        "GROUP BY source_ip ORDER BY count DESC LIMIT 500",
+        (f'-{days} days',)
+    ).fetchall()
+    result = {'countries': _aggregate_country_counts([(r['source_ip'], r['count']) for r in rows], lookup_country)}
+    _TOP_COUNTRIES_CACHE[days] = (time.time(), result)
+    return jsonify(result)
+
+# Reuses agent_checkins()'s exact 45s/300s thresholds (see that route for why those
+# specific numbers) so this widget's numbers agree with the EDR page's own.
+def _agent_status_from_age(age_seconds):
+    if age_seconds <= 45:
+        return 'Online'
+    if age_seconds <= 300:
+        return 'Idle'
+    return 'Offline'
+
+@app.route('/api/dashboards/agent-status', methods=['GET'])
+@login_required
+def api_dashboard_agent_status():
+    # No LIMIT 20 (unlike agent_checkins()), since this widget reports a total count
+    # across every known agent, not just the most recently active ones. Deliberately
+    # NOT range-filtered by the shared time selector -- "online right now" is a
+    # point-in-time state, not a trend, so the frontend marks this widget as
+    # real-time-only.
+    import datetime  # shadows the module-level `from datetime import datetime` class
+                      # import with the actual module, same as agent_checkins() does --
+                      # needed for datetime.datetime.strptime below.
+    db = get_db()
+    rows = db.execute('SELECT * FROM agent_polls WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY ip_address)').fetchall()
+    now = datetime.datetime.now()
+    counts = {'Online': 0, 'Idle': 0, 'Offline': 0, 'Unknown': 0}
+    for r in rows:
+        ts = r['timestamp'] if 'timestamp' in r.keys() else ''
+        status = 'Unknown'
+        try:
+            age = (now - datetime.datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')).total_seconds()
+            status = _agent_status_from_age(age)
+        except (ValueError, TypeError):
+            pass
+        counts[status] += 1
+    return jsonify({'status_counts': counts, 'total': len(rows)})
 
 
 # ==========================================
