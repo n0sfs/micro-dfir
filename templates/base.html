@@ -35,6 +35,32 @@
   --font-mono:'JetBrains Mono',ui-monospace,'SFMono-Regular',Consolas,monospace;
 }
 
+/* Light mode: redefines the same custom properties dark mode uses -- every rule below
+   (.bg-dark, .border-secondary, .table-dark, .form-control, etc.) already resolves
+   through these variables rather than Bootstrap's fixed dark colors, so flipping
+   data-bs-theme (the same attribute Bootstrap's own components already key off) is
+   enough to re-theme the whole app without touching individual templates. */
+html[data-bs-theme="light"]{
+  --bg-page:#f4f5f7;
+  --bg-sidebar:#ffffff;
+  --bg-card:#ffffff;
+  --bg-card-alt:#eef0f3;
+  --bg-inset:#eef0f3;
+  --border:#dde1e7;
+  --border-light:#c7cdd6;
+  --text-primary:#1a1d23;
+  --text-secondary:#4b5568;
+  --text-muted:#8891a0;
+  --accent:#2563eb;
+  --accent-dim:rgba(37,99,235,.08);
+  --accent-hover:#1d4ed8;
+  --success:#16a34a;
+  --warning:#d97706;
+  --danger:#dc2626;
+  --info:#0284c7;
+  --shadow-card:0 1px 2px rgba(20,22,28,.06), 0 1px 0 rgba(20,22,28,.03);
+}
+
 * { scrollbar-color: var(--border-light) transparent; }
 ::-webkit-scrollbar{width:10px;height:10px;}
 ::-webkit-scrollbar-thumb{background:var(--border-light);border-radius:5px;}
@@ -194,6 +220,20 @@ body.sidebar-collapsed .btn-logout span{display:none;}
 .card-title{font-size:.95rem;}
 .border-secondary{border-color:var(--border)!important;}
 .bg-black{background-color:var(--bg-inset)!important;}
+.text-light{color:var(--text-primary)!important;}
+.list-group-item{background-color:var(--bg-card)!important;color:var(--text-primary)!important;}
+/* .dropdown-menu-dark is Bootstrap's intentionally-always-dark variant (meant for a
+   dark menu on a light navbar) -- this app uses it as its one standard dropdown style,
+   so it needs to re-theme with everything else rather than staying fixed-dark. */
+.dropdown-menu-dark{
+  --bs-dropdown-bg:var(--bg-card);
+  --bs-dropdown-color:var(--text-primary);
+  --bs-dropdown-link-color:var(--text-primary);
+  --bs-dropdown-link-hover-bg:var(--bg-card-alt);
+  --bs-dropdown-link-hover-color:var(--text-primary);
+  --bs-dropdown-border-color:var(--border);
+  --bs-dropdown-divider-bg:var(--border);
+}
 
 /* Buttons */
 .btn{border-radius:6px;font-weight:500;font-size:.85rem;}
@@ -240,6 +280,16 @@ body.sidebar-collapsed .btn-logout span{display:none;}
 /* Alerts (flash messages) */
 .alert{border-radius:var(--radius);font-size:.85rem;border-width:1px;}
 
+/* ---------- Theme toggle (fixed top-right) ---------- */
+.theme-toggle-btn{
+  position:fixed; top:16px; right:16px; z-index:1500;
+  width:36px; height:36px; padding:0; display:flex; align-items:center; justify-content:center;
+  background-color:var(--bg-card); border:1px solid var(--border-light); border-radius:50%;
+  color:var(--text-secondary); cursor:pointer; box-shadow:var(--shadow-card);
+  transition:color .12s ease, border-color .12s ease, background-color .12s ease;
+}
+.theme-toggle-btn:hover{color:var(--accent); border-color:var(--accent);}
+
 /* Stat tiles (used across pages) */
 .stat-tile{
   background-color:var(--bg-card);border:1px solid var(--border);
@@ -263,7 +313,7 @@ body.sidebar-collapsed .btn-logout span{display:none;}
 
 /* ---------- Toasts (replaces alert()) ---------- */
 .mdfir-toast-stack{
-  position:fixed; top:16px; right:16px; z-index:2000;
+  position:fixed; top:64px; right:16px; z-index:2000; /* below the fixed theme toggle button */
   display:flex; flex-direction:column; gap:8px;
   width:360px; max-width:calc(100vw - 32px);
 }
@@ -331,7 +381,17 @@ body.sidebar-collapsed .btn-logout span{display:none;}
                 document.body.classList.add('sidebar-collapsed');
             }
         } catch (e) {}
+        // Same reasoning as the sidebar-collapsed restore above: applied before the page
+        // paints so a light-mode preference doesn't flash dark first on every navigation.
+        // Defaults to dark (the <html> tag already ships data-bs-theme="dark") when
+        // nothing is stored yet.
+        try {
+            if (localStorage.getItem('microdfir_theme') === 'light') {
+                document.documentElement.setAttribute('data-bs-theme', 'light');
+            }
+        } catch (e) {}
     </script>
+    <button type="button" id="themeToggleBtn" class="theme-toggle-btn" onclick="toggleTheme()" title="Switch to light mode"><i class="fa-solid fa-sun"></i></button>
     <div class="sidebar">
         <div class="sidebar-header">
             <a href="/" class="brand" title="Micro DFIR"><i class="fa-solid fa-shield-halved"></i> <span>Micro DFIR</span></a>
@@ -377,6 +437,24 @@ body.sidebar-collapsed .btn-logout span{display:none;}
             const btn = document.getElementById('sidebarToggleBtn');
             if (btn && document.body.classList.contains('sidebar-collapsed')) btn.title = 'Expand sidebar';
         })();
+
+        // ---------- Theme toggle (light/dark) ----------
+        function updateThemeToggleIcon(theme) {
+            const btn = document.getElementById('themeToggleBtn');
+            if (!btn) return;
+            btn.innerHTML = theme === 'light' ? '<i class="fa-solid fa-moon"></i>' : '<i class="fa-solid fa-sun"></i>';
+            btn.title = theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode';
+        }
+        function toggleTheme() {
+            const current = document.documentElement.getAttribute('data-bs-theme') || 'dark';
+            const next = current === 'light' ? 'dark' : 'light';
+            document.documentElement.setAttribute('data-bs-theme', next);
+            try { localStorage.setItem('microdfir_theme', next); } catch (e) {}
+            updateThemeToggleIcon(next);
+        }
+        // Syncs the button's icon to whatever the early inline script (in <head>) already
+        // restored from localStorage, since that ran before this button existed in the DOM.
+        updateThemeToggleIcon(document.documentElement.getAttribute('data-bs-theme') || 'dark');
 
         // ---------- Toast notifications (replaces alert()) ----------
         var toast = (function() {
