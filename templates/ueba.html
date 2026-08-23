@@ -250,7 +250,7 @@
                     <p class="text-muted small mb-3">How composite risk scores are computed — see the Risk Scoring tab for results. The scoring window controls how far back contributing events are summed; point values control the flat per-indicator contribution (Sigma alert severity, IOC sweep hits, statistical anomalies). Sensitive-action and custom scoring now lives in the rules below instead of this JSON.</p>
                     <div class="row g-3 mb-4">
                         <div class="col-md-3">
-                            <label class="form-label">Scoring Window (days)</label>
+                            <label class="form-label">Scoring Window (days) <i class="fa-solid fa-circle-info text-muted small" title="How many days of history are summed to compute an entity's current composite risk score. Contributing events older than this fall out of the total automatically as time passes -- it does not delete anything, it just stops counting toward the score."></i></label>
                             <input type="number" id="riskCfgWindowDays" class="form-control bg-dark text-light border-secondary" min="1" max="90" oninput="onDynamicScoringFieldChange()" {{ '' if current_user.role == 'admin' else 'disabled' }}>
                         </div>
                     </div>
@@ -563,20 +563,29 @@ function viewRiskScoreDetail(entityType, entityId) {
 // Grouped for readability rather than one flat list -- matches how the indicators are
 // actually described elsewhere in this app (Risk Scoring tab, Data Insights labels).
 const DYNAMIC_SCORING_FIELDS = [
-    { group: 'Sigma Alert Severity', key: 'points', fields: [
+    { group: 'Sigma Alert Severity',
+      desc: 'Points added to an entity\'s risk score each time a Sigma rule fires an alert, based on that rule\'s configured severity. Higher severities should carry more points since they represent higher-confidence detections.',
+      key: 'points', fields: [
         {k: 'alert_critical', label: 'Critical'}, {k: 'alert_high', label: 'High'},
         {k: 'alert_medium', label: 'Medium'}, {k: 'alert_low', label: 'Low'},
         {k: 'alert_informational', label: 'Informational'},
     ]},
-    { group: 'Statistical Anomaly Severity', key: 'points', fields: [
+    { group: 'Statistical Anomaly Severity',
+      desc: 'Points added when the UEBA baseline-deviation detector flags an entity generating unusually high event volume compared to its own recent history. Severity here is derived from how many standard deviations above baseline the volume is, not from a Sigma rule.',
+      key: 'points', fields: [
         {k: 'volume_anomaly_critical', label: 'Critical'}, {k: 'volume_anomaly_high', label: 'High'},
         {k: 'volume_anomaly_medium', label: 'Medium'},
     ]},
-    { group: 'Other Indicators', key: 'points', fields: [
-        {k: 'failed_login', label: 'Failed Login'}, {k: 'sweep_hit', label: 'IOC/String Sweep Hit'},
-        {k: 'new_source_ip', label: 'New Source IP'},
+    { group: 'Other Indicators',
+      desc: 'Flat point values for indicators that aren\'t severity-tiered -- each adds the same number of points every time it occurs.',
+      key: 'points', fields: [
+        {k: 'failed_login', label: 'Failed Login', desc: 'Added each time a failed authentication event is recorded for this entity.'},
+        {k: 'sweep_hit', label: 'IOC/String Sweep Hit', desc: 'Added when an agent\'s IOC hash sweep or string sweep finds a match on this host.'},
+        {k: 'new_source_ip', label: 'New Source IP', desc: 'Added the first time this entity is seen connecting from a source IP that hasn\'t been seen for it before, within the lookback window.'},
     ]},
-    { group: 'Score Tiers (thresholds)', key: 'tiers', fields: [
+    { group: 'Score Tiers (thresholds)',
+      desc: 'The minimum summed score (over the Scoring Window above) an entity needs to reach each risk tier -- these are the Low/Medium/High/Critical badges shown throughout the UI. E.g. with High = 50, any entity whose current score reaches 50 is labeled High risk until its score drops back below that threshold.',
+      key: 'tiers', fields: [
         {k: 'low', label: 'Low'}, {k: 'medium', label: 'Medium'},
         {k: 'high', label: 'High'}, {k: 'critical', label: 'Critical'},
     ]},
@@ -586,11 +595,11 @@ function renderDynamicScoringForm(cfg) {
     const container = document.getElementById('dynamicScoringForm');
     container.innerHTML = DYNAMIC_SCORING_FIELDS.map(section => `
         <div class="mb-3">
-            <div class="text-muted small mb-1">${escHtml(section.group)}</div>
+            <div class="text-muted small mb-1">${escHtml(section.group)} ${section.desc ? `<i class="fa-solid fa-circle-info small" title="${escHtml(section.desc)}"></i>` : ''}</div>
             <div class="row g-2">
                 ${section.fields.map(f => `
                     <div class="col-6 col-md-4">
-                        <label class="form-label small mb-1">${escHtml(f.label)}</label>
+                        <label class="form-label small mb-1">${escHtml(f.label)} ${f.desc ? `<i class="fa-solid fa-circle-info text-muted" title="${escHtml(f.desc)}"></i>` : ''}</label>
                         <input type="number" step="1" class="form-control form-control-sm bg-dark text-light border-secondary"
                                data-dsgroup="${section.key}" data-dskey="${f.k}"
                                value="${(cfg[section.key] && cfg[section.key][f.k]) ?? 0}"
