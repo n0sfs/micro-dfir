@@ -3066,7 +3066,15 @@ def _get_live_yara_strings(limit=150):
                 if any(mod in tail for mod in _YARA_SKIP_MODIFIERS):
                     continue
                 value = _unescape_yara_string(raw)
-                if len(value) < 6:
+                # Real production string_sweep output showed 6-char strings like
+                # "Microsoft"/"Uninstall" (9 chars each) matching on huge swaths of
+                # ordinary Windows binaries -- individual short YARA strings are normally
+                # only meaningful combined with a rule's other conditions, which this
+                # agent-side substring search deliberately doesn't (can't) evaluate. 10
+                # is still short enough to keep plenty of real signal (API names, PDB
+                # paths, C2 domains all comfortably clear it) while cutting the shortest,
+                # noisiest generic tokens.
+                if len(value) < 10:
                     continue
                 key = (current_rule, value)
                 if key in seen:
@@ -3342,7 +3350,12 @@ def api_agent_result():
 
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     status = 'done' if d.get('exit_code', 1) == 0 else 'failed'
-    stdout = str(d.get('stdout', ''))[:20000]
+    # Was 20000 -- confirmed too tight in production: a string_sweep result (JSON, one
+    # object per hit file) blew straight through it and got cut off mid-string into
+    # invalid JSON. string_sweep now bounds its own output size on the agent side
+    # (agent_scripts.py), but this is a safety margin for that and every other action's
+    # output, not a value to size exactly around one script's current caps.
+    stdout = str(d.get('stdout', ''))[:60000]
     db.execute(
         "UPDATE agent_commands SET status = ?, completed_at = ?, exit_code = ?, stdout = ?, stderr = ? WHERE id = ?",
         (status, now, d.get('exit_code'), stdout, str(d.get('stderr', ''))[:5000], cmd_id)
