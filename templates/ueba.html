@@ -28,6 +28,7 @@
             <li class="nav-item"><button type="button" class="nav-link active" id="tabBtnDetections" onclick="switchUebaTab('detections')"><i class="fa-solid fa-chart-line me-2"></i>Anomaly Detections</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnRisk" onclick="switchUebaTab('risk')"><i class="fa-solid fa-gauge-high me-2"></i>Risk Scoring</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnInsights" onclick="switchUebaTab('insights')"><i class="fa-solid fa-chart-column me-2"></i>Data Insights</button></li>
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnTimeline" onclick="switchUebaTab('timeline')"><i class="fa-solid fa-timeline me-2"></i>Timeline</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnTuning" onclick="switchUebaTab('tuning')"><i class="fa-solid fa-sliders me-2"></i>Anomaly Tuning</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnRules" onclick="switchUebaTab('rules')"><i class="fa-solid fa-list-check me-2"></i>Anomaly Rules</button></li>
         </ul>
@@ -111,6 +112,23 @@
                 </div>
             </div>
             <div id="insightsResults"><p class="text-muted small">Search for a host or user above to see its activity histograms.</p></div>
+        </div>
+    </div>
+
+    <!-- Timeline pane (placeholder) -->
+    <div id="paneTimeline" style="display:none;">
+        <div class="card-body">
+            <div class="card bg-dark border-secondary">
+                <div class="card-body text-center py-5">
+                    <i class="fa-solid fa-timeline text-muted mb-3" style="font-size:2.5rem;"></i>
+                    <h5>Entity Timeline — Coming Soon</h5>
+                    <p class="text-muted small mx-auto" style="max-width:640px;">
+                        A chronological, per-entity view of everything behind a risk score — logins, Sigma alerts, IOC sweep hits,
+                        and matched anomaly rules on one timeline, each event annotated with the points it contributed and why
+                        (first-time activity, a specific matched rule, etc). This tab is a placeholder; nothing is wired up yet.
+                    </p>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -336,7 +354,7 @@ function escHtml(s) {
 }
 
 // ---- Tabs + shared stat row (repurposed per active tab, not two separate rows) ----
-const UEBA_TABS = ['detections', 'risk', 'insights', 'tuning', 'rules'];
+const UEBA_TABS = ['detections', 'risk', 'insights', 'timeline', 'tuning', 'rules'];
 let activeUebaTab = 'detections';
 let uebaDetectionsData = null;
 
@@ -374,6 +392,11 @@ function updateSharedStats() {
         setStatTile(3, 'Top Score', rows.length ? rows[0].score : '—', true);
     } else if (activeUebaTab === 'insights') {
         setStatTile(0, 'Mode', insightsMode === 'entity' ? 'By Entity' : 'By Model', false);
+        setStatTile(1, '—', '—', true);
+        setStatTile(2, '—', '—', true);
+        setStatTile(3, '—', '—', true);
+    } else if (activeUebaTab === 'timeline') {
+        setStatTile(0, 'Status', 'Placeholder', false);
         setStatTile(1, '—', '—', true);
         setStatTile(2, '—', '—', true);
         setStatTile(3, '—', '—', true);
