@@ -1278,6 +1278,89 @@ def report_branding_logo():
         return '', 404
     return send_from_directory(REPORT_BRANDING_DIR, cfg['logo_filename'])
 
+# Report scheduling -- same settings-table JSON-blob pattern as branding/risk config
+# above. Only 'security' defaults to 'monthly' so a fresh install's out-of-the-box
+# behavior matches what install.sh used to hardcode directly into crontab; compliance
+# and audit start 'off' since they were always on-demand-only before this existed.
+# Mirrored in src/sync_report_schedule.py (a standalone script, same reasoning as
+# generate_report.py's own duplicated REPORT_BRANDING_DEFAULTS -- it has no Flask app
+# context and is invoked once at deploy time, not imported from here).
+REPORT_SCHEDULE_FREQUENCIES = ('off', 'weekly', 'monthly')
+REPORT_SCHEDULE_DEFAULTS = {'security': 'monthly', 'compliance': 'off', 'audit': 'off'}
+REPORT_SCHEDULE_CRON = {
+    'weekly': '0 6 * * 1',   # Monday 06:00 -- lands before the start of the work week
+    'monthly': '0 1 1 * *',  # 1st of month 01:00 -- matches install.sh's old convention
+}
+
+def get_report_schedule_config(db):
+    import copy as _copy
+    cfg = _copy.deepcopy(REPORT_SCHEDULE_DEFAULTS)
+    row = db.execute("SELECT value FROM settings WHERE key = 'report_schedule_config'").fetchone()
+    if row and row['value']:
+        try:
+            saved = json.loads(row['value'])
+            cfg.update({k: v for k, v in saved.items() if k in REPORT_TYPES and v in REPORT_SCHEDULE_FREQUENCIES})
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return cfg
+
+# Rewrites root's crontab entries for every report type's generate_report.py
+# invocation, replacing whatever was there -- mirrors the idempotent
+# `crontab -l | grep -v <marker> ; echo <newline> | crontab -` pattern update.sh already
+# uses for the GeoIP cron job, except marker-per-report-type so multiple independent
+# schedules coexist without clobbering each other, and any type set back to 'off' has
+# its line simply not re-added (not left stale). Any OTHER cron line (ueba_engine.py,
+# taxii_client.py, geoip_update.py) is left completely untouched. Uses argv-list
+# subprocess (no shell=True) so there's no shell-injection surface, and report types
+# are drawn from the fixed REPORT_TYPES tuple, never free-text from a request.
+#
+# Concurrency note: `crontab -l` then `crontab -` is a read-modify-write race if two
+# saves happen at once -- accepted as-is for this single-admin appliance rather than
+# adding a cross-process lock for a scenario this unlikely.
+def apply_report_schedule_to_crontab(schedule_cfg):
+    try:
+        result = subprocess.run(['crontab', '-l'], capture_output=True, text=True)
+        existing_lines = result.stdout.splitlines() if result.returncode == 0 else []
+    except FileNotFoundError:
+        return False, 'crontab command not found'
+    kept_lines = [l for l in existing_lines if 'generate_report.py' not in l]
+    new_lines = []
+    for report_type in REPORT_TYPES:
+        freq = schedule_cfg.get(report_type, 'off')
+        if freq not in ('weekly', 'monthly'):
+            continue
+        cmd = (f"/opt/micro-dfir/venv/bin/python3 /opt/micro-dfir/src/generate_report.py "
+               f"{report_type} --source=scheduled >> /var/log/microdfir-report.log 2>&1")
+        new_lines.append(f"{REPORT_SCHEDULE_CRON[freq]} {cmd}  # microdfir-report:{report_type}")
+    final_crontab = '\n'.join(kept_lines + new_lines)
+    if final_crontab and not final_crontab.endswith('\n'):
+        final_crontab += '\n'
+    proc = subprocess.run(['crontab', '-'], input=final_crontab, capture_output=True, text=True)
+    if proc.returncode != 0:
+        return False, proc.stderr
+    return True, None
+
+@app.route('/api/settings/report-schedule', methods=['GET', 'POST'])
+@login_required
+def api_report_schedule():
+    db = get_db()
+    if request.method == 'GET':
+        return jsonify(get_report_schedule_config(db))
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    d = request.json or {}
+    cfg = get_report_schedule_config(db)
+    for report_type in REPORT_TYPES:
+        if report_type in d and d[report_type] in REPORT_SCHEDULE_FREQUENCIES:
+            cfg[report_type] = d[report_type]
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('report_schedule_config', ?)", (json.dumps(cfg),))
+    db.commit()
+    ok, err = apply_report_schedule_to_crontab(cfg)
+    log_audit('report_schedule_change', 'settings', None, json.dumps(cfg) + ('' if ok else f' (crontab write failed: {err})'))
+    if not ok:
+        return jsonify({'status': 'partial', 'config': cfg, 'warning': f'Settings saved but crontab update failed: {err}'})
+    return jsonify({'status': 'success', 'config': cfg})
+
 # ==========================================
 # UEBA — BEHAVIORAL ANOMALY DETECTIONS
 # ==========================================
