@@ -244,7 +244,22 @@ body.sidebar-collapsed .btn-logout span{display:none;}
 .btn-sm{font-size:.78rem;}
 
 /* Tables */
-.table-dark{--bs-table-bg:var(--bg-card);}
+/* Bootstrap's .table-dark sets several custom properties, not just its own background --
+   striped/hover/active rows each read their own --bs-table-*-bg/-color pair, set by
+   .table-dark to raw white-on-dark values. Only overriding --bs-table-bg (as this rule
+   used to) left every *striped* row's text pinned to that raw white -- invisible in
+   light mode even though non-striped rows looked fine via the plain .table rule below. */
+.table-dark{
+  --bs-table-color:var(--text-primary);
+  --bs-table-bg:var(--bg-card);
+  --bs-table-border-color:var(--border);
+  --bs-table-striped-bg:var(--bg-card-alt);
+  --bs-table-striped-color:var(--text-primary);
+  --bs-table-active-bg:var(--bg-card-alt);
+  --bs-table-active-color:var(--text-primary);
+  --bs-table-hover-bg:var(--bg-card-alt);
+  --bs-table-hover-color:var(--text-primary);
+}
 .table{color:var(--text-primary);}
 .table thead th{
   color:var(--text-muted);font-size:.7rem;font-weight:700;
