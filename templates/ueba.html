@@ -29,6 +29,7 @@
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnRisk" onclick="switchUebaTab('risk')"><i class="fa-solid fa-gauge-high me-2"></i>Risk Scoring</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnInsights" onclick="switchUebaTab('insights')"><i class="fa-solid fa-chart-column me-2"></i>Data Insights</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnTuning" onclick="switchUebaTab('tuning')"><i class="fa-solid fa-sliders me-2"></i>Anomaly Tuning</button></li>
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnRules" onclick="switchUebaTab('rules')"><i class="fa-solid fa-list-check me-2"></i>Anomaly Rules</button></li>
         </ul>
     </div>
 
@@ -155,32 +156,6 @@
             </div>
 
             <div class="card bg-dark border-secondary mb-4">
-                <div class="card-header">
-                    <i class="fa-solid fa-gauge-high me-2"></i>Risk Scoring Configuration
-                </div>
-                <div class="card-body">
-                    <p class="text-muted small mb-3">How composite risk scores are computed — see the Risk Scoring tab for results. The scoring window controls how far back contributing events are summed; point values control how much each indicator (Sigma alert severity, IOC sweep hits, sensitive audit actions, statistical anomalies) contributes.</p>
-                    <div class="row g-3">
-                        <div class="col-md-3">
-                            <label class="form-label">Scoring Window (days)</label>
-                            <input type="number" id="riskCfgWindowDays" class="form-control bg-dark text-light border-secondary" min="1" max="90" {{ '' if current_user.role == 'admin' else 'disabled' }}>
-                        </div>
-                    </div>
-                    <div class="mt-3">
-                        <label class="form-label small text-muted mb-1">Point values (advanced — indicator/action name : points)</label>
-                        <textarea id="riskCfgPointsJson" class="form-control bg-dark text-light border-secondary font-monospace small" rows="8" spellcheck="false" {{ '' if current_user.role == 'admin' else 'disabled' }}></textarea>
-                        <p class="text-muted small mt-1 mb-0">Edit as JSON — <code>points</code> (per-indicator), <code>sensitive_actions</code> (per audit action type), and <code>tiers</code> (score thresholds for Low/Medium/High/Critical).</p>
-                    </div>
-                    {% if current_user.role == 'admin' %}
-                    <button class="btn btn-primary btn-sm mt-3" onclick="saveRiskConfig()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Risk Scoring Config</button>
-                    <span id="riskCfgSaveMsg" class="small ms-2" style="display:none;"></span>
-                    {% else %}
-                    <p class="text-muted small mt-3 mb-0"><i class="fa-solid fa-lock me-1"></i>Admin role required to change tuning.</p>
-                    {% endif %}
-                </div>
-            </div>
-
-            <div class="card bg-dark border-secondary mb-4">
                 <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
                     <span><i class="fa-solid fa-chart-simple me-2"></i>Entity Baselines <span class="text-muted small fw-normal">— every host/user the model currently tracks, not just the ones that fired</span></span>
                     <span class="text-muted small" id="baselinesComputedAt"></span>
@@ -245,6 +220,98 @@
             </div>
         </div>
     </div>
+
+    <!-- Anomaly Rules pane -->
+    <div id="paneRules" style="display:none;">
+        <div class="card-body">
+            <div class="card bg-dark border-secondary mb-4">
+                <div class="card-header">
+                    <i class="fa-solid fa-gauge-high me-2"></i>Scoring Settings
+                </div>
+                <div class="card-body">
+                    <p class="text-muted small mb-3">How composite risk scores are computed — see the Risk Scoring tab for results. The scoring window controls how far back contributing events are summed; point values control the flat per-indicator contribution (Sigma alert severity, IOC sweep hits, statistical anomalies). Sensitive-action and custom scoring now lives in the rules below instead of this JSON.</p>
+                    <div class="row g-3">
+                        <div class="col-md-3">
+                            <label class="form-label">Scoring Window (days)</label>
+                            <input type="number" id="riskCfgWindowDays" class="form-control bg-dark text-light border-secondary" min="1" max="90" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        </div>
+                    </div>
+                    <div class="mt-3">
+                        <label class="form-label small text-muted mb-1">Point values (advanced — indicator name : points)</label>
+                        <textarea id="riskCfgPointsJson" class="form-control bg-dark text-light border-secondary font-monospace small" rows="8" spellcheck="false" {{ '' if current_user.role == 'admin' else 'disabled' }}></textarea>
+                        <p class="text-muted small mt-1 mb-0">Edit as JSON — <code>points</code> (per-indicator) and <code>tiers</code> (score thresholds for Low/Medium/High/Critical).</p>
+                    </div>
+                    {% if current_user.role == 'admin' %}
+                    <button class="btn btn-primary btn-sm mt-3" onclick="saveRiskConfig()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Scoring Settings</button>
+                    <span id="riskCfgSaveMsg" class="small ms-2" style="display:none;"></span>
+                    {% else %}
+                    <p class="text-muted small mt-3 mb-0"><i class="fa-solid fa-lock me-1"></i>Admin role required to change scoring settings.</p>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div class="card bg-dark border-secondary">
+                <div class="card-header">
+                    <i class="fa-solid fa-list-check me-2"></i>Rules <span class="text-muted small fw-normal">— condition-based scoring against audit log actions or Sigma alerts. Each triggered rule adds its points to the matching entity; a first-time bonus can also apply when this is the first time this exact rule has matched for that entity.</span>
+                </div>
+                <div class="card-body">
+                    <div class="table-responsive mb-3">
+                        <table class="table table-dark table-sm align-middle mb-0">
+                            <thead><tr><th>Name</th><th>Source</th><th>Condition</th><th>Entity</th><th>Points</th><th>First-Time Bonus</th><th>Enabled</th><th></th></tr></thead>
+                            <tbody id="anomalyRulesTableBody"><tr><td colspan="8" class="text-center text-muted py-4">Loading…</td></tr></tbody>
+                        </table>
+                    </div>
+                    {% if current_user.role == 'admin' %}
+                    <div class="row g-2 align-items-end bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
+                        <div class="col-md-2">
+                            <label class="form-label small text-muted mb-1">Name</label>
+                            <input type="text" id="arName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Bulk rule deletion">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small text-muted mb-1">Source</label>
+                            <select id="arSource" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onAnomalyRuleSourceChange()">
+                                <option value="audit_log">Audit Log</option>
+                                <option value="alerts">Sigma Alert</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small text-muted mb-1">Field</label>
+                            <select id="arField" class="form-select form-select-sm bg-dark text-light border-secondary"></select>
+                        </div>
+                        <div class="col-md-1">
+                            <label class="form-label small text-muted mb-1">Operator</label>
+                            <select id="arOperator" class="form-select form-select-sm bg-dark text-light border-secondary">
+                                <option value="equals">equals</option>
+                                <option value="not_equals">not equals</option>
+                                <option value="contains">contains</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small text-muted mb-1">Value</label>
+                            <input type="text" id="arValue" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. rule_bulk_toggle">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small text-muted mb-1">Score Entity</label>
+                            <select id="arEntityField" class="form-select form-select-sm bg-dark text-light border-secondary"></select>
+                        </div>
+                        <div class="col-md-1">
+                            <label class="form-label small text-muted mb-1">Points</label>
+                            <input type="number" id="arPoints" class="form-control form-control-sm bg-dark text-light border-secondary" value="10" min="1" step="1">
+                        </div>
+                        <div class="col-md-2 mt-2">
+                            <label class="form-label small text-muted mb-1">First-Time Bonus (optional)</label>
+                            <input type="number" id="arBonus" class="form-control form-control-sm bg-dark text-light border-secondary" min="0" step="1" placeholder="none">
+                        </div>
+                        <div class="col-md-2 mt-2">
+                            <button type="button" class="btn btn-sm btn-outline-primary w-100" onclick="addAnomalyRule()"><i class="fa-solid fa-plus me-1"></i> Add Rule</button>
+                        </div>
+                    </div>
+                    <div id="arError" class="text-danger small mt-2" style="display:none;"></div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
 
 <!-- Risk Score Detail Modal -->
@@ -270,7 +337,7 @@ function escHtml(s) {
 }
 
 // ---- Tabs + shared stat row (repurposed per active tab, not two separate rows) ----
-const UEBA_TABS = ['detections', 'risk', 'insights', 'tuning'];
+const UEBA_TABS = ['detections', 'risk', 'insights', 'tuning', 'rules'];
 let activeUebaTab = 'detections';
 let uebaDetectionsData = null;
 
@@ -283,6 +350,7 @@ function switchUebaTab(tab) {
         document.getElementById('pane' + cap).style.display = (t === tab) ? 'block' : 'none';
     });
     if (tab === 'risk' && !riskScoresLoadedOnce) loadRiskScores();
+    if (tab === 'rules' && !anomalyRulesLoadedOnce) loadAnomalyRules();
     updateSharedStats();
 }
 
@@ -310,6 +378,12 @@ function updateSharedStats() {
         setStatTile(1, '—', '—', true);
         setStatTile(2, '—', '—', true);
         setStatTile(3, '—', '—', true);
+    } else if (activeUebaTab === 'rules') {
+        const rows = anomalyRulesData || [];
+        setStatTile(0, 'Total Rules', rows.length, true);
+        setStatTile(1, 'Enabled', rows.filter(r => r.enabled).length, true);
+        setStatTile(2, 'Audit Log Rules', rows.filter(r => r.source === 'audit_log').length, true);
+        setStatTile(3, 'Alert Rules', rows.filter(r => r.source === 'alerts').length, true);
     } else {
         const d = uebaDetectionsData || {};
         setStatTile(0, 'Total Detections', d.total ?? '—', true);
@@ -430,7 +504,7 @@ function loadRiskConfig() {
         .then(cfg => {
             document.getElementById('riskCfgWindowDays').value = cfg.window_days;
             document.getElementById('riskCfgPointsJson').value = JSON.stringify(
-                {points: cfg.points, sensitive_actions: cfg.sensitive_actions, tiers: cfg.tiers}, null, 2
+                {points: cfg.points, tiers: cfg.tiers}, null, 2
             );
         })
         .catch(err => console.error('Error loading risk scoring config:', err));
@@ -768,10 +842,109 @@ async function deleteUebaExclusion(eid) {
         .catch(err => toast('Error deleting exclusion: ' + err, 'danger'));
 }
 
+// ---- Anomaly Rules ----
+// Mirrors ANOMALY_RULE_SOURCES in src/app.py / src/ueba_engine.py -- duplicated here
+// the same way this codebase already duplicates small shared constants across files
+// rather than importing across module/language boundaries.
+const ANOMALY_RULE_SOURCES_JS = {
+    audit_log: {fields: ['action', 'username', 'role', 'target_type', 'target_id'], entity_fields: ['username', 'target_id']},
+    alerts: {fields: ['severity', 'rule_name', 'host', 'username', 'source_ip', 'destination_ip'], entity_fields: ['host', 'username']},
+};
+let anomalyRulesData = [];
+let anomalyRulesLoadedOnce = false;
+
+function onAnomalyRuleSourceChange() {
+    const src = ANOMALY_RULE_SOURCES_JS[document.getElementById('arSource').value];
+    const fieldSel = document.getElementById('arField');
+    const entitySel = document.getElementById('arEntityField');
+    fieldSel.innerHTML = src.fields.map(f => `<option value="${f}">${f}</option>`).join('');
+    entitySel.innerHTML = src.entity_fields.map(f => `<option value="${f}">${f}</option>`).join('');
+}
+
+function anomalyRuleSourceLabel(s) {
+    return s === 'alerts' ? 'Sigma Alert' : 'Audit Log';
+}
+
+function renderAnomalyRules() {
+    const tbody = document.getElementById('anomalyRulesTableBody');
+    if (!anomalyRulesData.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-4">No rules yet.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = anomalyRulesData.map(r => `<tr>
+        <td>${escHtml(r.name)}</td>
+        <td class="small text-muted">${anomalyRuleSourceLabel(r.source)}</td>
+        <td class="small"><code>${escHtml(r.field)} ${escHtml(r.operator)} ${escHtml(r.value)}</code></td>
+        <td class="small">${entityTypeBadge(r.entity_type)}${escHtml(r.entity_field)}</td>
+        <td>${r.points}</td>
+        <td class="small text-muted">${r.first_time_bonus_points ?? '—'}</td>
+        <td>${IS_ADMIN
+            ? `<input type="checkbox" class="form-check-input" ${r.enabled ? 'checked' : ''} onchange="toggleAnomalyRule(${r.id}, this.checked)">`
+            : (r.enabled ? '<span class="badge bg-success">On</span>' : '<span class="badge bg-secondary">Off</span>')}</td>
+        <td>${IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteAnomalyRule(${r.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
+    </tr>`).join('');
+}
+
+function loadAnomalyRules() {
+    fetch('/api/ueba/anomaly-rules').then(r => r.json()).then(rows => {
+        anomalyRulesData = rows || [];
+        anomalyRulesLoadedOnce = true;
+        renderAnomalyRules();
+        updateSharedStats();
+    }).catch(err => console.error('Error loading anomaly rules:', err));
+}
+
+function addAnomalyRule() {
+    const bonusRaw = document.getElementById('arBonus').value.trim();
+    const payload = {
+        name: document.getElementById('arName').value.trim(),
+        source: document.getElementById('arSource').value,
+        field: document.getElementById('arField').value,
+        operator: document.getElementById('arOperator').value,
+        value: document.getElementById('arValue').value.trim(),
+        entity_field: document.getElementById('arEntityField').value,
+        entity_type: document.getElementById('arEntityField').value === 'host' ? 'host' : 'user',
+        points: parseInt(document.getElementById('arPoints').value, 10),
+        first_time_bonus_points: bonusRaw === '' ? null : parseInt(bonusRaw, 10),
+    };
+    const errBox = document.getElementById('arError');
+    errBox.style.display = 'none';
+    if (!payload.name) { errBox.innerText = 'Name is required.'; errBox.style.display = 'block'; return; }
+    if (!payload.value) { errBox.innerText = 'Value is required.'; errBox.style.display = 'block'; return; }
+    fetch('/api/ueba/anomaly-rules', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (ok) {
+            document.getElementById('arName').value = '';
+            document.getElementById('arValue').value = '';
+            document.getElementById('arPoints').value = '10';
+            document.getElementById('arBonus').value = '';
+            loadAnomalyRules();
+        } else {
+            errBox.innerText = data.error || 'Failed to add rule.'; errBox.style.display = 'block';
+        }
+    }).catch(err => { errBox.innerText = 'Error: ' + err; errBox.style.display = 'block'; });
+}
+
+function toggleAnomalyRule(rid, enabled) {
+    fetch(`/api/ueba/anomaly-rules/${rid}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled})
+    }).then(() => loadAnomalyRules())
+      .catch(err => toast('Error updating rule: ' + err, 'danger'));
+}
+
+async function deleteAnomalyRule(rid) {
+    if (!(await confirmDialog('Delete this rule?', {title: 'Delete rule', danger: true, confirmLabel: 'Delete'}))) return;
+    fetch(`/api/ueba/anomaly-rules/${rid}`, {method: 'DELETE'})
+        .then(() => loadAnomalyRules())
+        .catch(err => toast('Error deleting rule: ' + err, 'danger'));
+}
+
 // ---- Init ----
 const _uebaUrlTab = new URLSearchParams(window.location.search).get('tab');
 if (_uebaUrlTab && _uebaUrlTab !== 'detections' && UEBA_TABS.includes(_uebaUrlTab)) switchUebaTab(_uebaUrlTab);
 
+onAnomalyRuleSourceChange();
 loadUebaDetections();
 loadRiskConfig();
 loadUebaConfig();
