@@ -54,8 +54,12 @@ venv/bin/python src/geoip_update.py
 echo "[*] Setting up Automation Cron Jobs..."
 (crontab -l 2>/dev/null | grep -v "ueba_engine.py"; echo "0 * * * * $SOC_DIR/venv/bin/python3 $SOC_DIR/src/ueba_engine.py >> /var/log/microdfir-ueba.log 2>&1") | crontab -
 (crontab -l 2>/dev/null | grep -v "taxii_client.py"; echo "0 2 * * * $SOC_DIR/venv/bin/python3 $SOC_DIR/src/taxii_client.py >> /var/log/microdfir-taxii.log 2>&1") | crontab -
-(crontab -l 2>/dev/null | grep -v "generate_report.py"; echo "0 1 1 * * $SOC_DIR/venv/bin/python3 $SOC_DIR/src/generate_report.py >> /var/log/microdfir-report.log 2>&1") | crontab -
 (crontab -l 2>/dev/null | grep -v "geoip_update.py"; echo "0 3 1 * * $SOC_DIR/venv/bin/python3 $SOC_DIR/src/geoip_update.py >> /var/log/microdfir-geoip.log 2>&1") | crontab -
+# Report generation is scheduled per-type from Settings > Reports > Schedule (saved to
+# the settings table, applied live by app.py) rather than a single hardcoded line here
+# -- this seeds the default schedule (security only, monthly) into crontab so a fresh
+# install's out-of-the-box behavior matches what used to be hardcoded.
+venv/bin/python src/sync_report_schedule.py
 
 echo "[*] Installing Systemd Services..."
 cp config/microsoc-web.service /etc/systemd/system/

@@ -34,6 +34,16 @@ if [ ! -f "$SOC_DIR/data/geoip/dbip-country-lite.mmdb" ]; then
     venv/bin/python src/geoip_update.py
 fi
 
+# Report scheduling moved from this script's own hardcoded crontab line to a
+# Settings-page-configurable one (Settings > Reports > Schedule), applied live by
+# app.py whenever an admin saves it. An existing host's crontab still has the OLD
+# hardcoded line from a prior install.sh run, though -- this one-shot sync replaces it
+# with whatever the saved schedule config says (defaulting to the same "security only,
+# monthly" behavior if nothing's been saved yet), so it doesn't linger alongside the
+# app-managed lines and double-generate the security report.
+echo "[*] Syncing the report generation schedule to crontab..."
+venv/bin/python src/sync_report_schedule.py
+
 echo "[*] Restarting Micro-SOC services to apply changes..."
 systemctl restart microsoc-web
 systemctl restart microsoc-soar

@@ -216,6 +216,35 @@
                     </div>
                 </div>
             </div>
+
+            <hr class="border-secondary my-4">
+
+            <h6 class="text-info mb-3">Report Schedule</h6>
+            <p class="text-muted small mb-3">Automatically generate each report type on a recurring cadence, in addition to generating on demand from the SIEM tab's Reports pane.</p>
+            <div class="row g-2 align-items-end mb-2" style="max-width:520px;">
+                <div class="col-6"><label class="form-label small text-muted mb-1">Security Summary</label>
+                    <select data-report-type="security" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <option value="off">Off</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
+                    </select>
+                </div>
+                <div class="col-6"><label class="form-label small text-muted mb-1">Compliance Report</label>
+                    <select data-report-type="compliance" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <option value="off">Off</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
+                    </select>
+                </div>
+                <div class="col-6"><label class="form-label small text-muted mb-1">Audit Trail Report</label>
+                    <select data-report-type="audit" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <option value="off">Off</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
+                    </select>
+                </div>
+            </div>
+            {% if current_user.role == 'admin' %}
+            <button class="btn btn-outline-primary btn-sm mt-2" onclick="saveReportSchedule()"><i class="fa-solid fa-save me-1"></i> Save Schedule</button>
+            {% else %}
+            <p class="text-muted small mb-0"><i class="fa-solid fa-lock me-1"></i>Admin role required to change the report schedule.</p>
+            {% endif %}
+            <p class="text-muted small mt-2 mb-0">Weekly reports run Monday 06:00; monthly reports run the 1st at 01:00 — the appliance's own local system time.</p>
+            <div id="scheduleMsg" class="mt-2 small" style="display:none;"></div>
         </div>
     </div>
 
@@ -344,6 +373,7 @@ document.addEventListener("DOMContentLoaded", function() {
     loadUsers();
     loadRetentionSettings();
     loadReportBranding();
+    loadReportSchedule();
     setInterval(loadMetrics, 5000);
 
     let certForm = document.getElementById('certUploadForm');
@@ -399,6 +429,44 @@ function saveBranding() {
             msg.style.display = 'block';
             msg.className = 'mt-3 small text-danger';
             msg.innerText = 'Error saving branding: ' + err;
+        });
+}
+
+// Report Schedule Logic
+function loadReportSchedule() {
+    fetch('/api/settings/report-schedule')
+        .then(r => r.json())
+        .then(cfg => {
+            document.querySelectorAll('[data-report-type]').forEach(sel => {
+                sel.value = cfg[sel.dataset.reportType] || 'off';
+            });
+        })
+        .catch(e => console.log('Error loading report schedule:', e));
+}
+
+function saveReportSchedule() {
+    const cfg = {};
+    document.querySelectorAll('[data-report-type]').forEach(sel => { cfg[sel.dataset.reportType] = sel.value; });
+    const msg = document.getElementById('scheduleMsg');
+    fetch('/api/settings/report-schedule', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(cfg) })
+        .then(r => r.json())
+        .then(res => {
+            msg.style.display = 'block';
+            if (res.status === 'success') {
+                msg.className = 'mt-2 small text-success';
+                msg.innerHTML = '<i class="fa-solid fa-check-circle"></i> Schedule saved.';
+            } else if (res.status === 'partial') {
+                msg.className = 'mt-2 small text-warning';
+                msg.innerText = res.warning || 'Settings saved but the schedule may not have applied.';
+            } else {
+                msg.className = 'mt-2 small text-danger';
+                msg.innerText = res.error || 'Failed to save schedule.';
+            }
+        })
+        .catch(err => {
+            msg.style.display = 'block';
+            msg.className = 'mt-2 small text-danger';
+            msg.innerText = 'Error saving schedule: ' + err;
         });
 }
 
