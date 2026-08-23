@@ -1348,7 +1348,7 @@ RISK_SCORE_DEFAULTS = {
         'alert_critical': 40, 'alert_high': 25, 'alert_medium': 10, 'alert_low': 5, 'alert_informational': 1,
         'sweep_hit': 35, 'failed_login': 10,
         'volume_anomaly_critical': 30, 'volume_anomaly_high': 20, 'volume_anomaly_medium': 10,
-        'new_source_ip': 15, 'first_time_bonus': 15,
+        'new_source_ip': 15,
     },
     'tiers': {'low': 0, 'medium': 20, 'high': 50, 'critical': 100},
 }
