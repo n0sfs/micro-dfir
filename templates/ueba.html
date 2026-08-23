@@ -338,22 +338,15 @@
                     <option value="alerts">Sigma Alert</option>
                 </select>
             </div>
-            <div class="col-md-4">
-                <label class="form-label small text-muted mb-1">Field</label>
-                <select id="arField" class="form-select form-select-sm bg-dark text-light border-secondary"></select>
+        </div>
+        <div class="mt-3">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+                <label class="form-label small text-muted mb-0">Conditions <span class="fw-normal">— all must match (AND)</span></label>
+                <button type="button" class="btn btn-sm btn-outline-primary py-0 px-2" onclick="addAnomalyRuleCondition()"><i class="fa-solid fa-plus me-1"></i>Add Condition</button>
             </div>
-            <div class="col-md-3">
-                <label class="form-label small text-muted mb-1">Operator</label>
-                <select id="arOperator" class="form-select form-select-sm bg-dark text-light border-secondary">
-                    <option value="equals">equals</option>
-                    <option value="not_equals">not equals</option>
-                    <option value="contains">contains</option>
-                </select>
-            </div>
-            <div class="col-md-5">
-                <label class="form-label small text-muted mb-1">Value</label>
-                <input type="text" id="arValue" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Mimikatz">
-            </div>
+            <div id="arConditionsList"></div>
+        </div>
+        <div class="row g-3 mt-1">
             <div class="col-md-4">
                 <label class="form-label small text-muted mb-1">Score Entity</label>
                 <select id="arEntityField" class="form-select form-select-sm bg-dark text-light border-secondary"></select>
@@ -996,19 +989,67 @@ async function deleteUebaExclusion(eid) {
 const ANOMALY_RULE_SOURCES_JS = {
     alerts: {fields: ['severity', 'rule_name', 'host', 'username', 'source_ip', 'destination_ip'], entity_fields: ['host', 'username']},
 };
+const ANOMALY_RULE_OPERATORS_JS = [
+    ['equals', 'equals'], ['not_equals', 'not equals'], ['contains', 'contains'],
+    ['starts_with', 'starts with'], ['ends_with', 'ends with'],
+];
 let anomalyRulesData = [];
 let anomalyRulesLoadedOnce = false;
 let arQuickFilter = 'all';
 let arQ = '';
 let arSortState = { key: 'matches_30d', dir: 'desc' };
 let arEditingId = null;
+// The modal's source of truth for its repeating condition rows -- each input writes
+// straight into this array via its own oninput/onchange handler (see renderArConditions),
+// so add/remove can re-render without losing whatever the user already typed.
+let arConditions = [];
 
 function onAnomalyRuleSourceChange() {
     const src = ANOMALY_RULE_SOURCES_JS[document.getElementById('arSource').value];
-    const fieldSel = document.getElementById('arField');
     const entitySel = document.getElementById('arEntityField');
-    fieldSel.innerHTML = src.fields.map(f => `<option value="${f}">${f}</option>`).join('');
     entitySel.innerHTML = src.entity_fields.map(f => `<option value="${f}">${f}</option>`).join('');
+    // A condition's field may not exist under a newly-selected source -- reset just
+    // those to the new source's first field rather than leaving a stale/invalid value.
+    arConditions.forEach(c => { if (!src.fields.includes(c.field)) c.field = src.fields[0]; });
+    renderArConditions();
+}
+
+function renderArConditions() {
+    const container = document.getElementById('arConditionsList');
+    if (!container) return;
+    const src = ANOMALY_RULE_SOURCES_JS[document.getElementById('arSource').value];
+    container.innerHTML = arConditions.map((c, i) => `
+        <div class="row g-2 align-items-center mb-2">
+            <div class="col-4">
+                <select class="form-select form-select-sm bg-dark text-light border-secondary" onchange="arConditions[${i}].field = this.value">
+                    ${src.fields.map(f => `<option value="${f}" ${c.field === f ? 'selected' : ''}>${f}</option>`).join('')}
+                </select>
+            </div>
+            <div class="col-3">
+                <select class="form-select form-select-sm bg-dark text-light border-secondary" onchange="arConditions[${i}].operator = this.value">
+                    ${ANOMALY_RULE_OPERATORS_JS.map(([val, label]) => `<option value="${val}" ${c.operator === val ? 'selected' : ''}>${label}</option>`).join('')}
+                </select>
+            </div>
+            <div class="col-4">
+                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" value="${escHtml(c.value)}" oninput="arConditions[${i}].value = this.value" placeholder="e.g. Mimikatz">
+            </div>
+            <div class="col-1">
+                <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" onclick="removeAnomalyRuleCondition(${i})" ${arConditions.length <= 1 ? 'disabled' : ''} title="Remove condition"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+        </div>
+    `).join('');
+}
+
+function addAnomalyRuleCondition() {
+    const src = ANOMALY_RULE_SOURCES_JS[document.getElementById('arSource').value];
+    arConditions.push({ field: src.fields[0], operator: 'equals', value: '' });
+    renderArConditions();
+}
+
+function removeAnomalyRuleCondition(i) {
+    if (arConditions.length <= 1) return;
+    arConditions.splice(i, 1);
+    renderArConditions();
 }
 
 function anomalyRuleSourceLabel(s) {
@@ -1064,7 +1105,7 @@ function arRenderTable(rows) {
     tbody.innerHTML = rows.map(r => `<tr>
         <td>${escHtml(r.name)}</td>
         <td class="small text-muted">${anomalyRuleSourceLabel(r.source)}</td>
-        <td class="small"><code>${escHtml(r.field)} ${escHtml(r.operator)} ${escHtml(r.value)}</code></td>
+        <td class="small"><code>${(r.conditions || []).map(c => `${escHtml(c.field)} ${escHtml(c.operator)} ${escHtml(c.value)}`).join(' AND ')}</code></td>
         <td class="small">${entityTypeBadge(r.entity_type)}${escHtml(r.entity_field)}</td>
         <td>${r.points}</td>
         <td class="small text-muted">${r.first_time_bonus_points ?? '—'}</td>
@@ -1103,10 +1144,11 @@ function openAnomalyRuleModal(rule) {
         ? '<i class="fa-solid fa-pen me-2"></i>Edit Rule' : '<i class="fa-solid fa-list-check me-2"></i>Add Rule';
     document.getElementById('arName').value = rule ? rule.name : '';
     document.getElementById('arSource').value = rule ? rule.source : 'alerts';
+    const src = ANOMALY_RULE_SOURCES_JS[document.getElementById('arSource').value];
+    arConditions = (rule && rule.conditions && rule.conditions.length)
+        ? rule.conditions.map(c => ({ field: c.field, operator: c.operator, value: c.value }))
+        : [{ field: src.fields[0], operator: 'equals', value: '' }];
     onAnomalyRuleSourceChange();
-    document.getElementById('arField').value = rule ? rule.field : document.getElementById('arField').value;
-    document.getElementById('arOperator').value = rule ? rule.operator : 'equals';
-    document.getElementById('arValue').value = rule ? rule.value : '';
     document.getElementById('arEntityField').value = rule ? rule.entity_field : document.getElementById('arEntityField').value;
     document.getElementById('arPoints').value = rule ? rule.points : '10';
     document.getElementById('arBonus').value = (rule && rule.first_time_bonus_points != null) ? rule.first_time_bonus_points : '';
@@ -1116,12 +1158,11 @@ function openAnomalyRuleModal(rule) {
 
 function saveAnomalyRuleModal() {
     const bonusRaw = document.getElementById('arBonus').value.trim();
+    const conditions = arConditions.map(c => ({ field: c.field, operator: c.operator, value: String(c.value || '').trim() }));
     const payload = {
         name: document.getElementById('arName').value.trim(),
         source: document.getElementById('arSource').value,
-        field: document.getElementById('arField').value,
-        operator: document.getElementById('arOperator').value,
-        value: document.getElementById('arValue').value.trim(),
+        conditions,
         entity_field: document.getElementById('arEntityField').value,
         entity_type: document.getElementById('arEntityField').value === 'host' ? 'host' : 'user',
         points: parseInt(document.getElementById('arPoints').value, 10),
@@ -1130,7 +1171,7 @@ function saveAnomalyRuleModal() {
     const errBox = document.getElementById('arError');
     errBox.style.display = 'none';
     if (!payload.name) { errBox.innerText = 'Name is required.'; errBox.style.display = 'block'; return; }
-    if (!payload.value) { errBox.innerText = 'Value is required.'; errBox.style.display = 'block'; return; }
+    if (!payload.conditions.length || payload.conditions.some(c => !c.value)) { errBox.innerText = 'Every condition needs a value.'; errBox.style.display = 'block'; return; }
     const url = arEditingId ? `/api/ueba/anomaly-rules/${arEditingId}` : '/api/ueba/anomaly-rules';
     const method = arEditingId ? 'PUT' : 'POST';
     fetch(url, {

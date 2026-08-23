@@ -1388,7 +1388,7 @@ RISK_SCORE_DEFAULTS = {
 ANOMALY_RULE_SOURCES = {
     'alerts': {'fields': ('severity', 'rule_name', 'host', 'username', 'source_ip', 'destination_ip'), 'entity_fields': ('host', 'username')},
 }
-ANOMALY_RULE_OPERATORS = ('equals', 'not_equals', 'contains')
+ANOMALY_RULE_OPERATORS = ('equals', 'not_equals', 'contains', 'starts_with', 'ends_with')
 ANOMALY_RULE_ENTITY_TYPES = ('user', 'host')
 
 ANOMALY_RULES_CACHE = None
@@ -1480,19 +1480,25 @@ def api_ueba_risk_config():
     log_audit('risk_score_config_change', 'settings')
     return jsonify({'status': 'success'})
 
-def _validate_anomaly_rule(d, partial=False):
+def _validate_anomaly_rule(d):
     source = d.get('source')
     allowed = ANOMALY_RULE_SOURCES.get(source)
     if not allowed:
         return f"source must be one of {', '.join(ANOMALY_RULE_SOURCES)}"
     if not (d.get('name') or '').strip():
         return 'name is required'
-    if d.get('field') not in allowed['fields']:
-        return f"field must be one of {', '.join(allowed['fields'])} for source '{source}'"
-    if d.get('operator') not in ANOMALY_RULE_OPERATORS:
-        return f"operator must be one of {', '.join(ANOMALY_RULE_OPERATORS)}"
-    if not str(d.get('value', '')).strip():
-        return 'value is required'
+    conditions = d.get('conditions')
+    if not isinstance(conditions, list) or not conditions:
+        return 'at least one condition is required'
+    for c in conditions:
+        if not isinstance(c, dict):
+            return 'each condition must be an object'
+        if c.get('field') not in allowed['fields']:
+            return f"condition field must be one of {', '.join(allowed['fields'])} for source '{source}'"
+        if c.get('operator') not in ANOMALY_RULE_OPERATORS:
+            return f"condition operator must be one of {', '.join(ANOMALY_RULE_OPERATORS)}"
+        if not str(c.get('value', '')).strip():
+            return 'condition value is required'
     if d.get('entity_field') not in allowed['entity_fields']:
         return f"entity_field must be one of {', '.join(allowed['entity_fields'])} for source '{source}'"
     if d.get('entity_type') not in ANOMALY_RULE_ENTITY_TYPES:
@@ -1507,6 +1513,16 @@ def _validate_anomaly_rule(d, partial=False):
         except (TypeError, ValueError):
             return 'first_time_bonus_points must be a number'
     return None
+
+def _condition_summary(conditions):
+    return ' AND '.join(f"{c['field']} {c['operator']} {c['value']}" for c in conditions)
+
+def _replace_anomaly_rule_conditions(db, rule_id, conditions):
+    db.execute("DELETE FROM anomaly_rule_conditions WHERE rule_id = ?", (rule_id,))
+    db.executemany(
+        "INSERT INTO anomaly_rule_conditions (rule_id, field, operator, value) VALUES (?, ?, ?, ?)",
+        [(rule_id, c['field'], c['operator'], str(c['value'])) for c in conditions]
+    )
 
 # Match counts are LEFT JOINed off risk_score_events.rule_id the same way
 # /api/rules/tuning joins alerts.rule_id against sigma_rules -- see ANOMALY_RULES_CACHE
@@ -1534,8 +1550,13 @@ def api_anomaly_rules():
         import time
         if ANOMALY_RULES_CACHE is not None and (time.time() - ANOMALY_RULES_CACHE_TIME) < RULES_CACHE_TTL:
             return jsonify(ANOMALY_RULES_CACHE)
-        out = [dict(r) for r in db.execute(_ANOMALY_RULES_TUNING_SQL).fetchall()]
-        ANOMALY_RULES_CACHE = out
+        rules = [dict(r) for r in db.execute(_ANOMALY_RULES_TUNING_SQL).fetchall()]
+        conds_by_rule = {}
+        for c in db.execute("SELECT rule_id, field, operator, value FROM anomaly_rule_conditions ORDER BY id").fetchall():
+            conds_by_rule.setdefault(c['rule_id'], []).append({'field': c['field'], 'operator': c['operator'], 'value': c['value']})
+        for r in rules:
+            r['conditions'] = conds_by_rule.get(r['id'], [])
+        ANOMALY_RULES_CACHE = rules
         ANOMALY_RULES_CACHE_TIME = time.time()
         return jsonify(ANOMALY_RULES_CACHE)
     if current_user.role != 'admin':
@@ -1546,14 +1567,15 @@ def api_anomaly_rules():
         return jsonify({'error': err}), 400
     bonus = d.get('first_time_bonus_points')
     bonus = int(bonus) if bonus not in (None, '') else None
-    db.execute(
-        "INSERT INTO anomaly_rules (name, source, field, operator, value, entity_field, entity_type, points, first_time_bonus_points, enabled, created_by) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
-        (d['name'].strip(), d['source'], d['field'], d['operator'], str(d['value']), d['entity_field'], d['entity_type'], int(d['points']), bonus, current_user.username)
+    cur = db.execute(
+        "INSERT INTO anomaly_rules (name, source, entity_field, entity_type, points, first_time_bonus_points, enabled, created_by) "
+        "VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
+        (d['name'].strip(), d['source'], d['entity_field'], d['entity_type'], int(d['points']), bonus, current_user.username)
     )
+    _replace_anomaly_rule_conditions(db, cur.lastrowid, d['conditions'])
     db.commit()
     invalidate_anomaly_rules_cache()
-    log_audit('anomaly_rule_create', 'anomaly_rule', None, f"{d['name']}: {d['field']} {d['operator']} {d['value']} -> {d['points']} pts")
+    log_audit('anomaly_rule_create', 'anomaly_rule', cur.lastrowid, f"{d['name']}: {_condition_summary(d['conditions'])} -> {d['points']} pts")
     return jsonify({'status': 'success'}), 201
 
 @app.route('/api/ueba/anomaly-rules/<int:rid>', methods=['PUT', 'DELETE'])
@@ -1564,6 +1586,7 @@ def api_anomaly_rule_detail(rid):
         return jsonify({'error': 'Admin required'}), 403
     if request.method == 'DELETE':
         db.execute("DELETE FROM anomaly_rules WHERE id = ?", (rid,))
+        db.execute("DELETE FROM anomaly_rule_conditions WHERE rule_id = ?", (rid,))
         db.commit()
         invalidate_anomaly_rules_cache()
         log_audit('anomaly_rule_delete', 'anomaly_rule', rid)
@@ -1585,14 +1608,15 @@ def api_anomaly_rule_detail(rid):
     bonus = d.get('first_time_bonus_points')
     bonus = int(bonus) if bonus not in (None, '') else None
     db.execute(
-        "UPDATE anomaly_rules SET name=?, source=?, field=?, operator=?, value=?, entity_field=?, entity_type=?, points=?, "
+        "UPDATE anomaly_rules SET name=?, source=?, entity_field=?, entity_type=?, points=?, "
         "first_time_bonus_points=?, enabled=?, updated_by=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-        (d['name'].strip(), d['source'], d['field'], d['operator'], str(d['value']), d['entity_field'], d['entity_type'],
+        (d['name'].strip(), d['source'], d['entity_field'], d['entity_type'],
          int(d['points']), bonus, 1 if d.get('enabled', True) else 0, current_user.username, rid)
     )
+    _replace_anomaly_rule_conditions(db, rid, d['conditions'])
     db.commit()
     invalidate_anomaly_rules_cache()
-    log_audit('anomaly_rule_update', 'anomaly_rule', rid, f"{d['name']}: {d['field']} {d['operator']} {d['value']} -> {d['points']} pts")
+    log_audit('anomaly_rule_update', 'anomaly_rule', rid, f"{d['name']}: {_condition_summary(d['conditions'])} -> {d['points']} pts")
     return jsonify({'status': 'success'})
 
 # ---- Data Insights: per-entity and per-model behavior histograms ----
@@ -2107,10 +2131,14 @@ def migrate_risk_scoring():
 def migrate_anomaly_rules():
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        # Current (post-cleanup) shape -- conditions (field/operator/value) live in
+        # their own table now, see migrate_anomaly_rule_conditions() below. This
+        # CREATE TABLE only actually does anything if anomaly_rules doesn't exist at
+        # all yet; an existing install with the old inline field/operator/value columns
+        # is handled by that migration's rebuild, not by this IF NOT EXISTS no-op.
         conn.execute('''CREATE TABLE IF NOT EXISTS anomaly_rules (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL, source TEXT NOT NULL, field TEXT NOT NULL,
-            operator TEXT NOT NULL DEFAULT 'equals', value TEXT NOT NULL,
+            name TEXT NOT NULL, source TEXT NOT NULL,
             entity_field TEXT NOT NULL, entity_type TEXT NOT NULL, points INTEGER NOT NULL,
             first_time_bonus_points INTEGER, enabled BOOLEAN DEFAULT 1,
             created_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -2120,6 +2148,57 @@ def migrate_anomaly_rules():
         # was pulled back out shortly after shipping -- Sigma alerts only for now. Clean
         # up any rows a prior deploy already seeded; harmless no-op once none remain.
         conn.execute("DELETE FROM anomaly_rules WHERE source = 'audit_log'")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_anomaly_rule_conditions():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(anomaly_rules)").fetchall()]
+        conn.execute('''CREATE TABLE IF NOT EXISTS anomaly_rule_conditions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id INTEGER NOT NULL,
+            field TEXT NOT NULL, operator TEXT NOT NULL DEFAULT 'equals', value TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_rule_conditions_rule ON anomaly_rule_conditions(rule_id)")
+        if 'field' not in cols:
+            # Already on the new shape (or a fresh install that started there) --
+            # nothing left to backfill or rebuild.
+            conn.commit()
+            conn.close()
+            return
+        # Old shape detected: move each rule's single field/operator/value into its own
+        # condition row (skip any rule that somehow already has conditions, so this stays
+        # safe to re-run), then rebuild anomaly_rules without those columns for real --
+        # SQLite's DROP COLUMN support varies by version, so this doesn't rely on it.
+        rows = conn.execute("SELECT id, field, operator, value FROM anomaly_rules").fetchall()
+        for rid, field, operator, value in rows:
+            already = conn.execute("SELECT COUNT(*) FROM anomaly_rule_conditions WHERE rule_id = ?", (rid,)).fetchone()[0]
+            if already == 0:
+                conn.execute(
+                    "INSERT INTO anomaly_rule_conditions (rule_id, field, operator, value) VALUES (?, ?, ?, ?)",
+                    (rid, field, operator, value)
+                )
+        conn.execute('''CREATE TABLE anomaly_rules_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL, source TEXT NOT NULL,
+            entity_field TEXT NOT NULL, entity_type TEXT NOT NULL, points INTEGER NOT NULL,
+            first_time_bonus_points INTEGER, enabled BOOLEAN DEFAULT 1,
+            created_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_by TEXT, updated_at DATETIME
+        )''')
+        # Explicit id column in both the INSERT and SELECT preserves every rule's
+        # original id -- risk_score_events.rule_id and the just-backfilled
+        # anomaly_rule_conditions.rule_id both reference it, and losing that link would
+        # silently break match-history/tuning-stat attribution for every existing rule.
+        conn.execute('''INSERT INTO anomaly_rules_new
+            (id, name, source, entity_field, entity_type, points, first_time_bonus_points, enabled, created_by, created_at, updated_by, updated_at)
+            SELECT id, name, source, entity_field, entity_type, points, first_time_bonus_points, enabled, created_by, created_at, updated_by, updated_at
+            FROM anomaly_rules''')
+        conn.execute("DROP TABLE anomaly_rules")
+        conn.execute("ALTER TABLE anomaly_rules_new RENAME TO anomaly_rules")
         conn.commit()
         conn.close()
     except Exception:
@@ -3419,6 +3498,7 @@ migrate_agent_tokens()
 migrate_audit_log()
 migrate_risk_scoring()
 migrate_anomaly_rules()
+migrate_anomaly_rule_conditions()
 migrate_risk_score_events_rule_id()
 
 try:
