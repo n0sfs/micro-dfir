@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <h2><i class="fa-solid fa-robot me-2"></i>SOAR</h2>
+    <p>Security Orchestration, Automation, and Response.</p>
+</div>
+
+<div class="card bg-dark border-secondary">
+    <div class="card-body text-center py-5">
+        <i class="fa-solid fa-robot text-muted mb-3" style="font-size:2.5rem;"></i>
+        <h5>Playbooks &amp; Automated Response — Coming Soon</h5>
+        <p class="text-muted small mx-auto" style="max-width:640px;">
+            The SOAR engine already runs as a backend service today, receiving
+            high-severity Sigma alerts by webhook and acknowledging them -- this tab
+            will let you define and manage the automated response playbooks
+            (containment actions, notifications, enrichment) triggered from those
+            alerts. This page is a placeholder; nothing is wired up in the UI yet.
+        </p>
+    </div>
+</div>
+{% endblock %}
