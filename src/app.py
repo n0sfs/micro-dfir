@@ -110,6 +110,12 @@ def init_db():
         c.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", ('admin', generate_password_hash('changeme123'), 'admin'))
     conn.commit()
     conn.close()
+
+# The only fields a drop rule can actually act on, post-remap -- generate_vector_config()
+# and the preview endpoint (api_droprules_preview) both need this exact same list, since
+# the preview's whole job is to faithfully predict what the real Vector config would drop.
+DROP_RULE_FIELDS = ('app', 'host', 'event_id', 'message')
+
 def generate_vector_config():
     db = get_db()
     rules = db.execute("SELECT * FROM drop_rules WHERE enabled = 1").fetchall()
@@ -128,7 +134,7 @@ def generate_vector_config():
     # since the UI never sends "app_name"/"hostname", only "app"/"host"/"event_id".
     stmts = []
     for r in rules:
-        field = r['field'] if r['field'] in ('app', 'host', 'event_id', 'message') else 'message'
+        field = r['field'] if r['field'] in DROP_RULE_FIELDS else 'message'
         val = (r['value'] or '').replace('\\', '\\\\').replace('"', '\\"')
         if r['operator'] == 'equals':
             cond = f'(to_string(.{field}) ?? "") == "{val}"'
@@ -770,6 +776,48 @@ def del_drop(rid):
     log_audit('drop_rule_delete', 'drop_rule', rid)
     return jsonify({"ok":1})
 
+DROP_RULE_PREVIEW_WINDOW_DAYS = 7
+DROP_RULE_PREVIEW_SAMPLE_LIMIT = 20
+
+# Dry-run a candidate field/operator/value against real recently-ingested logs, so an
+# admin can see what a drop rule would actually have caught before saving it (drop
+# rules run at the Vector layer, before a log ever reaches live_logs -- once a rule is
+# live there's no way to see what it silently ate, so this is the only chance to check).
+# Deliberately mirrors generate_vector_config()'s own VRL semantics as closely as SQL
+# allows, not the Log Search page's (case-insensitive LIKE) filtering: VRL's `==` and
+# `contains()` are both case-sensitive by default, so this uses `=` and SQLite's
+# case-sensitive INSTR() rather than LIKE, and COALESCE(field, '') to mirror `?? ""`
+# for rows where the field is NULL -- using the wrong casing/null semantics here would
+# make the preview lie about what the real rule matches.
+@app.route('/api/droprules/preview', methods=['POST'])
+@login_required
+def api_droprules_preview():
+    d = request.get_json() or {}
+    field = d.get('field') if d.get('field') in DROP_RULE_FIELDS else 'message'
+    operator = d.get('operator')
+    value = str(d.get('value', '')).strip()
+    if not value:
+        return jsonify({'error': 'A match value is required to preview.'}), 400
+
+    if operator == 'equals':
+        cond = f"COALESCE({field}, '') = ?"
+    else:
+        cond = f"INSTR(COALESCE({field}, ''), ?) > 0"
+    where = f"{cond} AND timestamp >= datetime('now', ?)"
+    params = (value, f'-{DROP_RULE_PREVIEW_WINDOW_DAYS} days')
+
+    db = get_db()
+    count = db.execute(f"SELECT COUNT(*) FROM live_logs WHERE {where}", params).fetchone()[0]
+    rows = db.execute(
+        f"SELECT timestamp, host, app, event_id, message FROM live_logs WHERE {where} "
+        f"ORDER BY timestamp DESC LIMIT {DROP_RULE_PREVIEW_SAMPLE_LIMIT}",
+        params
+    ).fetchall()
+    return jsonify({
+        'count': count,
+        'sample': [dict(r) for r in rows],
+        'window_days': DROP_RULE_PREVIEW_WINDOW_DAYS,
+    })
 
 # ==========================================
 # SIGMA RULES ENGINE
