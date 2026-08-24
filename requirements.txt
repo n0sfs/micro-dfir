@@ -12,5 +12,14 @@ requests==2.31.0
 pydantic==2.4.2
 PyYAML==6.0.1
 weasyprint==61.0
+# weasyprint 61.0 only declares pydyf>=0.8.0 (no upper bound) but calls
+# pydyf.PDF(version, identifier) positionally -- pydyf 0.11.0 removed those
+# constructor args (confirmed directly: 0.10.0 accepts them, 0.11.0+ raises
+# "PDF.__init__() takes 1 positional argument but 3 were given"). An unpinned
+# `pip install` can silently pick up 0.11+ and break every PDF report with no
+# warning until generation is actually attempted. Pin below weasyprint's own
+# working ceiling until weasyprint itself is upgraded to a pydyf-0.11+-compatible
+# release.
+pydyf<0.11.0,>=0.8.0
 Jinja2==3.1.2
 maxminddb>=2.5.2
