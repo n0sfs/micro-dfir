@@ -119,6 +119,7 @@ def generate_vector_config():
     ingest_ip = s.get("ingest_bind_ip", "0.0.0.0")
     ingest_port = _resolve_ingest_port(s.get("ui_port", "5001"))
     soc_token = get_soc_secret(db) or ''
+    tcp_enabled = s.get("syslog_tcp_enabled") == "1"
 
     # Drop rules are defined (in the Log Pipeline UI) against live_logs' own field names
     # (app/host/event_id/message), so they're applied AFTER the remap below renames
@@ -137,6 +138,21 @@ def generate_vector_config():
         stmts.append(f"  # {desc}\n  if {cond} {{ abort }}")
     drop_block = ('\n' + '\n'.join(stmts)) if stmts else ''
 
+    # TCP is purely additive to the always-on UDP listener, not a replacement for it --
+    # both bind the same port (514) without conflict since UDP and TCP are independent
+    # transport-layer socket types. Opt-in (default off) since it's another open port,
+    # toggled from Settings > Network.
+    syslog_inputs = ['"syslog_in"']
+    tcp_source_block = ""
+    if tcp_enabled:
+        syslog_inputs.append('"syslog_in_tcp"')
+        tcp_source_block = f"""
+[sources.syslog_in_tcp]
+type = "syslog"
+mode = "tcp"
+address = "{ingest_ip}:514"
+"""
+
     toml = f"""[api]
 enabled = true
 address = "127.0.0.1:8686"
@@ -145,10 +161,10 @@ address = "127.0.0.1:8686"
 type = "syslog"
 mode = "udp"
 address = "{ingest_ip}:514"
-
+{tcp_source_block}
 [transforms.shape_logs]
 type = "remap"
-inputs = ["syslog_in"]
+inputs = [{", ".join(syslog_inputs)}]
 source = '''
   .host = .hostname
   .app = .appname
@@ -2827,6 +2843,10 @@ def settings_network():
     ui_port = request.form.get("ui_port", "5001")
     ingest_ip = request.form.get("ingest_bind_ip", "0.0.0.0")
     ingest_port = request.form.get("ingest_port", "5000")
+    # Checkboxes send no field at all when unchecked, so absence means "off" -- stored
+    # as the same '1'/(absent -> default 'off') string-flag convention already used
+    # elsewhere in settings rather than introducing a real boolean column.
+    syslog_tcp_enabled = "1" if request.form.get("syslog_tcp_enabled") else "0"
 
     conn = sqlite3.connect("/opt/micro-dfir/siem.db", timeout=30)
     c = conn.cursor()
@@ -2834,9 +2854,10 @@ def settings_network():
     c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ui_port', ?)", (ui_port,))
     c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ingest_bind_ip', ?)", (ingest_ip,))
     c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ingest_port', ?)", (ingest_port,))
+    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('syslog_tcp_enabled', ?)", (syslog_tcp_enabled,))
     conn.commit()
     conn.close()
-    log_audit('network_config_change', 'settings', None, f'ui={ui_ip}:{ui_port}, ingest={ingest_ip}:{ingest_port}')
+    log_audit('network_config_change', 'settings', None, f'ui={ui_ip}:{ui_port}, ingest={ingest_ip}:{ingest_port}, syslog_tcp={syslog_tcp_enabled}')
 
     # 1. Background task to rewrite the Gunicorn systemd file and restart the UI
     import re as sys_re

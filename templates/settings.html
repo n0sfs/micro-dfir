@@ -103,6 +103,10 @@
                         <input type="text" class="form-control bg-dark text-white border-secondary" name="ingest_port" value="{{ all_settings.get('ingest_port', '5000') }}">
                     </div>
                 </div>
+                <div class="form-check form-switch mb-3">
+                    <input class="form-check-input" type="checkbox" name="syslog_tcp_enabled" id="syslogTcpEnabled" {{ 'checked' if all_settings.get('syslog_tcp_enabled') == '1' else '' }}>
+                    <label class="form-check-label small" for="syslogTcpEnabled">Also accept syslog over TCP, port 514 <span class="text-muted">(in addition to UDP, which stays on)</span></label>
+                </div>
                 <button type="submit" class="btn btn-primary"><i class="fa-solid fa-save me-2"></i>Save & Apply Network Settings</button>
             </form>
             <small class="text-muted d-block mt-3"><i class="fa-solid fa-triangle-exclamation me-1"></i><strong>Warning:</strong> Applying changes will instantly reload Vector and restart Gunicorn in the background. You may need to reconnect your browser to the new UI IP and Port.</small>
