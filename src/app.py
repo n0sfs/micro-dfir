@@ -347,6 +347,17 @@ def agents():
 def dashboards_page():
     return render_template('dashboards.html', current_user=current_user)
 
+# Placeholder nav entry -- the SOAR *backend* already exists and runs today
+# (microsoc-soar.service / src/soar_engine.py, a separate FastAPI process that
+# receives high-severity Sigma alerts via webhook and acknowledges them), but has
+# never had any UI. This just gives it a page to land on; no playbook management is
+# wired up yet, matching the same "tab exists, marked coming soon" pattern already
+# used for UEBA's Timeline tab.
+@app.route('/soar')
+@login_required
+def soar_page():
+    return render_template('soar.html', current_user=current_user)
+
 @app.route('/api/alerts')
 @login_required
 def api_alerts():
