@@ -279,7 +279,22 @@
                     <label class="form-label text-muted small mb-1">Description</label>
                     <input type="text" id="dropDesc" class="form-control bg-dark text-light border-secondary form-control-sm" placeholder="Rule purpose...">
                 </div>
-                <button type="button" class="btn btn-primary btn-sm w-100 mb-3" onclick="addDropRule()">Add Rule</button>
+                <div class="d-flex gap-2 mb-3">
+                    <button type="button" class="btn btn-outline-info btn-sm flex-fill" onclick="previewDropRule()"><i class="fa-solid fa-magnifying-glass me-1"></i>Preview</button>
+                    <button type="button" class="btn btn-primary btn-sm flex-fill" onclick="addDropRule()">Add Rule</button>
+                </div>
+
+                <div id="dropRulePreview" class="mb-3" style="display:none;">
+                    <div class="border border-secondary rounded p-2 bg-black">
+                        <div id="dropRulePreviewSummary" class="small text-info mb-2"></div>
+                        <div class="table-responsive" style="max-height:220px; overflow-y:auto;">
+                            <table class="table table-dark table-sm mb-0 small">
+                                <thead><tr><th>Time</th><th>Host</th><th>App</th><th>Message</th></tr></thead>
+                                <tbody id="dropRulePreviewBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
 
                 <div class="table-responsive">
                     <table class="table table-dark table-striped table-hover mb-0 align-middle small">
@@ -1365,8 +1380,50 @@ function addDropRule() {
     }).then(r => r.json()).then(() => {
         document.getElementById('dropVal').value = '';
         document.getElementById('dropDesc').value = '';
+        document.getElementById('dropRulePreview').style.display = 'none';
         loadDropRules();
     }).catch(err => toast('Error adding rule: ' + err, 'danger'));
+}
+
+// Dry-runs the field/operator/value currently in the form against real recent logs,
+// without saving anything -- drop rules act at the Vector layer before a log ever
+// reaches live_logs, so once a rule is live there's no way to see what it silently
+// ate. This is the only chance to check before committing to one.
+function previewDropRule() {
+    let field = document.getElementById('dropField').value;
+    let operator = document.getElementById('dropOp').value;
+    let value = document.getElementById('dropVal').value.trim();
+    if (!value) { toast('Enter a match value to preview.', 'warning'); return; }
+
+    const panel = document.getElementById('dropRulePreview');
+    const summary = document.getElementById('dropRulePreviewSummary');
+    const body = document.getElementById('dropRulePreviewBody');
+    panel.style.display = 'block';
+    summary.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i>Checking recent logs...';
+    body.innerHTML = '';
+
+    fetch('/api/droprules/preview', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({field, operator, value})
+    }).then(r => r.json().then(d => ({ok: r.ok, d}))).then(({ok, d}) => {
+        if (!ok) { summary.innerHTML = `<span class="text-danger">${escHtml(d.error || 'Preview failed.')}</span>`; return; }
+        if (!d.count) {
+            summary.innerHTML = `No logs in the last ${d.window_days} days would match this rule.`;
+            body.innerHTML = '';
+            return;
+        }
+        const shown = d.sample.length;
+        summary.innerHTML = `<strong>${d.count}</strong> log(s) in the last ${d.window_days} days would be dropped by this rule` +
+            (shown < d.count ? ` — showing the ${shown} most recent` : '') + `.`;
+        body.innerHTML = d.sample.map(r => `
+            <tr>
+                <td class="text-muted text-nowrap">${escHtml(r.timestamp)}</td>
+                <td>${escHtml(r.host || '')}</td>
+                <td>${escHtml(r.app || '')}</td>
+                <td class="text-truncate" style="max-width:280px;" title="${escHtml(r.message)}">${escHtml(r.message)}</td>
+            </tr>`).join('');
+    }).catch(err => { summary.innerHTML = `<span class="text-danger">Error: ${escHtml(err)}</span>`; body.innerHTML = ''; });
 }
 
 function toggleDropRule(id) {
