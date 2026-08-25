@@ -2781,6 +2781,154 @@ def migrate_anomaly_rule_conditions_logic():
     except Exception:
         pass
 
+# Starter pack of custom UEBA anomaly rules -- these ADD to the flat per-severity
+# scoring _score_alerts() already gives every host/username on every alert (see
+# ueba_engine.py's RISK_SCORE_DEFAULTS: alert_critical/high/medium/low/informational),
+# so nothing here just re-scores plain severity -- that would double-count. Each rule
+# instead picks out a qualitatively distinct pattern:
+#   - the 3 inline-heuristic-engine rule_name values (api_ingest's keyword detector,
+#     not the real Sigma pipeline -- Sigma-matched alerts.rule_name is always NULL,
+#     since sigma_engine.py's INSERT never sets it) get their own weighted scoring;
+#   - "named user" rules require username not_equals 'SYSTEM'. A blank/NULL username
+#     round-trips through _condition_matches() as '' (see the coercion there), which
+#     would technically satisfy that check too -- but these all use entity_field=
+#     'username', and _score_alerts() already skips any event whose entity_field value
+#     is falsy (`if not entity_id: continue`), so a blank-username alert never scores
+#     regardless of what the conditions evaluate to. (A blank-vs-'SYSTEM' distinction
+#     can't be expressed as a condition at all: _validate_anomaly_rule() rejects any
+#     condition with an empty value outright -- "condition value is required" -- so
+#     there is no not_equals-blank check to write here even if a host-entity variant
+#     wanted one; entity_field=host rules below avoid needing that distinction instead.)
+#   - "internal lateral movement" rules use starts_with on the two easy-to-prefix RFC
+#     1918 ranges (192.168.0.0/16, 10.0.0.0/8 -- 172.16.0.0/12 is skipped, it isn't a
+#     single string prefix) as a stand-in for "this IP field is actually populated with
+#     a private/internal address", since there's no presence-check operator available.
+#     The two starts_with conditions are OR'd together *first*, then AND'd with the
+#     rest -- conditions evaluate strictly left-to-right with no precedence (see
+#     _rule_matches_all() in ueba_engine.py), so "(A OR B) AND C" only comes out right
+#     if A/B are listed before C, not after.
+# `severity` is matched with `contains` + a lowercase value rather than `equals`,
+# because _condition_matches() only lowercases for contains/starts_with/ends_with --
+# Sigma-sourced alerts store Title-case severity ('Critical') while the inline heuristic
+# engine stores upper-case ('CRITICAL'); `equals` would only ever match one of the two.
+_INTERNAL_IP_OR = [
+    {'operator': 'starts_with', 'value': '192.168.'},
+    {'operator': 'starts_with', 'value': '10.', 'logic': 'OR'},
+]
+
+def _internal_ip_conditions(field, *rest):
+    return [{'field': field, **c} for c in _INTERNAL_IP_OR] + list(rest)
+
+_SEED_UEBA_RULES = [
+    {
+        'name': 'Credential Dumping Activity Detected', 'entity_field': 'host', 'entity_type': 'host',
+        'points': 50, 'first_time_bonus_points': 75,
+        'conditions': [{'field': 'rule_name', 'operator': 'contains', 'value': 'Credential Dumping'}],
+    },
+    {
+        'name': 'Suspicious PowerShell Execution Detected', 'entity_field': 'host', 'entity_type': 'host',
+        'points': 30, 'first_time_bonus_points': 40,
+        'conditions': [{'field': 'rule_name', 'operator': 'contains', 'value': 'Suspicious PowerShell'}],
+    },
+    {
+        'name': 'System Discovery Commands Detected', 'entity_field': 'host', 'entity_type': 'host',
+        'points': 8, 'first_time_bonus_points': 10,
+        'conditions': [{'field': 'rule_name', 'operator': 'contains', 'value': 'Discovery Commands'}],
+    },
+    {
+        'name': 'Critical Alert Attributed to Named User', 'entity_field': 'username', 'entity_type': 'user',
+        'points': 25, 'first_time_bonus_points': 40,
+        'conditions': [
+            {'field': 'severity', 'operator': 'contains', 'value': 'critical'},
+            {'field': 'username', 'operator': 'not_equals', 'value': 'SYSTEM', 'logic': 'AND'},
+        ],
+    },
+    {
+        'name': 'High-Severity Alert Attributed to Named User', 'entity_field': 'username', 'entity_type': 'user',
+        'points': 15, 'first_time_bonus_points': 20,
+        'conditions': [
+            {'field': 'severity', 'operator': 'contains', 'value': 'high'},
+            {'field': 'username', 'operator': 'not_equals', 'value': 'SYSTEM', 'logic': 'AND'},
+        ],
+    },
+    {
+        'name': 'Medium-Severity Alert Attributed to Named User', 'entity_field': 'username', 'entity_type': 'user',
+        'points': 8, 'first_time_bonus_points': 10,
+        'conditions': [
+            {'field': 'severity', 'operator': 'contains', 'value': 'medium'},
+            {'field': 'username', 'operator': 'not_equals', 'value': 'SYSTEM', 'logic': 'AND'},
+        ],
+    },
+    {
+        'name': 'Critical Alert with Internal Lateral Movement (Host)', 'entity_field': 'host', 'entity_type': 'host',
+        'points': 25, 'first_time_bonus_points': 35,
+        'conditions': _internal_ip_conditions('destination_ip', {'field': 'severity', 'operator': 'contains', 'value': 'critical', 'logic': 'AND'}),
+    },
+    {
+        'name': 'Critical Alert with Internal Lateral Movement (User)', 'entity_field': 'username', 'entity_type': 'user',
+        'points': 20, 'first_time_bonus_points': 30,
+        'conditions': _internal_ip_conditions('destination_ip', {'field': 'severity', 'operator': 'contains', 'value': 'critical', 'logic': 'AND'}),
+    },
+    {
+        'name': 'High-Severity Alert with Internal Lateral Movement (Host)', 'entity_field': 'host', 'entity_type': 'host',
+        'points': 15, 'first_time_bonus_points': 20,
+        'conditions': _internal_ip_conditions('destination_ip', {'field': 'severity', 'operator': 'contains', 'value': 'high', 'logic': 'AND'}),
+    },
+    {
+        'name': 'High-Severity Alert with Internal Lateral Movement (User)', 'entity_field': 'username', 'entity_type': 'user',
+        'points': 10, 'first_time_bonus_points': 15,
+        'conditions': _internal_ip_conditions('destination_ip', {'field': 'severity', 'operator': 'contains', 'value': 'high', 'logic': 'AND'}),
+    },
+    {
+        'name': 'Critical Alert Sourced from Internal Network (Host)', 'entity_field': 'host', 'entity_type': 'host',
+        'points': 20, 'first_time_bonus_points': 30,
+        'conditions': _internal_ip_conditions('source_ip', {'field': 'severity', 'operator': 'contains', 'value': 'critical', 'logic': 'AND'}),
+    },
+    {
+        'name': 'Critical Alert Sourced from Internal Network (User)', 'entity_field': 'username', 'entity_type': 'user',
+        'points': 15, 'first_time_bonus_points': 25,
+        'conditions': _internal_ip_conditions('source_ip', {'field': 'severity', 'operator': 'contains', 'value': 'critical', 'logic': 'AND'}),
+    },
+    {
+        'name': 'High-Severity Alert Sourced from Internal Network (Host)', 'entity_field': 'host', 'entity_type': 'host',
+        'points': 12, 'first_time_bonus_points': 15,
+        'conditions': _internal_ip_conditions('source_ip', {'field': 'severity', 'operator': 'contains', 'value': 'high', 'logic': 'AND'}),
+    },
+    {
+        'name': 'Named-User Alert with Internal Lateral Movement', 'entity_field': 'username', 'entity_type': 'user',
+        'points': 18, 'first_time_bonus_points': 25,
+        'conditions': _internal_ip_conditions('destination_ip', {'field': 'username', 'operator': 'not_equals', 'value': 'SYSTEM', 'logic': 'AND'}),
+    },
+    {
+        'name': 'Named-User Alert Sourced from Internal Network', 'entity_field': 'username', 'entity_type': 'user',
+        'points': 18, 'first_time_bonus_points': 25,
+        'conditions': _internal_ip_conditions('source_ip', {'field': 'username', 'operator': 'not_equals', 'value': 'SYSTEM', 'logic': 'AND'}),
+    },
+]
+
+def migrate_seed_ueba_rules():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.row_factory = sqlite3.Row
+        existing = {row['name'] for row in conn.execute("SELECT name FROM anomaly_rules").fetchall()}
+        for rule in _SEED_UEBA_RULES:
+            if rule['name'] in existing:
+                continue
+            cur = conn.execute(
+                "INSERT INTO anomaly_rules (name, source, entity_field, entity_type, points, first_time_bonus_points, enabled, created_by) "
+                "VALUES (?, 'alerts', ?, ?, ?, ?, 1, 'system')",
+                (rule['name'], rule['entity_field'], rule['entity_type'], rule['points'], rule['first_time_bonus_points'])
+            )
+            rule_id = cur.lastrowid
+            conn.executemany(
+                "INSERT INTO anomaly_rule_conditions (rule_id, field, operator, value, logic) VALUES (?, ?, ?, ?, ?)",
+                [(rule_id, c['field'], c['operator'], c['value'], c.get('logic', 'AND')) for c in rule['conditions']]
+            )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_risk_score_events_rule_id():
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
@@ -4166,6 +4314,7 @@ migrate_risk_scoring()
 migrate_anomaly_rules()
 migrate_anomaly_rule_conditions()
 migrate_anomaly_rule_conditions_logic()
+migrate_seed_ueba_rules()
 migrate_risk_score_events_rule_id()
 migrate_report_history()
 
