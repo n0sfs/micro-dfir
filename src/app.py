@@ -18,7 +18,6 @@ from werkzeug.utils import secure_filename
 from werkzeug.security import check_password_hash
 from flask import Flask, render_template, request, jsonify, g, redirect, url_for, flash
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
-from ti_engine import lookup_ioc
 from yara_scanner import scan_file
 from taxii_client import sync_one as ti_sync_one
 import agent_scripts
@@ -317,6 +316,11 @@ _PROCESS_FIELD_PATTERNS = {
     'parent_image': re.compile(r'^[ \t]*ParentImage:\s*(.+)$', re.MULTILINE),
     'parent_command_line': re.compile(r'^[ \t]*ParentCommandLine:\s*(.+)$', re.MULTILINE),
     'original_file_name': re.compile(r'^[ \t]*OriginalFileName:\s*(.+)$', re.MULTILINE),
+    # Sysmon Event ID 1's raw multi-hash string ("MD5=xxx,SHA256=yyy,IMPHASH=zzz") --
+    # collapsed to one canonical hash by _canonical_hash() below, not stored as-is.
+    'hashes_raw': re.compile(r'^[ \t]*Hashes:\s*(.+)$', re.MULTILINE),
+    # Sysmon Event ID 22 (DNS query) -- a bare hostname, not a full URL.
+    'query_name': re.compile(r'^[ \t]*QueryName:\s*(.+)$', re.MULTILINE),
 }
 
 # "-" and "." both show up as real Sysmon/Windows Event placeholder-for-empty values
@@ -347,7 +351,28 @@ _XML_PROCESS_FIELD_MAP = {
     'ParentImage': 'parent_image',
     'ParentCommandLine': 'parent_command_line',
     'OriginalFileName': 'original_file_name',
+    'Hashes': 'hashes_raw',
+    'QueryName': 'query_name',
 }
+
+# Sysmon's Hashes field lists every configured algorithm as "ALGO=hex,ALGO=hex,..." --
+# collapse to a single canonical value (preferring the strongest/most specific algorithm)
+# so IOC-hash correlation has one column to compare against regardless of which
+# algorithms a given Sysmon config happens to compute. IMPHASH is deliberately excluded
+# from the preference order -- it identifies a compiled import table, not file content,
+# so it isn't comparable to the file-content hashes (MD5/SHA1/SHA256) a feed's hash IOCs
+# are actually keyed on.
+_HASH_PAIR_RE = re.compile(r'\b(MD5|SHA1|SHA256)=([0-9A-Fa-f]{32,64})\b')
+_HASH_ALGO_PREFERENCE = ('SHA256', 'SHA1', 'MD5')
+
+def _canonical_hash(hashes_raw):
+    if not hashes_raw:
+        return None
+    found = dict(_HASH_PAIR_RE.findall(hashes_raw))
+    for algo in _HASH_ALGO_PREFERENCE:
+        if algo in found:
+            return found[algo].lower()
+    return None
 
 def _extract_process_fields_from_xml(xml_text):
     if not xml_text:
@@ -425,13 +450,16 @@ def api_ingest():
             proc = _extract_process_fields_from_xml(raw_xml) if raw_xml else {}
             if not proc:
                 proc = _extract_process_fields(msg)
+            file_hash = _canonical_hash(proc.get('hashes_raw'))
             db.execute(
                 "INSERT INTO live_logs (timestamp, host, app, severity, event_id, username, source_ip, message, "
-                "process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml, "
+                "file_hash, query_name) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (ts, hst, app_n, sev, eid, usr, sip, msg,
                  proc.get('process_image'), proc.get('command_line'), proc.get('parent_image'),
-                 proc.get('parent_command_line'), proc.get('original_file_name'), raw_xml)
+                 proc.get('parent_command_line'), proc.get('original_file_name'), raw_xml,
+                 file_hash, proc.get('query_name'))
             )
             count += 1
 
@@ -650,7 +678,33 @@ def api_hunt():
 
 @app.route('/api/ti/lookup', methods=['POST'])
 @login_required
-def api_ti(): return jsonify(lookup_ioc(request.get_json().get('ioc')))
+def api_ti_lookup():
+    # Previously called ti_engine.py's lookup_ioc(), which hit ThreatFox's LIVE API on
+    # every request with no caching, no rate limiting, and no UI ever actually called
+    # it (confirmed dead code -- ti_engine.py has been deleted). An exact-match lookup
+    # against the local IOC set (now ~130K+ real indicators post-MISP-feed-sync, see
+    # the CTI gap-analysis Tier 1 work) plus sighting history is strictly more useful:
+    # instant, works offline, and tells you whether this value has actually been
+    # OBSERVED here, not just whether some feed once flagged it.
+    ioc = ((request.get_json() or {}).get('ioc') or '').strip()
+    if not ioc:
+        return jsonify({'status': 'error', 'message': 'No IOC value provided'}), 400
+    db = get_db()
+    rows = db.execute(
+        "SELECT si.stix_id, si.ioc_type, si.name, si.description, si.revoked, tf.name as source_name, "
+        "(SELECT COUNT(*) FROM ioc_sightings s WHERE s.stix_id = si.stix_id) as sighting_count, "
+        "(SELECT MAX(seen_at) FROM ioc_sightings s WHERE s.stix_id = si.stix_id) as last_sighted "
+        "FROM stix_indicators si LEFT JOIN ti_feeds tf ON si.feed_id = tf.id "
+        "WHERE LOWER(si.pattern) = LOWER(?)",
+        (ioc,)
+    ).fetchall()
+    if not rows:
+        return jsonify({'status': 'clean', 'message': 'No match in the local Threat Intel IOC set.'})
+    matches = [dict(r) for r in rows]
+    active = [m for m in matches if not m['revoked']]
+    if not active:
+        return jsonify({'status': 'revoked', 'message': 'Matches only revoked/inactive IOC(s).', 'matches': matches})
+    return jsonify({'status': 'malicious', 'matches': matches})
 
 
 # ==========================================
@@ -3227,7 +3281,8 @@ def migrate_live_logs_archive():
             host TEXT, app TEXT, severity TEXT, event_id TEXT, username TEXT,
             source_ip TEXT, destination_ip TEXT, message TEXT NOT NULL,
             process_image TEXT, command_line TEXT, parent_image TEXT,
-            parent_command_line TEXT, original_file_name TEXT, raw_xml TEXT
+            parent_command_line TEXT, original_file_name TEXT, raw_xml TEXT,
+            file_hash TEXT, query_name TEXT
         )''')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_live_logs_archive_timestamp ON live_logs_archive(timestamp)')
         conn.commit()
@@ -3361,6 +3416,25 @@ def migrate_live_logs_process_columns():
         for col in ('process_image', 'command_line', 'parent_image', 'parent_command_line', 'original_file_name', 'raw_xml'):
             if col not in cols:
                 conn.execute(f"ALTER TABLE live_logs ADD COLUMN {col} TEXT")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_live_logs_hash_dns_columns():
+    # Backing columns for the Tier 2 CTI-gap-analysis correlation extension: file_hash
+    # (canonicalized from Sysmon Event ID 1's Hashes field, see _canonical_hash()) and
+    # query_name (Sysmon Event ID 22 DNS query) -- extends IOC correlation beyond IP,
+    # same __IOC_..._LIST__ placeholder mechanism as sigma_engine.py's existing IP path.
+    # Added to live_logs_archive too, since archive_logs.py's ARCHIVE_COLUMNS list
+    # copies whatever columns both tables actually share.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        for table in ('live_logs', 'live_logs_archive'):
+            cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            for col in ('file_hash', 'query_name'):
+                if col not in cols:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
         conn.commit()
         conn.close()
     except Exception:
@@ -4295,7 +4369,7 @@ SELECT timestamp, severity, host, app, event_id, username, source_ip, destinatio
        NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
        process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
        NULL as occurrence_count, NULL as last_seen, NULL as item_id, NULL as entity_type,
-       NULL as status, NULL as assignee
+       NULL as status, NULL as assignee, file_hash, query_name
 FROM live_logs
 UNION ALL
 SELECT a.timestamp, a.severity,
@@ -4314,7 +4388,7 @@ SELECT a.timestamp, a.severity,
        NULL as raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
        a.occurrence_count as occurrence_count, a.last_seen as last_seen, a.id as item_id, NULL as entity_type,
-       a.status as status, a.assignee as assignee
+       a.status as status, a.assignee as assignee, NULL as file_hash, NULL as query_name
 FROM alerts a
 LEFT JOIN sigma_rules s ON a.rule_id = s.id
 UNION ALL
@@ -4323,7 +4397,7 @@ SELECT timestamp, severity, hostname as host, 'UEBA Anomaly' as app, '-' as even
        NULL as rule_id, 'ueba' as rule_source, NULL as log_event_id, NULL as log_app, raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
        NULL as occurrence_count, NULL as last_seen, id as item_id, entity_type,
-       NULL as status, NULL as assignee
+       NULL as status, NULL as assignee, NULL as file_hash, NULL as query_name
 FROM events
 WHERE app_name = 'duckdb_ueba'
 ) AS unified_logs"""
@@ -4337,14 +4411,14 @@ SELECT timestamp, severity, host, app, event_id, username, source_ip, destinatio
        NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
        process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
        NULL as occurrence_count, NULL as last_seen, NULL as item_id, NULL as entity_type,
-       NULL as status, NULL as assignee
+       NULL as status, NULL as assignee, file_hash, query_name
 FROM live_logs
 UNION ALL
 SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type,
        NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
        process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
        NULL as occurrence_count, NULL as last_seen, NULL as item_id, NULL as entity_type,
-       NULL as status, NULL as assignee
+       NULL as status, NULL as assignee, file_hash, query_name
 FROM live_logs_archive
 UNION ALL
 SELECT a.timestamp, a.severity,
@@ -4363,7 +4437,7 @@ SELECT a.timestamp, a.severity,
        NULL as raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
        a.occurrence_count as occurrence_count, a.last_seen as last_seen, a.id as item_id, NULL as entity_type,
-       a.status as status, a.assignee as assignee
+       a.status as status, a.assignee as assignee, NULL as file_hash, NULL as query_name
 FROM alerts a
 LEFT JOIN sigma_rules s ON a.rule_id = s.id
 UNION ALL
@@ -4372,7 +4446,7 @@ SELECT timestamp, severity, hostname as host, 'UEBA Anomaly' as app, '-' as even
        NULL as rule_id, 'ueba' as rule_source, NULL as log_event_id, NULL as log_app, raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
        NULL as occurrence_count, NULL as last_seen, id as item_id, entity_type,
-       NULL as status, NULL as assignee
+       NULL as status, NULL as assignee, NULL as file_hash, NULL as query_name
 FROM events
 WHERE app_name = 'duckdb_ueba'
 ) AS unified_logs"""
@@ -4414,6 +4488,8 @@ LOG_SEARCH_ALLOWED_FIELDS = [
     {'key': 'parent_command_line', 'label': 'Parent Command Line'},
     {'key': 'original_file_name', 'label': 'Original File Name'},
     {'key': 'raw_xml', 'label': 'Raw XML'},
+    {'key': 'file_hash', 'label': 'File Hash'},
+    {'key': 'query_name', 'label': 'DNS Query'},
 ]
 
 # Sortable via the Log Search results table's clickable column headers -- restricted to
@@ -4697,7 +4773,9 @@ def _build_log_response_rows(rows):
             'occurrence_count': r['occurrence_count'],
             'last_seen': r['last_seen'],
             'status': r['status'],
-            'assignee': r['assignee']
+            'assignee': r['assignee'],
+            'file_hash': r['file_hash'],
+            'query_name': r['query_name']
         })
     return logs
 
@@ -5649,6 +5727,7 @@ migrate_fim_paths()
 migrate_ueba_priority_scores()
 migrate_live_logs_ip_columns()
 migrate_live_logs_process_columns()
+migrate_live_logs_hash_dns_columns()
 migrate_agent_versions()
 migrate_agent_tokens()
 migrate_audit_log()
