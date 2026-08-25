@@ -48,11 +48,12 @@
                             <th class="ps-3">Time</th>
                             <th>Entity</th>
                             <th>Severity</th>
+                            <th>Process</th>
                             <th>Detail</th>
                         </tr>
                     </thead>
                     <tbody id="uebaTableBody">
-                        <tr><td colspan="4" class="text-center text-muted py-4">Loading detections...</td></tr>
+                        <tr><td colspan="5" class="text-center text-muted py-4">Loading detections...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -523,6 +524,26 @@ function entityBadge(entityType) {
     return `<span class="badge ${isUser ? 'bg-info text-dark' : 'bg-secondary'} me-1" style="font-size:.65rem;"><i class="fa-solid ${isUser ? 'fa-user' : 'fa-desktop'} me-1"></i>${isUser ? 'User' : 'Host'}</span>`;
 }
 
+// Not every detection carries a process at all (volume_baseline/off_hours_activity are
+// pure count anomalies) -- those just show a dash. When one is present, the basename
+// (e.g. "git.exe") is the headline since that's what an analyst scans for first; the
+// full path stays visible underneath (truncated from the left, since the tail --
+// ...\Git\bin\git.exe vs ...\Git\mingw64\bin\git.exe -- is what actually distinguishes
+// otherwise-identical-looking entries) so path context isn't lost for a masquerading
+// check, with the untruncated value always available via the title tooltip.
+function renderDetectionProcess(d) {
+    if (!d.process_name) return '<span class="text-muted">—</span>';
+    const path = d.process_image || '';
+    const pathShort = path.length > 40 ? '…' + path.slice(-40) : path;
+    const pathLine = (path && path !== d.process_name)
+        ? `<br><span class="text-muted" style="font-size:.7rem;" title="${escHtml(path)}">${escHtml(pathShort)}</span>` : '';
+    const cmd = d.command_line || '';
+    const cmdShort = cmd.length > 60 ? cmd.slice(0, 60) + '…' : cmd;
+    const cmdLine = cmd
+        ? `<br><span class="text-muted font-monospace" style="font-size:.7rem;" title="${escHtml(cmd)}">${escHtml(cmdShort)}</span>` : '';
+    return `<code class="text-info">${escHtml(d.process_name)}</code>${pathLine}${cmdLine}`;
+}
+
 function loadUebaDetections() {
     fetch('/api/ueba/detections')
         .then(r => r.json())
@@ -532,7 +553,7 @@ function loadUebaDetections() {
 
             const tbody = document.getElementById('uebaTableBody');
             if (!data.detections || data.detections.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-4">No behavioral anomalies detected yet. The model needs at least 30 days of baseline data per host/user before it will flag anything.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">No behavioral anomalies detected yet. The model needs at least 30 days of baseline data per host/user before it will flag anything.</td></tr>';
                 return;
             }
             tbody.innerHTML = data.detections.map(d => `
@@ -540,6 +561,7 @@ function loadUebaDetections() {
                     <td class="ps-3 text-nowrap">${d.timestamp}</td>
                     <td>${entityBadge(d.entity_type)}<strong>${d.hostname}</strong></td>
                     <td>${severityBadge(d.severity)}</td>
+                    <td class="small">${renderDetectionProcess(d)}</td>
                     <td class="text-muted small">${d.message}</td>
                 </tr>
             `).join('');

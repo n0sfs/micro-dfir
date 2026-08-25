@@ -319,7 +319,7 @@ def _run_new_process_model(con, cfg):
         "      AND CAST(timestamp AS TIMESTAMP) < CURRENT_DATE "
         "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN') "
         "      AND process_image IS NOT NULL AND process_image != ''), "
-        "today_pairs AS (SELECT host, process_image, count(*) as c FROM siem.live_logs "
+        "today_pairs AS (SELECT host, process_image, count(*) as c, any_value(command_line) as command_line FROM siem.live_logs "
         "    WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE "
         "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN') "
         "      AND process_image IS NOT NULL AND process_image != '' GROUP BY 1, 2), "
@@ -327,12 +327,12 @@ def _run_new_process_model(con, cfg):
         f"    FROM siem.live_logs WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE - INTERVAL {cfg['lookback_days']} DAY "
         "      AND CAST(timestamp AS TIMESTAMP) < CURRENT_DATE "
         "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN') GROUP BY 1) "
-        "SELECT tp.host, tp.process_image, tp.c FROM today_pairs tp "
+        "SELECT tp.host, tp.process_image, tp.c, tp.command_line FROM today_pairs tp "
         "LEFT JOIN known k ON tp.host = k.host AND tp.process_image = k.process_image "
         "JOIN entity_days ed ON tp.host = ed.entity_id "
         f"WHERE k.host IS NULL AND ed.days_seen >= {cfg['min_days_observed']} LIMIT 200"
     )
-    return [{'host': h, 'process_image': p, 'count': c} for h, p, c in con.execute(query).fetchall()]
+    return [{'host': h, 'process_image': p, 'count': c, 'command_line': cl} for h, p, c, cl in con.execute(query).fetchall()]
 
 # Same shape again, keyed on (host, destination_ip) -- a host reaching a destination it
 # has never contacted before in the lookback window (first-contact / lateral-movement
@@ -375,7 +375,8 @@ def _run_process_lineage_model(con, cfg):
         "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN') "
         "      AND parent_image IS NOT NULL AND parent_image != '' "
         "      AND process_image IS NOT NULL AND process_image != ''), "
-        "today_pairs AS (SELECT host, parent_image, process_image, count(*) as c FROM siem.live_logs "
+        "today_pairs AS (SELECT host, parent_image, process_image, count(*) as c, any_value(command_line) as command_line, "
+        "    any_value(parent_command_line) as parent_command_line FROM siem.live_logs "
         "    WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE "
         "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN') "
         "      AND parent_image IS NOT NULL AND parent_image != '' "
@@ -384,12 +385,13 @@ def _run_process_lineage_model(con, cfg):
         f"    FROM siem.live_logs WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE - INTERVAL {cfg['lookback_days']} DAY "
         "      AND CAST(timestamp AS TIMESTAMP) < CURRENT_DATE "
         "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN') GROUP BY 1) "
-        "SELECT tp.host, tp.parent_image, tp.process_image, tp.c FROM today_pairs tp "
+        "SELECT tp.host, tp.parent_image, tp.process_image, tp.c, tp.command_line, tp.parent_command_line FROM today_pairs tp "
         "LEFT JOIN known k ON tp.host = k.host AND tp.parent_image = k.parent_image AND tp.process_image = k.process_image "
         "JOIN entity_days ed ON tp.host = ed.entity_id "
         f"WHERE k.host IS NULL AND ed.days_seen >= {cfg['min_days_observed']} LIMIT 200"
     )
-    return [{'host': h, 'parent_image': pi, 'process_image': p, 'count': c} for h, pi, p, c in con.execute(query).fetchall()]
+    return [{'host': h, 'parent_image': pi, 'process_image': p, 'count': c, 'command_line': cl, 'parent_command_line': pcl}
+            for h, pi, p, c, cl, pcl in con.execute(query).fetchall()]
 
 # A different shape from the 3 pair-based models above: per entity (host/user, reusing
 # ENTITY_MODELS), a 24-hour x 7-day-of-week histogram baseline per (entity, dow, hr)
@@ -467,23 +469,31 @@ def _run_off_hours_model(con, cfg):
 # no other host touches). host_counts intentionally includes today's activity in the
 # denominator -- this is a population-rarity measure, not a first-time-seen check, so
 # there's no known-vs-today split the way the pair-based models above have.
+#
+# Grouped/joined on lower(process_image) rather than the raw path -- confirmed in
+# production that the exact same binary gets logged with different drive-letter casing
+# depending on source (e.g. "C:\Windows\..." from one channel vs "C:\WINDOWS\..." from
+# another), which without normalization silently split one real file into two separate
+# "rare process" hits. The displayed process_image still comes from today_hosts (the
+# actual casing seen on that host today), so this only affects grouping, not display.
 def _run_rare_process_population_model(con, cfg):
     if not cfg['rare_process_enabled']:
         return []
     query = (
-        "WITH host_counts AS (SELECT process_image, COUNT(DISTINCT host) as host_count FROM siem.live_logs "
+        "WITH host_counts AS (SELECT lower(process_image) as process_key, COUNT(DISTINCT host) as host_count FROM siem.live_logs "
         f"    WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE - INTERVAL {cfg['lookback_days']} DAY "
         "      AND process_image IS NOT NULL AND process_image != '' "
         "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN') GROUP BY 1), "
-        "today_hosts AS (SELECT DISTINCT host, process_image FROM siem.live_logs "
+        "today_hosts AS (SELECT host, process_image, lower(process_image) as process_key, any_value(command_line) as command_line "
+        "    FROM siem.live_logs "
         "    WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE "
         "      AND process_image IS NOT NULL AND process_image != '' "
-        "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN')) "
-        "SELECT th.host, th.process_image, hc.host_count FROM today_hosts th "
-        "JOIN host_counts hc ON th.process_image = hc.process_image "
+        "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN') GROUP BY 1, 2, 3) "
+        "SELECT th.host, th.process_image, hc.host_count, th.command_line FROM today_hosts th "
+        "JOIN host_counts hc ON th.process_key = hc.process_key "
         f"WHERE hc.host_count <= {cfg['rare_process_max_hosts']} LIMIT 200"
     )
-    return [{'host': h, 'process_image': p, 'host_count': hc} for h, p, hc in con.execute(query).fetchall()]
+    return [{'host': h, 'process_image': p, 'host_count': hc, 'command_line': cl} for h, p, hc, cl in con.execute(query).fetchall()]
 
 def run_ueba_models():
     try:
@@ -568,8 +578,9 @@ def run_ueba_models():
                 ('user', h['username'], 'new_source_ip', risk_cfg['points']['new_source_ip'], message, 'events', None, None)
             )
         for h in new_process_hits:
+            cmd_note = f" Command line: {h['command_line']}" if h.get('command_line') else ""
             message = (f"{h['host']} (host) executed a process never seen on this host before in the past "
-                       f"{cfg['lookback_days']} days: {h['process_image']} ({h['count']} times today).")
+                       f"{cfg['lookback_days']} days: {h['process_image']} ({h['count']} times today).{cmd_note}")
             conn.execute(
                 "INSERT INTO events (timestamp, hostname, entity_type, app_name, severity, message, raw_json) "
                 "VALUES (datetime('now'), ?, 'host', 'duckdb_ueba', 'Medium', ?, ?)",
@@ -592,8 +603,9 @@ def run_ueba_models():
                 ('host', h['host'], 'new_destination_ip', risk_cfg['points']['new_destination_ip'], message, 'events', None, None)
             )
         for h in lineage_hits:
+            cmd_note = f" Command line: {h['command_line']}" if h.get('command_line') else ""
             message = (f"{h['host']} (host) had a process relationship never seen before in the past {cfg['lookback_days']} days: "
-                       f"{h['parent_image']} spawned {h['process_image']} ({h['count']} times today).")
+                       f"{h['parent_image']} spawned {h['process_image']} ({h['count']} times today).{cmd_note}")
             conn.execute(
                 "INSERT INTO events (timestamp, hostname, entity_type, app_name, severity, message, raw_json) "
                 "VALUES (datetime('now'), ?, 'host', 'duckdb_ueba', 'High', ?, ?)",
@@ -620,8 +632,9 @@ def run_ueba_models():
                 (h['entity_type'], h['entity_id'], 'off_hours_activity', risk_cfg['points']['off_hours_activity'], message, 'events', None, None)
             )
         for h in rare_process_hits:
+            cmd_note = f" Command line: {h['command_line']}" if h.get('command_line') else ""
             message = (f"{h['host']} (host) is running a process rare across the whole fleet -- seen on only "
-                       f"{h['host_count']} host(s) in the past {cfg['lookback_days']} days: {h['process_image']}.")
+                       f"{h['host_count']} host(s) in the past {cfg['lookback_days']} days: {h['process_image']}.{cmd_note}")
             conn.execute(
                 "INSERT INTO events (timestamp, hostname, entity_type, app_name, severity, message, raw_json) "
                 "VALUES (datetime('now'), ?, 'host', 'duckdb_ueba', 'Medium', ?, ?)",
