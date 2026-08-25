@@ -216,7 +216,13 @@
 </div>
 
 <!-- EXPORT ROW -->
-<div class="d-flex justify-content-end align-items-center mb-2">
+<div class="d-flex justify-content-end align-items-center gap-2 mb-2">
+    <div class="dropdown">
+        <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" title="Choose which columns to show in the results table">
+            <i class="fa-solid fa-table-columns me-1"></i> Columns
+        </button>
+        <ul id="columnPickerMenu" class="dropdown-menu dropdown-menu-dark dropdown-menu-end shadow" style="min-width: 220px; max-height: 320px; overflow-y: auto;"></ul>
+    </div>
     <button class="btn btn-outline-success btn-sm" onclick="exportCSV()" title="Export current filtered logs to CSV"><i class="fa-solid fa-file-excel me-1"></i> Export CSV</button>
 </div>
 
@@ -226,20 +232,10 @@
         <div class="table-responsive">
             <table class="table table-dark table-striped table-hover mb-0 align-middle">
                 <thead>
-                    <tr>
-                        <th>Time</th>
-                        <th>Type</th>
-                        <th>Sev</th>
-                        <th>Host</th>
-                        <th>App</th>
-                        <th>Event ID</th>
-                        <th>User</th>
-                        <th>Src IP</th>
-                        <th>Message</th>
-                    </tr>
+                    <tr id="logsTableHeadRow"></tr>
                 </thead>
                 <tbody>
-                    <tr><td colspan="9" class="text-center text-muted py-4">Loading logs...</td></tr>
+                    <tr><td class="text-center text-muted py-4">Loading logs...</td></tr>
                 </tbody>
             </table>
         </div>
@@ -1171,28 +1167,108 @@ window.loadLogs = function() {
             searchStats.timeWindow = timeRangeState.range === 'custom' ? 'Custom' : (RANGE_LABELS[timeRangeState.range] || timeRangeState.range);
             updateSharedStats('search');
 
-            let tbody = document.querySelector('#paneSearch tbody');
-            if (!tbody) return;
-            if (!data.logs || data.logs.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-3">No logs match current filters.</td></tr>';
-                return;
-            }
-            tbody.innerHTML = data.logs.map((log, idx) => `
-                <tr>
-                    <td class="text-nowrap">${escHtml(log.time)}</td>
-                    <td>${typeBadge(log.type)}</td>
-                    <td><span class="badge ${severityBadgeClass(log.severity)}">${escHtml((log.severity || '').toUpperCase())}</span></td>
-                    <td class="text-nowrap">${highlightText(log.host, termsFor('host'))}</td>
-                    <td>${highlightText(log.app, termsFor('app'))}</td>
-                    <td>${highlightText(log.event_id, termsFor('event_id'))}</td>
-                    <td>${highlightText(log.username, termsFor('username'))}</td>
-                    <td>${highlightText(log.source_ip, termsFor('source_ip'))}</td>
-                    <td class="text-truncate log-msg-cell" style="max-width: 350px; cursor: pointer;" onclick="showLogDetail(${idx})" title="Click to view full message">${highlightText(log.message, termsFor('message'))}</td>
-                </tr>
-            `).join('');
+            renderLogsTableRows(logs);
         })
         .catch(err => console.error("Error fetching logs:", err));
 };
+
+// ---- Log Search results table: user-configurable columns ----
+// Order here is the fixed on-screen column order regardless of the order a user
+// checked boxes in -- only which columns show is configurable, not their order.
+const LOG_TABLE_COLUMNS = [
+    {key: 'time', label: 'Time', default: true, cellClass: 'text-nowrap'},
+    {key: 'type', label: 'Type', default: true},
+    {key: 'severity', label: 'Sev', default: true},
+    {key: 'host', label: 'Host', default: true, cellClass: 'text-nowrap'},
+    {key: 'app', label: 'App', default: true},
+    {key: 'event_id', label: 'Event ID', default: true},
+    {key: 'username', label: 'User', default: true},
+    {key: 'source_ip', label: 'Src IP', default: true},
+    {key: 'destination_ip', label: 'Dest IP', default: false},
+    {key: 'message', label: 'Message', default: true, cellClass: 'text-truncate log-msg-cell', cellStyle: 'max-width: 350px;'},
+    {key: 'process_image', label: 'Process Image', default: false},
+    {key: 'command_line', label: 'Command Line', default: false},
+    {key: 'parent_image', label: 'Parent Image', default: false},
+    {key: 'parent_command_line', label: 'Parent Command Line', default: false},
+    {key: 'original_file_name', label: 'Original File Name', default: false},
+];
+
+function renderCell(col, log) {
+    switch (col) {
+        case 'time': return escHtml(log.time);
+        case 'type': return typeBadge(log.type);
+        case 'severity': return `<span class="badge ${severityBadgeClass(log.severity)}">${escHtml((log.severity || '').toUpperCase())}</span>`;
+        default: return highlightText(log[col], termsFor(col));
+    }
+}
+
+function loadColumnPrefs() {
+    try {
+        let saved = JSON.parse(localStorage.getItem('microdfir_search_columns') || 'null');
+        if (Array.isArray(saved) && saved.length) return saved.filter(k => LOG_TABLE_COLUMNS.some(c => c.key === k));
+    } catch (e) {}
+    return LOG_TABLE_COLUMNS.filter(c => c.default).map(c => c.key);
+}
+
+function saveColumnPrefs(keys) {
+    try { localStorage.setItem('microdfir_search_columns', JSON.stringify(keys)); } catch (e) {}
+}
+
+let activeColumns = loadColumnPrefs();
+
+function activeColumnDefs() {
+    return LOG_TABLE_COLUMNS.filter(c => activeColumns.includes(c.key));
+}
+
+function renderColumnPicker() {
+    let menu = document.getElementById('columnPickerMenu');
+    if (!menu) return;
+    menu.innerHTML = LOG_TABLE_COLUMNS.map(c => `
+        <li class="px-2 py-1">
+            <div class="form-check">
+                <input class="form-check-input col-pick-chk" type="checkbox" data-col="${c.key}" id="colpick_${c.key}" ${activeColumns.includes(c.key) ? 'checked' : ''} onchange="applyColumnSelection()">
+                <label class="form-check-label w-100" for="colpick_${c.key}">${escHtml(c.label)}</label>
+            </div>
+        </li>
+    `).join('');
+}
+
+function applyColumnSelection() {
+    let checked = Array.from(document.querySelectorAll('#columnPickerMenu .col-pick-chk:checked')).map(el => el.dataset.col);
+    if (checked.length === 0) {
+        // Never allow zero columns -- force Message back on (falling back to whatever
+        // the first checkbox is, in the unlikely case Message itself isn't in the DOM)
+        // rather than leaving the table with nothing to show at all.
+        let box = document.getElementById('colpick_message') || document.querySelector('#columnPickerMenu .col-pick-chk');
+        if (box) box.checked = true;
+        checked = Array.from(document.querySelectorAll('#columnPickerMenu .col-pick-chk:checked')).map(el => el.dataset.col);
+    }
+    activeColumns = checked;
+    saveColumnPrefs(activeColumns);
+    renderLogsTableHead();
+    renderLogsTableRows(currentLogs);
+}
+
+function renderLogsTableHead() {
+    let row = document.getElementById('logsTableHeadRow');
+    if (!row) return;
+    row.innerHTML = activeColumnDefs().map(c => `<th>${escHtml(c.label)}</th>`).join('');
+}
+
+function renderLogsTableRows(logs) {
+    let tbody = document.querySelector('#paneSearch tbody');
+    if (!tbody) return;
+    const cols = activeColumnDefs();
+    if (!logs || logs.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="${cols.length || 1}" class="text-center text-muted py-3">No logs match current filters.</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = logs.map((log, idx) => `
+        <tr onclick="showLogDetail(${idx})" style="cursor:pointer;" title="Click to view full details">
+            ${cols.map(c => `<td class="${c.cellClass || ''}"${c.cellStyle ? ` style="${c.cellStyle}"` : ''}>${renderCell(c.key, log)}</td>`).join('')}
+        </tr>
+    `).join('');
+}
 
 function loadTimeline() {
     let q = document.getElementById('searchQuery').value;
@@ -1351,6 +1427,8 @@ function initSearchTab() {
     setTimeRangeLabel();
     markActivePresetBtn(timeRangeState.range);
     renderFavorites();
+    renderColumnPicker();
+    renderLogsTableHead();
     loadDashboardData();
 }
 
