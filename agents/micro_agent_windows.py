@@ -4,7 +4,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, tem
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.08.23.1"
+AGENT_VERSION = "2026.08.24.1"
 
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
@@ -199,7 +199,13 @@ def fetch_windows_logs(channels, last_seconds):
                     _sent_event_sigs.add(sig)
                     if len(_sent_event_sigs) > _SENT_SIG_CAP:
                         _sent_event_sigs.pop()
-                    logs.append({"time": str(e.get('TimeCreated', '')), "host": host, "app": base, "severity": "ALERT" if e.get('LevelDisplayName') in ['Error', 'Critical'] else "WARN" if e.get('LevelDisplayName') == 'Warning' else "INFO", "event_id": str(e.get('Id', '-')), "username": str(e.get('User', 'SYSTEM')).split('\\')[-1], "message": str(e.get('Message', ''))[:1000]})
+                    # 4000 (was 1000) -- a Sysmon process-creation message's ParentImage/
+                    # ParentCommandLine fields (which the server now parses out, see
+                    # _extract_process_fields in app.py) sit near the end of the message,
+                    # well past 1000 chars once Description/Product/Company/Hashes are
+                    # included, so the old cap silently dropped them before they ever left
+                    # this agent.
+                    logs.append({"time": str(e.get('TimeCreated', '')), "host": host, "app": base, "severity": "ALERT" if e.get('LevelDisplayName') in ['Error', 'Critical'] else "WARN" if e.get('LevelDisplayName') == 'Warning' else "INFO", "event_id": str(e.get('Id', '-')), "username": str(e.get('User', 'SYSTEM')).split('\\')[-1], "message": str(e.get('Message', ''))[:4000]})
         except: pass
     return logs
 

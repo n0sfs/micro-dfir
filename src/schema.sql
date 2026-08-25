@@ -2,7 +2,7 @@ PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, role TEXT DEFAULT 'analyst');
 CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME NOT NULL, source_ip TEXT, hostname TEXT, app_name TEXT, facility TEXT, severity TEXT, message TEXT NOT NULL, raw_json TEXT, entity_type TEXT);
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
-CREATE TABLE IF NOT EXISTS live_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME NOT NULL, host TEXT, app TEXT, severity TEXT, event_id TEXT, username TEXT, source_ip TEXT, destination_ip TEXT, message TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS live_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME NOT NULL, host TEXT, app TEXT, severity TEXT, event_id TEXT, username TEXT, source_ip TEXT, destination_ip TEXT, message TEXT NOT NULL, process_image TEXT, command_line TEXT, parent_image TEXT, parent_command_line TEXT, original_file_name TEXT);
 CREATE INDEX IF NOT EXISTS idx_live_logs_timestamp ON live_logs(timestamp);
 CREATE TABLE IF NOT EXISTS sigma_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, rule_yaml TEXT NOT NULL, enabled BOOLEAN DEFAULT 0, source TEXT DEFAULT 'sigma', sigma_uuid TEXT, cloned_from INTEGER, created_by TEXT, created_at DATETIME, updated_by TEXT, updated_at DATETIME, severity_override TEXT, compliance_tags TEXT);
 CREATE TABLE IF NOT EXISTS sigma_rule_history (id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id INTEGER NOT NULL, changed_by TEXT, changed_at DATETIME DEFAULT CURRENT_TIMESTAMP, old_yaml TEXT, new_yaml TEXT);

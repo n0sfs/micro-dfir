@@ -168,6 +168,11 @@
                 <option value="source_ip">Src IP</option>
                 <option value="destination_ip">Dest IP</option>
                 <option value="message">Message</option>
+                <option value="process_image">Process Image</option>
+                <option value="command_line">Command Line</option>
+                <option value="parent_image">Parent Image</option>
+                <option value="parent_command_line">Parent Command Line</option>
+                <option value="original_file_name">Original File Name</option>
             </select>
             <button class="btn btn-outline-secondary text-light" type="button" data-bs-toggle="modal" data-bs-target="#fieldManagerModal" title="Manage, add, edit, or delete custom search fields"><i class="fa-solid fa-gear"></i></button>
         </div>
@@ -1098,6 +1103,7 @@ function showLogDetail(idx) {
     const viewRuleBtn = (log.type === 'alert' && log.rule_id)
         ? `<a href="/rules?rule_id=${encodeURIComponent(log.rule_id)}" target="_blank" class="btn btn-sm btn-outline-primary mb-2"><i class="fa-solid fa-file-shield me-1"></i>View Rule</a>`
         : '';
+    const hasProcessFields = log.process_image || log.command_line || log.parent_image || log.parent_command_line || log.original_file_name;
 
     document.getElementById('logDetailBody').innerHTML = `
         <dl class="row mb-2 small">
@@ -1118,6 +1124,15 @@ function showLogDetail(idx) {
         <dl class="row mb-2 small">
             <dt class="col-3">Event ID</dt><dd class="col-9">${escHtml(log.log_event_id || '-')}</dd>
             <dt class="col-3">Channel</dt><dd class="col-9">${escHtml(log.log_app || '-')}</dd>
+        </dl>` : ''}
+        ${hasProcessFields ? `
+        <label class="form-label small text-muted mb-1">Process Details</label>
+        <dl class="row mb-2 small">
+            <dt class="col-3">Image</dt><dd class="col-9">${highlightText(log.process_image, termsFor('process_image'))}</dd>
+            <dt class="col-3">Command Line</dt><dd class="col-9">${highlightText(log.command_line, termsFor('command_line'))}</dd>
+            <dt class="col-3">Parent Image</dt><dd class="col-9">${highlightText(log.parent_image, termsFor('parent_image'))}</dd>
+            <dt class="col-3">Parent Command Line</dt><dd class="col-9">${highlightText(log.parent_command_line, termsFor('parent_command_line'))}</dd>
+            <dt class="col-3">Original File Name</dt><dd class="col-9">${highlightText(log.original_file_name, termsFor('original_file_name'))}</dd>
         </dl>` : ''}
         ${anomalyDetailHtml(log)}
         <label class="form-label small text-muted mb-1">Full Message</label>

@@ -163,6 +163,13 @@ address = "{ingest_ip}:514"
 enabled = true
 address = "127.0.0.1:8686"
 
+# The syslog source below automatically adds a `.source_ip` field to every event --
+# the real UDP/TCP peer address, distinct from `.hostname` (the syslog message's own
+# self-reported HOSTNAME, used for .host below). shape_logs deliberately never touches
+# .source_ip, so it passes through untouched to the app's /api/ingest, which reads it
+# as the log's real source IP. Don't "fix" this by adding an explicit assignment here --
+# there's nothing missing, this is Vector's own default behavior (verified against the
+# installed 0.57.0).
 [sources.syslog_in]
 type = "syslog"
 mode = "udp"
@@ -233,11 +240,19 @@ def logout():
     logout_user()
     return redirect(url_for('login'))
 
-# live_logs.source_ip has never been populated by any ingest path — the Windows agent's
-# Get-WinEvent selection doesn't request a network-address property, and nothing extracts
-# one from the message text either. Windows Security auth events (4624/4625/4648, etc.)
-# do carry it in their human-readable message body under this label, so best-effort regex
-# extraction there is enough to make source_ip usable without changing the agent.
+# Vector's syslog source (confirmed against the installed 0.57.0's own docs) already
+# populates a real .source_ip field itself -- the actual UDP/TCP peer address, distinct
+# from .hostname (the syslog message's own self-reported HOSTNAME, which is what .host
+# comes from) -- and generate_vector_config()'s remap never touches it, so it passes
+# through to this endpoint untouched and log.get('source_ip') below picks it up first.
+# The Windows/Linux agents, by contrast, never send source_ip at all (Get-WinEvent's
+# selection doesn't request a network-address property), so for agent-sourced events
+# this falls back to regex-extracting it from Windows Security auth events' own
+# human-readable message body (they carry it under this label), and finally to the
+# request's own remote address -- which is only trustworthy for genuine direct
+# connections (agents); for anything forwarded through Vector's local sink it would
+# always read 127.0.0.1, so that specific case is excluded rather than trusted (see
+# api_ingest below).
 _SOURCE_IP_RE = re.compile(r'Source Network Address:\s*([0-9a-fA-F:.]+)')
 
 def _extract_source_ip(message):
@@ -248,6 +263,33 @@ def _extract_source_ip(message):
         return None
     ip = m.group(1).strip()
     return ip if ip and ip != '-' else None
+
+# Sysmon (and Security-log equivalents) render process-creation events as one
+# "Label: value" pair per line in the human-readable message body -- confirmed against
+# real published Sysmon Event ID 1 examples, not a sample from this deployment (none
+# exists in this repo). `^[ \t]*Label:` rather than a bare `^Label:` tolerates a leading
+# indent some renderers add; `ParentImage:`/`ParentCommandLine:` lines can't false-match
+# the bare `Image:`/`CommandLine:` patterns since those lines start with "Parent", not
+# "Image"/"Command".
+_PROCESS_FIELD_PATTERNS = {
+    'process_image': re.compile(r'^[ \t]*Image:\s*(.+)$', re.MULTILINE),
+    'command_line': re.compile(r'^[ \t]*CommandLine:\s*(.+)$', re.MULTILINE),
+    'parent_image': re.compile(r'^[ \t]*ParentImage:\s*(.+)$', re.MULTILINE),
+    'parent_command_line': re.compile(r'^[ \t]*ParentCommandLine:\s*(.+)$', re.MULTILINE),
+    'original_file_name': re.compile(r'^[ \t]*OriginalFileName:\s*(.+)$', re.MULTILINE),
+}
+
+def _extract_process_fields(message):
+    if not message:
+        return {}
+    out = {}
+    for col, pattern in _PROCESS_FIELD_PATTERNS.items():
+        m = pattern.search(message)
+        if m:
+            val = m.group(1).strip()  # .strip() drops a trailing \r on CRLF-sourced text
+            if val and val != '-':
+                out[col] = val
+    return out
 
 @app.route('/api/ingest', methods=['POST'])
 def api_ingest():
@@ -281,9 +323,25 @@ def api_ingest():
             msg = log.get('message', '')
             # Fall back to the IP the ingest request actually came from — an event with no
             # network-address text in its message (most Sysmon/System events) still comes
-            # from a real endpoint, and request.remote_addr is that endpoint's address.
-            sip = log.get('source_ip') or _extract_source_ip(msg) or request.remote_addr
-            db.execute("INSERT INTO live_logs (timestamp, host, app, severity, event_id, username, source_ip, message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (ts, hst, app_n, sev, eid, usr, sip, msg))
+            # from a real endpoint, and request.remote_addr is that endpoint's address for
+            # a genuine direct connection (agents). It's NOT trustworthy for anything
+            # forwarded through Vector's local sink, though -- that always reads as
+            # 127.0.0.1 (Vector posts to 127.0.0.1:{ingest_port}), so falling back to it
+            # there would silently record Vector's own address instead of leaving the
+            # field unset. log.get('source_ip') is checked first and already covers the
+            # real syslog case (Vector's syslog source populates it natively).
+            sip = log.get('source_ip') or _extract_source_ip(msg)
+            if not sip and request.remote_addr not in ('127.0.0.1', '::1'):
+                sip = request.remote_addr
+            proc = _extract_process_fields(msg)
+            db.execute(
+                "INSERT INTO live_logs (timestamp, host, app, severity, event_id, username, source_ip, message, "
+                "process_image, command_line, parent_image, parent_command_line, original_file_name) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (ts, hst, app_n, sev, eid, usr, sip, msg,
+                 proc.get('process_image'), proc.get('command_line'), proc.get('parent_image'),
+                 proc.get('parent_command_line'), proc.get('original_file_name'))
+            )
             count += 1
 
             # --- INLINE DETECTION ENGINE (fast keyword heuristics; sigma_engine.py runs the real Sigma-rule pipeline) ---
@@ -2402,6 +2460,18 @@ def migrate_live_logs_ip_columns():
     except Exception:
         pass
 
+def migrate_live_logs_process_columns():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(live_logs)").fetchall()}
+        for col in ('process_image', 'command_line', 'parent_image', 'parent_command_line', 'original_file_name'):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE live_logs ADD COLUMN {col} TEXT")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_agent_versions():
     # agent_polls predates version reporting — add the column for already-deployed
     # databases. agent_version_history is new: one row per (hostname, version) pair,
@@ -3069,7 +3139,8 @@ def agent_config():
 # logic (built for live_logs alone) works unchanged against the union.
 UNIFIED_LOGS_SQL = """(
 SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type,
-       NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json
+       NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
+       process_image, command_line, parent_image, parent_command_line, original_file_name
 FROM live_logs
 UNION ALL
 SELECT a.timestamp, a.severity,
@@ -3085,13 +3156,15 @@ SELECT a.timestamp, a.severity,
        CASE WHEN a.rule_id IS NULL THEN 'heuristic' ELSE COALESCE(s.source, 'sigma') END as rule_source,
        a.log_event_id as log_event_id,
        a.log_app as log_app,
-       NULL as raw_json
+       NULL as raw_json,
+       NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name
 FROM alerts a
 LEFT JOIN sigma_rules s ON a.rule_id = s.id
 UNION ALL
 SELECT timestamp, severity, hostname as host, 'UEBA Anomaly' as app, '-' as event_id, '-' as username,
        NULL as source_ip, NULL as destination_ip, message, 'anomaly' as log_type,
-       NULL as rule_id, 'ueba' as rule_source, NULL as log_event_id, NULL as log_app, raw_json
+       NULL as rule_id, 'ueba' as rule_source, NULL as log_event_id, NULL as log_app, raw_json,
+       NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name
 FROM events
 WHERE app_name = 'duckdb_ueba'
 ) AS unified_logs"""
@@ -3156,7 +3229,8 @@ def _build_log_filters(args):
             conditions.append(f"UPPER(severity) IN ({','.join(['?']*len(sevs))})")
             params.extend(sevs)
 
-    allowed_columns = ['username', 'host', 'event_id', 'source_ip', 'destination_ip', 'message', 'log_type']
+    allowed_columns = ['username', 'host', 'event_id', 'source_ip', 'destination_ip', 'message', 'log_type',
+                       'process_image', 'command_line', 'parent_image', 'parent_command_line', 'original_file_name']
     if field_key and field_val:
         col = field_key if field_key in allowed_columns else 'message'
         if field_op == 'equals':
@@ -3936,6 +4010,7 @@ migrate_compliance_tags()
 migrate_ueba_entities()
 migrate_ueba_math_v2()
 migrate_live_logs_ip_columns()
+migrate_live_logs_process_columns()
 migrate_agent_versions()
 migrate_agent_tokens()
 migrate_audit_log()

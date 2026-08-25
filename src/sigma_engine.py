@@ -47,6 +47,17 @@ _FIELD_COLUMN_ALIASES = {
     # source_ip/destination_ip columns as their plain counterparts — the only
     # difference is the *value* side, a live list instead of a single typed-in value.
     'sourceipioc': 'source_ip', 'destinationipioc': 'destination_ip',
+    # Process-creation fields (the single most common Sigma rule category), regex-
+    # extracted from the raw message body at ingest time by _extract_process_fields()
+    # in app.py -- see live_logs.process_image/command_line/parent_image/
+    # parent_command_line/original_file_name. 'newprocessname' is Security-log 4688's
+    # own name for the same concept as Sysmon's 'Image'; 'targetimage' covers Sysmon
+    # event types where a different process is the subject (e.g. access/tamper events).
+    'image': 'process_image', 'newprocessname': 'process_image', 'targetimage': 'process_image',
+    'commandline': 'command_line', 'processcommandline': 'command_line',
+    'parentimage': 'parent_image',
+    'parentcommandline': 'parent_command_line',
+    'originalfilename': 'original_file_name',
 }
 
 @dataclass
