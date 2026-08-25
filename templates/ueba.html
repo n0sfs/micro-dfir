@@ -16,10 +16,10 @@
 </style>
 
 <div class="row g-3 mb-4">
-    <div class="col-6 col-lg-3"><div class="stat-tile"><div class="stat-label" id="statLabel0">—</div><div class="stat-value" id="statValue0">—</div></div></div>
-    <div class="col-6 col-lg-3"><div class="stat-tile"><div class="stat-label" id="statLabel1">—</div><div class="stat-value" id="statValue1">—</div></div></div>
-    <div class="col-6 col-lg-3"><div class="stat-tile"><div class="stat-label" id="statLabel2">—</div><div class="stat-value" id="statValue2">—</div></div></div>
-    <div class="col-6 col-lg-3"><div class="stat-tile"><div class="stat-label" id="statLabel3">—</div><div class="stat-value" id="statValue3" style="font-size:1.6rem;">—</div></div></div>
+    <div class="col-6 col-lg-3" id="statTile0"><div class="stat-tile"><div class="stat-label" id="statLabel0">—</div><div class="stat-value" id="statValue0">—</div></div></div>
+    <div class="col-6 col-lg-3" id="statTile1"><div class="stat-tile"><div class="stat-label" id="statLabel1">—</div><div class="stat-value" id="statValue1">—</div></div></div>
+    <div class="col-6 col-lg-3" id="statTile2"><div class="stat-tile"><div class="stat-label" id="statLabel2">—</div><div class="stat-value" id="statValue2">—</div></div></div>
+    <div class="col-6 col-lg-3" id="statTile3"><div class="stat-tile"><div class="stat-label" id="statLabel3">—</div><div class="stat-value" id="statValue3" style="font-size:1.6rem;">—</div></div></div>
 </div>
 
 <div class="card bg-dark border-secondary">
@@ -29,8 +29,8 @@
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnRisk" onclick="switchUebaTab('risk')"><i class="fa-solid fa-gauge-high me-2"></i>Risk Scoring</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnInsights" onclick="switchUebaTab('insights')"><i class="fa-solid fa-chart-column me-2"></i>Data Insights</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnTimeline" onclick="switchUebaTab('timeline')"><i class="fa-solid fa-timeline me-2"></i>Timeline</button></li>
-            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnTuning" onclick="switchUebaTab('tuning')"><i class="fa-solid fa-sliders me-2"></i>Anomaly Tuning</button></li>
-            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnRules" onclick="switchUebaTab('rules')"><i class="fa-solid fa-list-check me-2"></i>Anomaly Rules</button></li>
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnTuning" onclick="switchUebaTab('tuning')" title="Turn the 8 built-in detection models on/off and tune their thresholds"><i class="fa-solid fa-sliders me-2"></i>Model Tuning</button></li>
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnRules" onclick="switchUebaTab('rules')" title="Point values, tiers, and admin-defined custom scoring rules"><i class="fa-solid fa-list-check me-2"></i>Scoring &amp; Rules</button></li>
         </ul>
     </div>
 
@@ -192,7 +192,7 @@
                     </div>
                     <div class="form-check form-switch mt-2">
                         <input class="form-check-input" type="checkbox" id="cfgOffHoursEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
-                        <label class="form-check-label small" for="cfgOffHoursEnabled">Flag hosts/users active at an hour of day never seen for that entity before</label>
+                        <label class="form-check-label small" for="cfgOffHoursEnabled">Flag hosts/users active at an hour of day that's unusual for them, judged against a per-hour-of-week baseline <span class="text-muted">(a stable recurring pattern, e.g. always active Friday 11pm, is not penalized)</span></label>
                     </div>
                     <div class="form-check form-switch mt-2 d-flex align-items-center flex-wrap gap-2">
                         <div>
@@ -318,9 +318,14 @@
                             <div id="dynamicScoringForm"></div>
                         </div>
                         <div class="col-lg-6">
-                            <label class="form-label small text-muted mb-1">Raw JSON</label>
-                            <textarea id="riskCfgPointsJson" class="form-control bg-dark text-light border-secondary font-monospace small" rows="16" spellcheck="false" oninput="onDynamicScoringJsonChange()" {{ '' if current_user.role == 'admin' else 'disabled' }}></textarea>
-                            <p class="small mt-1 mb-0" id="dynamicScoringJsonStatus">&nbsp;</p>
+                            <button type="button" class="btn btn-sm btn-outline-secondary mb-2" onclick="toggleRawJsonView()" id="toggleRawJsonBtn">
+                                <i class="fa-solid fa-code me-1"></i> Show Raw JSON
+                            </button>
+                            <div id="rawJsonWrap" style="display:none;">
+                                <label class="form-label small text-muted mb-1">Raw JSON <span class="text-muted">— edits here sync back to the fields on the left and vice versa; mainly useful for pasting in a whole config at once</span></label>
+                                <textarea id="riskCfgPointsJson" class="form-control bg-dark text-light border-secondary font-monospace small" rows="16" spellcheck="false" oninput="onDynamicScoringJsonChange()" {{ '' if current_user.role == 'admin' else 'disabled' }}></textarea>
+                                <p class="small mt-1 mb-0" id="dynamicScoringJsonStatus">&nbsp;</p>
+                            </div>
                         </div>
                     </div>
                     {% if current_user.role == 'admin' %}
@@ -469,40 +474,68 @@ function switchUebaTab(tab) {
 }
 
 function setStatTile(i, label, value, large) {
+    document.getElementById(`statTile${i}`).style.display = '';
     document.getElementById(`statLabel${i}`).innerText = label;
     document.getElementById(`statValue${i}`).innerText = value;
     document.getElementById(`statValue${i}`).style.fontSize = large ? '1.6rem' : '1.05rem';
 }
 
+// Tiles hidden by a tab with fewer than 4 real stats (Data Insights, Timeline) stay
+// hidden on every other tab too unless setStatTile() explicitly re-shows them -- this
+// resets all 4 up front so a tab with real data for all of them never inherits a
+// hidden tile left over from switching away from Insights/Timeline.
+function hideStatTile(i) {
+    document.getElementById(`statTile${i}`).style.display = 'none';
+}
+
 function updateSharedStats() {
+    for (let i = 0; i < 4; i++) hideStatTile(i);
     if (activeUebaTab === 'tuning') {
-        const rows = allBaselines || [];
-        setStatTile(0, 'Entities Tracked', rows.length, true);
-        setStatTile(1, 'Anomalous Now', rows.filter(r => r.is_anomalous).length, true);
-        setStatTile(2, 'Excluded', rows.filter(r => r.excluded).length, true);
-        setStatTile(3, 'Weekday-Modeled', rows.filter(r => r.baseline_mode === 'weekday').length, true);
+        if (!baselinesLoadedOnce) {
+            setStatTile(0, 'Entities Tracked', '—', true);
+            setStatTile(1, 'Anomalous Now', '—', true);
+            setStatTile(2, 'Excluded', '—', true);
+            setStatTile(3, 'Weekday-Modeled', '—', true);
+        } else {
+            const rows = allBaselines || [];
+            setStatTile(0, 'Entities Tracked', rows.length, true);
+            setStatTile(1, 'Anomalous Now', rows.filter(r => r.is_anomalous).length, true);
+            setStatTile(2, 'Excluded', rows.filter(r => r.excluded).length, true);
+            setStatTile(3, 'Weekday-Modeled', rows.filter(r => r.baseline_mode === 'weekday').length, true);
+        }
     } else if (activeUebaTab === 'risk') {
-        const rows = riskScoresData || [];
-        setStatTile(0, 'Entities Scored', rows.length, true);
-        setStatTile(1, 'Critical', rows.filter(r => r.tier === 'Critical').length, true);
-        setStatTile(2, 'High', rows.filter(r => r.tier === 'High').length, true);
-        setStatTile(3, 'Top Score', rows.length ? rows[0].score : '—', true);
+        if (!riskScoresLoadedOnce) {
+            setStatTile(0, 'Entities Scored', '—', true);
+            setStatTile(1, 'Critical', '—', true);
+            setStatTile(2, 'High', '—', true);
+            setStatTile(3, 'Top Score', '—', true);
+        } else {
+            const rows = riskScoresData || [];
+            setStatTile(0, 'Entities Scored', rows.length, true);
+            setStatTile(1, 'Critical', rows.filter(r => r.tier === 'Critical').length, true);
+            setStatTile(2, 'High', rows.filter(r => r.tier === 'High').length, true);
+            setStatTile(3, 'Top Score', rows.length ? rows[0].score : '—', true);
+        }
     } else if (activeUebaTab === 'insights') {
+        // Only one stat is meaningful on this tab -- the other three tiles are hidden
+        // entirely (see hideStatTile above) instead of rendered as permanent, never-filled
+        // "—" placeholders that just waste header space.
         setStatTile(0, 'Mode', insightsMode === 'entity' ? 'By Entity' : 'By Model', false);
-        setStatTile(1, '—', '—', true);
-        setStatTile(2, '—', '—', true);
-        setStatTile(3, '—', '—', true);
     } else if (activeUebaTab === 'timeline') {
         setStatTile(0, 'Status', 'Placeholder', false);
-        setStatTile(1, '—', '—', true);
-        setStatTile(2, '—', '—', true);
-        setStatTile(3, '—', '—', true);
     } else if (activeUebaTab === 'rules') {
-        const rows = anomalyRulesData || [];
-        setStatTile(0, 'Total Rules', rows.length, true);
-        setStatTile(1, 'Enabled', rows.filter(r => r.enabled).length, true);
-        setStatTile(2, 'Disabled', rows.filter(r => !r.enabled).length, true);
-        setStatTile(3, 'With First-Time Bonus', rows.filter(r => r.first_time_bonus_points).length, true);
+        if (!anomalyRulesLoadedOnce) {
+            setStatTile(0, 'Total Rules', '—', true);
+            setStatTile(1, 'Enabled', '—', true);
+            setStatTile(2, 'Disabled', '—', true);
+            setStatTile(3, 'With First-Time Bonus', '—', true);
+        } else {
+            const rows = anomalyRulesData || [];
+            setStatTile(0, 'Total Rules', rows.length, true);
+            setStatTile(1, 'Enabled', rows.filter(r => r.enabled).length, true);
+            setStatTile(2, 'Disabled', rows.filter(r => !r.enabled).length, true);
+            setStatTile(3, 'With First-Time Bonus', rows.filter(r => r.first_time_bonus_points).length, true);
+        }
     } else {
         const d = uebaDetectionsData || {};
         setStatTile(0, 'Total Detections', d.total ?? '—', true);
@@ -669,6 +702,20 @@ function viewRiskScoreDetail(entityType, entityId) {
         .catch(err => {
             document.getElementById('riskDetailModalBody').innerHTML = `<p class="text-danger small">Error loading detail: ${escHtml(err)}</p>`;
         });
+}
+
+// Collapsed by default -- the labeled fields to its left already show every value in
+// this JSON, so showing both at once by default was pure duplication taking up half
+// the card's width. Kept as a real, always-in-sync editor (not just removed) since
+// pasting in a whole config at once is still a genuinely useful escape hatch.
+function toggleRawJsonView() {
+    const wrap = document.getElementById('rawJsonWrap');
+    const btn = document.getElementById('toggleRawJsonBtn');
+    const showing = wrap.style.display !== 'none';
+    wrap.style.display = showing ? 'none' : 'block';
+    btn.innerHTML = showing
+        ? '<i class="fa-solid fa-code me-1"></i> Show Raw JSON'
+        : '<i class="fa-solid fa-chevron-up me-1"></i> Hide Raw JSON';
 }
 
 // ---- Dynamic Scoring: labeled fields <-> raw JSON, kept in sync both directions ----
@@ -1016,6 +1063,7 @@ function saveUebaConfig() {
 }
 
 let allBaselines = [];
+let baselinesLoadedOnce = false;
 let baselineFilter = 'all';
 let baselineQ = '';
 
@@ -1067,6 +1115,7 @@ function renderBaselines() {
 function loadBaselines() {
     fetch('/api/ueba/baselines').then(r => r.json()).then(data => {
         allBaselines = data.baselines || [];
+        baselinesLoadedOnce = true;
         document.getElementById('baselinesComputedAt').innerText = data.computed_at ? `Last computed: ${data.computed_at}` : '';
         renderBaselines();
         updateSharedStats();
