@@ -420,6 +420,7 @@ body.sidebar-collapsed .btn-logout span{display:none;}
             <a href="/ueba" class="nav-block {{ 'active' if request.endpoint in ['ueba', 'ueba_tuning'] else '' }}" title="UEBA"><i class="fa-solid fa-user-secret"></i><span>UEBA</span></a>
             <a href="/threat-intel" class="nav-block {{ 'active' if request.endpoint in ['threat_intel', 'hunt'] else '' }}" title="Threat Intel &amp; Hunting"><i class="fa-solid fa-globe"></i><span>Threat Intel &amp; Hunting</span></a>
             <a href="{{ url_for('soar_page') }}" class="nav-block {{ 'active' if request.endpoint == 'soar_page' else '' }}" title="SOAR"><i class="fa-solid fa-robot"></i><span>SOAR</span></a>
+            <a href="{{ url_for('cases_page') }}" class="nav-block {{ 'active' if request.endpoint == 'cases_page' else '' }}" title="Cases"><i class="fa-solid fa-folder-open"></i><span>Cases</span></a>
         </nav>
 
         <div class="sidebar-bottom">

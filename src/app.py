@@ -541,6 +541,11 @@ def dashboards_page():
 def soar_page():
     return render_template('soar.html', current_user=current_user)
 
+@app.route('/cases')
+@login_required
+def cases_page():
+    return render_template('cases.html', current_user=current_user)
+
 @app.route('/api/alerts')
 @login_required
 def api_alerts():
@@ -1808,6 +1813,122 @@ def api_identity_detail(iid):
     db.commit()
     return jsonify({"status": "success"})
 
+# 'ueba_event' rather than 'anomaly' to match the events table this actually points at --
+# UNIFIED_LOGS_SQL's log_type for these rows is 'anomaly', but that's a display label,
+# not the underlying table name, so the two are kept intentionally distinct here.
+CASE_ITEM_TYPES = {'alert': 'alerts', 'ueba_event': 'events'}
+
+@app.route('/api/cases', methods=['GET', 'POST'])
+@login_required
+def api_cases():
+    db = get_db()
+    if request.method == 'GET':
+        rows = db.execute(
+            "SELECT c.id, c.title, c.status, c.assignee, c.description, c.created_by, c.created_at, c.closed_at, "
+            "COUNT(ci.id) as item_count "
+            "FROM cases c LEFT JOIN case_items ci ON ci.case_id = c.id "
+            "GROUP BY c.id ORDER BY CASE WHEN c.status = 'open' THEN 0 ELSE 1 END, c.created_at DESC"
+        ).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+    data = request.get_json() or {}
+    title = (data.get('title') or '').strip()
+    if not title:
+        return jsonify({"error": "Title is required"}), 400
+    assignee = (data.get('assignee') or '').strip()
+    description = (data.get('description') or '').strip()
+    cur = db.execute(
+        "INSERT INTO cases (title, assignee, description, created_by) VALUES (?, ?, ?, ?)",
+        (title, assignee, description, current_user.username)
+    )
+    db.commit()
+    return jsonify({"status": "success", "id": cur.lastrowid})
+
+def _case_item_summary(db, item_type, item_id):
+    if item_type == 'alert':
+        r = db.execute(
+            "SELECT a.timestamp, a.severity, a.host, a.username, COALESCE(s.title, a.rule_name, 'Custom/YARA Rule') as label, a.message "
+            "FROM alerts a LEFT JOIN sigma_rules s ON a.rule_id = s.id WHERE a.id = ?", (item_id,)
+        ).fetchone()
+    else:
+        r = db.execute(
+            "SELECT timestamp, severity, hostname as host, NULL as username, 'UEBA Anomaly' as label, message FROM events WHERE id = ?", (item_id,)
+        ).fetchone()
+    return dict(r) if r else None
+
+@app.route('/api/cases/<int:cid>', methods=['GET', 'PUT', 'DELETE'])
+@login_required
+def api_case_detail(cid):
+    db = get_db()
+    case = db.execute("SELECT * FROM cases WHERE id = ?", (cid,)).fetchone()
+    if not case:
+        return jsonify({"error": "Case not found"}), 404
+
+    if request.method == 'DELETE':
+        db.execute("DELETE FROM case_items WHERE case_id = ?", (cid,))
+        db.execute("DELETE FROM cases WHERE id = ?", (cid,))
+        db.commit()
+        return jsonify({"ok": 1})
+
+    if request.method == 'PUT':
+        data = request.get_json() or {}
+        title = data['title'].strip() if 'title' in data and data['title'] else case['title']
+        status = data['status'].strip() if 'status' in data and data['status'] else case['status']
+        assignee = data['assignee'].strip() if 'assignee' in data else (case['assignee'] or '')
+        description = data['description'].strip() if 'description' in data else (case['description'] or '')
+        if status not in ('open', 'closed'):
+            return jsonify({"error": "status must be 'open' or 'closed'"}), 400
+        closed_at = case['closed_at']
+        if status == 'closed' and case['status'] != 'closed':
+            closed_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        elif status == 'open':
+            closed_at = None
+        db.execute(
+            "UPDATE cases SET title = ?, status = ?, assignee = ?, description = ?, closed_at = ? WHERE id = ?",
+            (title, status, assignee, description, closed_at, cid)
+        )
+        db.commit()
+        return jsonify({"status": "success"})
+
+    items = db.execute("SELECT id, item_type, item_id, added_by, added_at FROM case_items WHERE case_id = ? ORDER BY added_at DESC", (cid,)).fetchall()
+    items_out = []
+    for it in items:
+        summary = _case_item_summary(db, it['item_type'], it['item_id'])
+        items_out.append({**dict(it), 'summary': summary})
+    return jsonify({**dict(case), 'items': items_out})
+
+@app.route('/api/cases/<int:cid>/items', methods=['POST'])
+@login_required
+def api_case_add_item(cid):
+    db = get_db()
+    if not db.execute("SELECT 1 FROM cases WHERE id = ?", (cid,)).fetchone():
+        return jsonify({"error": "Case not found"}), 404
+    data = request.get_json() or {}
+    item_type = data.get('item_type')
+    item_id = data.get('item_id')
+    if item_type not in CASE_ITEM_TYPES:
+        return jsonify({"error": f"item_type must be one of {', '.join(CASE_ITEM_TYPES)}"}), 400
+    if not item_id:
+        return jsonify({"error": "item_id is required"}), 400
+    if db.execute("SELECT 1 FROM case_items WHERE case_id = ? AND item_type = ? AND item_id = ?", (cid, item_type, item_id)).fetchone():
+        return jsonify({"error": "That item is already in this case"}), 400
+    db.execute(
+        "INSERT INTO case_items (case_id, item_type, item_id, added_by) VALUES (?, ?, ?, ?)",
+        (cid, item_type, str(item_id), current_user.username)
+    )
+    db.commit()
+    return jsonify({"status": "success"})
+
+@app.route('/api/cases/<int:cid>/items/<int:item_row_id>', methods=['DELETE'])
+@login_required
+def api_case_remove_item(cid, item_row_id):
+    db = get_db()
+    if not db.execute("SELECT 1 FROM case_items WHERE id = ? AND case_id = ?", (item_row_id, cid)).fetchone():
+        return jsonify({"error": "Case item not found"}), 404
+    db.execute("DELETE FROM case_items WHERE id = ?", (item_row_id,))
+    db.commit()
+    return jsonify({"ok": 1})
+
 UEBA_CONFIG_DEFAULTS = {
     'ueba_lookback_days': '30', 'ueba_stddev_multiplier': '3', 'ueba_min_baseline': '50',
     'ueba_min_days_observed': '4', 'ueba_new_ip_enabled': '1',
@@ -2773,6 +2894,33 @@ def migrate_assets_identities():
     except Exception:
         pass
 
+def migrate_cases():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS cases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            assignee TEXT,
+            description TEXT,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            closed_at DATETIME
+        )''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS case_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id INTEGER NOT NULL,
+            item_type TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            added_by TEXT,
+            added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_case_items_case ON case_items(case_id)')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_live_logs_ip_columns():
     # source_ip/destination_ip were added to schema.sql at some point but no migration
     # ever backfilled them onto already-deployed databases, and no ingest path ever
@@ -3637,7 +3785,7 @@ UNIFIED_LOGS_SQL = """(
 SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type,
        NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
        process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
-       NULL as occurrence_count, NULL as last_seen
+       NULL as occurrence_count, NULL as last_seen, NULL as item_id
 FROM live_logs
 UNION ALL
 SELECT a.timestamp, a.severity,
@@ -3655,7 +3803,7 @@ SELECT a.timestamp, a.severity,
        a.log_app as log_app,
        NULL as raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
-       a.occurrence_count as occurrence_count, a.last_seen as last_seen
+       a.occurrence_count as occurrence_count, a.last_seen as last_seen, a.id as item_id
 FROM alerts a
 LEFT JOIN sigma_rules s ON a.rule_id = s.id
 UNION ALL
@@ -3663,7 +3811,7 @@ SELECT timestamp, severity, hostname as host, 'UEBA Anomaly' as app, '-' as even
        NULL as source_ip, NULL as destination_ip, message, 'anomaly' as log_type,
        NULL as rule_id, 'ueba' as rule_source, NULL as log_event_id, NULL as log_app, raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
-       NULL as occurrence_count, NULL as last_seen
+       NULL as occurrence_count, NULL as last_seen, id as item_id
 FROM events
 WHERE app_name = 'duckdb_ueba'
 ) AS unified_logs"""
@@ -3767,6 +3915,7 @@ def api_logs_search():
         rows = db.execute(f"SELECT * FROM {UNIFIED_LOGS_SQL}{where_clause} ORDER BY timestamp DESC LIMIT 300", params).fetchall()
 
         logs = [{
+            'id': r['item_id'],
             'time': r['timestamp'],
             'severity': r['severity'],
             'host': r['host'],
@@ -3781,7 +3930,15 @@ def api_logs_search():
             'rule_source': r['rule_source'],
             'log_event_id': r['log_event_id'],
             'log_app': r['log_app'],
-            'raw_json': r['raw_json']
+            'raw_json': r['raw_json'],
+            'process_image': r['process_image'],
+            'command_line': r['command_line'],
+            'parent_image': r['parent_image'],
+            'parent_command_line': r['parent_command_line'],
+            'original_file_name': r['original_file_name'],
+            'raw_xml': r['raw_xml'],
+            'occurrence_count': r['occurrence_count'],
+            'last_seen': r['last_seen']
         } for r in rows]
 
         return jsonify({'logs': logs, 'count': len(logs), 'total_matches': total_count})
@@ -4558,6 +4715,7 @@ migrate_compliance_tags()
 migrate_ueba_entities()
 migrate_ueba_math_v2()
 migrate_assets_identities()
+migrate_cases()
 migrate_live_logs_ip_columns()
 migrate_live_logs_process_columns()
 migrate_agent_versions()
