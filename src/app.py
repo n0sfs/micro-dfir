@@ -1113,73 +1113,80 @@ def _extract_yaml_field(key, text):
     m = re.search(rf'^{key}:\s*([^\n\r#]+)', text, re.MULTILINE)
     return m.group(1).strip().strip("'\"") if m else None
 
+def _get_rules_cache(db):
+    """Returns the rules_out list used by both /api/rules and /api/mitre/coverage,
+    rebuilding from sigma_rules when the TTL cache is stale."""
+    global RULES_CACHE, RULES_CACHE_TIME
+    import time
+    if RULES_CACHE is not None and (time.time() - RULES_CACHE_TIME) < RULES_CACHE_TTL:
+        return RULES_CACHE
+
+    import re
+    from mitre_attack import techniques_for_tags
+    rules_out = []
+    for r in db.execute(
+        "SELECT id, title, rule_yaml, enabled, source, cloned_from, created_by, created_at, updated_by, updated_at, compliance_tags "
+        "FROM sigma_rules ORDER BY id DESC"
+    ).fetchall():
+        rid = r['id']
+        ry = r['rule_yaml']
+        try:
+            cat = _extract_yaml_field('category', ry) or 'unknown'
+            platform = (_extract_yaml_field('product', ry) or 'Global').title()
+
+            t_match = re.search(r'^tags:\s*\n((\s+-\s*[^\n\r]+\n?)+)', ry, re.MULTILINE)
+            tags = [t.strip().strip('- ') for t in t_match.group(1).split('\n') if t.strip()] if t_match else []
+
+            rule_type = "Generic"
+            for t in tags:
+                if t.startswith('compliance'):
+                    rule_type = "Compliance"
+                    break
+                elif 'hunting' in t or 'threat_hunting' in t:
+                    rule_type = "Threat Hunting"
+                    break
+
+            level = (_extract_yaml_field('level', ry) or 'medium').lower()
+            status = _normalize_rule_status(_extract_yaml_field('status', ry))
+
+            d_match = re.search(r'^modified:\s*([0-9]{4}[-/][0-9]{2}[-/][0-9]{2})', ry, re.MULTILINE) or \
+                      re.search(r'^date:\s*([0-9]{4}[-/][0-9]{2}[-/][0-9]{2})', ry, re.MULTILINE)
+            rule_date = d_match.group(1).replace('/', '-') if d_match else None
+        except Exception:
+            rule_type, platform, cat, tags = "Generic", "Global", "unknown", []
+            level, status, rule_date = "medium", "unknown", None
+
+        rules_out.append({
+            "id": rid,
+            "title": r['title'],
+            "enabled": r['enabled'],
+            "rule_type": rule_type,
+            "platform": platform,
+            "category": cat,
+            "tags": tags,
+            "mitre_techniques": techniques_for_tags(tags),
+            "level": level,
+            "status": status,
+            "source": r['source'] or 'sigma',
+            "cloned_from": r['cloned_from'],
+            "created_by": r['created_by'],
+            "created_at": r['created_at'],
+            "updated_by": r['updated_by'],
+            "updated_at": r['updated_at'],
+            "last_update": r['updated_at'] or rule_date or r['created_at'],
+            "compliance_tags": [t for t in (r['compliance_tags'] or '').split(',') if t]
+        })
+    RULES_CACHE = rules_out
+    RULES_CACHE_TIME = time.time()
+    return RULES_CACHE
+
 @app.route('/api/rules', methods=['GET', 'POST'])
 @login_required
 def api_rules():
-    global RULES_CACHE, RULES_CACHE_TIME
-    import time
     db = get_db()
 
     if request.method == 'GET':
-        if RULES_CACHE is not None and (time.time() - RULES_CACHE_TIME) < RULES_CACHE_TTL:
-            return jsonify(RULES_CACHE)
-
-        import re
-        rules_out = []
-        for r in db.execute(
-            "SELECT id, title, rule_yaml, enabled, source, cloned_from, created_by, created_at, updated_by, updated_at, compliance_tags "
-            "FROM sigma_rules ORDER BY id DESC"
-        ).fetchall():
-            rid = r['id']
-            ry = r['rule_yaml']
-            try:
-                cat = _extract_yaml_field('category', ry) or 'unknown'
-                platform = (_extract_yaml_field('product', ry) or 'Global').title()
-
-                t_match = re.search(r'^tags:\s*\n((\s+-\s*[^\n\r]+\n?)+)', ry, re.MULTILINE)
-                tags = [t.strip().strip('- ') for t in t_match.group(1).split('\n') if t.strip()] if t_match else []
-
-                rule_type = "Generic"
-                for t in tags:
-                    if t.startswith('compliance'):
-                        rule_type = "Compliance"
-                        break
-                    elif 'hunting' in t or 'threat_hunting' in t:
-                        rule_type = "Threat Hunting"
-                        break
-
-                level = (_extract_yaml_field('level', ry) or 'medium').lower()
-                status = _normalize_rule_status(_extract_yaml_field('status', ry))
-
-                d_match = re.search(r'^modified:\s*([0-9]{4}[-/][0-9]{2}[-/][0-9]{2})', ry, re.MULTILINE) or \
-                          re.search(r'^date:\s*([0-9]{4}[-/][0-9]{2}[-/][0-9]{2})', ry, re.MULTILINE)
-                rule_date = d_match.group(1).replace('/', '-') if d_match else None
-            except Exception:
-                rule_type, platform, cat, tags = "Generic", "Global", "unknown", []
-                level, status, rule_date = "medium", "unknown", None
-
-            rules_out.append({
-                "id": rid,
-                "title": r['title'],
-                "enabled": r['enabled'],
-                "rule_type": rule_type,
-                "platform": platform,
-                "category": cat,
-                "tags": tags,
-                "level": level,
-                "status": status,
-                "source": r['source'] or 'sigma',
-                "cloned_from": r['cloned_from'],
-                "created_by": r['created_by'],
-                "created_at": r['created_at'],
-                "updated_by": r['updated_by'],
-                "updated_at": r['updated_at'],
-                "last_update": r['updated_at'] or rule_date or r['created_at'],
-                "compliance_tags": [t for t in (r['compliance_tags'] or '').split(',') if t]
-            })
-        RULES_CACHE = rules_out
-        RULES_CACHE_TIME = time.time()
-        return jsonify(RULES_CACHE)
+        return jsonify(_get_rules_cache(db))
 
     if current_user.role != 'admin': return jsonify({"error": "Admin required"}), 403
     ry = request.get_json().get('rule_yaml', '')
@@ -1196,6 +1203,58 @@ def api_rules():
     db.commit()
     invalidate_rules_cache()
     return jsonify({"status": "success"})
+
+def _build_mitre_coverage(rules):
+    """Aggregates MITRE technique coverage across enabled rules (each a dict
+    with 'enabled' and 'mitre_techniques', matching _get_rules_cache()'s
+    shape), grouped by tactic. Every curated technique appears even at zero
+    coverage (so the heatmap shows gaps, not just hits); any technique tag
+    found in a rule but missing from the curated table is still counted,
+    under 'unmapped'."""
+    from mitre_attack import TACTICS, TACTIC_LABELS, TECHNIQUES, _display_id
+
+    counts = {}
+    unmapped = {}
+    for r in rules:
+        if not r['enabled']:
+            continue
+        for tech in r['mitre_techniques']:
+            if tech['tactic'] == 'unmapped':
+                entry = unmapped.setdefault(tech['id'], {'id': tech['id'], 'name': None, 'count': 0})
+                entry['count'] += 1
+            else:
+                counts[(tech['tactic'], tech['id'])] = counts.get((tech['tactic'], tech['id']), 0) + 1
+
+    seen_ids = set()
+    tactics_out = []
+    for tactic in TACTICS:
+        techs = []
+        for key, (name, t) in TECHNIQUES.items():
+            if t != tactic:
+                continue
+            tid = _display_id(key)
+            if tid in seen_ids:
+                continue
+            seen_ids.add(tid)
+            techs.append({'id': tid, 'name': name, 'count': counts.get((tactic, tid), 0)})
+        techs.sort(key=lambda x: (-x['count'], x['id']))
+        tactics_out.append({
+            'tactic': tactic, 'label': TACTIC_LABELS[tactic],
+            'techniques': techs,
+            'covered': sum(1 for x in techs if x['count'] > 0),
+            'total': len(techs),
+        })
+
+    return {
+        'tactics': tactics_out,
+        'unmapped': sorted(unmapped.values(), key=lambda x: -x['count']),
+    }
+
+@app.route('/api/mitre/coverage', methods=['GET'])
+@login_required
+def api_mitre_coverage():
+    return jsonify(_build_mitre_coverage(_get_rules_cache(get_db())))
+
 @app.route('/api/rules/<int:rid>', methods=['GET', 'PUT', 'DELETE'])
 @login_required
 def api_rule_detail(rid):
