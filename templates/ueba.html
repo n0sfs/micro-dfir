@@ -113,6 +113,7 @@
                         <option value="process_lineage">Suspicious Process Lineage</option>
                         <option value="off_hours_activity">Off-Hours Activity</option>
                         <option value="rare_process_population">Rare Process (Fleet-Wide)</option>
+                        <option value="multi_signal_convergence">Multi-Signal Convergence</option>
                     </select>
                 </div>
             </div>
@@ -192,6 +193,16 @@
                         </div>
                         <input type="number" id="cfgRareProcessMaxHosts" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="50" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
                         <span class="text-muted small">host(s) or fewer <span class="text-muted">(independent of any single host's own baseline)</span></span>
+                    </div>
+                    <div class="form-check form-switch mt-2 d-flex align-items-center flex-wrap gap-2">
+                        <div>
+                            <input class="form-check-input" type="checkbox" id="cfgConvergenceEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                            <label class="form-check-label small" for="cfgConvergenceEnabled">Flag an entity that trips at least</label>
+                        </div>
+                        <input type="number" id="cfgConvergenceMinIndicators" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:60px;" min="2" max="10" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <span class="text-muted small">distinct signal types within</span>
+                        <input type="number" id="cfgConvergenceWindowHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="168" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <span class="text-muted small">hours <span class="text-muted">(one weak signal alone isn't much -- several different ones close together is)</span></span>
                     </div>
                     {% if current_user.role == 'admin' %}
                     <button class="btn btn-primary btn-sm mt-3" onclick="saveUebaConfig()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Tuning</button>
@@ -616,6 +627,7 @@ const DYNAMIC_SCORING_FIELDS = [
         {k: 'process_lineage', label: 'Suspicious Process Lineage', desc: 'Added the first time a host is seen with a parent-to-child process relationship (e.g. an Office app spawning PowerShell) it hasn\'t had before, within the lookback window.'},
         {k: 'off_hours_activity', label: 'Off-Hours Activity', desc: 'Added when a host or user is active at an hour of day it hasn\'t been active in before, within the lookback window.'},
         {k: 'rare_process_population', label: 'Rare Process (Fleet-Wide)', desc: 'Added when a host runs a process that\'s rare across the whole fleet (seen on very few hosts total), independent of that host\'s own baseline.'},
+        {k: 'multi_signal_convergence', label: 'Multi-Signal Convergence', desc: 'Added when an entity triggers several distinct signal types (a mix of alerts and/or UEBA indicators) within a short window -- corroboration across different detection mechanisms is a stronger signal than any one alone.'},
     ]},
     { group: 'Score Tiers (thresholds)',
       desc: 'The minimum summed score (over the Scoring Window above) an entity needs to reach each risk tier -- these are the Low/Medium/High/Critical badges shown throughout the UI. E.g. with High = 50, any entity whose current score reaches 50 is labeled High risk until its score drops back below that threshold.',
@@ -732,6 +744,7 @@ const INSIGHTS_MODEL_LABELS = {
     new_process: 'New Process', new_destination_ip: 'New Destination IP',
     process_lineage: 'Suspicious Process Lineage', off_hours_activity: 'Off-Hours Activity',
     rare_process_population: 'Rare Process (Fleet-Wide)',
+    multi_signal_convergence: 'Multi-Signal Convergence',
 };
 const DOW_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -882,6 +895,9 @@ function loadUebaConfig() {
             document.getElementById('cfgOffHoursEnabled').checked = !!cfg.off_hours_enabled;
             document.getElementById('cfgRareProcessEnabled').checked = !!cfg.rare_process_enabled;
             document.getElementById('cfgRareProcessMaxHosts').value = cfg.rare_process_max_hosts;
+            document.getElementById('cfgConvergenceEnabled').checked = !!cfg.convergence_enabled;
+            document.getElementById('cfgConvergenceMinIndicators').value = cfg.convergence_min_indicators;
+            document.getElementById('cfgConvergenceWindowHours').value = cfg.convergence_window_hours;
         })
         .catch(err => console.error('Error loading UEBA config:', err));
 }
@@ -898,7 +914,10 @@ function saveUebaConfig() {
         process_lineage_enabled: document.getElementById('cfgProcessLineageEnabled').checked,
         off_hours_enabled: document.getElementById('cfgOffHoursEnabled').checked,
         rare_process_enabled: document.getElementById('cfgRareProcessEnabled').checked,
-        rare_process_max_hosts: parseInt(document.getElementById('cfgRareProcessMaxHosts').value, 10)
+        rare_process_max_hosts: parseInt(document.getElementById('cfgRareProcessMaxHosts').value, 10),
+        convergence_enabled: document.getElementById('cfgConvergenceEnabled').checked,
+        convergence_min_indicators: parseInt(document.getElementById('cfgConvergenceMinIndicators').value, 10),
+        convergence_window_hours: parseInt(document.getElementById('cfgConvergenceWindowHours').value, 10)
     };
     const msg = document.getElementById('cfgSaveMsg');
     fetch('/api/ueba/config', {

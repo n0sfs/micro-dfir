@@ -1687,6 +1687,8 @@ UEBA_CONFIG_DEFAULTS = {
     'ueba_new_process_enabled': '1', 'ueba_new_dest_ip_enabled': '1',
     'ueba_process_lineage_enabled': '1', 'ueba_off_hours_enabled': '1',
     'ueba_rare_process_enabled': '1', 'ueba_rare_process_max_hosts': '2',
+    'ueba_convergence_enabled': '1', 'ueba_convergence_min_indicators': '3',
+    'ueba_convergence_window_hours': '24',
 }
 
 @app.route('/api/ueba/config', methods=['GET', 'POST'])
@@ -1699,7 +1701,8 @@ def api_ueba_config():
             "SELECT key, value FROM settings WHERE key IN "
             "('ueba_lookback_days', 'ueba_stddev_multiplier', 'ueba_min_baseline', 'ueba_min_days_observed', 'ueba_new_ip_enabled', "
             "'ueba_new_process_enabled', 'ueba_new_dest_ip_enabled', 'ueba_process_lineage_enabled', 'ueba_off_hours_enabled', "
-            "'ueba_rare_process_enabled', 'ueba_rare_process_max_hosts')"
+            "'ueba_rare_process_enabled', 'ueba_rare_process_max_hosts', "
+            "'ueba_convergence_enabled', 'ueba_convergence_min_indicators', 'ueba_convergence_window_hours')"
         ).fetchall()
         cfg = {**UEBA_CONFIG_DEFAULTS, **{r['key']: r['value'] for r in rows}}
         return jsonify({
@@ -1714,6 +1717,9 @@ def api_ueba_config():
             'off_hours_enabled': str(cfg['ueba_off_hours_enabled']) not in ('0', 'false', 'False'),
             'rare_process_enabled': str(cfg['ueba_rare_process_enabled']) not in ('0', 'false', 'False'),
             'rare_process_max_hosts': int(cfg['ueba_rare_process_max_hosts']),
+            'convergence_enabled': str(cfg['ueba_convergence_enabled']) not in ('0', 'false', 'False'),
+            'convergence_min_indicators': int(cfg['ueba_convergence_min_indicators']),
+            'convergence_window_hours': int(cfg['ueba_convergence_window_hours']),
         })
 
     if current_user.role != 'admin':
@@ -1732,11 +1738,16 @@ def api_ueba_config():
         off_hours_enabled = bool(data.get('off_hours_enabled'))
         rare_process_enabled = bool(data.get('rare_process_enabled'))
         rare_process_max_hosts = int(data.get('rare_process_max_hosts'))
+        convergence_enabled = bool(data.get('convergence_enabled'))
+        convergence_min_indicators = int(data.get('convergence_min_indicators'))
+        convergence_window_hours = int(data.get('convergence_window_hours'))
         if not (1 <= lookback_days <= 365): raise ValueError('lookback_days must be 1-365')
         if not (0.5 <= stddev_multiplier <= 10): raise ValueError('stddev_multiplier must be 0.5-10')
         if not (0 <= min_baseline <= 1000000): raise ValueError('min_baseline must be 0-1000000')
         if not (1 <= min_days_observed <= 52): raise ValueError('min_days_observed must be 1-52')
         if not (1 <= rare_process_max_hosts <= 50): raise ValueError('rare_process_max_hosts must be 1-50')
+        if not (2 <= convergence_min_indicators <= 10): raise ValueError('convergence_min_indicators must be 2-10')
+        if not (1 <= convergence_window_hours <= 168): raise ValueError('convergence_window_hours must be 1-168')
     except (TypeError, ValueError) as e:
         return jsonify({'error': str(e) or 'Invalid config values'}), 400
 
@@ -1751,6 +1762,9 @@ def api_ueba_config():
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_off_hours_enabled', ?)", ('1' if off_hours_enabled else '0',))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_rare_process_enabled', ?)", ('1' if rare_process_enabled else '0',))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_rare_process_max_hosts', ?)", (str(rare_process_max_hosts),))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_convergence_enabled', ?)", ('1' if convergence_enabled else '0',))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_convergence_min_indicators', ?)", (str(convergence_min_indicators),))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_convergence_window_hours', ?)", (str(convergence_window_hours),))
     db.commit()
     return jsonify({'status': 'success'})
 
@@ -1767,6 +1781,7 @@ RISK_SCORE_DEFAULTS = {
         'new_source_ip': 15,
         'new_process': 20, 'new_destination_ip': 15, 'process_lineage': 25, 'off_hours_activity': 10,
         'rare_process_population': 18,
+        'multi_signal_convergence': 30,
     },
     'tiers': {'low': 0, 'medium': 20, 'high': 50, 'critical': 100},
 }
@@ -2314,6 +2329,9 @@ def migrate_settings():
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_off_hours_enabled', '1')")
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_rare_process_enabled', '1')")
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_rare_process_max_hosts', '2')")
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_convergence_enabled', '1')")
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_convergence_min_indicators', '3')")
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_convergence_window_hours', '24')")
         conn.commit()
         conn.close()
     except Exception:
