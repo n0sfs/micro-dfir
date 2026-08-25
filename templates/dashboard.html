@@ -1093,10 +1093,12 @@ function showLogDetail(idx) {
         ? `<a href="/rules?rule_id=${encodeURIComponent(log.rule_id)}" target="_blank" class="btn btn-sm btn-outline-primary mb-2"><i class="fa-solid fa-file-shield me-1"></i>View Rule</a>`
         : '';
     const hasProcessFields = log.process_image || log.command_line || log.parent_image || log.parent_command_line || log.original_file_name;
+    const isRecurring = log.type === 'alert' && log.occurrence_count > 1;
 
     document.getElementById('logDetailBody').innerHTML = `
         <dl class="row mb-2 small">
-            <dt class="col-3">Time</dt><dd class="col-9">${escHtml(log.time)}</dd>
+            <dt class="col-3">Time</dt><dd class="col-9">${escHtml(log.time)}${isRecurring ? ` <span class="text-muted">(first seen)</span>` : ''}</dd>
+            ${isRecurring ? `<dt class="col-3">Last Seen</dt><dd class="col-9">${escHtml(log.last_seen)} <span class="badge bg-secondary">&times;${log.occurrence_count} occurrences</span></dd>` : ''}
             <dt class="col-3">Type</dt><dd class="col-9">${typeBadge(log.type)}</dd>
             ${srcLabel ? `<dt class="col-3">Detection Source</dt><dd class="col-9"><span class="badge bg-secondary">${escHtml(srcLabel)}</span></dd>` : ''}
             <dt class="col-3">Severity</dt><dd class="col-9"><span class="badge ${severityBadgeClass(log.severity)}">${escHtml((log.severity || '').toUpperCase())}</span></dd>
@@ -1196,7 +1198,7 @@ const LOG_TABLE_COLUMNS = [
 function renderCell(col, log) {
     switch (col) {
         case 'time': return escHtml(log.time);
-        case 'type': return typeBadge(log.type);
+        case 'type': return typeBadge(log.type) + (log.occurrence_count > 1 ? ` <span class="badge bg-secondary" title="Same alert recurred ${log.occurrence_count} times since ${escHtml(log.time)}">&times;${log.occurrence_count}</span>` : '');
         case 'severity': return `<span class="badge ${severityBadgeClass(log.severity)}">${escHtml((log.severity || '').toUpperCase())}</span>`;
         default: return highlightText(log[col], termsFor(col));
     }
