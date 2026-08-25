@@ -1094,8 +1094,10 @@ function showLogDetail(idx) {
         : '';
     const hasProcessFields = log.process_image || log.command_line || log.parent_image || log.parent_command_line || log.original_file_name;
     const isRecurring = log.type === 'alert' && log.occurrence_count > 1;
+    const canAddToCase = (log.type === 'alert' || log.type === 'anomaly') && log.id;
 
     document.getElementById('logDetailBody').innerHTML = `
+        ${canAddToCase ? `<div id="addToCaseWrap" class="mb-2"></div>` : ''}
         <dl class="row mb-2 small">
             <dt class="col-3">Time</dt><dd class="col-9">${escHtml(log.time)}${isRecurring ? ` <span class="text-muted">(first seen)</span>` : ''}</dd>
             ${isRecurring ? `<dt class="col-3">Last Seen</dt><dd class="col-9">${escHtml(log.last_seen)} <span class="badge bg-secondary">&times;${log.occurrence_count} occurrences</span></dd>` : ''}
@@ -1134,7 +1136,58 @@ function showLogDetail(idx) {
             <pre class="bg-black border border-secondary rounded p-2 small mb-0 mt-1" style="white-space:pre-wrap; word-break:break-word; max-height:400px; overflow-y:auto;">${highlightText(log.raw_xml, termsFor('raw_xml'))}</pre>
         </details>` : ''}
     `;
+    if (canAddToCase) renderAddToCaseControl(log);
     new bootstrap.Modal(document.getElementById('logDetailModal')).show();
+}
+
+// Only alerts and UEBA anomalies have a stable id to link (see item_id in
+// UNIFIED_LOGS_SQL/api_logs_search) -- raw live_logs rows have no case-linkable identity.
+function renderAddToCaseControl(log) {
+    const wrap = document.getElementById('addToCaseWrap');
+    if (!wrap) return;
+    wrap.innerHTML = `<span class="text-muted small">Loading cases…</span>`;
+    fetch('/api/cases').then(r => r.json()).then(cases => {
+        const openCases = (cases || []).filter(c => c.status === 'open');
+        const itemType = log.type === 'alert' ? 'alert' : 'ueba_event';
+        const options = openCases.map(c => `<option value="${c.id}">${escHtml(c.title)}</option>`).join('');
+        wrap.innerHTML = `
+            <div class="d-flex align-items-center gap-2">
+                <select id="addToCaseSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:260px;">
+                    <option value="">Add to case…</option>
+                    ${options}
+                    <option value="__new__">+ New Case</option>
+                </select>
+                <button type="button" class="btn btn-sm btn-outline-primary" onclick="addToCase('${itemType}', '${log.id}')"><i class="fa-solid fa-folder-plus me-1"></i>Add</button>
+            </div>
+            <div id="addToCaseMsg" class="small mt-1" style="display:none;"></div>
+        `;
+    }).catch(() => { wrap.innerHTML = '<span class="text-muted small">Could not load cases.</span>'; });
+}
+
+async function addToCase(itemType, itemId) {
+    const select = document.getElementById('addToCaseSelect');
+    const msg = document.getElementById('addToCaseMsg');
+    let caseId = select.value;
+    if (!caseId) {
+        msg.className = 'small mt-1 text-danger'; msg.innerText = 'Pick a case first.'; msg.style.display = 'block'; return;
+    }
+    if (caseId === '__new__') {
+        const title = prompt('New case title:');
+        if (!title || !title.trim()) return;
+        const createResp = await fetch('/api/cases', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title: title.trim()})});
+        const createData = await createResp.json();
+        if (!createResp.ok) {
+            msg.className = 'small mt-1 text-danger'; msg.innerText = createData.error || 'Failed to create case.'; msg.style.display = 'block'; return;
+        }
+        caseId = createData.id;
+    }
+    fetch(`/api/cases/${caseId}/items`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({item_type: itemType, item_id: itemId})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        msg.className = 'small mt-1 ' + (ok ? 'text-success' : 'text-danger');
+        msg.innerText = ok ? 'Added to case.' : (data.error || 'Failed to add.');
+        msg.style.display = 'block';
+    }).catch(err => { msg.className = 'small mt-1 text-danger'; msg.innerText = 'Error: ' + err; msg.style.display = 'block'; });
 }
 
 const TEXT_MATCH_OPS = ['contains', 'equals', 'starts_with', 'ends_with'];
