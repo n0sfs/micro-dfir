@@ -1,4 +1,5 @@
 import os, json, re, time, sqlite3, requests, datetime
+from notifications import notify_if_configured
 from dataclasses import dataclass, field as dc_field
 from sigma.collection import SigmaCollection
 from sigma.backends.sqlite import sqliteBackend
@@ -165,6 +166,7 @@ def run_detection_cycle():
 
     cursor.execute(f"CREATE TEMP VIEW recent_events AS SELECT * FROM live_logs WHERE id > {last_id} AND id <= {current_max}")
     rules = cursor.execute("SELECT id, title, rule_yaml, severity_override FROM sigma_rules WHERE enabled = 1").fetchall()
+    rule_titles = {r['id']: r['title'] for r in rules}
     backend = _make_backend()
 
     exclusions_by_rule = {}
@@ -254,6 +256,15 @@ def run_detection_cycle():
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
                     (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app, g['count'])
                 )
+                # Only a brand-new alert notifies, not a re-occurrence within the same
+                # 15-minute dedup window (the `existing` branch above) -- otherwise a noisy
+                # rule would re-notify every cycle it keeps matching instead of once per burst.
+                notify_if_configured(cursor, {
+                    'rule_title': rule_titles.get(rule_id, 'Custom/YARA Rule'),
+                    'severity': severity, 'host': host, 'username': username,
+                    'source_ip': source_ip, 'message': message,
+                    'timestamp': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                })
     conn.commit(); conn.close()
     json.dump({"last_id": current_max}, open(STATE_FILE, 'w'))
 

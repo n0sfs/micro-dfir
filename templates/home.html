@@ -165,8 +165,12 @@ function renderAlertsWidget() {
 
 function acknowledgeAlert(aid, btn) {
     btn.disabled = true;
+    // The quick-acknowledge button doubles as "mark resolved" for the triage lifecycle --
+    // explicit here at the call site (not inferred server-side) so this is the one place
+    // that decides acknowledged and status move together, matching PUT /api/alerts/<id>'s
+    // deliberately independent-per-field design.
     fetch(`/api/alerts/${aid}`, {
-        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({acknowledged: true})
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({acknowledged: true, status: 'resolved'})
     }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok}) => {
         if (ok) {
             // The row this button lives in is now acknowledged and drops out of the
