@@ -238,6 +238,107 @@ $result.wmi_bindings = Get-CimInstance -Namespace root\subscription -ClassName _
 $result | ConvertTo-Json -Depth 5 -Compress
 """
 
+# Metadata/listing only, not binary parsing -- History/places.sqlite are locked while
+# the browser's running (hashing just fails gracefully via try/catch, same pattern as
+# collect_triage's own process hashes), and there's no SQLite reader built into vanilla
+# PowerShell to query browsing history without a new dependency. Walks every profile
+# under C:\Users (the agent runs at highest privilege via its scheduled task, not just
+# the interactively-logged-in user) rather than just $env:USERPROFILE.
+def collect_browser_artifacts():
+    return r"""$result = @{}
+$browsers = New-Object System.Collections.ArrayList
+$downloads = New-Object System.Collections.ArrayList
+Get-ChildItem 'C:\Users' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+    $uname = $_.Name
+    $uhome = $_.FullName
+    $candidates = @(
+        (Join-Path $uhome 'AppData\Local\Google\Chrome\User Data\Default\History'),
+        (Join-Path $uhome 'AppData\Local\Microsoft\Edge\User Data\Default\History')
+    )
+    foreach ($p in $candidates) {
+        if (Test-Path $p) {
+            $item = Get-Item $p -ErrorAction SilentlyContinue
+            if ($item) {
+                $h = try { (Get-FileHash $p -Algorithm SHA256 -ErrorAction Stop).Hash } catch { $null }
+                [void]$browsers.Add([PSCustomObject]@{ user=$uname; path=$p; size=$item.Length; last_write=$item.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'); sha256=$h })
+            }
+        }
+    }
+    $ffProfiles = Join-Path $uhome 'AppData\Roaming\Mozilla\Firefox\Profiles'
+    if (Test-Path $ffProfiles) {
+        Get-ChildItem $ffProfiles -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            $places = Join-Path $_.FullName 'places.sqlite'
+            if (Test-Path $places) {
+                $item = Get-Item $places -ErrorAction SilentlyContinue
+                $h = try { (Get-FileHash $places -Algorithm SHA256 -ErrorAction Stop).Hash } catch { $null }
+                [void]$browsers.Add([PSCustomObject]@{ user=$uname; path=$places; size=$item.Length; last_write=$item.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'); sha256=$h })
+            }
+        }
+    }
+    $dl = Join-Path $uhome 'Downloads'
+    if (Test-Path $dl) {
+        Get-ChildItem $dl -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 30 | ForEach-Object {
+            [void]$downloads.Add([PSCustomObject]@{ user=$uname; name=$_.Name; size=$_.Length; last_write=$_.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss') })
+        }
+    }
+}
+$result.browser_history_files = $browsers
+$result.recent_downloads = $downloads
+$result.note = "History/places.sqlite listed with hash+timestamps only, not parsed -- collect the file via 'Collect File' for offline analysis (e.g. with a SQLite browser)."
+$result | ConvertTo-Json -Depth 4 -Compress
+"""
+
+# Prefetch is listed directly (filenames/timestamps are already meaningful without
+# parsing the binary body). Amcache/Shimcache are genuinely proprietary binary formats
+# with no built-in PowerShell reader -- reported as metadata/existence only, same
+# scope discipline as collect_browser_artifacts above, with an explicit pointer to
+# offline tooling rather than a half-parsed guess at their internal structure.
+def collect_forensic_timestamps():
+    return r"""$result = @{}
+$result.prefetch_enabled = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters' -ErrorAction SilentlyContinue).EnablePrefetcher
+$result.prefetch_files = @(Get-ChildItem 'C:\Windows\Prefetch\*.pf' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 150 | ForEach-Object { [PSCustomObject]@{ name=$_.Name; size=$_.Length; last_write=$_.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'); created=$_.CreationTime.ToString('yyyy-MM-dd HH:mm:ss') } })
+$amcachePath = 'C:\Windows\AppCompat\Programs\Amcache.hve'
+if (Test-Path $amcachePath) {
+    $item = Get-Item $amcachePath -ErrorAction SilentlyContinue
+    $result.amcache = [PSCustomObject]@{ path=$amcachePath; size=$item.Length; last_write=$item.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss') }
+} else {
+    $result.amcache = $null
+}
+try {
+    $shim = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\AppCompatCache' -Name 'AppCompatCache' -ErrorAction Stop).AppCompatCache
+    $result.shimcache_blob_bytes = $shim.Length
+} catch {
+    $result.shimcache_blob_bytes = $null
+}
+$result.note = "Prefetch is listed (name/timestamps); Amcache/Shimcache are proprietary binary formats reported as metadata only (existence/size/byte length) -- collect the file/hive via 'Collect File' and parse offline with a real tool (e.g. Eric Zimmerman's AmcacheParser/AppCompatCacheParser)."
+$result | ConvertTo-Json -Depth 4 -Compress
+"""
+
+# A literal USN journal excerpt would need real offset/record parsing against
+# `fsutil usn readjournal` (no built-in "last N minutes" filter, and reading from an
+# unbounded starting point risks streaming the entire journal and blowing the script
+# timeout) -- not safely buildable as a bounded one-shot script. This is the practical,
+# reliably-bounded substitute: a straight recently-modified-files scan across the
+# locations that matter for triage, which answers the same underlying question ("what
+# changed on this host recently") without the USN parsing risk.
+def collect_recent_file_changes():
+    return r"""$result = @{}
+$cutoff = (Get-Date).AddHours(-24)
+$paths = @('C:\Windows\System32\Tasks', 'C:\Windows\Temp', "$env:ProgramData", "$env:WINDIR\System32\drivers")
+$hits = @()
+foreach ($p in $paths) {
+    if (-not (Test-Path $p)) { continue }
+    Get-ChildItem -Path $p -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -ge $cutoff } |
+        Select-Object -First 300 |
+        ForEach-Object { $hits += [PSCustomObject]@{ path=$_.FullName; size=$_.Length; last_write=$_.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss') } }
+}
+$result.cutoff = $cutoff.ToString('yyyy-MM-dd HH:mm:ss')
+$result.changed_files = $hits | Sort-Object last_write -Descending | Select-Object -First 200
+$result.note = "A recently-modified-files scan (last 24h) across common drop/persistence locations -- not a literal USN journal parse (unbounded and timeout-risky as a one-shot script)."
+$result | ConvertTo-Json -Depth 4 -Compress
+"""
+
 # label -> (builder, required param names)
 WINDOWS_TEMPLATES = {
     'list_processes': (lambda params: _PROGRESS_SILENT + list_processes(), []),
@@ -247,6 +348,9 @@ WINDOWS_TEMPLATES = {
     'collect_triage': (lambda params: _PROGRESS_SILENT + collect_triage(), []),
     'persistence_sweep': (lambda params: _PROGRESS_SILENT + persistence_sweep(), []),
     'collect_file': (lambda params: _PROGRESS_SILENT + collect_file(params['path']), ['path']),
+    'collect_browser_artifacts': (lambda params: _PROGRESS_SILENT + collect_browser_artifacts(), []),
+    'collect_forensic_timestamps': (lambda params: _PROGRESS_SILENT + collect_forensic_timestamps(), []),
+    'collect_recent_file_changes': (lambda params: _PROGRESS_SILENT + collect_recent_file_changes(), []),
     # 'hashes'/'md5_hashes'/'sha1_hashes' and 'patterns' are always server-populated
     # from the live IOC list / imported YARA rules right before dispatch (see app.py's
     # api_agent_commands()), never client-supplied — deliberately not in the required
@@ -503,6 +607,33 @@ echo "=== LD_PRELOAD References ==="
 grep -H LD_PRELOAD /etc/environment /etc/ld.so.preload 2>/dev/null || echo "(none found)"
 """
 
+# Same uid>=1000-or-root user enumeration idiom as collect_triage_linux()'s
+# getent/awk line -- shell history (last 100 lines per shell, not the whole file, since
+# a long-lived interactive session's history can run to many thousands of lines) plus
+# every real user's authorized_keys and known_hosts, both classic SSH-based persistence
+# and lateral-movement artifacts.
+def collect_ssh_artifacts_linux():
+    return r"""echo "=== Shell History (last 100 lines, uid 0 or >= 1000) ==="
+getent passwd | awk -F: '$3>=1000 || $3==0 {print $1":"$6}' | while IFS=: read -r user home; do
+    for hf in .bash_history .zsh_history; do
+        f="$home/$hf"
+        [ -f "$f" ] && echo "--$user:$f--" && tail -n 100 "$f"
+    done
+done
+echo
+echo "=== authorized_keys (uid 0 or >= 1000) ==="
+getent passwd | awk -F: '$3>=1000 || $3==0 {print $1":"$6}' | while IFS=: read -r user home; do
+    f="$home/.ssh/authorized_keys"
+    [ -f "$f" ] && echo "--$user:$f--" && cat "$f"
+done
+echo
+echo "=== known_hosts (uid 0 or >= 1000) ==="
+getent passwd | awk -F: '$3>=1000 || $3==0 {print $1":"$6}' | while IFS=: read -r user home; do
+    f="$home/.ssh/known_hosts"
+    [ -f "$f" ] && echo "--$user:$f--" && cat "$f"
+done
+"""
+
 def enable_exec_auditing():
     return r"""RULES_FILE=/etc/audit/rules.d/microdfir.rules
 if ! command -v auditctl >/dev/null 2>&1; then
@@ -539,6 +670,7 @@ LINUX_TEMPLATES = {
     'collect_triage': (lambda params: collect_triage_linux(), []),
     'persistence_sweep': (lambda params: persistence_sweep_linux(), []),
     'collect_file': (lambda params: collect_file_linux(params['path']), ['path']),
+    'collect_ssh_artifacts': (lambda params: collect_ssh_artifacts_linux(), []),
     'ioc_sweep': (lambda params: ioc_sweep_linux(params.get('hashes', []), params.get('md5_hashes', []), params.get('sha1_hashes', [])), []),
     'string_sweep': (lambda params: string_sweep_linux(params.get('patterns', [])), []),
     'enable_exec_auditing': (lambda params: enable_exec_auditing(), []),
