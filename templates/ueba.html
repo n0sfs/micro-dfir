@@ -25,37 +25,82 @@
 <div class="card bg-dark border-secondary">
     <div class="card-header border-secondary p-0">
         <ul class="nav nav-tabs border-0" id="uebaTabs">
-            <li class="nav-item"><button type="button" class="nav-link active" id="tabBtnDetections" onclick="switchUebaTab('detections')"><i class="fa-solid fa-chart-line me-2"></i>Anomaly Detections</button></li>
+            <li class="nav-item"><button type="button" class="nav-link active" id="tabBtnTimeline" onclick="switchUebaTab('timeline')"><i class="fa-solid fa-timeline me-2"></i>Timeline</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnRisk" onclick="switchUebaTab('risk')"><i class="fa-solid fa-gauge-high me-2"></i>Risk Scoring</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnInsights" onclick="switchUebaTab('insights')"><i class="fa-solid fa-chart-column me-2"></i>Data Insights</button></li>
-            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnTimeline" onclick="switchUebaTab('timeline')"><i class="fa-solid fa-timeline me-2"></i>Timeline</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnTuning" onclick="switchUebaTab('tuning')" title="Turn the 8 built-in detection models on/off and tune their thresholds"><i class="fa-solid fa-sliders me-2"></i>Model Tuning</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnRules" onclick="switchUebaTab('rules')" title="Point values, tiers, and admin-defined custom scoring rules"><i class="fa-solid fa-list-check me-2"></i>Scoring &amp; Rules</button></li>
         </ul>
     </div>
 
-    <!-- Anomaly Detections pane -->
-    <div id="paneDetections">
-        <div class="card-body py-2 px-3 border-bottom border-secondary d-flex justify-content-between align-items-center">
-            <span class="text-muted small"><i class="fa-solid fa-circle-info me-1"></i>Hosts and users whose daily event volume statistically exceeded their historical baseline, computed hourly.</span>
-            <button class="btn btn-outline-secondary btn-sm" onclick="loadUebaDetections()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
-        </div>
-        <div class="card-body p-0">
-            <div class="table-responsive" style="max-height: 600px; overflow-y: auto;">
-                <table class="table table-dark table-hover mb-0 align-middle">
-                    <thead>
-                        <tr>
-                            <th class="ps-3">Time</th>
-                            <th>Entity</th>
-                            <th>Severity</th>
-                            <th>Process</th>
-                            <th>Detail</th>
-                        </tr>
-                    </thead>
-                    <tbody id="uebaTableBody">
-                        <tr><td colspan="5" class="text-center text-muted py-4">Loading detections...</td></tr>
-                    </tbody>
-                </table>
+    <!-- Timeline pane (merged Anomaly Detections + the event-type/time filters) -->
+    <div id="paneTimeline">
+        <div class="row g-0">
+            <div class="col-12 col-lg-3 border-end border-secondary p-3">
+                <h6 class="text-muted text-uppercase small mb-3" style="letter-spacing:.05em;"><i class="fa-solid fa-filter me-1"></i>Filters</h6>
+                <div class="mb-3">
+                    <label class="form-label small text-muted mb-1">Event Types</label>
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="tlTypeAnomaly" checked onchange="timelineLimit=300; loadTimeline();">
+                        <label class="form-check-label small" for="tlTypeAnomaly"><span class="badge bg-info text-dark" style="font-size:.6rem;">UEBA</span> UEBA Alerts</label>
+                    </div>
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="tlTypeAlert" checked onchange="timelineLimit=300; loadTimeline();">
+                        <label class="form-check-label small" for="tlTypeAlert"><span class="badge bg-danger" style="font-size:.6rem;">Alert</span> Sigma &amp; Custom Alerts</label>
+                    </div>
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="tlTypeLog" onchange="timelineLimit=300; loadTimeline();">
+                        <label class="form-check-label small" for="tlTypeLog"><span class="badge bg-secondary" style="font-size:.6rem;">Log</span> All Logs</label>
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label small text-muted mb-1" for="tlRange">Time Range</label>
+                    <select id="tlRange" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onTimelineRangeChange(); timelineLimit=300; loadTimeline();">
+                        <option value="1h">Last 1 hour</option>
+                        <option value="4h">Last 4 hours</option>
+                        <option value="12h">Last 12 hours</option>
+                        <option value="24h" selected>Last 24 hours</option>
+                        <option value="3d">Last 3 days</option>
+                        <option value="7d">Last 7 days</option>
+                        <option value="30d">Last 30 days</option>
+                        <option value="all">All time</option>
+                        <option value="custom">Custom range…</option>
+                    </select>
+                </div>
+                <div id="tlCustomRange" class="mb-3 flex-column gap-2" style="display:none;">
+                    <input type="datetime-local" id="tlStart" class="form-control form-control-sm bg-dark text-light border-secondary" onchange="timelineLimit=300; loadTimeline();">
+                    <input type="datetime-local" id="tlEnd" class="form-control form-control-sm bg-dark text-light border-secondary" onchange="timelineLimit=300; loadTimeline();">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label small text-muted mb-1" for="tlSearch">Search</label>
+                    <input type="text" id="tlSearch" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Host, user, message…" onkeydown="if(event.key==='Enter'){timelineLimit=300; loadTimeline();}">
+                </div>
+                <button class="btn btn-outline-secondary btn-sm w-100" onclick="timelineLimit=300; loadTimeline();"><i class="fa-solid fa-rotate me-1"></i> Apply / Refresh</button>
+            </div>
+            <div class="col-12 col-lg-9">
+                <div class="card-body py-2 px-3 border-bottom border-secondary">
+                    <span class="text-muted small" id="timelineCountNote"><i class="fa-solid fa-circle-info me-1"></i>Most recent events first, across everything selected on the left.</span>
+                </div>
+                <div class="table-responsive" style="max-height: 640px; overflow-y: auto;">
+                    <table class="table table-dark table-hover mb-0 align-middle">
+                        <thead>
+                            <tr>
+                                <th class="ps-3">Time</th>
+                                <th>Type</th>
+                                <th>Entity</th>
+                                <th>Severity</th>
+                                <th>Process</th>
+                                <th>Detail</th>
+                            </tr>
+                        </thead>
+                        <tbody id="timelineBody">
+                            <tr><td colspan="6" class="text-center text-muted py-4">Loading…</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div id="timelineLoadMoreWrap" class="text-center py-2 border-top border-secondary" style="display:none;">
+                    <button class="btn btn-outline-secondary btn-sm" onclick="loadMoreTimeline()">Load more</button>
+                </div>
             </div>
         </div>
     </div>
@@ -126,64 +171,6 @@
                 </div>
             </div>
             <div id="insightsResults"><p class="text-muted small">Search for a host or user above to see its activity histograms.</p></div>
-        </div>
-    </div>
-
-    <!-- Timeline pane -->
-    <div id="paneTimeline" style="display:none;">
-        <div class="row g-0">
-            <div class="col-12 col-lg-3 border-end border-secondary p-3">
-                <h6 class="text-muted text-uppercase small mb-3" style="letter-spacing:.05em;"><i class="fa-solid fa-filter me-1"></i>Filters</h6>
-                <div class="mb-3">
-                    <label class="form-label small text-muted mb-1">Event Types</label>
-                    <div class="form-check">
-                        <input class="form-check-input" type="checkbox" id="tlTypeAnomaly" checked onchange="timelineLimit=300; loadTimeline();">
-                        <label class="form-check-label small" for="tlTypeAnomaly"><span class="badge bg-info text-dark" style="font-size:.6rem;">UEBA</span> UEBA Alerts</label>
-                    </div>
-                    <div class="form-check">
-                        <input class="form-check-input" type="checkbox" id="tlTypeAlert" checked onchange="timelineLimit=300; loadTimeline();">
-                        <label class="form-check-label small" for="tlTypeAlert"><span class="badge bg-danger" style="font-size:.6rem;">Alert</span> Sigma &amp; Custom Alerts</label>
-                    </div>
-                    <div class="form-check">
-                        <input class="form-check-input" type="checkbox" id="tlTypeLog" onchange="timelineLimit=300; loadTimeline();">
-                        <label class="form-check-label small" for="tlTypeLog"><span class="badge bg-secondary" style="font-size:.6rem;">Log</span> All Logs</label>
-                    </div>
-                </div>
-                <div class="mb-3">
-                    <label class="form-label small text-muted mb-1" for="tlRange">Time Range</label>
-                    <select id="tlRange" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onTimelineRangeChange(); timelineLimit=300; loadTimeline();">
-                        <option value="1h">Last 1 hour</option>
-                        <option value="4h">Last 4 hours</option>
-                        <option value="12h">Last 12 hours</option>
-                        <option value="24h" selected>Last 24 hours</option>
-                        <option value="3d">Last 3 days</option>
-                        <option value="7d">Last 7 days</option>
-                        <option value="30d">Last 30 days</option>
-                        <option value="all">All time</option>
-                        <option value="custom">Custom range…</option>
-                    </select>
-                </div>
-                <div id="tlCustomRange" class="mb-3 flex-column gap-2" style="display:none;">
-                    <input type="datetime-local" id="tlStart" class="form-control form-control-sm bg-dark text-light border-secondary" onchange="timelineLimit=300; loadTimeline();">
-                    <input type="datetime-local" id="tlEnd" class="form-control form-control-sm bg-dark text-light border-secondary" onchange="timelineLimit=300; loadTimeline();">
-                </div>
-                <div class="mb-3">
-                    <label class="form-label small text-muted mb-1" for="tlSearch">Search</label>
-                    <input type="text" id="tlSearch" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Host, user, message…" onkeydown="if(event.key==='Enter'){timelineLimit=300; loadTimeline();}">
-                </div>
-                <button class="btn btn-outline-secondary btn-sm w-100" onclick="timelineLimit=300; loadTimeline();"><i class="fa-solid fa-rotate me-1"></i> Apply / Refresh</button>
-            </div>
-            <div class="col-12 col-lg-9">
-                <div class="card-body py-2 px-3 border-bottom border-secondary">
-                    <span class="text-muted small" id="timelineCountNote"><i class="fa-solid fa-circle-info me-1"></i>Most recent events first, across everything selected on the left.</span>
-                </div>
-                <div id="timelineBody" style="max-height: 640px; overflow-y: auto;">
-                    <div class="text-center text-muted py-5">Loading…</div>
-                </div>
-                <div id="timelineLoadMoreWrap" class="text-center py-2 border-top border-secondary" style="display:none;">
-                    <button class="btn btn-outline-secondary btn-sm" onclick="loadMoreTimeline()">Load more</button>
-                </div>
-            </div>
         </div>
     </div>
 
@@ -497,12 +484,11 @@ function escHtml(s) {
 }
 
 // ---- Tabs + shared stat row (repurposed per active tab, not two separate rows) ----
-const UEBA_TABS = ['detections', 'risk', 'insights', 'timeline', 'tuning', 'rules'];
-let activeUebaTab = 'detections';
-let uebaDetectionsData = null;
+const UEBA_TABS = ['timeline', 'risk', 'insights', 'tuning', 'rules'];
+let activeUebaTab = 'timeline';
 
 function switchUebaTab(tab) {
-    if (!UEBA_TABS.includes(tab)) tab = 'detections';
+    if (!UEBA_TABS.includes(tab)) tab = 'timeline';
     activeUebaTab = tab;
     UEBA_TABS.forEach(t => {
         const cap = t.charAt(0).toUpperCase() + t.slice(1);
@@ -589,16 +575,9 @@ function updateSharedStats() {
             setStatTile(2, 'Disabled', rows.filter(r => !r.enabled).length, true);
             setStatTile(3, 'With First-Time Bonus', rows.filter(r => r.first_time_bonus_points).length, true);
         }
-    } else {
-        const d = uebaDetectionsData || {};
-        setStatTile(0, 'Total Detections', d.total ?? '—', true);
-        setStatTile(1, 'Detected Today', d.today ?? '—', true);
-        setStatTile(2, 'Entities Flagged', d.entities_flagged ?? '—', true);
-        setStatTile(3, 'Latest Detection', d.latest || 'None yet', false);
     }
 }
 
-// ---- Anomaly Detections ----
 function severityBadge(sev) {
     const s = (sev || '').toUpperCase();
     const cls = (s === 'CRITICAL' || s === 'HIGH') ? 'bg-danger' : s === 'MEDIUM' ? 'bg-warning text-dark' : s === 'LOW' ? 'bg-secondary' : 'bg-info text-dark';
@@ -610,52 +589,7 @@ function entityBadge(entityType) {
     return `<span class="badge ${isUser ? 'bg-info text-dark' : 'bg-secondary'} me-1" style="font-size:.65rem;"><i class="fa-solid ${isUser ? 'fa-user' : 'fa-desktop'} me-1"></i>${isUser ? 'User' : 'Host'}</span>`;
 }
 
-// Not every detection carries a process at all (volume_baseline/off_hours_activity are
-// pure count anomalies) -- those just show a dash. When one is present, the basename
-// (e.g. "git.exe") is the headline since that's what an analyst scans for first; the
-// full path stays visible underneath (truncated from the left, since the tail --
-// ...\Git\bin\git.exe vs ...\Git\mingw64\bin\git.exe -- is what actually distinguishes
-// otherwise-identical-looking entries) so path context isn't lost for a masquerading
-// check, with the untruncated value always available via the title tooltip.
-function renderDetectionProcess(d) {
-    if (!d.process_name) return '<span class="text-muted">—</span>';
-    const path = d.process_image || '';
-    const pathShort = path.length > 40 ? '…' + path.slice(-40) : path;
-    const pathLine = (path && path !== d.process_name)
-        ? `<br><span class="text-muted" style="font-size:.7rem;" title="${escHtml(path)}">${escHtml(pathShort)}</span>` : '';
-    const cmd = d.command_line || '';
-    const cmdShort = cmd.length > 60 ? cmd.slice(0, 60) + '…' : cmd;
-    const cmdLine = cmd
-        ? `<br><span class="text-muted font-monospace" style="font-size:.7rem;" title="${escHtml(cmd)}">${escHtml(cmdShort)}</span>` : '';
-    return `<code class="text-info">${escHtml(d.process_name)}</code>${pathLine}${cmdLine}`;
-}
-
-function loadUebaDetections() {
-    fetch('/api/ueba/detections')
-        .then(r => r.json())
-        .then(data => {
-            uebaDetectionsData = data;
-            updateSharedStats();
-
-            const tbody = document.getElementById('uebaTableBody');
-            if (!data.detections || data.detections.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">No behavioral anomalies detected yet. The model needs at least 30 days of baseline data per host/user before it will flag anything.</td></tr>';
-                return;
-            }
-            tbody.innerHTML = data.detections.map(d => `
-                <tr>
-                    <td class="ps-3 text-nowrap">${d.timestamp}</td>
-                    <td>${entityBadge(d.entity_type)}<strong>${d.hostname}</strong></td>
-                    <td>${severityBadge(d.severity)}</td>
-                    <td class="small">${renderDetectionProcess(d)}</td>
-                    <td class="text-muted small">${d.message}</td>
-                </tr>
-            `).join('');
-        })
-        .catch(err => console.error('Error loading UEBA detections:', err));
-}
-
-// ---- Timeline ----
+// ---- Timeline (merged Anomaly Detections + UEBA/Sigma/log filtering) ----
 let timelineData = null;
 let timelineLoadedOnce = false;
 let timelineLimit = 300;
@@ -678,15 +612,45 @@ function timelineTypeBadge(t) {
     return '<span class="badge bg-secondary" style="font-size:.65rem;"><i class="fa-solid fa-file-lines me-1"></i>Log</span>';
 }
 
-// Same "basename headline, full path/command as monospace detail" idea as
-// renderDetectionProcess() above, but generalized for the raw process_image/
-// command_line columns UNIFIED_LOGS_SQL exposes directly (not a parsed detections row).
+// Not every event carries a process at all (a plain heuristic alert, a volume_baseline/
+// off_hours_activity anomaly, a non-Sysmon log line) -- those just show a dash. When one
+// is present, the basename (e.g. "git.exe") is the headline since that's what an analyst
+// scans for first; the full path stays visible underneath (truncated from the left, since
+// the tail -- ...\Git\bin\git.exe vs ...\Git\mingw64\bin\git.exe -- is what actually
+// distinguishes otherwise-identical-looking entries) so path context isn't lost for a
+// masquerading check, with the untruncated value always available via the title tooltip.
 function renderTimelineProcess(ev) {
-    if (!ev.process_image && !ev.command_line) return '';
+    if (!ev.process_image && !ev.command_line) return '<span class="text-muted">—</span>';
     const name = ev.process_image ? ev.process_image.split(/[\\/]/).pop() : '';
+    const path = ev.process_image || '';
+    const pathShort = path.length > 40 ? '…' + path.slice(-40) : path;
+    const pathLine = (path && path !== name)
+        ? `<br><span class="text-muted" style="font-size:.7rem;" title="${escHtml(path)}">${escHtml(pathShort)}</span>` : '';
     const cmd = ev.command_line || '';
-    const cmdShort = cmd.length > 90 ? cmd.slice(0, 90) + '…' : cmd;
-    return `<div class="small mt-1">${name ? `<code class="text-info">${escHtml(name)}</code> ` : ''}${cmd ? `<span class="text-muted font-monospace" style="font-size:.7rem;" title="${escHtml(cmd)}">${escHtml(cmdShort)}</span>` : ''}</div>`;
+    const cmdShort = cmd.length > 60 ? cmd.slice(0, 60) + '…' : cmd;
+    const cmdLine = cmd
+        ? `<br><span class="text-muted font-monospace" style="font-size:.7rem;" title="${escHtml(cmd)}">${escHtml(cmdShort)}</span>` : '';
+    return `${name ? `<code class="text-info">${escHtml(name)}</code>` : '<span class="text-muted">—</span>'}${pathLine}${cmdLine}`;
+}
+
+function timelineEntityCell(ev) {
+    const badge = ev.type === 'anomaly' && ev.entity_type ? entityBadge(ev.entity_type) : '';
+    const userLine = (ev.username && ev.username !== '-')
+        ? `<br><span class="text-muted small">${escHtml(ev.username)}</span>` : '';
+    return `${badge}<strong>${escHtml(ev.host || 'UNKNOWN')}</strong>${userLine}`;
+}
+
+function timelineDetailCell(ev) {
+    const msg = ev.message || '';
+    const msgShort = msg.length > 160 ? msg.slice(0, 160) + '…' : msg;
+    const headline = ev.type === 'alert'
+        ? `<strong>${escHtml(ev.app || 'Alert')}</strong>${msg ? ' — ' + escHtml(msgShort) : ''}`
+        : ev.type === 'anomaly'
+        ? escHtml(msgShort)
+        : `<strong>${escHtml(ev.app || '')}</strong>${ev.event_id && ev.event_id !== '-' ? ' <span class="text-muted">(Event ID ' + escHtml(ev.event_id) + ')</span>' : ''}${msg ? ' — ' + escHtml(msgShort) : ''}`;
+    const recur = ev.occurrence_count > 1
+        ? ` <span class="badge bg-secondary" title="Recurred ${ev.occurrence_count} times, last at ${escHtml(ev.last_seen || '')}">&times;${ev.occurrence_count}</span>` : '';
+    return headline + recur;
 }
 
 function loadTimeline() {
@@ -696,7 +660,7 @@ function loadTimeline() {
     if (!types.length) {
         timelineData = {logs: [], count: 0, total_matches: 0};
         timelineLoadedOnce = true;
-        body.innerHTML = '<div class="text-center text-muted py-5">Select at least one event type on the left to see events.</div>';
+        body.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">Select at least one event type on the left to see events.</td></tr>';
         document.getElementById('timelineCountNote').innerText = 'No event types selected.';
         updateSharedStats();
         return;
@@ -712,7 +676,7 @@ function loadTimeline() {
         params.set('start', document.getElementById('tlStart').value);
         params.set('end', document.getElementById('tlEnd').value);
     }
-    body.innerHTML = '<div class="text-center text-muted py-5">Loading…</div>';
+    body.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">Loading…</td></tr>';
     fetch('/api/logs/search?' + params.toString())
         .then(r => r.json())
         .then(data => {
@@ -721,7 +685,7 @@ function loadTimeline() {
             renderTimeline();
             updateSharedStats();
         })
-        .catch(err => { body.innerHTML = `<div class="text-center text-danger py-5">Error loading timeline: ${escHtml(String(err))}</div>`; });
+        .catch(err => { body.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-4">Error loading timeline: ${escHtml(String(err))}</td></tr>`; });
 }
 
 function loadMoreTimeline() {
@@ -733,47 +697,20 @@ function renderTimeline() {
     const body = document.getElementById('timelineBody');
     const rows = (timelineData && timelineData.logs) || [];
     if (!rows.length) {
-        body.innerHTML = '<div class="text-center text-muted py-5">No events match the current filters.</div>';
+        body.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">No events match the current filters.</td></tr>';
         document.getElementById('timelineCountNote').innerText = 'No matching events.';
         return;
     }
-    let html = '';
-    let lastDate = null;
-    for (const ev of rows) {
-        const ts = ev.time || '';
-        const spaceIdx = ts.indexOf(' ');
-        const datePart = spaceIdx === -1 ? ts : ts.slice(0, spaceIdx);
-        const timePart = spaceIdx === -1 ? '' : ts.slice(spaceIdx + 1);
-        if (datePart !== lastDate) {
-            html += `<div class="px-3 py-2 text-uppercase text-muted small fw-bold" style="letter-spacing:.05em; background:var(--bg-inset);">${escHtml(datePart)}</div>`;
-            lastDate = datePart;
-        }
-        const msg = ev.message || '';
-        const msgShort = msg.length > 160 ? msg.slice(0, 160) + '…' : msg;
-        const headline = ev.type === 'alert'
-            ? `<strong>${escHtml(ev.app || 'Alert')}</strong>${msg ? ' — ' + escHtml(msgShort) : ''}`
-            : ev.type === 'anomaly'
-            ? escHtml(msgShort)
-            : `<strong>${escHtml(ev.app || '')}</strong>${ev.event_id && ev.event_id !== '-' ? ' <span class="text-muted">(Event ID ' + escHtml(ev.event_id) + ')</span>' : ''}${msg ? ' — ' + escHtml(msgShort) : ''}`;
-        const recur = ev.occurrence_count > 1
-            ? ` <span class="badge bg-secondary" title="Recurred ${ev.occurrence_count} times, last at ${escHtml(ev.last_seen || '')}">&times;${ev.occurrence_count}</span>` : '';
-        html += `
-            <div class="d-flex gap-3 py-2 px-3 border-bottom border-secondary">
-                <div class="text-nowrap text-muted small" style="width:70px;">${escHtml(timePart)}</div>
-                <div class="flex-grow-1">
-                    <div class="d-flex align-items-center gap-2 mb-1 flex-wrap">
-                        ${timelineTypeBadge(ev.type)}
-                        ${severityBadge(ev.severity)}
-                        <strong>${escHtml(ev.host || 'UNKNOWN')}</strong>
-                        ${ev.username && ev.username !== '-' ? `<span class="text-muted small">&middot; ${escHtml(ev.username)}</span>` : ''}
-                        ${recur}
-                    </div>
-                    <div class="small">${headline}</div>
-                    ${renderTimelineProcess(ev)}
-                </div>
-            </div>`;
-    }
-    body.innerHTML = html;
+    body.innerHTML = rows.map(ev => `
+        <tr>
+            <td class="ps-3 text-nowrap">${escHtml(ev.time)}</td>
+            <td>${timelineTypeBadge(ev.type)}</td>
+            <td>${timelineEntityCell(ev)}</td>
+            <td>${severityBadge(ev.severity)}</td>
+            <td class="small">${renderTimelineProcess(ev)}</td>
+            <td class="text-muted small">${timelineDetailCell(ev)}</td>
+        </tr>
+    `).join('');
     document.getElementById('timelineCountNote').innerText =
         `Showing ${rows.length} of ${timelineData.total_matches ?? rows.length} matching events, most recent first`;
     document.getElementById('timelineLoadMoreWrap').style.display =
@@ -1603,11 +1540,14 @@ async function deleteAnomalyRule(rid) {
 }
 
 // ---- Init ----
+// Old bookmarks/links to the since-removed Anomaly Detections tab (?tab=detections) just
+// fall through here and land on Timeline -- its merged replacement, and already the
+// default active pane -- instead of matching nothing.
 const _uebaUrlTab = new URLSearchParams(window.location.search).get('tab');
-if (_uebaUrlTab && _uebaUrlTab !== 'detections' && UEBA_TABS.includes(_uebaUrlTab)) switchUebaTab(_uebaUrlTab);
+if (_uebaUrlTab && UEBA_TABS.includes(_uebaUrlTab)) switchUebaTab(_uebaUrlTab);
 
 onAnomalyRuleSourceChange();
-loadUebaDetections();
+loadTimeline();
 loadRiskConfig();
 loadUebaConfig();
 loadBaselines();

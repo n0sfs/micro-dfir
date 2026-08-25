@@ -497,8 +497,8 @@ def api_home_stats():
     db = get_db()
     hosts_tracked = db.execute("SELECT COUNT(*) FROM ueba_entity_baselines WHERE entity_type = 'host'").fetchone()[0]
     users_tracked = db.execute("SELECT COUNT(*) FROM ueba_entity_baselines WHERE entity_type = 'user'").fetchone()[0]
-    # "today" = calendar day, matching /api/ueba/detections' own today count rather than
-    # a rolling 24h window, so this tile and that tab's stat always agree with each other.
+    # "today" = calendar day (not a rolling 24h window), matching how the UEBA Timeline
+    # tab's own stat tiles count "today" so the two pages never disagree.
     events_today = db.execute("SELECT COUNT(*) FROM live_logs WHERE date(timestamp) = date('now')").fetchone()[0]
     alerts_unacknowledged = db.execute("SELECT COUNT(*) FROM alerts WHERE acknowledged = 0").fetchone()[0]
     anomalies_today = db.execute(
@@ -1622,50 +1622,6 @@ def ueba_tuning():
     # Anomaly Detections and Anomaly Tuning are now tabs on one page — redirect old
     # bookmarks/links straight to the right tab instead of 404ing.
     return redirect(url_for('ueba', tab='tuning'))
-
-@app.route('/api/ueba/detections')
-@login_required
-def api_ueba_detections():
-    import ntpath
-    db = get_db()
-    limit = request.args.get('limit', 100, type=int)
-    rows = db.execute(
-        "SELECT timestamp, hostname, entity_type, severity, message, raw_json FROM events WHERE app_name = 'duckdb_ueba' ORDER BY id DESC LIMIT ?",
-        (limit,)
-    ).fetchall()
-    detections = []
-    for r in rows:
-        d = {'timestamp': r['timestamp'], 'hostname': r['hostname'], 'entity_type': r['entity_type'],
-             'severity': r['severity'], 'message': r['message']}
-        try:
-            raw = json.loads(r['raw_json']) if r['raw_json'] else {}
-        except (TypeError, ValueError):
-            raw = {}
-        # Not every detection_type carries these -- e.g. volume_baseline/off_hours_activity
-        # are pure count anomalies with no process involved at all, so these come back
-        # None for those rows and the UI just shows the message column alone.
-        d['detection_type'] = raw.get('detection_type')
-        process_image = raw.get('process_image')
-        d['process_image'] = process_image
-        # ntpath (not os.path) specifically -- these are always Windows paths regardless
-        # of what OS this server itself runs on, and ntpath.basename handles both '\' and
-        # '/' separators so it degrades gracefully on a bare value with no path at all
-        # (e.g. Sysmon's literal "System" for the kernel process) by just returning it as-is.
-        d['process_name'] = ntpath.basename(process_image) if process_image else None
-        d['command_line'] = raw.get('command_line')
-        d['parent_image'] = raw.get('parent_image')
-        detections.append(d)
-    total = db.execute("SELECT COUNT(*) FROM events WHERE app_name = 'duckdb_ueba'").fetchone()[0]
-    today = db.execute("SELECT COUNT(*) FROM events WHERE app_name = 'duckdb_ueba' AND date(timestamp) = date('now')").fetchone()[0]
-    entities_flagged = db.execute("SELECT COUNT(DISTINCT hostname || '|' || COALESCE(entity_type, '')) FROM events WHERE app_name = 'duckdb_ueba'").fetchone()[0]
-    latest = detections[0]['timestamp'] if detections else None
-    return jsonify({
-        'detections': detections,
-        'total': total,
-        'today': today,
-        'entities_flagged': entities_flagged,
-        'latest': latest
-    })
 
 @app.route('/api/ueba/baselines')
 @login_required
@@ -3947,7 +3903,7 @@ UNIFIED_LOGS_SQL = """(
 SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type,
        NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
        process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
-       NULL as occurrence_count, NULL as last_seen, NULL as item_id
+       NULL as occurrence_count, NULL as last_seen, NULL as item_id, NULL as entity_type
 FROM live_logs
 UNION ALL
 SELECT a.timestamp, a.severity,
@@ -3965,7 +3921,7 @@ SELECT a.timestamp, a.severity,
        a.log_app as log_app,
        NULL as raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
-       a.occurrence_count as occurrence_count, a.last_seen as last_seen, a.id as item_id
+       a.occurrence_count as occurrence_count, a.last_seen as last_seen, a.id as item_id, NULL as entity_type
 FROM alerts a
 LEFT JOIN sigma_rules s ON a.rule_id = s.id
 UNION ALL
@@ -3973,7 +3929,7 @@ SELECT timestamp, severity, hostname as host, 'UEBA Anomaly' as app, '-' as even
        NULL as source_ip, NULL as destination_ip, message, 'anomaly' as log_type,
        NULL as rule_id, 'ueba' as rule_source, NULL as log_event_id, NULL as log_app, raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
-       NULL as occurrence_count, NULL as last_seen, id as item_id
+       NULL as occurrence_count, NULL as last_seen, id as item_id, entity_type
 FROM events
 WHERE app_name = 'duckdb_ueba'
 ) AS unified_logs"""
@@ -3986,13 +3942,13 @@ UNIFIED_LOGS_SQL_WITH_ARCHIVE = """(
 SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type,
        NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
        process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
-       NULL as occurrence_count, NULL as last_seen, NULL as item_id
+       NULL as occurrence_count, NULL as last_seen, NULL as item_id, NULL as entity_type
 FROM live_logs
 UNION ALL
 SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type,
        NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
        process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
-       NULL as occurrence_count, NULL as last_seen, NULL as item_id
+       NULL as occurrence_count, NULL as last_seen, NULL as item_id, NULL as entity_type
 FROM live_logs_archive
 UNION ALL
 SELECT a.timestamp, a.severity,
@@ -4010,7 +3966,7 @@ SELECT a.timestamp, a.severity,
        a.log_app as log_app,
        NULL as raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
-       a.occurrence_count as occurrence_count, a.last_seen as last_seen, a.id as item_id
+       a.occurrence_count as occurrence_count, a.last_seen as last_seen, a.id as item_id, NULL as entity_type
 FROM alerts a
 LEFT JOIN sigma_rules s ON a.rule_id = s.id
 UNION ALL
@@ -4018,7 +3974,7 @@ SELECT timestamp, severity, hostname as host, 'UEBA Anomaly' as app, '-' as even
        NULL as source_ip, NULL as destination_ip, message, 'anomaly' as log_type,
        NULL as rule_id, 'ueba' as rule_source, NULL as log_event_id, NULL as log_app, raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
-       NULL as occurrence_count, NULL as last_seen, id as item_id
+       NULL as occurrence_count, NULL as last_seen, id as item_id, entity_type
 FROM events
 WHERE app_name = 'duckdb_ueba'
 ) AS unified_logs"""
@@ -4133,32 +4089,49 @@ def api_logs_search():
         total_count = db.execute(f"SELECT COUNT(*) FROM {source_sql}{where_clause}", params).fetchone()[0]
         rows = db.execute(f"SELECT * FROM {source_sql}{where_clause} ORDER BY timestamp DESC LIMIT ?", params + [limit]).fetchall()
 
-        logs = [{
-            'id': r['item_id'],
-            'time': r['timestamp'],
-            'severity': r['severity'],
-            'host': r['host'],
-            'app': r['app'],
-            'event_id': r['event_id'],
-            'username': r['username'],
-            'source_ip': r['source_ip'] if r['source_ip'] is not None else '-',
-            'destination_ip': r['destination_ip'] if r['destination_ip'] is not None else '-',
-            'message': r['message'],
-            'type': r['log_type'],
-            'rule_id': r['rule_id'],
-            'rule_source': r['rule_source'],
-            'log_event_id': r['log_event_id'],
-            'log_app': r['log_app'],
-            'raw_json': r['raw_json'],
-            'process_image': r['process_image'],
-            'command_line': r['command_line'],
-            'parent_image': r['parent_image'],
-            'parent_command_line': r['parent_command_line'],
-            'original_file_name': r['original_file_name'],
-            'raw_xml': r['raw_xml'],
-            'occurrence_count': r['occurrence_count'],
-            'last_seen': r['last_seen']
-        } for r in rows]
+        logs = []
+        for r in rows:
+            process_image, command_line, parent_image = r['process_image'], r['command_line'], r['parent_image']
+            if r['log_type'] == 'anomaly' and r['raw_json']:
+                # UEBA anomaly rows don't carry real process_image/command_line columns
+                # (they're log lines from `events`, not Sysmon-parsed live_logs rows) -- the
+                # process detail ueba_engine.py captured lives inside raw_json instead, same
+                # as /api/ueba/detections used to parse before that endpoint was folded into
+                # this one for the merged UEBA Timeline tab.
+                try:
+                    raw = json.loads(r['raw_json'])
+                except (TypeError, ValueError):
+                    raw = {}
+                process_image = process_image or raw.get('process_image')
+                command_line = command_line or raw.get('command_line')
+                parent_image = parent_image or raw.get('parent_image')
+            logs.append({
+                'id': r['item_id'],
+                'time': r['timestamp'],
+                'severity': r['severity'],
+                'host': r['host'],
+                'app': r['app'],
+                'event_id': r['event_id'],
+                'username': r['username'],
+                'entity_type': r['entity_type'],
+                'source_ip': r['source_ip'] if r['source_ip'] is not None else '-',
+                'destination_ip': r['destination_ip'] if r['destination_ip'] is not None else '-',
+                'message': r['message'],
+                'type': r['log_type'],
+                'rule_id': r['rule_id'],
+                'rule_source': r['rule_source'],
+                'log_event_id': r['log_event_id'],
+                'log_app': r['log_app'],
+                'raw_json': r['raw_json'],
+                'process_image': process_image,
+                'command_line': command_line,
+                'parent_image': parent_image,
+                'parent_command_line': r['parent_command_line'],
+                'original_file_name': r['original_file_name'],
+                'raw_xml': r['raw_xml'],
+                'occurrence_count': r['occurrence_count'],
+                'last_seen': r['last_seen']
+            })
 
         return jsonify({'logs': logs, 'count': len(logs), 'total_matches': total_count})
     except Exception as e:
