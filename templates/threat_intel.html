@@ -35,6 +35,18 @@
     <div id="paneIocs" style="display:{{ 'none' if active_tab == 'hunt' else 'block' }};">
         <div class="card-body">
             <div class="card bg-dark border-secondary mb-4">
+                <div class="card-header"><i class="fa-solid fa-magnifying-glass-arrow-right me-2"></i>Quick IOC Lookup</div>
+                <div class="card-body">
+                    <div class="d-flex flex-wrap gap-2 align-items-center">
+                        <input type="text" id="iocLookupInput" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:420px;" placeholder="IP, domain, URL, or file hash..." onkeyup="if(event.key === 'Enter') runIocLookup()">
+                        <button type="button" class="btn btn-sm btn-primary" onclick="runIocLookup()"><i class="fa-solid fa-search me-1"></i>Check</button>
+                        <span id="iocLookupResult" class="small"></span>
+                    </div>
+                    <div class="form-text text-muted">Exact-match check against the local IOC set synced from your Threat Feeds below — not a live external lookup.</div>
+                </div>
+            </div>
+
+            <div class="card bg-dark border-secondary mb-4">
                 <div class="card-header d-flex justify-content-between align-items-center">
                     <span><i class="fa-solid fa-satellite-dish me-2"></i>Feed Sources</span>
                     {% if current_user.role == 'admin' %}
@@ -958,6 +970,30 @@ function loadFeeds() {
             `).join('');
         })
         .catch(err => console.error('Error loading feeds:', err));
+}
+
+async function runIocLookup() {
+    const input = document.getElementById('iocLookupInput');
+    const resultEl = document.getElementById('iocLookupResult');
+    const ioc = input.value.trim();
+    if (!ioc) { resultEl.innerHTML = '<span class="text-muted">Enter a value to check.</span>'; return; }
+    resultEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+    try {
+        const res = await fetch('/api/ti/lookup', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ioc})});
+        const data = await res.json();
+        if (!res.ok) { resultEl.innerHTML = `<span class="text-danger">${escHtml(data.message || 'Lookup failed.')}</span>`; return; }
+        if (data.status === 'clean') {
+            resultEl.innerHTML = '<span class="text-success"><i class="fa-solid fa-circle-check me-1"></i>No match in the local IOC set.</span>';
+        } else if (data.status === 'revoked') {
+            resultEl.innerHTML = `<span class="text-muted"><i class="fa-solid fa-circle-minus me-1"></i>Matches ${data.matches.length} revoked/inactive indicator(s) only.</span>`;
+        } else {
+            const m = data.matches.find(x => !x.revoked) || data.matches[0];
+            const sightingNote = m.sighting_count > 0 ? `, observed here ${m.sighting_count}x (last: ${escHtml(m.last_sighted || '')})` : ', never observed in this environment';
+            resultEl.innerHTML = `<span class="text-danger"><i class="fa-solid fa-triangle-exclamation me-1"></i>MATCH — ${escHtml(m.name || m.ioc_type)} (source: ${escHtml(m.source_name || 'Unknown')}${sightingNote})</span>`;
+        }
+    } catch (e) {
+        resultEl.innerHTML = `<span class="text-danger">Error: ${escHtml(String(e))}</span>`;
+    }
 }
 
 function loadWarninglists() {

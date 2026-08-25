@@ -60,6 +60,16 @@ _FIELD_COLUMN_ALIASES = {
     'parentimage': 'parent_image',
     'parentcommandline': 'parent_command_line',
     'originalfilename': 'original_file_name',
+    # Canonicalized single-hash column (see app.py's _canonical_hash()) -- 'hashes' is
+    # Sysmon's own field name for the raw multi-algorithm string, 'sha256/md5/sha1' cover
+    # SigmaHQ rules that target one algorithm specifically; all land on the same column
+    # since only one canonical hash is ever stored per row.
+    'hashes': 'file_hash', 'hash': 'file_hash', 'sha256': 'file_hash', 'md5': 'file_hash', 'sha1': 'file_hash',
+    # DNS query name (Sysmon Event ID 22) -- a bare hostname, not a full URL.
+    'queryname': 'query_name', 'query': 'query_name',
+    # IOC-match builder fields for the two correlation types this maps onto, same
+    # relationship as sourceipioc/destinationipioc above.
+    'filehashioc': 'file_hash', 'destinationdomainioc': 'query_name',
 }
 
 @dataclass
@@ -116,7 +126,22 @@ def _get_soar_api_key(cursor):
 # stored rule at save time — means the match set is always whatever's currently in
 # stix_indicators, including anything ingested since the rule was created.
 IOC_IP_PLACEHOLDER = "__IOC_IP_LIST__"
+# Same mechanism, extended to the two correlation types live_logs now has real columns
+# for (file_hash/query_name, see app.py's ingest-time extraction) -- "Tier 2" of the
+# CTI gap analysis: automatic correlation was IP-only until this.
+IOC_HASH_PLACEHOLDER = "__IOC_HASH_LIST__"
+IOC_DOMAIN_PLACEHOLDER = "__IOC_DOMAIN_LIST__"
 _PORT_SUFFIX_RE = re.compile(r':\d+$')
+_HEX_HASH_RE = re.compile(r'^[0-9a-fA-F]{32}$|^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$')
+
+def _ioc_list_yaml(values):
+    if not values:
+        # An empty `field: []` is invalid Sigma/YAML (and `IN ()` is invalid SQL) — a
+        # sentinel that can never appear in real traffic keeps the rule syntactically
+        # valid and simply match-nothing until IOCs exist.
+        return "['__NO_IOCS_YET__']"
+    escaped = sorted(v.replace("'", "''") for v in values)
+    return '[' + ', '.join(f"'{v}'" for v in escaped) + ']'
 
 def _get_ioc_ip_list_yaml(cursor):
     # ioc_type vocabulary varies a lot by feed (ip, ipv4-addr, IPv4, ip:port, ...) —
@@ -138,47 +163,78 @@ def _get_ioc_ip_list_yaml(cursor):
     # resolvers, RFC1918) before it can ever fire the IOC-IP rule -- a phishing kit
     # that transiently sits on a shared Cloudflare IP shouldn't turn ordinary CDN
     # traffic into a "known-bad IP matched" alert.
-    values = set(filter_warninglisted_ips(cursor, values))
-    if not values:
-        # An empty `field: []` is invalid Sigma/YAML (and `IN ()` is invalid SQL) — a
-        # sentinel that can never appear in real traffic keeps the rule syntactically
-        # valid and simply match-nothing until IOCs exist.
-        return "['__NO_IOCS_YET__']"
-    escaped = sorted(v.replace("'", "''") for v in values)
-    return '[' + ', '.join(f"'{v}'" for v in escaped) + ']'
+    return _ioc_list_yaml(filter_warninglisted_ips(cursor, values))
 
-# Records one ioc_sightings row per stix_indicators IP that actually contributed to
-# a NEW alert firing via the IOC-IP correlation -- the only automatic IOC-to-log
+def _get_ioc_hash_list_yaml(cursor):
+    # Matched by SHAPE (hex length), the same reasoning as the IP list's substring
+    # match above: ioc_type vocabulary for hashes varies just as much across feeds
+    # ('md5'/'sha1'/'sha256' from CSV, 'FileHash-SHA256' from generic TAXII, whatever a
+    # live feed calls it) and a 32/40/64-char hex string is unambiguously a hash
+    # regardless of how the feed labeled it (see app.py's identical _get_live_ioc_*_hashes
+    # helpers, which independently arrived at the same shape-based approach for the IOC
+    # hash sweep agent action).
+    rows = cursor.execute(
+        "SELECT DISTINCT pattern FROM stix_indicators WHERE revoked = 0 AND pattern IS NOT NULL AND pattern != ''"
+    ).fetchall()
+    values = {r['pattern'].strip().lower() for r in rows if _HEX_HASH_RE.match((r['pattern'] or '').strip())}
+    return _ioc_list_yaml(values)
+
+def _get_ioc_domain_list_yaml(cursor):
+    rows = cursor.execute(
+        "SELECT DISTINCT pattern FROM stix_indicators WHERE revoked = 0 "
+        "AND pattern IS NOT NULL AND pattern != '' AND LOWER(ioc_type) LIKE '%domain%'"
+    ).fetchall()
+    values = {r['pattern'].strip().lower() for r in rows if r['pattern']}
+    return _ioc_list_yaml(values)
+
+# Records one ioc_sightings row per stix_indicators IOC that actually contributed to a
+# NEW alert firing via one of the __IOC_..._LIST__ correlations (IP, hash, or DNS query
+# domain -- see rule_uses_ioc_placeholder below) -- the only automatic IOC-to-log
 # correlation that exists today, so this is the only place a genuine "observed in our
 # environment" event can currently be derived from. Only called for brand-new alerts
 # (not re-occurrences within the 15-minute dedup window), mirroring the same
 # once-per-burst restraint already applied to notify_if_configured() below.
-def _record_ioc_sightings(cursor, rule_id, host, source_ip, destination_ip, alert_id, rule_title, rule_uses_ioc_ip):
-    if not rule_uses_ioc_ip.get(rule_id):
+def _record_ioc_sightings(cursor, rule_id, host, source_ip, destination_ip, file_hash, query_name,
+                           alert_id, rule_title, rule_uses_ioc_placeholder):
+    used = rule_uses_ioc_placeholder.get(rule_id)
+    if not used:
         return
-    ips = [ip for ip in (source_ip, destination_ip) if ip]
-    if not ips:
-        return
-    placeholders = ','.join('?' * len(ips))
-    rows = cursor.execute(
-        f"SELECT stix_id FROM stix_indicators WHERE pattern IN ({placeholders}) "
-        f"AND LOWER(ioc_type) LIKE '%ip%' AND revoked = 0",
-        ips
-    ).fetchall()
-    for row in rows:
-        cursor.execute(
-            "INSERT INTO ioc_sightings (stix_id, source, log_ref) VALUES (?, ?, ?)",
-            (row['stix_id'], f"alert:{rule_title}", f"alert_id={alert_id}, host={host}")
-        )
+    # Each correlation type only ever checks its own column against its own ioc_type
+    # shape -- a rule using __IOC_HASH_LIST__ must not accidentally record a sighting
+    # off the same alert's source_ip, which has nothing to do with what that rule
+    # actually matched on.
+    candidates = []
+    if used.get('ip'):
+        candidates += [(v, "LOWER(ioc_type) LIKE '%ip%'") for v in (source_ip, destination_ip) if v]
+    if used.get('hash') and file_hash:
+        candidates.append((file_hash, "1=1"))  # hash IOCs are matched by shape (see _get_ioc_hash_list_yaml), not ioc_type
+    if used.get('domain') and query_name:
+        candidates.append((query_name, "LOWER(ioc_type) LIKE '%domain%'"))
+    for value, type_filter in candidates:
+        rows = cursor.execute(
+            f"SELECT stix_id FROM stix_indicators WHERE LOWER(pattern) = LOWER(?) AND {type_filter} AND revoked = 0",
+            (value,)
+        ).fetchall()
+        for row in rows:
+            cursor.execute(
+                "INSERT INTO ioc_sightings (stix_id, source, log_ref) VALUES (?, ?, ?)",
+                (row['stix_id'], f"alert:{rule_title}", f"alert_id={alert_id}, host={host}")
+            )
+
+_IOC_PLACEHOLDER_KINDS = (('ip', IOC_IP_PLACEHOLDER), ('hash', IOC_HASH_PLACEHOLDER), ('domain', IOC_DOMAIN_PLACEHOLDER))
+_IOC_LIST_BUILDERS = {'ip': _get_ioc_ip_list_yaml, 'hash': _get_ioc_hash_list_yaml, 'domain': _get_ioc_domain_list_yaml}
 
 def _substitute_ioc_placeholder(rule_yaml_text, cursor, cache):
-    if IOC_IP_PLACEHOLDER not in rule_yaml_text:
-        return rule_yaml_text
-    if 'value' not in cache:
-        # Computed at most once per detection cycle (cached across every rule that
-        # references it), not once per rule — this is the only place the query runs.
-        cache['value'] = _get_ioc_ip_list_yaml(cursor)
-    return rule_yaml_text.replace(IOC_IP_PLACEHOLDER, cache['value'])
+    for kind, placeholder in _IOC_PLACEHOLDER_KINDS:
+        if placeholder not in rule_yaml_text:
+            continue
+        if kind not in cache:
+            # Computed at most once per detection cycle per kind (cached across every
+            # rule that references it), not once per rule -- this is the only place
+            # each of these 3 queries runs per cycle.
+            cache[kind] = _IOC_LIST_BUILDERS[kind](cursor)
+        rule_yaml_text = rule_yaml_text.replace(placeholder, cache[kind])
+    return rule_yaml_text
 
 def run_detection_cycle():
     if not os.path.exists(DB_PATH): return
@@ -197,7 +253,10 @@ def run_detection_cycle():
     cursor.execute(f"CREATE TEMP VIEW recent_events AS SELECT * FROM live_logs WHERE id > {last_id} AND id <= {current_max}")
     rules = cursor.execute("SELECT id, title, rule_yaml, severity_override FROM sigma_rules WHERE enabled = 1").fetchall()
     rule_titles = {r['id']: r['title'] for r in rules}
-    rule_uses_ioc_ip = {r['id']: IOC_IP_PLACEHOLDER in r['rule_yaml'] for r in rules}
+    rule_uses_ioc_placeholder = {
+        r['id']: {kind: placeholder in r['rule_yaml'] for kind, placeholder in _IOC_PLACEHOLDER_KINDS}
+        for r in rules
+    }
     backend = _make_backend()
 
     exclusions_by_rule = {}
@@ -216,12 +275,12 @@ def run_detection_cycle():
     # only the writes shrinks the lock-held window to milliseconds without changing
     # anything about which alerts get created.
     pending_alerts = []
-    ioc_ip_cache = {}
+    ioc_cache = {}
     for r in rules:
         try:
             rule_exclusions = exclusions_by_rule.get(r['id'], [])
             severity = (r['severity_override'] or '').capitalize() or _extract_level(r['rule_yaml']) or 'High'
-            rule_yaml_text = _substitute_ioc_placeholder(_normalize_rule_dates(r['rule_yaml']), cursor, ioc_ip_cache)
+            rule_yaml_text = _substitute_ioc_placeholder(_normalize_rule_dates(r['rule_yaml']), cursor, ioc_cache)
             for q in backend.convert(SigmaCollection.from_yaml(rule_yaml_text)):
                 for m in cursor.execute(q).fetchall():
                     if any(_exclusion_matches(e, m) for e in rule_exclusions):
@@ -232,6 +291,9 @@ def run_detection_cycle():
                     # multi-million-row live_logs table on every query. log_event_id/log_app
                     # preserve the original event's own Windows Event ID and channel, distinct
                     # from the rule that fired — both shown in the alert's detail view.
+                    # file_hash/query_name aren't stored on the alert row itself (alerts has no
+                    # such columns) -- they're only carried through pending_alerts far enough to
+                    # feed _record_ioc_sightings() below, then discarded.
                     m_keys = m.keys()
                     pending_alerts.append((
                         r['id'], m['id'], severity, m['host'], m['message'],
@@ -239,7 +301,9 @@ def run_detection_cycle():
                         m['source_ip'] if 'source_ip' in m_keys else None,
                         m['destination_ip'] if 'destination_ip' in m_keys else None,
                         m['event_id'] if 'event_id' in m_keys else None,
-                        m['app'] if 'app' in m_keys else None
+                        m['app'] if 'app' in m_keys else None,
+                        m['file_hash'] if 'file_hash' in m_keys else None,
+                        m['query_name'] if 'query_name' in m_keys else None
                     ))
                     try:
                         if soar_api_key:
@@ -268,7 +332,8 @@ def run_detection_cycle():
         # fired, so this stays a brief final write phase rather than reopening the
         # long-write-lock problem the pending_alerts batching above exists to avoid.
         for (rule_id, host, username), g in grouped.items():
-            (_, event_id, severity, _, message, _, source_ip, destination_ip, log_event_id, log_app) = g['latest']
+            (_, event_id, severity, _, message, _, source_ip, destination_ip, log_event_id, log_app,
+             file_hash, query_name) = g['latest']
             existing = cursor.execute(
                 "SELECT id, occurrence_count FROM alerts WHERE rule_id IS ? AND host = ? AND username IS ? "
                 "AND COALESCE(last_seen, timestamp) >= datetime('now', '-15 minutes') ORDER BY id DESC LIMIT 1",
@@ -287,7 +352,8 @@ def run_detection_cycle():
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
                     (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app, g['count'])
                 )
-                _record_ioc_sightings(cursor, rule_id, host, source_ip, destination_ip, cursor.lastrowid, rule_titles.get(rule_id, 'Custom/YARA Rule'), rule_uses_ioc_ip)
+                _record_ioc_sightings(cursor, rule_id, host, source_ip, destination_ip, file_hash, query_name,
+                                       cursor.lastrowid, rule_titles.get(rule_id, 'Custom/YARA Rule'), rule_uses_ioc_placeholder)
                 # Only a brand-new alert notifies, not a re-occurrence within the same
                 # 15-minute dedup window (the `existing` branch above) -- otherwise a noisy
                 # rule would re-notify every cycle it keeps matching instead of once per burst.

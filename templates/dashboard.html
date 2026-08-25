@@ -730,7 +730,7 @@
 
         <!-- Raw YAML pane -->
         <div id="paneYaml" style="display:none;">
-            <p class="text-muted small">Paste or edit a Sigma rule in YAML format. The rule's <code>title</code> field is used as its display name. To match against the live Threat Intel IOC list, use the unquoted placeholder <code>__IOC_IP_LIST__</code> as a field's value (e.g. <code>SourceIp: __IOC_IP_LIST__</code>) — it's replaced with the current IOC IP set on every detection cycle.</p>
+            <p class="text-muted small">Paste or edit a Sigma rule in YAML format. The rule's <code>title</code> field is used as its display name. To match against a live Threat Intel IOC list, use one of these unquoted placeholders as a field's value — each is replaced with its matching IOC set on every detection cycle: <code>__IOC_IP_LIST__</code> (e.g. <code>SourceIp: __IOC_IP_LIST__</code>), <code>__IOC_HASH_LIST__</code> (e.g. <code>Hashes: __IOC_HASH_LIST__</code>), or <code>__IOC_DOMAIN_LIST__</code> (e.g. <code>QueryName: __IOC_DOMAIN_LIST__</code>).</p>
             <textarea id="ruleYamlInput" class="form-control bg-black text-light border-secondary font-monospace small" rows="18" spellcheck="false" placeholder="title: My Detection Rule&#10;status: experimental&#10;logsource:&#10;  product: windows&#10;  category: process_creation&#10;detection:&#10;  selection:&#10;    CommandLine|contains: 'example'&#10;  condition: selection"></textarea>
         </div>
 
@@ -2164,13 +2164,21 @@ const BUILDER_FIELDS = [
     {value: 'DestinationIp', label: 'Destination IP'},
     {value: 'Message', label: 'Message contains text'},
     {value: 'SourceIpIOC', label: 'Source IP — matches live IOC list'},
-    {value: 'DestinationIpIOC', label: 'Destination IP — matches live IOC list'}
+    {value: 'DestinationIpIOC', label: 'Destination IP — matches live IOC list'},
+    {value: 'FileHashIOC', label: 'File Hash — matches live IOC list'},
+    {value: 'DestinationDomainIOC', label: 'DNS Query — matches live IOC list'}
 ];
-// These fields don't take a typed-in value — sigma_engine.py substitutes them with
-// whatever IPs are currently in the Threat Intel IOC list at detection time, so the
-// match set stays live instead of being frozen at rule-save time.
-const IOC_MATCH_FIELDS = ['SourceIpIOC', 'DestinationIpIOC'];
-const IOC_IP_PLACEHOLDER = '__IOC_IP_LIST__';
+// These fields don't take a typed-in value — sigma_engine.py substitutes each with
+// whatever's currently in the matching Threat Intel IOC list at detection time, so the
+// match set stays live instead of being frozen at rule-save time. Each IOC-match field
+// maps to its own placeholder/list (IP vs. file hash vs. DNS query domain), not one
+// shared list — see sigma_engine.py's _substitute_ioc_placeholder().
+const IOC_PLACEHOLDER_BY_FIELD = {
+    SourceIpIOC: '__IOC_IP_LIST__', DestinationIpIOC: '__IOC_IP_LIST__',
+    FileHashIOC: '__IOC_HASH_LIST__', DestinationDomainIOC: '__IOC_DOMAIN_LIST__'
+};
+const IOC_MATCH_FIELDS = Object.keys(IOC_PLACEHOLDER_BY_FIELD);
+const IOC_PLACEHOLDER_VALUES = Object.values(IOC_PLACEHOLDER_BY_FIELD);
 const BUILDER_OPS = [
     {value: '', label: 'equals'},
     {value: 'contains', label: 'contains'},
@@ -2248,8 +2256,8 @@ function updateCondField(gi, ri, val) {
     // Switching to/from an IOC-match field changes the row's value (and whether an
     // operator applies) and its HTML structure, so a full re-render is needed here —
     // renderYamlPreview() alone wouldn't rebuild the row markup.
-    if (IOC_MATCH_FIELDS.includes(val)) { cond.value = IOC_IP_PLACEHOLDER; cond.op = ''; renderGroups(); }
-    else { if (cond.value === IOC_IP_PLACEHOLDER) cond.value = ''; renderGroups(); }
+    if (IOC_MATCH_FIELDS.includes(val)) { cond.value = IOC_PLACEHOLDER_BY_FIELD[val]; cond.op = ''; renderGroups(); }
+    else { if (IOC_PLACEHOLDER_VALUES.includes(cond.value)) cond.value = ''; renderGroups(); }
 }
 function updateCondOp(gi, ri, val) { builderState.groups[gi][ri].op = val; renderYamlPreview(); }
 function updateCondValue(gi, ri, val) { builderState.groups[gi][ri].value = val; renderYamlPreview(); }
@@ -2290,8 +2298,8 @@ function removeExcludeRow(ri) {
 function updateExcludeField(ri, val) {
     const cond = builderState.exclude[ri];
     cond.field = val;
-    if (IOC_MATCH_FIELDS.includes(val)) { cond.value = IOC_IP_PLACEHOLDER; cond.op = ''; renderExclude(); }
-    else { if (cond.value === IOC_IP_PLACEHOLDER) cond.value = ''; renderExclude(); }
+    if (IOC_MATCH_FIELDS.includes(val)) { cond.value = IOC_PLACEHOLDER_BY_FIELD[val]; cond.op = ''; renderExclude(); }
+    else { if (IOC_PLACEHOLDER_VALUES.includes(cond.value)) cond.value = ''; renderExclude(); }
 }
 function updateExcludeOp(ri, val) { builderState.exclude[ri].op = val; renderYamlPreview(); }
 function updateExcludeValue(ri, val) { builderState.exclude[ri].value = val; renderYamlPreview(); }
@@ -2312,7 +2320,7 @@ function buildDetectionYaml() {
         validRows.forEach(r => {
             const key = r.op ? `${r.field}|${r.op}` : r.field;
             // IOC-match fields must stay unquoted: sigma_engine.py replaces the bare
-            // __IOC_IP_LIST__ token with a real YAML flow-list before parsing, and a
+            // __IOC_..._LIST__ token with a real YAML flow-list before parsing, and a
             // quoted token would turn that substitution into invalid nested-quote YAML.
             const val = IOC_MATCH_FIELDS.includes(r.field) ? r.value : yamlQuote(r.value);
             lines.push(`    ${key}: ${val}`);

@@ -18,7 +18,8 @@ DEFAULT_ARCHIVE_DAYS = 90
 ARCHIVE_COLUMNS = [
     'id', 'timestamp', 'host', 'app', 'severity', 'event_id', 'username',
     'source_ip', 'destination_ip', 'message', 'process_image', 'command_line',
-    'parent_image', 'parent_command_line', 'original_file_name', 'raw_xml'
+    'parent_image', 'parent_command_line', 'original_file_name', 'raw_xml',
+    'file_hash', 'query_name'
 ]
 
 def archive_old_logs(days_override=None):
