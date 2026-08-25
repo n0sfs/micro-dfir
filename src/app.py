@@ -377,6 +377,7 @@ def _extract_process_fields_from_xml(xml_text):
 def api_ingest():
     from flask import request, jsonify
     import datetime
+    from notifications import notify_if_configured
     try:
         db = get_db()
         expected_token = get_soc_secret(db)
@@ -467,9 +468,19 @@ def api_ingest():
                     )
                 else:
                     db.execute(
-                        "INSERT INTO alerts (timestamp, rule_name, severity, host, message, occurrence_count, last_seen) VALUES (?, ?, ?, ?, ?, 1, ?)",
-                        (ts, triggered_rule, alert_sev, hst, msg, ts)
+                        "INSERT INTO alerts (timestamp, rule_name, severity, host, message, username, source_ip, occurrence_count, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
+                        (ts, triggered_rule, alert_sev, hst, msg, usr, sip, ts)
                     )
+                    # Same "only a brand-new alert notifies" rule as sigma_engine.py's path --
+                    # a re-firing heuristic within the dedup window hits the `existing` branch
+                    # above instead. This runs inline in the ingest request; notify_if_configured
+                    # is a fast local settings lookup + a couple of short-timeout network calls
+                    # at most, never raises, and only fires at all if an admin has actually
+                    # configured a channel -- negligible added latency for the common case.
+                    notify_if_configured(db, {
+                        'rule_title': triggered_rule, 'severity': alert_sev, 'host': hst,
+                        'username': usr, 'source_ip': sip, 'message': msg, 'timestamp': ts,
+                    })
             # -------------------------------
         db.commit()
         return jsonify({'status': 'success', 'ingested': count}), 200
@@ -553,6 +564,11 @@ def soar_page():
 def cases_page():
     return render_template('cases.html', current_user=current_user)
 
+# The triage lifecycle sits alongside (not instead of) the older binary `acknowledged`
+# flag -- see migrate_alerts_triage(). 'new' is the schema DEFAULT so every alert starts
+# here with no extra write needed.
+ALERT_STATUSES = ('new', 'investigating', 'resolved', 'false_positive')
+
 @app.route('/api/alerts')
 @login_required
 def api_alerts():
@@ -560,7 +576,9 @@ def api_alerts():
     limit = request.args.get('limit', 30, type=int)
     try:
         rows = db.execute("""
-            SELECT a.id, a.timestamp, a.severity, a.acknowledged,
+            SELECT a.id, a.timestamp, a.severity, a.acknowledged, a.status, a.assignee,
+                   a.rule_id, a.username, a.source_ip, a.destination_ip,
+                   a.occurrence_count, a.last_seen,
                    COALESCE(s.title, a.rule_name, 'YARA / Custom Rule Match') as rule_title,
                    COALESCE(l.message, a.message) as event_message,
                    COALESCE(l.host, a.host) as hostname
@@ -577,19 +595,35 @@ def api_alerts():
 @app.route('/api/alerts/<int:aid>', methods=['PUT'])
 @login_required
 def api_alert_update(aid):
-    # Any logged-in user can acknowledge -- alert triage is an analyst task, matching
-    # every other alert-facing route (viewing/exporting/case-linking), none of which are
-    # admin-gated either.
+    # Any logged-in user can triage -- alert triage is an analyst task, matching every
+    # other alert-facing route (viewing/exporting/case-linking), none of which are
+    # admin-gated either. Each of acknowledged/status/assignee is optional and independent
+    # -- a caller updates only what it means to change, no cross-field inference here (the
+    # Home widget's quick-acknowledge button sets both acknowledged AND status explicitly
+    # at the call site instead, so the "keep them in sync" behavior is visible there, not
+    # hidden as magic in this route).
     db = get_db()
     if not db.execute("SELECT 1 FROM alerts WHERE id = ?", (aid,)).fetchone():
         return jsonify({"error": "Alert not found"}), 404
     data = request.get_json() or {}
-    if 'acknowledged' not in data:
-        return jsonify({"error": "acknowledged is required"}), 400
-    acked = 1 if data.get('acknowledged') else 0
-    db.execute("UPDATE alerts SET acknowledged = ? WHERE id = ?", (acked, aid))
+    if not any(k in data for k in ('acknowledged', 'status', 'assignee')):
+        return jsonify({"error": "at least one of acknowledged/status/assignee is required"}), 400
+
+    if 'status' in data and data['status'] not in ALERT_STATUSES:
+        return jsonify({"error": f"status must be one of {', '.join(ALERT_STATUSES)}"}), 400
+
+    if 'acknowledged' in data:
+        acked = 1 if data.get('acknowledged') else 0
+        db.execute("UPDATE alerts SET acknowledged = ? WHERE id = ?", (acked, aid))
+        log_audit('alert_acknowledge' if acked else 'alert_unacknowledge', 'alert', aid)
+    if 'status' in data:
+        db.execute("UPDATE alerts SET status = ? WHERE id = ?", (data['status'], aid))
+        log_audit('alert_status_change', 'alert', aid, data['status'])
+    if 'assignee' in data:
+        assignee = (data.get('assignee') or '').strip() or None
+        db.execute("UPDATE alerts SET assignee = ? WHERE id = ?", (assignee, aid))
+        log_audit('alert_assign', 'alert', aid, assignee or '(unassigned)')
     db.commit()
-    log_audit('alert_acknowledge' if acked else 'alert_unacknowledge', 'alert', aid)
     return jsonify({"status": "success"})
 
 @app.route('/api/events')
@@ -1626,6 +1660,54 @@ def api_report_schedule():
     if not ok:
         return jsonify({'status': 'partial', 'config': cfg, 'warning': f'Settings saved but crontab update failed: {err}'})
     return jsonify({'status': 'success', 'config': cfg})
+
+_SMTP_PASS_PLACEHOLDER = '••••••••'
+
+@app.route('/api/settings/alert-notifications', methods=['GET', 'POST'])
+@login_required
+def api_alert_notification_settings():
+    from notifications import get_alert_notification_config, ALERT_NOTIFICATION_DEFAULTS
+    db = get_db()
+    if request.method == 'GET':
+        cfg = get_alert_notification_config(db)
+        # Never echo the real secret back down to the browser -- the Save form only ever
+        # sees a placeholder, and leaving it unchanged (see POST below) keeps the real
+        # value intact rather than overwriting it with the placeholder string itself.
+        cfg['smtp_pass'] = _SMTP_PASS_PLACEHOLDER if cfg.get('smtp_pass') else ''
+        return jsonify(cfg)
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    d = request.json or {}
+    cfg = get_alert_notification_config(db)
+    for k in ALERT_NOTIFICATION_DEFAULTS:
+        if k not in d:
+            continue
+        if k == 'smtp_pass' and d[k] == _SMTP_PASS_PLACEHOLDER:
+            continue  # unchanged placeholder from the GET above -- keep the existing secret
+        cfg[k] = d[k]
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('alert_notification_config', ?)", (json.dumps(cfg),))
+    db.commit()
+    log_audit('alert_notification_settings_change', 'settings', None,
+              f"smtp_enabled={cfg['smtp_enabled']} webhook_enabled={cfg['webhook_enabled']} min_severity={cfg['min_severity']}")
+    return jsonify({'status': 'success'})
+
+@app.route('/api/settings/alert-notifications/test', methods=['POST'])
+@login_required
+def api_alert_notification_test():
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    from notifications import get_alert_notification_config, send_alert_notification
+    db = get_db()
+    cfg = get_alert_notification_config(db)
+    result = send_alert_notification(cfg, {
+        'rule_title': 'Test Notification', 'severity': 'High', 'host': 'test-host',
+        'username': current_user.username, 'source_ip': '203.0.113.1',
+        'message': 'This is a test alert notification triggered manually from Settings.',
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    })
+    if not result:
+        return jsonify({'error': 'No channel is enabled -- turn on Email and/or Webhook first.'}), 400
+    return jsonify(result)
 
 # ==========================================
 # UEBA — BEHAVIORAL ANOMALY DETECTIONS
@@ -2811,6 +2893,23 @@ def migrate_alerts_dedup_columns():
     except Exception:
         pass
 
+def migrate_alerts_triage():
+    # Adds the triage lifecycle (status + assignee) on top of the existing binary
+    # acknowledged flag -- acknowledged is left untouched (still drives the Home widget's
+    # "unacknowledged" list unchanged) so this is purely additive, no behavior change for
+    # anyone who never opens the new status/assignee controls.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(alerts)").fetchall()}
+        if 'status' not in cols:
+            conn.execute("ALTER TABLE alerts ADD COLUMN status TEXT NOT NULL DEFAULT 'new'")
+        if 'assignee' not in cols:
+            conn.execute("ALTER TABLE alerts ADD COLUMN assignee TEXT")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_sigma_rules_columns():
     # sigma_rules originally had no provenance columns — rules bulk-imported from SigmaHQ
     # and rules hand-written in the editor were indistinguishable. ALTER TABLE catches
@@ -3962,7 +4061,8 @@ UNIFIED_LOGS_SQL = """(
 SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type,
        NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
        process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
-       NULL as occurrence_count, NULL as last_seen, NULL as item_id, NULL as entity_type
+       NULL as occurrence_count, NULL as last_seen, NULL as item_id, NULL as entity_type,
+       NULL as status, NULL as assignee
 FROM live_logs
 UNION ALL
 SELECT a.timestamp, a.severity,
@@ -3980,7 +4080,8 @@ SELECT a.timestamp, a.severity,
        a.log_app as log_app,
        NULL as raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
-       a.occurrence_count as occurrence_count, a.last_seen as last_seen, a.id as item_id, NULL as entity_type
+       a.occurrence_count as occurrence_count, a.last_seen as last_seen, a.id as item_id, NULL as entity_type,
+       a.status as status, a.assignee as assignee
 FROM alerts a
 LEFT JOIN sigma_rules s ON a.rule_id = s.id
 UNION ALL
@@ -3988,7 +4089,8 @@ SELECT timestamp, severity, hostname as host, 'UEBA Anomaly' as app, '-' as even
        NULL as source_ip, NULL as destination_ip, message, 'anomaly' as log_type,
        NULL as rule_id, 'ueba' as rule_source, NULL as log_event_id, NULL as log_app, raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
-       NULL as occurrence_count, NULL as last_seen, id as item_id, entity_type
+       NULL as occurrence_count, NULL as last_seen, id as item_id, entity_type,
+       NULL as status, NULL as assignee
 FROM events
 WHERE app_name = 'duckdb_ueba'
 ) AS unified_logs"""
@@ -4001,13 +4103,15 @@ UNIFIED_LOGS_SQL_WITH_ARCHIVE = """(
 SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type,
        NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
        process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
-       NULL as occurrence_count, NULL as last_seen, NULL as item_id, NULL as entity_type
+       NULL as occurrence_count, NULL as last_seen, NULL as item_id, NULL as entity_type,
+       NULL as status, NULL as assignee
 FROM live_logs
 UNION ALL
 SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type,
        NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
        process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
-       NULL as occurrence_count, NULL as last_seen, NULL as item_id, NULL as entity_type
+       NULL as occurrence_count, NULL as last_seen, NULL as item_id, NULL as entity_type,
+       NULL as status, NULL as assignee
 FROM live_logs_archive
 UNION ALL
 SELECT a.timestamp, a.severity,
@@ -4025,7 +4129,8 @@ SELECT a.timestamp, a.severity,
        a.log_app as log_app,
        NULL as raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
-       a.occurrence_count as occurrence_count, a.last_seen as last_seen, a.id as item_id, NULL as entity_type
+       a.occurrence_count as occurrence_count, a.last_seen as last_seen, a.id as item_id, NULL as entity_type,
+       a.status as status, a.assignee as assignee
 FROM alerts a
 LEFT JOIN sigma_rules s ON a.rule_id = s.id
 UNION ALL
@@ -4033,7 +4138,8 @@ SELECT timestamp, severity, hostname as host, 'UEBA Anomaly' as app, '-' as even
        NULL as source_ip, NULL as destination_ip, message, 'anomaly' as log_type,
        NULL as rule_id, 'ueba' as rule_source, NULL as log_event_id, NULL as log_app, raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
-       NULL as occurrence_count, NULL as last_seen, id as item_id, entity_type
+       NULL as occurrence_count, NULL as last_seen, id as item_id, entity_type,
+       NULL as status, NULL as assignee
 FROM events
 WHERE app_name = 'duckdb_ueba'
 ) AS unified_logs"""
@@ -4223,7 +4329,9 @@ def _build_log_response_rows(rows):
             'original_file_name': r['original_file_name'],
             'raw_xml': r['raw_xml'],
             'occurrence_count': r['occurrence_count'],
-            'last_seen': r['last_seen']
+            'last_seen': r['last_seen'],
+            'status': r['status'],
+            'assignee': r['assignee']
         })
     return logs
 
@@ -5128,6 +5236,7 @@ migrate_seed_ueba_rules()
 migrate_risk_score_events_rule_id()
 migrate_report_history()
 migrate_log_search_indexes()
+migrate_alerts_triage()
 
 try:
     # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every

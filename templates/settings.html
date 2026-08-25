@@ -18,6 +18,7 @@
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnNetwork" onclick="switchSettingsTab('network')"><i class="fa-solid fa-network-wired me-2"></i>Network</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnSystem" onclick="switchSettingsTab('system')"><i class="fa-solid fa-database me-2"></i>System</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnReports" onclick="switchSettingsTab('reports')"><i class="fa-solid fa-file-pdf me-2"></i>Reports</button></li>
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnNotifications" onclick="switchSettingsTab('notifications')"><i class="fa-solid fa-bell me-2"></i>Notifications</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnAssetIdentity" onclick="switchSettingsTab('assetIdentity')"><i class="fa-solid fa-building-shield me-2"></i>Asset &amp; Identity</button></li>
             {% if current_user.role == 'admin' %}
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnAudit" onclick="switchSettingsTab('audit')"><i class="fa-solid fa-clipboard-list me-2"></i>Audit Log</button></li>
@@ -274,6 +275,72 @@
         </div>
     </div>
 
+    <!-- Alert Notifications pane -->
+    <div id="paneNotifications" style="display:none;">
+        <div class="card-body">
+            <h6 class="text-info mb-3">Alert Notifications</h6>
+            <p class="text-muted small mb-3">Get an email and/or webhook call the moment a new alert fires — from both the Sigma detection engine and the built-in keyword heuristics. Only <strong>new</strong> alerts notify (a rule re-firing within the existing 15-minute dedup window doesn't re-notify), and only at or above the severity threshold below.</p>
+
+            <div class="row g-4">
+                <div class="col-md-6">
+                    <div class="form-check form-switch mb-2">
+                        <input class="form-check-input" type="checkbox" id="notifSmtpEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <label class="form-check-label fw-bold" for="notifSmtpEnabled">Email (SMTP)</label>
+                    </div>
+                    <div class="row g-2">
+                        <div class="col-8"><label class="form-label small text-muted mb-1">SMTP Host</label>
+                            <input type="text" id="notifSmtpHost" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="smtp.example.com" {{ '' if current_user.role == 'admin' else 'disabled' }}></div>
+                        <div class="col-4"><label class="form-label small text-muted mb-1">Port</label>
+                            <input type="number" id="notifSmtpPort" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="587" {{ '' if current_user.role == 'admin' else 'disabled' }}></div>
+                        <div class="col-12">
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="checkbox" id="notifSmtpTls" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                                <label class="form-check-label small" for="notifSmtpTls">Use STARTTLS</label>
+                            </div>
+                        </div>
+                        <div class="col-6"><label class="form-label small text-muted mb-1">Username</label>
+                            <input type="text" id="notifSmtpUser" class="form-control form-control-sm bg-dark text-light border-secondary" {{ '' if current_user.role == 'admin' else 'disabled' }}></div>
+                        <div class="col-6"><label class="form-label small text-muted mb-1">Password</label>
+                            <input type="password" id="notifSmtpPass" class="form-control form-control-sm bg-dark text-light border-secondary" autocomplete="new-password" {{ '' if current_user.role == 'admin' else 'disabled' }}></div>
+                        <div class="col-6"><label class="form-label small text-muted mb-1">From Address</label>
+                            <input type="text" id="notifSmtpFrom" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="micro-dfir@example.com" {{ '' if current_user.role == 'admin' else 'disabled' }}></div>
+                        <div class="col-6"><label class="form-label small text-muted mb-1">To (comma-separated)</label>
+                            <input type="text" id="notifSmtpTo" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="soc@example.com" {{ '' if current_user.role == 'admin' else 'disabled' }}></div>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="form-check form-switch mb-2">
+                        <input class="form-check-input" type="checkbox" id="notifWebhookEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <label class="form-check-label fw-bold" for="notifWebhookEnabled">Generic Webhook</label>
+                    </div>
+                    <label class="form-label small text-muted mb-1">Webhook URL</label>
+                    <input type="text" id="notifWebhookUrl" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="https://hooks.example.com/..." {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                    <p class="text-muted small mt-1 mb-0">POSTs a JSON body (rule_title, severity, host, username, source_ip, message, timestamp) — works as-is with Slack/Discord/Teams incoming-webhook URLs or any endpoint that accepts a JSON POST.</p>
+
+                    <hr class="border-secondary my-3">
+
+                    <label class="form-label small text-muted mb-1">Minimum Severity to Notify</label>
+                    <select id="notifMinSeverity" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <option value="Low">Low and above</option>
+                        <option value="Medium">Medium and above</option>
+                        <option value="High">High and above</option>
+                        <option value="Critical">Critical only</option>
+                    </select>
+                </div>
+            </div>
+
+            {% if current_user.role == 'admin' %}
+            <div class="mt-4 d-flex gap-2">
+                <button class="btn btn-outline-primary btn-sm" onclick="saveAlertNotifications()"><i class="fa-solid fa-save me-1"></i> Save</button>
+                <button class="btn btn-outline-secondary btn-sm" onclick="testAlertNotifications()"><i class="fa-solid fa-paper-plane me-1"></i> Send Test</button>
+            </div>
+            {% else %}
+            <p class="text-muted small mt-3 mb-0"><i class="fa-solid fa-lock me-1"></i>Admin role required to change notification settings.</p>
+            {% endif %}
+            <div id="notifMsg" class="mt-2 small" style="display:none;"></div>
+        </div>
+    </div>
+
     <!-- Asset & Identity pane -->
     <div id="paneAssetIdentity" style="display:none;">
         <div class="card-body">
@@ -426,7 +493,7 @@ const SETTINGS_TAB_KEY = 'microdfir_settings_active_tab';
 // 'audit' is admin-only server-side (see the admin-role Jinja guard around its tab
 // button/pane above) -- a non-admin's DOM simply won't have those elements, so each
 // lookup below is null-checked rather than assumed to exist.
-const SETTINGS_TABS = ['security', 'network', 'system', 'reports', 'assetIdentity', 'audit'];
+const SETTINGS_TABS = ['security', 'network', 'system', 'reports', 'notifications', 'assetIdentity', 'audit'];
 
 function switchSettingsTab(tab) {
     if (!SETTINGS_TABS.includes(tab)) tab = 'security';
@@ -455,6 +522,7 @@ document.addEventListener("DOMContentLoaded", function() {
     loadArchiveSettings();
     loadReportBranding();
     loadReportSchedule();
+    loadAlertNotifications();
     loadAssets();
     loadIdentities();
     setInterval(loadMetrics, 5000);
@@ -551,6 +619,86 @@ function saveReportSchedule() {
             msg.className = 'mt-2 small text-danger';
             msg.innerText = 'Error saving schedule: ' + err;
         });
+}
+
+// Alert Notifications Logic
+function loadAlertNotifications() {
+    fetch('/api/settings/alert-notifications')
+        .then(r => r.json())
+        .then(cfg => {
+            document.getElementById('notifSmtpEnabled').checked = !!cfg.smtp_enabled;
+            document.getElementById('notifSmtpHost').value = cfg.smtp_host || '';
+            document.getElementById('notifSmtpPort').value = cfg.smtp_port || 587;
+            document.getElementById('notifSmtpTls').checked = cfg.smtp_use_tls !== false;
+            document.getElementById('notifSmtpUser').value = cfg.smtp_user || '';
+            // The server never sends the real password back -- only a placeholder if one
+            // is set (so the field visibly shows "something is configured") or blank if
+            // not. Leaving it as the placeholder on Save keeps the existing secret intact;
+            // typing anything else replaces it.
+            document.getElementById('notifSmtpPass').value = cfg.smtp_pass || '';
+            document.getElementById('notifSmtpFrom').value = cfg.smtp_from || '';
+            document.getElementById('notifSmtpTo').value = cfg.smtp_to || '';
+            document.getElementById('notifWebhookEnabled').checked = !!cfg.webhook_enabled;
+            document.getElementById('notifWebhookUrl').value = cfg.webhook_url || '';
+            document.getElementById('notifMinSeverity').value = cfg.min_severity || 'High';
+        })
+        .catch(e => console.log('Error loading alert notification settings:', e));
+}
+
+function collectAlertNotificationConfig() {
+    return {
+        smtp_enabled: document.getElementById('notifSmtpEnabled').checked,
+        smtp_host: document.getElementById('notifSmtpHost').value.trim(),
+        smtp_port: parseInt(document.getElementById('notifSmtpPort').value, 10) || 587,
+        smtp_use_tls: document.getElementById('notifSmtpTls').checked,
+        smtp_user: document.getElementById('notifSmtpUser').value.trim(),
+        smtp_pass: document.getElementById('notifSmtpPass').value,
+        smtp_from: document.getElementById('notifSmtpFrom').value.trim(),
+        smtp_to: document.getElementById('notifSmtpTo').value.trim(),
+        webhook_enabled: document.getElementById('notifWebhookEnabled').checked,
+        webhook_url: document.getElementById('notifWebhookUrl').value.trim(),
+        min_severity: document.getElementById('notifMinSeverity').value,
+    };
+}
+
+function saveAlertNotifications() {
+    const msg = document.getElementById('notifMsg');
+    fetch('/api/settings/alert-notifications', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(collectAlertNotificationConfig())
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        msg.style.display = 'block';
+        msg.className = 'mt-2 small ' + (ok ? 'text-success' : 'text-danger');
+        msg.innerHTML = ok ? '<i class="fa-solid fa-check-circle"></i> Notification settings saved.' : (data.error || 'Failed to save.');
+        if (ok) loadAlertNotifications(); // re-pull so the password field re-masks to the placeholder
+    }).catch(err => {
+        msg.style.display = 'block'; msg.className = 'mt-2 small text-danger'; msg.innerText = 'Error saving: ' + err;
+    });
+}
+
+function testAlertNotifications() {
+    const msg = document.getElementById('notifMsg');
+    msg.style.display = 'block'; msg.className = 'mt-2 small text-muted'; msg.innerText = 'Sending test notification…';
+    // Test against whatever is CURRENTLY SAVED (not the unsaved form) -- save first so
+    // a test reflects the config that will actually fire on the next real alert.
+    fetch('/api/settings/alert-notifications', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(collectAlertNotificationConfig())
+    }).then(() => fetch('/api/settings/alert-notifications/test', {method: 'POST'}))
+        .then(r => r.json().then(data => ({ok: r.ok, data})))
+        .then(({ok, data}) => {
+            if (!ok) {
+                msg.className = 'mt-2 small text-danger';
+                msg.innerText = data.error || 'Test failed.';
+                return;
+            }
+            const parts = [];
+            if ('email' in data) parts.push(`Email: ${data.email.ok ? 'sent' : 'failed (' + data.email.error + ')'}`);
+            if ('webhook' in data) parts.push(`Webhook: ${data.webhook.ok ? 'sent' : 'failed (' + data.webhook.error + ')'}`);
+            const anyFailed = Object.values(data).some(c => !c.ok);
+            msg.className = 'mt-2 small ' + (anyFailed ? 'text-warning' : 'text-success');
+            msg.innerText = parts.join(' · ') || 'No channel enabled.';
+            loadAlertNotifications();
+        })
+        .catch(err => { msg.className = 'mt-2 small text-danger'; msg.innerText = 'Error: ' + err; });
 }
 
 // Telemetry Logic

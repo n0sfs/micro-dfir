@@ -1130,6 +1130,25 @@ function showLogDetail(idx) {
             <dt class="col-3">Dest IP</dt><dd class="col-9">${highlightText(log.destination_ip, termsFor('destination_ip'))}</dd>
         </dl>
         ${viewRuleBtn}
+        ${log.type === 'alert' ? `
+        <label class="form-label small text-muted mb-1">Triage</label>
+        <div class="d-flex align-items-end gap-2 mb-2 flex-wrap">
+            <div>
+                <label class="form-label small text-muted mb-1">Status</label>
+                <select id="triageStatus" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:160px;">
+                    <option value="new" ${(log.status || 'new') === 'new' ? 'selected' : ''}>New</option>
+                    <option value="investigating" ${log.status === 'investigating' ? 'selected' : ''}>Investigating</option>
+                    <option value="resolved" ${log.status === 'resolved' ? 'selected' : ''}>Resolved</option>
+                    <option value="false_positive" ${log.status === 'false_positive' ? 'selected' : ''}>False Positive</option>
+                </select>
+            </div>
+            <div>
+                <label class="form-label small text-muted mb-1">Assignee</label>
+                <input type="text" id="triageAssignee" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:160px;" placeholder="Unassigned" value="${escHtml(log.assignee || '')}">
+            </div>
+            <button type="button" class="btn btn-sm btn-outline-primary" onclick="saveTriage(${log.id})"><i class="fa-solid fa-save me-1"></i>Save</button>
+        </div>
+        <div id="triageMsg" class="small mb-2" style="display:none;"></div>` : ''}
         ${showTriggeringEvent ? `
         <label class="form-label small text-muted mb-1">Triggering Log Event</label>
         <dl class="row mb-2 small">
@@ -1156,6 +1175,28 @@ function showLogDetail(idx) {
     `;
     if (canAddToCase) renderAddToCaseControl(log);
     new bootstrap.Modal(document.getElementById('logDetailModal')).show();
+}
+
+function saveTriage(aid) {
+    const msg = document.getElementById('triageMsg');
+    const payload = {
+        status: document.getElementById('triageStatus').value,
+        assignee: document.getElementById('triageAssignee').value.trim(),
+    };
+    fetch(`/api/alerts/${aid}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        msg.style.display = 'block';
+        msg.className = 'small mb-2 ' + (ok ? 'text-success' : 'text-danger');
+        msg.innerText = ok ? 'Triage updated.' : (data.error || 'Failed to update.');
+        if (ok) {
+            // Keep the in-memory currentLogs entry consistent so the table's status badge
+            // reflects the change immediately without a full refetch.
+            const log = currentLogs.find(l => l.type === 'alert' && String(l.id) === String(aid));
+            if (log) { log.status = payload.status; log.assignee = payload.assignee || null; }
+            renderLogsTableRows(currentLogs);
+        }
+    }).catch(err => { msg.style.display = 'block'; msg.className = 'small mb-2 text-danger'; msg.innerText = 'Error: ' + err; });
 }
 
 // Only alerts and UEBA anomalies have a stable id to link (see item_id in
@@ -1314,11 +1355,24 @@ const LOG_TABLE_COLUMNS = [
     {key: 'original_file_name', label: 'Original File Name', default: false},
 ];
 
+// Only shown once an alert has moved off the 'new' default -- a badge on every single
+// alert row would just be visual noise repeating what's already implied by the row existing.
+function alertStatusBadge(status) {
+    if (!status || status === 'new') return '';
+    const STATUS_MAP = {
+        investigating: ['bg-info text-dark', 'Investigating'],
+        resolved: ['bg-success', 'Resolved'],
+        false_positive: ['bg-secondary', 'False Positive'],
+    };
+    const [cls, label] = STATUS_MAP[status] || ['bg-secondary', status];
+    return ` <span class="badge ${cls}" style="font-size:.65rem;">${escHtml(label)}</span>`;
+}
+
 function renderCell(col, log, idx) {
     let rendered;
     switch (col) {
         case 'time': rendered = escHtml(log.time); break;
-        case 'type': rendered = typeBadge(log.type) + (log.occurrence_count > 1 ? ` <span class="badge bg-secondary" title="Same alert recurred ${log.occurrence_count} times since ${escHtml(log.time)}">&times;${log.occurrence_count}</span>` : ''); break;
+        case 'type': rendered = typeBadge(log.type) + (log.occurrence_count > 1 ? ` <span class="badge bg-secondary" title="Same alert recurred ${log.occurrence_count} times since ${escHtml(log.time)}">&times;${log.occurrence_count}</span>` : '') + (log.type === 'alert' ? alertStatusBadge(log.status) : ''); break;
         case 'severity': rendered = `<span class="badge ${severityBadgeClass(log.severity)}">${escHtml((log.severity || '').toUpperCase())}</span>`; break;
         case 'source_ip': rendered = highlightText(log[col], termsFor(col)) + (log.country_name ? ` <span class="badge bg-secondary" title="${escHtml(log.country_code || '')}">${escHtml(log.country_name)}</span>` : ''); break;
         default: rendered = highlightText(log[col], termsFor(col));
