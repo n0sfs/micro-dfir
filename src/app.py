@@ -998,14 +998,49 @@ def _build_actor_summary(rows):
     out.sort(key=lambda a: -a['ioc_count'])
     return out
 
+_ACTOR_SUMMARY_CACHE = {}
+_ACTOR_SUMMARY_CACHE_TTL = 300  # seconds -- informational cross-reference, doesn't need per-request freshness
+_ACTOR_SUMMARY_SCAN_LIMIT = 15000  # bounds cost independent of how large stix_indicators grows over time
+
 @app.route('/api/ti/actor-summary', methods=['GET'])
 @login_required
 def api_ti_actor_summary():
+    # Live-verified real bug: scanning every stix_indicators row in Python (one
+    # find_actor_context() regex pass per row) hung this endpoint indefinitely once
+    # the table reached ~130K rows after the first real MISP feed sync -- same class of
+    # unbounded-work-driven-by-external-data-volume issue the MISP sync itself hit.
+    # Fixed two ways: (1) a coarse LIKE-based pre-filter pushed down into SQLite (native
+    # code, still a full scan but far cheaper per-row than the Python loop it replaces),
+    # bounded to the most recent N rows so cost stays roughly constant as the table keeps
+    # growing rather than degrading over time; (2) a short cache, since this is an
+    # informational cross-reference, not something that needs to recompute on every
+    # dashboard load -- same TTL-cache shape as RULES_CACHE/_TOP_COUNTRIES_CACHE above.
+    import time
+    now = time.time()
+    cached = _ACTOR_SUMMARY_CACHE.get('data')
+    if cached is not None and (now - _ACTOR_SUMMARY_CACHE.get('time', 0)) < _ACTOR_SUMMARY_CACHE_TTL:
+        return jsonify({'actors': cached})
+
+    from threat_actors import ACTORS
+    names = {actor['name'] for actor in ACTORS} | {a for actor in ACTORS for a in actor.get('aliases', [])}
+    if not names:
+        return jsonify({'actors': []})
     db = get_db()
+    conditions, cond_params = [], []
+    for n in names:
+        conditions.append("(LOWER(name) LIKE ? OR LOWER(description) LIKE ?)")
+        like = f"%{n.lower()}%"
+        cond_params.extend([like, like])
     rows = db.execute(
-        "SELECT name, description FROM stix_indicators WHERE revoked = 0 AND (name IS NOT NULL OR description IS NOT NULL)"
+        f"SELECT name, description FROM "
+        f"(SELECT name, description FROM stix_indicators WHERE revoked = 0 ORDER BY inserted_at DESC LIMIT ?) "
+        f"WHERE ({' OR '.join(conditions)})",
+        [_ACTOR_SUMMARY_SCAN_LIMIT] + cond_params
     ).fetchall()
-    return jsonify({'actors': _build_actor_summary(rows)})
+    result = _build_actor_summary(rows)
+    _ACTOR_SUMMARY_CACHE['data'] = result
+    _ACTOR_SUMMARY_CACHE['time'] = now
+    return jsonify({'actors': result})
 
 @app.route('/api/ti/warninglists', methods=['GET'])
 @login_required
