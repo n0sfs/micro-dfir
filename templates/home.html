@@ -151,13 +151,32 @@ function renderAlertsWidget() {
                 <div class="list-group-item bg-dark border-secondary px-0 py-2">
                     <div class="d-flex justify-content-between align-items-start gap-2">
                         <span class="small">${escHtml(a.rule_title)}</span>
-                        ${severityBadgeHome(a.severity)}
+                        <div class="d-flex align-items-center gap-1">
+                            ${severityBadgeHome(a.severity)}
+                            <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1" title="Acknowledge" onclick="acknowledgeAlert(${a.id}, this)"><i class="fa-solid fa-check"></i></button>
+                        </div>
                     </div>
                     <div class="text-muted small">${escHtml(a.hostname || '—')} &middot; ${escHtml(a.timestamp)}</div>
                 </div>
             `).join('')}</div>`;
         })
         .catch(err => { body.innerHTML = `<p class="text-danger small mb-0">Error loading alerts: ${escHtml(err)}</p>`; });
+}
+
+function acknowledgeAlert(aid, btn) {
+    btn.disabled = true;
+    fetch(`/api/alerts/${aid}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({acknowledged: true})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok}) => {
+        if (ok) {
+            // The row this button lives in is now acknowledged and drops out of the
+            // "unacknowledged" widget entirely -- just remove it rather than refetching.
+            const row = btn.closest('.list-group-item');
+            if (row) row.remove();
+        } else {
+            btn.disabled = false;
+        }
+    }).catch(() => { btn.disabled = false; });
 }
 
 function riskTierBadgeClassHome(tier) {

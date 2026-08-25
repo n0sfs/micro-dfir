@@ -229,6 +229,7 @@
         <ul id="columnPickerMenu" class="dropdown-menu dropdown-menu-dark dropdown-menu-end shadow" style="min-width: 220px; max-height: 320px; overflow-y: auto;"></ul>
     </div>
     <button class="btn btn-outline-success btn-sm" onclick="exportCSV()" title="Export current filtered logs to CSV"><i class="fa-solid fa-file-excel me-1"></i> Export CSV</button>
+    <button class="btn btn-outline-info btn-sm" onclick="exportJSON()" title="Export current filtered logs to JSON"><i class="fa-solid fa-file-code me-1"></i> Export JSON</button>
     </div>
 </div>
 
@@ -571,8 +572,9 @@
         <h6 id="modalFormTitle" class="text-primary mb-2">Add New Field</h6>
         <input type="hidden" id="editOriginalKey" value="">
         <div class="mb-2">
-          <label for="customFieldName" class="form-label small">Field Internal Key (e.g. <code>process_name</code>)</label>
-          <input type="text" class="form-control bg-dark text-light border-secondary form-control-sm" id="customFieldName" placeholder="e.g. workstation_id">
+          <label for="customFieldName" class="form-label small">Field</label>
+          <select class="form-select bg-dark text-light border-secondary form-select-sm" id="customFieldName"></select>
+          <p class="text-muted small mt-1 mb-0">Only fields Log Search can actually filter on are selectable here.</p>
         </div>
         <div class="mb-3">
           <label for="customFieldLabel" class="form-label small">Display Label (e.g. <code>Workstation ID</code>)</label>
@@ -995,12 +997,17 @@ function initChart() {
     });
 }
 
-window.loadDashboardData = function() {
-    loadLogs();
+window.loadDashboardData = function(opts) {
+    loadLogs(opts);
     loadTimeline();
 };
 
 let currentLogs = [];
+
+// Server-side single source of truth for which fields Log Search's field-specific filter
+// can target -- the Field Manager modal's "Field" picker is built from this list only, so
+// a field added there can never silently fall back to searching `message` server-side.
+const LOG_SEARCH_ALLOWED_FIELDS = {{ log_search_allowed_fields|tojson }};
 
 function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1119,7 +1126,7 @@ function showLogDetail(idx) {
             <dt class="col-3">App / Rule</dt><dd class="col-9">${highlightText(log.app, termsFor('app'))}</dd>
             <dt class="col-3">Event ID</dt><dd class="col-9">${highlightText(log.event_id, termsFor('event_id'))}</dd>
             <dt class="col-3">User</dt><dd class="col-9">${highlightText(log.username, termsFor('username'))}</dd>
-            <dt class="col-3">Src IP</dt><dd class="col-9">${highlightText(log.source_ip, termsFor('source_ip'))}</dd>
+            <dt class="col-3">Src IP</dt><dd class="col-9">${highlightText(log.source_ip, termsFor('source_ip'))}${log.country_name ? ` <span class="badge bg-secondary" title="${escHtml(log.country_code || '')}">${escHtml(log.country_name)}</span>` : ''}</dd>
             <dt class="col-3">Dest IP</dt><dd class="col-9">${highlightText(log.destination_ip, termsFor('destination_ip'))}</dd>
         </dl>
         ${viewRuleBtn}
@@ -1203,10 +1210,58 @@ async function addToCase(itemType, itemId) {
 
 const TEXT_MATCH_OPS = ['contains', 'equals', 'starts_with', 'ends_with'];
 
-window.loadLogs = function() {
+// Sortable-by-header columns (server allowlist mirrored client-side) and click-to-filter
+// pivot columns (must be in LOG_SEARCH_ALLOWED_FIELDS -- app/severity/type already have
+// their own dedicated filter UI, so they're deliberately not pivotable here).
+const SORTABLE_LOG_COLUMNS = {time: 'timestamp', type: 'log_type', severity: 'severity', host: 'host',
+                               app: 'app', event_id: 'event_id', username: 'username',
+                               source_ip: 'source_ip', destination_ip: 'destination_ip'};
+const PIVOT_COLUMNS = new Set(['host', 'username', 'event_id', 'source_ip', 'destination_ip', 'process_image']);
+let logSortState = {col: 'timestamp', dir: 'desc'};
+
+// Every fetch that hits _build_log_filters() (search, timeline chart, CSV/JSON export)
+// built this same query string independently before -- one shared builder means the new
+// sort/poll params only need adding in one place, not four.
+function buildLogQueryParams(opts) {
+    opts = opts || {};
     let q = document.getElementById('searchQuery').value;
     let app = Array.from(document.querySelectorAll('.app-chk:checked')).map(c=>c.value).join(',');
     let sev = Array.from(document.querySelectorAll('.sev-chk:checked')).map(c=>c.value).join(',');
+    let fieldKey = document.getElementById('fieldKey').value;
+    let fieldOp = document.getElementById('fieldOp').value;
+    let fieldVal = document.getElementById('fieldVal').value;
+    let params = `q=${encodeURIComponent(q)}&${timeRangeQuery()}&app=${encodeURIComponent(app)}&severity=${encodeURIComponent(sev)}&fieldKey=${encodeURIComponent(fieldKey)}&fieldOp=${encodeURIComponent(fieldOp)}&fieldVal=${encodeURIComponent(fieldVal)}${includeArchiveParam()}`;
+    params += `&sort=${encodeURIComponent(logSortState.col)}&dir=${encodeURIComponent(logSortState.dir)}`;
+    if (opts.auto) params += '&poll=1';
+    return params;
+}
+
+// Clicking a pivotable cell sets it as an exact-match field filter and re-searches --
+// event.stopPropagation() keeps the row's own onclick (open detail modal) from also firing.
+function pivotFilter(evt, col, idx) {
+    evt.stopPropagation();
+    const log = currentLogs[idx];
+    if (!log) return;
+    const val = log[col];
+    if (val === null || val === undefined || val === '') return;
+    document.getElementById('fieldKey').value = col;
+    document.getElementById('fieldOp').value = 'equals';
+    document.getElementById('fieldVal').value = val;
+    loadDashboardData();
+}
+
+function setSortColumn(col) {
+    if (logSortState.col === col) {
+        logSortState.dir = logSortState.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+        logSortState = {col, dir: col === 'timestamp' ? 'desc' : 'asc'};
+    }
+    renderLogsTableHead();
+    loadDashboardData();
+}
+
+window.loadLogs = function(opts) {
+    let q = document.getElementById('searchQuery').value;
     let fieldKey = document.getElementById('fieldKey').value;
     let fieldOp = document.getElementById('fieldOp').value;
     let fieldVal = document.getElementById('fieldVal').value;
@@ -1217,7 +1272,7 @@ window.loadLogs = function() {
         fieldKey: fieldKey
     };
 
-    fetch(`/api/logs/search?q=${encodeURIComponent(q)}&${timeRangeQuery()}&app=${encodeURIComponent(app)}&severity=${encodeURIComponent(sev)}&fieldKey=${encodeURIComponent(fieldKey)}&fieldOp=${encodeURIComponent(fieldOp)}&fieldVal=${encodeURIComponent(fieldVal)}${includeArchiveParam()}`)
+    fetch(`/api/logs/search?${buildLogQueryParams(opts)}`)
         .then(r => r.json())
         .then(data => {
             let badge = document.getElementById('logCountBadge');
@@ -1259,13 +1314,19 @@ const LOG_TABLE_COLUMNS = [
     {key: 'original_file_name', label: 'Original File Name', default: false},
 ];
 
-function renderCell(col, log) {
+function renderCell(col, log, idx) {
+    let rendered;
     switch (col) {
-        case 'time': return escHtml(log.time);
-        case 'type': return typeBadge(log.type) + (log.occurrence_count > 1 ? ` <span class="badge bg-secondary" title="Same alert recurred ${log.occurrence_count} times since ${escHtml(log.time)}">&times;${log.occurrence_count}</span>` : '');
-        case 'severity': return `<span class="badge ${severityBadgeClass(log.severity)}">${escHtml((log.severity || '').toUpperCase())}</span>`;
-        default: return highlightText(log[col], termsFor(col));
+        case 'time': rendered = escHtml(log.time); break;
+        case 'type': rendered = typeBadge(log.type) + (log.occurrence_count > 1 ? ` <span class="badge bg-secondary" title="Same alert recurred ${log.occurrence_count} times since ${escHtml(log.time)}">&times;${log.occurrence_count}</span>` : ''); break;
+        case 'severity': rendered = `<span class="badge ${severityBadgeClass(log.severity)}">${escHtml((log.severity || '').toUpperCase())}</span>`; break;
+        case 'source_ip': rendered = highlightText(log[col], termsFor(col)) + (log.country_name ? ` <span class="badge bg-secondary" title="${escHtml(log.country_code || '')}">${escHtml(log.country_name)}</span>` : ''); break;
+        default: rendered = highlightText(log[col], termsFor(col));
     }
+    if (PIVOT_COLUMNS.has(col) && log[col]) {
+        return `<span class="pivotable" style="cursor:cell;" title="Click to filter on this value" onclick="pivotFilter(event, '${col}', ${idx})">${rendered}</span>`;
+    }
+    return rendered;
 }
 
 function loadColumnPrefs() {
@@ -1318,7 +1379,13 @@ function applyColumnSelection() {
 function renderLogsTableHead() {
     let row = document.getElementById('logsTableHeadRow');
     if (!row) return;
-    row.innerHTML = activeColumnDefs().map(c => `<th>${escHtml(c.label)}</th>`).join('');
+    row.innerHTML = activeColumnDefs().map(c => {
+        const sortCol = SORTABLE_LOG_COLUMNS[c.key];
+        if (!sortCol) return `<th>${escHtml(c.label)}</th>`;
+        const active = logSortState.col === sortCol;
+        const arrow = active ? (logSortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
+        return `<th style="cursor:pointer; user-select:none;" title="Sort by ${escHtml(c.label)}" onclick="setSortColumn('${sortCol}')">${escHtml(c.label)}${arrow}</th>`;
+    }).join('');
 }
 
 function renderLogsTableRows(logs) {
@@ -1331,22 +1398,15 @@ function renderLogsTableRows(logs) {
     }
     tbody.innerHTML = logs.map((log, idx) => `
         <tr onclick="showLogDetail(${idx})" style="cursor:pointer;" title="Click to view full details">
-            ${cols.map(c => `<td class="${c.cellClass || ''}"${c.cellStyle ? ` style="${c.cellStyle}"` : ''}>${renderCell(c.key, log)}</td>`).join('')}
+            ${cols.map(c => `<td class="${c.cellClass || ''}"${c.cellStyle ? ` style="${c.cellStyle}"` : ''}>${renderCell(c.key, log, idx)}</td>`).join('')}
         </tr>
     `).join('');
 }
 
 function loadTimeline() {
-    let q = document.getElementById('searchQuery').value;
-    let app = Array.from(document.querySelectorAll('.app-chk:checked')).map(c=>c.value).join(',');
-    let sev = Array.from(document.querySelectorAll('.sev-chk:checked')).map(c=>c.value).join(',');
-    let fieldKey = document.getElementById('fieldKey').value;
-    let fieldOp = document.getElementById('fieldOp').value;
-    let fieldVal = document.getElementById('fieldVal').value;
-
     // Mirror loadLogs()'s exact filter set so the chart never shows volume for logs the
     // search table itself excludes -- both hit the same _build_log_filters() server-side.
-    fetch(`/api/logs/timeline?q=${encodeURIComponent(q)}&${timeRangeQuery()}&app=${encodeURIComponent(app)}&severity=${encodeURIComponent(sev)}&fieldKey=${encodeURIComponent(fieldKey)}&fieldOp=${encodeURIComponent(fieldOp)}&fieldVal=${encodeURIComponent(fieldVal)}${includeArchiveParam()}`)
+    fetch(`/api/logs/timeline?${buildLogQueryParams()}`)
         .then(r => r.json())
         .then(data => {
             if (!timelineChart || !data.timeline) return;
@@ -1361,15 +1421,11 @@ function loadTimeline() {
 }
 
 window.exportCSV = function() {
-    let q = document.getElementById('searchQuery').value;
-    let app = Array.from(document.querySelectorAll('.app-chk:checked')).map(c=>c.value).join(',');
-    let sev = Array.from(document.querySelectorAll('.sev-chk:checked')).map(c=>c.value).join(',');
-    let fieldKey = document.getElementById('fieldKey').value;
-    let fieldOp = document.getElementById('fieldOp').value;
-    let fieldVal = document.getElementById('fieldVal').value;
+    window.location.href = `/api/logs/export?${buildLogQueryParams()}`;
+};
 
-    let exportUrl = `/api/logs/export?q=${encodeURIComponent(q)}&${timeRangeQuery()}&app=${encodeURIComponent(app)}&severity=${encodeURIComponent(sev)}&fieldKey=${encodeURIComponent(fieldKey)}&fieldOp=${encodeURIComponent(fieldOp)}&fieldVal=${encodeURIComponent(fieldVal)}${includeArchiveParam()}`;
-    window.location.href = exportUrl;
+window.exportJSON = function() {
+    window.location.href = `/api/logs/export?format=json&${buildLogQueryParams()}`;
 };
 
 let isStreaming = false;
@@ -1379,19 +1435,23 @@ function toggleStream() {
     isStreaming = !isStreaming;
     let btn = document.getElementById('streamToggleBtn');
     if (isStreaming) {
+        // Actively streaming -> green + a pause icon (click to stop). The icon/color pair
+        // was previously swapped (play icon while active, pause icon while idle), and the
+        // interval below was commented out entirely, so this toggle looked like it worked
+        // but never actually polled anything.
         btn.className = "btn btn-success btn-sm";
-        btn.innerHTML = '<i class="fa-solid fa-play"></i>';
-        // streamInterval = setInterval(autoStreamLogs, 5000); // Disabled on load
+        btn.innerHTML = '<i class="fa-solid fa-pause"></i>';
+        streamInterval = setInterval(autoStreamLogs, 5000);
     } else {
         btn.className = "btn btn-outline-secondary btn-sm";
-        btn.innerHTML = '<i class="fa-solid fa-pause"></i>';
+        btn.innerHTML = '<i class="fa-solid fa-play"></i>';
         clearInterval(streamInterval);
     }
 }
 
 function autoStreamLogs() {
     if (isStreaming && typeof loadDashboardData === 'function') {
-        loadDashboardData();
+        loadDashboardData({auto: true});
     }
 }
 
@@ -1405,36 +1465,78 @@ function renderFieldList() {
         let opt = select.options[i];
         if (!opt.value) continue;
 
+        // data-* attributes + a click listener (not inline onclick string interpolation)
+        // so a label containing a quote can't break out of an attribute -- the label is
+        // free text the user typed, unlike the key, which is now always one of
+        // LOG_SEARCH_ALLOWED_FIELDS.
         let li = document.createElement('li');
         li.className = "list-group-item bg-dark text-light border-secondary d-flex justify-content-between align-items-center py-1 px-2";
         li.innerHTML = `
-            <span><strong>${opt.text}</strong> <code class="text-muted small">(${opt.value})</code></span>
+            <span><strong>${escHtml(opt.text)}</strong> <code class="text-muted small">(${escHtml(opt.value)})</code></span>
             <div>
-                <button class="btn btn-sm btn-outline-info py-0 px-1 me-1" onclick="editField('${opt.value}', '${opt.text}')"><i class="fa-solid fa-pen"></i></button>
-                <button class="btn btn-sm btn-outline-danger py-0 px-1" onclick="deleteField('${opt.value}')"><i class="fa-solid fa-trash"></i></button>
+                <button class="btn btn-sm btn-outline-info py-0 px-1 me-1 field-edit-btn" data-key="${escHtml(opt.value)}" data-label="${escHtml(opt.text)}"><i class="fa-solid fa-pen"></i></button>
+                <button class="btn btn-sm btn-outline-danger py-0 px-1 field-delete-btn" data-key="${escHtml(opt.value)}"><i class="fa-solid fa-trash"></i></button>
             </div>
         `;
+        li.querySelector('.field-edit-btn').addEventListener('click', () => editField(opt.value, opt.text));
+        li.querySelector('.field-delete-btn').addEventListener('click', () => deleteField(opt.value));
         listGroup.appendChild(li);
     }
+}
+
+// Populates the "Field" select in the Add/Edit form with LOG_SEARCH_ALLOWED_FIELDS
+// entries not already in the fieldKey picklist -- this is what makes it structurally
+// impossible to add a field the server won't recognize (the old free-text input let you
+// type anything, which then silently searched `message` instead with no error shown).
+function populateFieldKeySelect(selectedKey) {
+    const fieldKeySelect = document.getElementById('fieldKey');
+    const existingKeys = new Set(Array.from(fieldKeySelect.options).map(o => o.value).filter(Boolean));
+    const picker = document.getElementById('customFieldName');
+    const available = LOG_SEARCH_ALLOWED_FIELDS.filter(f => !existingKeys.has(f.key) || f.key === selectedKey);
+    picker.innerHTML = available.map(f => `<option value="${f.key}">${escHtml(f.label)} (${f.key})</option>`).join('');
+    if (selectedKey) picker.value = selectedKey;
 }
 
 function editField(key, label) {
     document.getElementById('modalFormTitle').innerText = "Edit Field";
     document.getElementById('editOriginalKey').value = key;
-    document.getElementById('customFieldName').value = key;
+    populateFieldKeySelect(key);
+    document.getElementById('customFieldName').disabled = true; // editing only renames the label; re-add to change the key
     document.getElementById('customFieldLabel').value = label;
 }
 
 function resetFieldForm() {
     document.getElementById('modalFormTitle').innerText = "Add New Field";
     document.getElementById('editOriginalKey').value = '';
-    document.getElementById('customFieldName').value = '';
+    document.getElementById('customFieldName').disabled = false;
+    populateFieldKeySelect(null);
     document.getElementById('customFieldLabel').value = '';
+}
+
+// Persisted so a picklist customization survives a reload -- re-validated against
+// LOG_SEARCH_ALLOWED_FIELDS every time it's loaded, so a field the server has since
+// dropped support for can never resurface from a stale localStorage value either.
+function saveFieldPicklist() {
+    const select = document.getElementById('fieldKey');
+    const entries = Array.from(select.options).filter(o => o.value).map(o => ({key: o.value, label: o.text}));
+    try { localStorage.setItem('microdfir_search_fields', JSON.stringify(entries)); } catch (e) {}
+}
+
+function loadFieldPicklist() {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem('microdfir_search_fields') || 'null'); } catch (e) {}
+    if (!Array.isArray(saved) || !saved.length) return; // keep the server-rendered defaults
+    const byKey = Object.fromEntries(LOG_SEARCH_ALLOWED_FIELDS.map(f => [f.key, f.label]));
+    const valid = saved.filter(s => byKey[s.key]);
+    if (!valid.length) return;
+    const select = document.getElementById('fieldKey');
+    select.innerHTML = '<option value="">-- Field --</option>' +
+        valid.map(s => `<option value="${escHtml(s.key)}">${escHtml(s.label || byKey[s.key])}</option>`).join('');
 }
 
 function saveFieldOption() {
     let originalKey = document.getElementById('editOriginalKey').value;
-    let keyInput = document.getElementById('customFieldName').value.trim();
+    let keyInput = document.getElementById('customFieldName').value;
     let labelInput = document.getElementById('customFieldLabel').value.trim();
     if (!keyInput || !labelInput) return;
 
@@ -1443,12 +1545,12 @@ function saveFieldOption() {
     if (originalKey) {
         for (let i = 0; i < select.options.length; i++) {
             if (select.options[i].value === originalKey) {
-                select.options[i].value = keyInput;
                 select.options[i].text = labelInput;
                 break;
             }
         }
     } else {
+        if (Array.from(select.options).some(o => o.value === keyInput)) { resetFieldForm(); return; }
         let opt = document.createElement('option');
         opt.value = keyInput;
         opt.text = labelInput;
@@ -1456,6 +1558,7 @@ function saveFieldOption() {
         select.value = keyInput;
     }
 
+    saveFieldPicklist();
     renderFieldList();
     resetFieldForm();
 }
@@ -1468,6 +1571,7 @@ function deleteField(key) {
             break;
         }
     }
+    saveFieldPicklist();
     renderFieldList();
 }
 
@@ -1485,6 +1589,7 @@ const modalEl = document.getElementById('fieldManagerModal');
 if (modalEl) {
     modalEl.addEventListener('show.bs.modal', function () {
         renderFieldList();
+        resetFieldForm();
     });
 }
 
@@ -1493,6 +1598,7 @@ function initSearchTab() {
     setTimeRangeLabel();
     markActivePresetBtn(timeRangeState.range);
     renderFavorites();
+    loadFieldPicklist();
     renderColumnPicker();
     renderLogsTableHead();
     loadDashboardData();

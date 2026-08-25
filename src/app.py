@@ -481,7 +481,8 @@ def api_ingest():
 @login_required
 def dash():
     active_tab = request.args.get('tab', 'search')
-    return render_template('dashboard.html', active_tab=active_tab, current_user=current_user, compliance_frameworks=COMPLIANCE_FRAMEWORKS)
+    return render_template('dashboard.html', active_tab=active_tab, current_user=current_user,
+                            compliance_frameworks=COMPLIANCE_FRAMEWORKS, log_search_allowed_fields=LOG_SEARCH_ALLOWED_FIELDS)
 
 # Home count queries reuse existing canonical data sources rather than new bookkeeping:
 # ueba_entity_baselines is already this app's registry of every host/user the UEBA
@@ -572,6 +573,24 @@ def api_alerts():
     except Exception:
         alerts = []
     return jsonify(alerts)
+
+@app.route('/api/alerts/<int:aid>', methods=['PUT'])
+@login_required
+def api_alert_update(aid):
+    # Any logged-in user can acknowledge -- alert triage is an analyst task, matching
+    # every other alert-facing route (viewing/exporting/case-linking), none of which are
+    # admin-gated either.
+    db = get_db()
+    if not db.execute("SELECT 1 FROM alerts WHERE id = ?", (aid,)).fetchone():
+        return jsonify({"error": "Alert not found"}), 404
+    data = request.get_json() or {}
+    if 'acknowledged' not in data:
+        return jsonify({"error": "acknowledged is required"}), 400
+    acked = 1 if data.get('acknowledged') else 0
+    db.execute("UPDATE alerts SET acknowledged = ? WHERE id = ?", (acked, aid))
+    db.commit()
+    log_audit('alert_acknowledge' if acked else 'alert_unacknowledge', 'alert', aid)
+    return jsonify({"status": "success"})
 
 @app.route('/api/events')
 @login_required
@@ -1831,14 +1850,22 @@ def api_cases():
 def _case_item_summary(db, item_type, item_id):
     if item_type == 'alert':
         r = db.execute(
-            "SELECT a.timestamp, a.severity, a.host, a.username, COALESCE(s.title, a.rule_name, 'Custom/YARA Rule') as label, a.message "
+            "SELECT a.timestamp, a.severity, a.host, a.username, a.source_ip, COALESCE(s.title, a.rule_name, 'Custom/YARA Rule') as label, a.message "
             "FROM alerts a LEFT JOIN sigma_rules s ON a.rule_id = s.id WHERE a.id = ?", (item_id,)
         ).fetchone()
     else:
         r = db.execute(
-            "SELECT timestamp, severity, hostname as host, NULL as username, 'UEBA Anomaly' as label, message FROM events WHERE id = ?", (item_id,)
+            "SELECT timestamp, severity, hostname as host, NULL as username, NULL as source_ip, 'UEBA Anomaly' as label, message FROM events WHERE id = ?", (item_id,)
         ).fetchone()
-    return dict(r) if r else None
+    if not r:
+        return None
+    summary = dict(r)
+    if summary.get('source_ip'):
+        from geoip import lookup_country
+        summary['country_code'], summary['country_name'] = lookup_country(summary['source_ip'])
+    else:
+        summary['country_code'] = summary['country_name'] = None
+    return summary
 
 @app.route('/api/cases/<int:cid>', methods=['GET', 'PUT', 'DELETE'])
 @login_required
@@ -3408,6 +3435,38 @@ def migrate_report_history():
     except Exception:
         pass
 
+def migrate_log_search_indexes():
+    # _build_log_filters() (Log Search / UEBA Timeline) filters on host/app/severity/
+    # username/event_id constantly, but only `timestamp` was ever indexed on live_logs/
+    # live_logs_archive/alerts/events -- every non-time filter was a full table scan.
+    # CREATE INDEX IF NOT EXISTS is idempotent, so unlike most migrate_*() functions here
+    # this doesn't need a PRAGMA table_info column-existence check first.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        for stmt in (
+            "CREATE INDEX IF NOT EXISTS idx_live_logs_host ON live_logs(host)",
+            "CREATE INDEX IF NOT EXISTS idx_live_logs_app ON live_logs(app)",
+            "CREATE INDEX IF NOT EXISTS idx_live_logs_severity ON live_logs(severity)",
+            "CREATE INDEX IF NOT EXISTS idx_live_logs_username ON live_logs(username)",
+            "CREATE INDEX IF NOT EXISTS idx_live_logs_event_id ON live_logs(event_id)",
+            "CREATE INDEX IF NOT EXISTS idx_live_logs_archive_host ON live_logs_archive(host)",
+            "CREATE INDEX IF NOT EXISTS idx_live_logs_archive_app ON live_logs_archive(app)",
+            "CREATE INDEX IF NOT EXISTS idx_live_logs_archive_severity ON live_logs_archive(severity)",
+            "CREATE INDEX IF NOT EXISTS idx_live_logs_archive_username ON live_logs_archive(username)",
+            "CREATE INDEX IF NOT EXISTS idx_live_logs_archive_event_id ON live_logs_archive(event_id)",
+            "CREATE INDEX IF NOT EXISTS idx_alerts_host ON alerts(host)",
+            "CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity)",
+            "CREATE INDEX IF NOT EXISTS idx_alerts_rule_id ON alerts(rule_id)",
+            "CREATE INDEX IF NOT EXISTS idx_events_hostname ON events(hostname)",
+            "CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity)",
+            "CREATE INDEX IF NOT EXISTS idx_events_app_name ON events(app_name)",
+        ):
+            conn.execute(stmt)
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def _run_sigmahq_import():
     import urllib.request, zipfile, tempfile, shutil, socket, sqlite3
     import yaml as _yaml
@@ -3996,6 +4055,42 @@ def _parse_datetime_local(s):
         s += ':00'
     return s
 
+# Single source of truth for "which columns can Log Search's field-specific filter
+# target" -- both _build_log_filters()'s server-side allowlist and the Field Manager UI's
+# key picker (dashboard.html) read from this. Previously the UI had its own independent,
+# unvalidated list (a free-text field name the user typed), so a custom field could be
+# added to the picklist that silently fell back to searching `message` server-side with
+# no indication anything was wrong -- this list is what closes that gap.
+LOG_SEARCH_ALLOWED_FIELDS = [
+    {'key': 'username', 'label': 'User'},
+    {'key': 'host', 'label': 'Host'},
+    {'key': 'event_id', 'label': 'Event ID'},
+    {'key': 'source_ip', 'label': 'Src IP'},
+    {'key': 'destination_ip', 'label': 'Dest IP'},
+    {'key': 'message', 'label': 'Message'},
+    {'key': 'log_type', 'label': 'Type'},
+    {'key': 'process_image', 'label': 'Process Image'},
+    {'key': 'command_line', 'label': 'Command Line'},
+    {'key': 'parent_image', 'label': 'Parent Image'},
+    {'key': 'parent_command_line', 'label': 'Parent Command Line'},
+    {'key': 'original_file_name', 'label': 'Original File Name'},
+    {'key': 'raw_xml', 'label': 'Raw XML'},
+]
+
+# Sortable via the Log Search results table's clickable column headers -- restricted to
+# columns that exist with consistent meaning across all 3 UNIFIED_LOGS_SQL branches
+# (unlike e.g. `message`, sorting alphabetically on a free-text column has little value
+# and isn't worth exposing as a header click target).
+_SORTABLE_LOG_COLUMNS = {'timestamp', 'severity', 'host', 'app', 'event_id', 'username',
+                          'source_ip', 'destination_ip', 'log_type'}
+
+def _build_log_sort(args):
+    col = args.get('sort', 'timestamp')
+    if col not in _SORTABLE_LOG_COLUMNS:
+        col = 'timestamp'
+    direction = 'ASC' if args.get('dir', 'desc').lower() == 'asc' else 'DESC'
+    return f"ORDER BY {col} {direction}"
+
 def _build_log_filters(args):
     import datetime
     q = args.get('q', '').lower()
@@ -4049,9 +4144,7 @@ def _build_log_filters(args):
             conditions.append(f"UPPER(severity) IN ({','.join(['?']*len(sevs))})")
             params.extend(sevs)
 
-    allowed_columns = ['username', 'host', 'event_id', 'source_ip', 'destination_ip', 'message', 'log_type',
-                       'process_image', 'command_line', 'parent_image', 'parent_command_line', 'original_file_name',
-                       'raw_xml']
+    allowed_columns = [f['key'] for f in LOG_SEARCH_ALLOWED_FIELDS]
     if field_key and field_val:
         col = field_key if field_key in allowed_columns else 'message'
         if field_op == 'equals':
@@ -4076,6 +4169,64 @@ def _build_log_filters(args):
     where_clause = (" WHERE " + " and ".join(conditions)) if conditions else ""
     return where_clause, params
 
+# Shared by /api/logs/search and /api/logs/export's format=json path, so the two never
+# drift into different row shapes -- both consume the same sqlite3.Row list straight off
+# UNIFIED_LOGS_SQL/_WITH_ARCHIVE.
+def _build_log_response_rows(rows):
+    from geoip import lookup_country
+    logs = []
+    for r in rows:
+        process_image, command_line, parent_image = r['process_image'], r['command_line'], r['parent_image']
+        if r['log_type'] == 'anomaly' and r['raw_json']:
+            # UEBA anomaly rows don't carry real process_image/command_line columns
+            # (they're log lines from `events`, not Sysmon-parsed live_logs rows) -- the
+            # process detail ueba_engine.py captured lives inside raw_json instead, same
+            # as /api/ueba/detections used to parse before that endpoint was folded into
+            # this one for the merged UEBA Timeline tab.
+            try:
+                raw = json.loads(r['raw_json'])
+            except (TypeError, ValueError):
+                raw = {}
+            process_image = process_image or raw.get('process_image')
+            command_line = command_line or raw.get('command_line')
+            parent_image = parent_image or raw.get('parent_image')
+        # GeoIP is a fast local mmdb lookup (no network call), but still only worth paying
+        # for on alert rows -- source_ip is rarely externally-routable on a raw log/anomaly
+        # row, and doing this for every one of up to 2000 rows would add up for no benefit.
+        country_code = country_name = None
+        if r['log_type'] == 'alert' and r['source_ip']:
+            country_code, country_name = lookup_country(r['source_ip'])
+        logs.append({
+            'id': r['item_id'],
+            'time': r['timestamp'],
+            'severity': r['severity'],
+            'host': r['host'],
+            'app': r['app'],
+            'event_id': r['event_id'],
+            'username': r['username'],
+            'entity_type': r['entity_type'],
+            'source_ip': r['source_ip'] if r['source_ip'] is not None else '-',
+            'destination_ip': r['destination_ip'] if r['destination_ip'] is not None else '-',
+            'country_code': country_code,
+            'country_name': country_name,
+            'message': r['message'],
+            'type': r['log_type'],
+            'rule_id': r['rule_id'],
+            'rule_source': r['rule_source'],
+            'log_event_id': r['log_event_id'],
+            'log_app': r['log_app'],
+            'raw_json': r['raw_json'],
+            'process_image': process_image,
+            'command_line': command_line,
+            'parent_image': parent_image,
+            'parent_command_line': r['parent_command_line'],
+            'original_file_name': r['original_file_name'],
+            'raw_xml': r['raw_xml'],
+            'occurrence_count': r['occurrence_count'],
+            'last_seen': r['last_seen']
+        })
+    return logs
+
 @app.route('/api/logs/search', methods=['GET'])
 @login_required
 def api_logs_search():
@@ -4084,54 +4235,20 @@ def api_logs_search():
         db = get_db()
         where_clause, params = _build_log_filters(request.args)
         source_sql = UNIFIED_LOGS_SQL_WITH_ARCHIVE if request.args.get('include_archive') == '1' else UNIFIED_LOGS_SQL
+        sort_clause = _build_log_sort(request.args)
         limit = max(1, min(request.args.get('limit', 300, type=int) or 300, 2000))
 
         total_count = db.execute(f"SELECT COUNT(*) FROM {source_sql}{where_clause}", params).fetchone()[0]
-        rows = db.execute(f"SELECT * FROM {source_sql}{where_clause} ORDER BY timestamp DESC LIMIT ?", params + [limit]).fetchall()
+        rows = db.execute(f"SELECT * FROM {source_sql}{where_clause} {sort_clause} LIMIT ?", params + [limit]).fetchall()
+        logs = _build_log_response_rows(rows)
 
-        logs = []
-        for r in rows:
-            process_image, command_line, parent_image = r['process_image'], r['command_line'], r['parent_image']
-            if r['log_type'] == 'anomaly' and r['raw_json']:
-                # UEBA anomaly rows don't carry real process_image/command_line columns
-                # (they're log lines from `events`, not Sysmon-parsed live_logs rows) -- the
-                # process detail ueba_engine.py captured lives inside raw_json instead, same
-                # as /api/ueba/detections used to parse before that endpoint was folded into
-                # this one for the merged UEBA Timeline tab.
-                try:
-                    raw = json.loads(r['raw_json'])
-                except (TypeError, ValueError):
-                    raw = {}
-                process_image = process_image or raw.get('process_image')
-                command_line = command_line or raw.get('command_line')
-                parent_image = parent_image or raw.get('parent_image')
-            logs.append({
-                'id': r['item_id'],
-                'time': r['timestamp'],
-                'severity': r['severity'],
-                'host': r['host'],
-                'app': r['app'],
-                'event_id': r['event_id'],
-                'username': r['username'],
-                'entity_type': r['entity_type'],
-                'source_ip': r['source_ip'] if r['source_ip'] is not None else '-',
-                'destination_ip': r['destination_ip'] if r['destination_ip'] is not None else '-',
-                'message': r['message'],
-                'type': r['log_type'],
-                'rule_id': r['rule_id'],
-                'rule_source': r['rule_source'],
-                'log_event_id': r['log_event_id'],
-                'log_app': r['log_app'],
-                'raw_json': r['raw_json'],
-                'process_image': process_image,
-                'command_line': command_line,
-                'parent_image': parent_image,
-                'parent_command_line': r['parent_command_line'],
-                'original_file_name': r['original_file_name'],
-                'raw_xml': r['raw_xml'],
-                'occurrence_count': r['occurrence_count'],
-                'last_seen': r['last_seen']
-            })
+        # `poll=1` marks an auto-refresh (UEBA Timeline's Live Streaming Mode), not a
+        # deliberate search -- auditing every 5-second poll would flood audit_log with
+        # near-duplicate entries for an otherwise-idle browser tab. A user-initiated search
+        # (button click, filter change, Timeline tab load) always gets logged.
+        if request.args.get('poll') != '1':
+            log_audit('log_search', 'search', None,
+                      f"q={request.args.get('q', '')[:100]!r} range={request.args.get('range', '24h')} matches={total_count}")
 
         return jsonify({'logs': logs, 'count': len(logs), 'total_matches': total_count})
     except Exception as e:
@@ -4146,11 +4263,26 @@ def export_logs_csv():
         db = get_db()
         where_clause, params = _build_log_filters(request.args)
         source_sql = UNIFIED_LOGS_SQL_WITH_ARCHIVE if request.args.get('include_archive') == '1' else UNIFIED_LOGS_SQL
+        sort_clause = _build_log_sort(request.args)
+        export_format = 'json' if request.args.get('format') == 'json' else 'csv'
 
         # Increased export limit (10,000 records) for deep incident analysis.
-        query = f"SELECT * FROM {source_sql}{where_clause} ORDER BY timestamp DESC LIMIT 10000"
+        query = f"SELECT * FROM {source_sql}{where_clause} {sort_clause} LIMIT 10000"
         cursor = db.execute(query, params)
         rows = cursor.fetchall()
+
+        # Exports are always a deliberate action (unlike search, never auto-polled) --
+        # data leaving the system is exactly the chain-of-custody moment worth recording.
+        log_audit('log_export', 'search', None,
+                  f"format={export_format} rows={len(rows)} q={request.args.get('q', '')[:100]!r}")
+
+        if export_format == 'json':
+            logs = _build_log_response_rows(rows)
+            return Response(
+                json.dumps({'logs': logs, 'count': len(logs)}, default=str),
+                mimetype="application/json",
+                headers={"Content-Disposition": "attachment;filename=micro_soc_complete_export.json"}
+            )
 
         column_names = [description[0] for description in cursor.description] if cursor.description else [
             'timestamp', 'severity', 'host', 'app', 'event_id', 'username', 'source_ip', 'destination_ip', 'message', 'log_type'
@@ -4995,6 +5127,7 @@ migrate_anomaly_rule_conditions_logic()
 migrate_seed_ueba_rules()
 migrate_risk_score_events_rule_id()
 migrate_report_history()
+migrate_log_search_indexes()
 
 try:
     # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every

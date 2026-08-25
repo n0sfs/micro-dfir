@@ -183,9 +183,10 @@ function itemSummaryLine(item) {
     if (!item.summary) return '<span class="text-muted small">(underlying record no longer exists)</span>';
     const s = item.summary;
     const kind = item.item_type === 'alert' ? 'Alert' : 'UEBA Anomaly';
+    const countryBadge = s.country_name ? ` <span class="badge bg-secondary" title="${escHtml(s.country_code)}">${escHtml(s.country_name)}</span>` : '';
     return `<span class="badge ${severityBadgeClass(s.severity)} me-2">${escHtml((s.severity || '').toUpperCase())}</span>` +
            `<strong>${escHtml(s.label)}</strong> <span class="text-muted small">(${kind})</span><br>` +
-           `<span class="text-muted small">${escHtml(s.host || '')}${s.username ? ' · ' + escHtml(s.username) : ''} · ${escHtml(s.timestamp)}</span><br>` +
+           `<span class="text-muted small">${escHtml(s.host || '')}${s.username ? ' · ' + escHtml(s.username) : ''} · ${escHtml(s.timestamp)}${countryBadge}</span><br>` +
            `<span class="small">${escHtml((s.message || '').slice(0, 200))}</span>`;
 }
 
