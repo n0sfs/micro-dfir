@@ -67,3 +67,14 @@ CREATE INDEX IF NOT EXISTS idx_anomaly_rule_conditions_rule ON anomaly_rule_cond
 -- lookup table download_report() keys off of instead of a raw user-supplied filename.
 CREATE TABLE IF NOT EXISTS report_history (id INTEGER PRIMARY KEY AUTOINCREMENT, report_type TEXT NOT NULL, filename TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'success', triggered_by TEXT, trigger_source TEXT NOT NULL DEFAULT 'manual', started_at DATETIME, completed_at DATETIME, file_size_bytes INTEGER, error_message TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS idx_report_history_type_time ON report_history(report_type, created_at);
+-- Curated MISP-warninglist-style suppression lists (vendored static data, seeded by
+-- migrate_warninglists() -- see src/warninglists.py) so a CDN/public-DNS IP that
+-- transiently shows up in a feed never fires the IOC-IP Sigma correlation.
+CREATE TABLE IF NOT EXISTS warninglists (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT, type TEXT NOT NULL, enabled BOOLEAN DEFAULT 1);
+CREATE TABLE IF NOT EXISTS warninglist_entries (id INTEGER PRIMARY KEY AUTOINCREMENT, warninglist_id INTEGER NOT NULL, value TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_warninglist_entries_wid ON warninglist_entries(warninglist_id);
+-- One row per time a synced IOC was actually matched against this environment's own
+-- data (currently: the IOC-IP Sigma correlation firing a new alert) -- decoupled from
+-- stix_indicators itself so an indicator can accumulate multiple observed-here events.
+CREATE TABLE IF NOT EXISTS ioc_sightings (id INTEGER PRIMARY KEY AUTOINCREMENT, stix_id TEXT NOT NULL, seen_at DATETIME DEFAULT CURRENT_TIMESTAMP, source TEXT, log_ref TEXT);
+CREATE INDEX IF NOT EXISTS idx_ioc_sightings_stix_id ON ioc_sightings(stix_id);

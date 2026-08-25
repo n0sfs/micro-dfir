@@ -65,6 +65,30 @@
                 </div>
             </div>
 
+            <div class="card bg-dark border-secondary mb-4">
+                <div class="card-header">
+                    <i class="fa-solid fa-shield-halved me-2"></i>Warninglist Suppression
+                    <span class="text-muted small ms-2">Suppresses known-benign IPs (CDNs, public DNS resolvers, private ranges) from the IOC-IP correlation, so they never fire a false "known-bad IP" alert.</span>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-dark table-hover mb-0 align-middle">
+                            <thead>
+                                <tr>
+                                    <th class="ps-3">List</th>
+                                    <th>Type</th>
+                                    <th>Entries</th>
+                                    <th>Enabled</th>
+                                </tr>
+                            </thead>
+                            <tbody id="warninglistsTableBody">
+                                <tr><td colspan="4" class="text-center text-muted py-3">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
             <div class="card bg-dark border-secondary">
                 <div class="card-header">
                     <i class="fa-solid fa-list-check me-2"></i>Indicator Browser
@@ -110,10 +134,11 @@
                                             </div>
                                         </div>
                                     </th>
+                                    <th title="How many times this indicator has actually matched our own environment (via the IOC-IP correlation), not just how many times it's been seen in the feed">Sightings</th>
                                 </tr>
                             </thead>
                             <tbody id="iocTableBody">
-                                <tr><td colspan="7" class="text-center text-muted py-4">Loading indicators...</td></tr>
+                                <tr><td colspan="8" class="text-center text-muted py-4">Loading indicators...</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -262,6 +287,10 @@
                 <option value="feodotracker">Feodo Tracker Botnet C2 IPs (public — API key optional)</option>
                 <option value="otx">AlienVault OTX Subscribed Pulses (API key required)</option>
                 <option value="yaraify">YARAify Bulk YARA Rule Pack (public — API key optional)</option>
+                <option value="misp">MISP-format Feed (public — e.g. CIRCL OSINT)</option>
+                <option value="sslbl">SSLBL Malicious TLS Certificates (public)</option>
+                <option value="spamhaus_drop">Spamhaus DROP (hijacked netblocks, public)</option>
+                <option value="tor_exit">Tor Exit Node List (public)</option>
                 <option value="taxii">STIX / TAXII 2.1 Server</option>
                 <option value="csv">CSV File Upload</option>
             </select>
@@ -274,11 +303,14 @@
             </div>
             <input type="hidden" id="feedCsrfToken" value="{{ csrf_token() }}">
         </div>
-        <div id="taxiiFields" style="display:none;">
+        <div id="urlField" style="display:none;">
             <div class="mb-3">
-                <label class="form-label">Discovery / API Root URL</label>
+                <label class="form-label" id="feedUrlLabel">Discovery / API Root URL</label>
                 <input type="text" id="feedUrl" class="form-control bg-dark text-light border-secondary" placeholder="https://taxii.example.com/api/v1/taxii2/feeds">
+                <div id="feedUrlHelp" class="form-text text-muted"></div>
             </div>
+        </div>
+        <div id="taxiiFields" style="display:none;">
             <div class="mb-3">
                 <label class="form-label">Collection ID</label>
                 <input type="text" id="feedCollection" class="form-control bg-dark text-light border-secondary" placeholder="collection-id-or-number">
@@ -700,17 +732,33 @@ function initFeedModal() { if (!feedModal) feedModal = new bootstrap.Modal(docum
 
 // Feed types that need the API key field shown: TAXII servers can optionally use a
 // bearer token instead of basic auth, and OTX requires one outright.
-const FEED_TYPES_WITH_API_KEY = ['taxii', 'otx', 'yaraify', 'threatfox', 'urlhaus', 'feodotracker'];
+const FEED_TYPES_WITH_API_KEY = ['taxii', 'otx', 'yaraify', 'threatfox', 'urlhaus', 'feodotracker', 'sslbl'];
 
-// These 3 keep working with zero configuration (their legacy public export endpoints
+// These keep working with zero configuration (their legacy public export endpoints
 // need no auth) -- a key here only raises the rate limit / attributes requests to your
 // abuse.ch account instead of anonymous access, so it's optional, not required.
-const FEED_TYPES_WITH_OPTIONAL_API_KEY = ['threatfox', 'urlhaus', 'feodotracker', 'yaraify'];
+const FEED_TYPES_WITH_OPTIONAL_API_KEY = ['threatfox', 'urlhaus', 'feodotracker', 'yaraify', 'sslbl'];
+
+// Feed types with a configurable base URL, and what that URL means for each.
+const FEED_TYPES_WITH_URL = ['taxii', 'misp'];
+const FEED_URL_LABELS = { taxii: 'Discovery / API Root URL', misp: 'Feed Base URL' };
+const FEED_URL_HELP = {
+    taxii: '',
+    misp: 'The directory containing manifest.json, e.g. https://www.circl.lu/doc/misp/feed-osint/ — no MISP instance or account needed.'
+};
+
+// spamhaus_drop and tor_exit are fixed public URLs with zero configuration at all
+// (not even an optional API key) -- only their sync interval is settable.
 
 function toggleFeedTypeFields() {
     const type = document.getElementById('feedType').value;
     const isCsv = type === 'csv';
     document.getElementById('csvFields').style.display = isCsv ? 'block' : 'none';
+    document.getElementById('urlField').style.display = (!isCsv && FEED_TYPES_WITH_URL.includes(type)) ? 'block' : 'none';
+    document.getElementById('feedUrlLabel').innerText = FEED_URL_LABELS[type] || 'Feed Base URL';
+    document.getElementById('feedUrlHelp').innerText = FEED_URL_HELP[type] || '';
+    document.getElementById('feedUrl').placeholder = type === 'misp'
+        ? 'https://www.circl.lu/doc/misp/feed-osint/' : 'https://taxii.example.com/api/v1/taxii2/feeds';
     document.getElementById('taxiiFields').style.display = (!isCsv && type === 'taxii') ? 'block' : 'none';
     document.getElementById('apiKeyField').style.display = (!isCsv && FEED_TYPES_WITH_API_KEY.includes(type)) ? 'block' : 'none';
     document.getElementById('feedApiKeyLabel').innerText = FEED_TYPES_WITH_OPTIONAL_API_KEY.includes(type)
@@ -848,13 +896,16 @@ function statusBadge(status) {
 
 const FEED_TYPE_LABELS = {
     threatfox: 'ThreatFox', taxii: 'STIX/TAXII 2.1', otx: 'AlienVault OTX',
-    urlhaus: 'URLhaus', feodotracker: 'Feodo Tracker', yaraify: 'YARAify', csv: 'CSV Upload'
+    urlhaus: 'URLhaus', feodotracker: 'Feodo Tracker', yaraify: 'YARAify', csv: 'CSV Upload',
+    misp: 'MISP-format Feed', sslbl: 'SSLBL Cert Blacklist', spamhaus_drop: 'Spamhaus DROP', tor_exit: 'Tor Exit List'
 };
 const FEED_TYPE_SOURCES = {
     threatfox: 'threatfox.abuse.ch (public)', urlhaus: 'urlhaus.abuse.ch (public)',
     feodotracker: 'feodotracker.abuse.ch (public)', otx: 'otx.alienvault.com (API key)',
     yaraify: 'yaraify.abuse.ch (public) — syncs YARA rule files, not IOCs',
-    csv: 'Uploaded file (one-time snapshot)'
+    csv: 'Uploaded file (one-time snapshot)',
+    sslbl: 'sslbl.abuse.ch (public)', spamhaus_drop: 'spamhaus.org/drop (public)',
+    tor_exit: 'check.torproject.org (public)'
 };
 
 function syncIntervalLabel(mins) {
@@ -882,7 +933,7 @@ function loadFeeds() {
                 <tr>
                     <td class="ps-3"><strong>${escHtml(f.name)}</strong></td>
                     <td><span class="badge bg-secondary">${escHtml(FEED_TYPE_LABELS[f.feed_type] || f.feed_type)}</span></td>
-                    <td class="text-muted small text-truncate" style="max-width:200px;">${escHtml(f.feed_type === 'taxii' ? (f.discovery_url || '') : (FEED_TYPE_SOURCES[f.feed_type] || ''))}</td>
+                    <td class="text-muted small text-truncate" style="max-width:200px;">${escHtml(['taxii', 'misp'].includes(f.feed_type) ? (f.discovery_url || '') : (FEED_TYPE_SOURCES[f.feed_type] || ''))}</td>
                     <td>
                         <div class="form-check form-switch mb-0">
                             <input class="form-check-input" type="checkbox" ${f.enabled ? 'checked' : ''} ${isAdmin ? '' : 'disabled'} onchange="toggleFeedEnabled(${f.id}, this.checked)">
@@ -907,6 +958,46 @@ function loadFeeds() {
             `).join('');
         })
         .catch(err => console.error('Error loading feeds:', err));
+}
+
+function loadWarninglists() {
+    fetch('/api/ti/warninglists')
+        .then(r => r.json())
+        .then(lists => {
+            const tbody = document.getElementById('warninglistsTableBody');
+            if (!lists.length) {
+                tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">No warninglists configured.</td></tr>';
+                return;
+            }
+            const isAdmin = {{ 'true' if current_user.role == 'admin' else 'false' }};
+            tbody.innerHTML = lists.map(w => `
+                <tr>
+                    <td class="ps-3"><strong title="${escHtml(w.description || '')}">${escHtml(w.name)}</strong></td>
+                    <td><span class="badge bg-secondary">${escHtml(w.type)}</span></td>
+                    <td>${w.entry_count}</td>
+                    <td>
+                        <div class="form-check form-switch mb-0">
+                            <input class="form-check-input" type="checkbox" ${w.enabled ? 'checked' : ''} ${isAdmin ? '' : 'disabled'} onchange="toggleWarninglistEnabled(${w.id}, this.checked)">
+                        </div>
+                    </td>
+                </tr>
+            `).join('');
+        })
+        .catch(err => console.error('Error loading warninglists:', err));
+}
+
+async function toggleWarninglistEnabled(id, checked) {
+    try {
+        const res = await fetch(`/api/ti/warninglists/${id}`, {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled: checked})
+        });
+        if (!res.ok) { const err = await res.json().catch(() => ({})); toast(err.error || 'Failed to update warninglist.', 'danger'); }
+    } catch (e) {
+        toast('Error: ' + e, 'danger');
+    } finally {
+        loadWarninglists();
+    }
 }
 
 // ---- Indicator Browser column filters (Type / Source / Status) ----
@@ -1004,7 +1095,7 @@ function loadIocs() {
                 : `Showing ${data.iocs.length} of ${data.total} indicators`;
             const tbody = document.getElementById('iocTableBody');
             if (!data.iocs || data.iocs.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-4">${filtered ? 'No indicators match your filters.' : 'No indicators ingested yet. Add or sync a feed above.'}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="8" class="text-center text-muted py-4">${filtered ? 'No indicators match your filters.' : 'No indicators ingested yet. Add or sync a feed above.'}</td></tr>`;
                 return;
             }
             tbody.innerHTML = data.iocs.map(i => `
@@ -1016,6 +1107,9 @@ function loadIocs() {
                     <td class="text-muted small">${escHtml(i.source_name || 'Unknown')}</td>
                     <td class="text-nowrap small text-muted">${escHtml(i.valid_from || '')}</td>
                     <td>${i.revoked ? '<span class="badge bg-secondary">Revoked</span>' : '<span class="badge bg-danger">Active</span>'}</td>
+                    <td>${i.sighting_count > 0
+                        ? `<span class="badge bg-warning text-dark" title="Last observed here: ${escHtml(i.last_sighted || '')}">${i.sighting_count}</span>`
+                        : '<span class="text-muted small">—</span>'}</td>
                 </tr>
             `).join('');
         })
@@ -1024,6 +1118,7 @@ function loadIocs() {
 
 updateHuntStats();
 loadFeeds();
+loadWarninglists();
 loadIocs();
 loadIocFacets();
 initIocFilterDropdowns();
