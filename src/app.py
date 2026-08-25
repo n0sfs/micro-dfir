@@ -4046,6 +4046,7 @@ def _build_log_filters(args):
     time_range = args.get('range', '24h')
     app_filter = args.get('app', '')
     severity_filter = args.get('severity', '')
+    type_filter = args.get('types', '')
     field_key = args.get('fieldKey', '')
     field_op = args.get('fieldOp', 'contains')
     field_val = args.get('fieldVal', '').lower()
@@ -4073,6 +4074,15 @@ def _build_log_filters(args):
         if apps:
             conditions.append(f"app IN ({','.join(['?']*len(apps))})")
             params.extend(apps)
+
+    if type_filter:
+        # log_type is one of 'log' / 'alert' / 'anomaly' -- the UEBA Timeline tab's
+        # event-type checkboxes (All Logs / Sigma & Custom Alerts / UEBA Alerts) drive
+        # this, same IN-list shape as the app/severity filters above.
+        types = [t.strip() for t in type_filter.split(',') if t.strip()]
+        if types:
+            conditions.append(f"log_type IN ({','.join(['?']*len(types))})")
+            params.extend(types)
 
     if severity_filter:
         # Sigma/UEBA severities are Title-case (Critical/High/Medium), live_logs and the
@@ -4118,9 +4128,10 @@ def api_logs_search():
         db = get_db()
         where_clause, params = _build_log_filters(request.args)
         source_sql = UNIFIED_LOGS_SQL_WITH_ARCHIVE if request.args.get('include_archive') == '1' else UNIFIED_LOGS_SQL
+        limit = max(1, min(request.args.get('limit', 300, type=int) or 300, 2000))
 
         total_count = db.execute(f"SELECT COUNT(*) FROM {source_sql}{where_clause}", params).fetchone()[0]
-        rows = db.execute(f"SELECT * FROM {source_sql}{where_clause} ORDER BY timestamp DESC LIMIT 300", params).fetchall()
+        rows = db.execute(f"SELECT * FROM {source_sql}{where_clause} ORDER BY timestamp DESC LIMIT ?", params + [limit]).fetchall()
 
         logs = [{
             'id': r['item_id'],
