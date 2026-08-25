@@ -691,7 +691,7 @@ def api_ti_lookup():
         return jsonify({'status': 'error', 'message': 'No IOC value provided'}), 400
     db = get_db()
     rows = db.execute(
-        "SELECT si.stix_id, si.ioc_type, si.name, si.description, si.revoked, tf.name as source_name, "
+        "SELECT si.stix_id, si.ioc_type, si.name, si.description, si.revoked, si.feed_id, tf.name as source_name, "
         "(SELECT COUNT(*) FROM ioc_sightings s WHERE s.stix_id = si.stix_id) as sighting_count, "
         "(SELECT MAX(seen_at) FROM ioc_sightings s WHERE s.stix_id = si.stix_id) as last_sighted "
         "FROM stix_indicators si LEFT JOIN ti_feeds tf ON si.feed_id = tf.id "
@@ -704,7 +704,72 @@ def api_ti_lookup():
     active = [m for m in matches if not m['revoked']]
     if not active:
         return jsonify({'status': 'revoked', 'message': 'Matches only revoked/inactive IOC(s).', 'matches': matches})
-    return jsonify({'status': 'malicious', 'matches': matches})
+    # Cross-feed corroboration: how many DISTINCT active feeds independently reported
+    # this exact value -- every active row already fetched above, so no extra query.
+    corroboration_count = len({m['feed_id'] for m in active if m['feed_id'] is not None})
+    return jsonify({'status': 'malicious', 'matches': matches, 'corroboration_count': corroboration_count})
+
+_ENRICHMENT_KEY_PLACEHOLDER = '••••••••'
+
+@app.route('/api/settings/enrichment', methods=['GET', 'POST'])
+@login_required
+def api_enrichment_settings():
+    db = get_db()
+    row = db.execute("SELECT value FROM settings WHERE key = 'enrichment_api_keys'").fetchone()
+    keys = json.loads(row['value']) if row and row['value'] else {}
+    if request.method == 'GET':
+        # Never echo a real key back to the browser -- same masked-placeholder pattern
+        # as the alert-notifications SMTP password.
+        return jsonify({'abuseipdb_api_key': _ENRICHMENT_KEY_PLACEHOLDER if keys.get('abuseipdb_api_key') else ''})
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    d = request.json or {}
+    new_key = d.get('abuseipdb_api_key')
+    if new_key is not None and new_key != _ENRICHMENT_KEY_PLACEHOLDER:
+        keys['abuseipdb_api_key'] = new_key
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('enrichment_api_keys', ?)", (json.dumps(keys),))
+    db.commit()
+    log_audit('enrichment_settings_change', 'settings', None, 'abuseipdb_api_key ' + ('set' if keys.get('abuseipdb_api_key') else 'cleared'))
+    return jsonify({'status': 'success'})
+
+@app.route('/api/ti/enrich', methods=['POST'])
+@login_required
+def api_ti_enrich():
+    from analyzers import applicable_analyzers, ENRICHMENT_CACHE_TTL_HOURS
+    d = request.get_json() or {}
+    value = (d.get('value') or '').strip()
+    ioc_type = (d.get('ioc_type') or '').strip()
+    if not value:
+        return jsonify({'error': 'value is required'}), 400
+    analyzers = applicable_analyzers(ioc_type)
+    if not analyzers:
+        return jsonify({'results': [], 'message': f'No enrichment analyzers apply to type "{ioc_type or "unknown"}" yet.'})
+
+    db = get_db()
+    key_row = db.execute("SELECT value FROM settings WHERE key = 'enrichment_api_keys'").fetchone()
+    api_keys = json.loads(key_row['value']) if key_row and key_row['value'] else {}
+
+    results = []
+    for a in analyzers:
+        cached = db.execute(
+            "SELECT verdict, summary, fetched_at FROM enrichment_results WHERE value = ? AND source = ? "
+            "AND fetched_at >= datetime('now', ?)",
+            (value, a['key'], f'-{ENRICHMENT_CACHE_TTL_HOURS} hours')
+        ).fetchone()
+        if cached:
+            results.append({'source': a['label'], 'verdict': cached['verdict'], 'summary': cached['summary'],
+                             'cached': True, 'fetched_at': cached['fetched_at']})
+            continue
+        api_key = api_keys.get(a['settings_key']) if a.get('requires_key') else None
+        out = a['run'](value, api_key)
+        db.execute(
+            "INSERT INTO enrichment_results (value, source, verdict, summary, raw_json, fetched_at) VALUES (?, ?, ?, ?, ?, datetime('now')) "
+            "ON CONFLICT(value, source) DO UPDATE SET verdict=excluded.verdict, summary=excluded.summary, raw_json=excluded.raw_json, fetched_at=excluded.fetched_at",
+            (value, a['key'], out['verdict'], out['summary'], json.dumps(out.get('raw') or {}))
+        )
+        db.commit()
+        results.append({'source': a['label'], 'verdict': out['verdict'], 'summary': out['summary'], 'cached': False})
+    return jsonify({'results': results})
 
 
 # ==========================================
@@ -1011,7 +1076,13 @@ def api_ti_iocs():
         f"SELECT si.stix_id, si.type, si.ioc_type, si.name, si.description, si.pattern, si.valid_from, si.revoked, "
         f"si.inserted_at, si.feed_id, tf.name AS source_name, "
         f"(SELECT COUNT(*) FROM ioc_sightings s WHERE s.stix_id = si.stix_id) AS sighting_count, "
-        f"(SELECT MAX(seen_at) FROM ioc_sightings s WHERE s.stix_id = si.stix_id) AS last_sighted "
+        f"(SELECT MAX(seen_at) FROM ioc_sightings s WHERE s.stix_id = si.stix_id) AS last_sighted, "
+        # Cross-feed corroboration, computed at read time rather than merged/deduped at
+        # write time -- each feed's own row (and its own provenance: name/description/
+        # feed_id) stays intact, but a value independently reported by more than one feed
+        # is a real confidence signal worth surfacing. Uses the same idx_stix_pattern
+        # index the q= search above already relies on, so this stays cheap per row.
+        f"(SELECT COUNT(DISTINCT feed_id) FROM stix_indicators si2 WHERE si2.pattern = si.pattern AND si2.revoked = 0) AS corroboration_count "
         f"FROM stix_indicators si "
         f"LEFT JOIN ti_feeds tf ON si.feed_id = tf.id {where} ORDER BY si.inserted_at DESC LIMIT ?",
         params + [limit]
@@ -3435,6 +3506,24 @@ def migrate_seed_ioc_correlation_rule():
     except Exception:
         pass
 
+def migrate_enrichment_results():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS enrichment_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            value TEXT NOT NULL,
+            source TEXT NOT NULL,
+            verdict TEXT,
+            summary TEXT,
+            raw_json TEXT,
+            fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(value, source)
+        )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_live_logs_ip_columns():
     # source_ip/destination_ip were added to schema.sql at some point but no migration
     # ever backfilled them onto already-deployed databases, and no ingest path ever
@@ -5789,6 +5878,7 @@ migrate_saved_searches()
 migrate_warninglists()
 migrate_ioc_sightings()
 migrate_seed_ioc_correlation_rule()
+migrate_enrichment_results()
 
 try:
     # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every

@@ -40,9 +40,19 @@
                     <div class="d-flex flex-wrap gap-2 align-items-center">
                         <input type="text" id="iocLookupInput" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:420px;" placeholder="IP, domain, URL, or file hash..." onkeyup="if(event.key === 'Enter') runIocLookup()">
                         <button type="button" class="btn btn-sm btn-primary" onclick="runIocLookup()"><i class="fa-solid fa-search me-1"></i>Check</button>
+                        <button type="button" id="iocEnrichBtn" class="btn btn-sm btn-outline-info" style="display:none;" onclick="runIocEnrich()"><i class="fa-solid fa-flask me-1"></i>Enrich</button>
                         <span id="iocLookupResult" class="small"></span>
                     </div>
-                    <div class="form-text text-muted">Exact-match check against the local IOC set synced from your Threat Feeds below — not a live external lookup.</div>
+                    <div id="iocEnrichResults" class="mt-2 small" style="display:none;"></div>
+                    <div class="form-text text-muted">Exact-match check against the local IOC set synced from your Threat Feeds below — not a live external lookup. "Enrich" queries free-tier external sources (Shodan InternetDB, AbuseIPDB) on demand, cached 24h.</div>
+                    {% if current_user.role == 'admin' %}
+                    <div class="d-flex flex-wrap gap-2 align-items-center mt-3 pt-2 border-top border-secondary">
+                        <label class="form-label small text-muted mb-0">AbuseIPDB API Key</label>
+                        <input type="password" id="abuseipdbKeyInput" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:280px;" placeholder="Leave blank to keep existing">
+                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="saveEnrichmentSettings()"><i class="fa-solid fa-floppy-disk me-1"></i>Save</button>
+                        <span id="enrichSettingsMsg" class="small text-muted"></span>
+                    </div>
+                    {% endif %}
                 </div>
             </div>
 
@@ -972,28 +982,106 @@ function loadFeeds() {
         .catch(err => console.error('Error loading feeds:', err));
 }
 
+// Populated by runIocLookup() so runIocEnrich() knows what to enrich and can pass
+// along the matched ioc_type (falls back to a client-side IP-shape guess when there
+// was no local match at all, since "enrich a clean IP" is still a useful action).
+let lastLookupValue = '';
+let lastLookupIocType = '';
+const _IPV4_SHAPE_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
+
 async function runIocLookup() {
     const input = document.getElementById('iocLookupInput');
     const resultEl = document.getElementById('iocLookupResult');
+    const enrichBtn = document.getElementById('iocEnrichBtn');
     const ioc = input.value.trim();
-    if (!ioc) { resultEl.innerHTML = '<span class="text-muted">Enter a value to check.</span>'; return; }
+    document.getElementById('iocEnrichResults').style.display = 'none';
+    if (!ioc) { resultEl.innerHTML = '<span class="text-muted">Enter a value to check.</span>'; enrichBtn.style.display = 'none'; return; }
     resultEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
     try {
         const res = await fetch('/api/ti/lookup', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ioc})});
         const data = await res.json();
-        if (!res.ok) { resultEl.innerHTML = `<span class="text-danger">${escHtml(data.message || 'Lookup failed.')}</span>`; return; }
+        if (!res.ok) { resultEl.innerHTML = `<span class="text-danger">${escHtml(data.message || 'Lookup failed.')}</span>`; enrichBtn.style.display = 'none'; return; }
+        lastLookupValue = ioc;
+        lastLookupIocType = _IPV4_SHAPE_RE.test(ioc) ? 'ip' : '';
         if (data.status === 'clean') {
             resultEl.innerHTML = '<span class="text-success"><i class="fa-solid fa-circle-check me-1"></i>No match in the local IOC set.</span>';
         } else if (data.status === 'revoked') {
             resultEl.innerHTML = `<span class="text-muted"><i class="fa-solid fa-circle-minus me-1"></i>Matches ${data.matches.length} revoked/inactive indicator(s) only.</span>`;
+            lastLookupIocType = data.matches[0].ioc_type || lastLookupIocType;
         } else {
             const m = data.matches.find(x => !x.revoked) || data.matches[0];
+            lastLookupIocType = m.ioc_type || lastLookupIocType;
             const sightingNote = m.sighting_count > 0 ? `, observed here ${m.sighting_count}x (last: ${escHtml(m.last_sighted || '')})` : ', never observed in this environment';
-            resultEl.innerHTML = `<span class="text-danger"><i class="fa-solid fa-triangle-exclamation me-1"></i>MATCH — ${escHtml(m.name || m.ioc_type)} (source: ${escHtml(m.source_name || 'Unknown')}${sightingNote})</span>`;
+            const corrobNote = data.corroboration_count > 1 ? `, corroborated by ${data.corroboration_count} independent feeds` : '';
+            resultEl.innerHTML = `<span class="text-danger"><i class="fa-solid fa-triangle-exclamation me-1"></i>MATCH — ${escHtml(m.name || m.ioc_type)} (source: ${escHtml(m.source_name || 'Unknown')}${corrobNote}${sightingNote})</span>`;
         }
+        enrichBtn.style.display = lastLookupIocType.includes('ip') ? 'inline-block' : 'none';
     } catch (e) {
         resultEl.innerHTML = `<span class="text-danger">Error: ${escHtml(String(e))}</span>`;
+        enrichBtn.style.display = 'none';
     }
+}
+
+function enrichVerdictBadge(verdict) {
+    const map = {malicious: 'bg-danger', suspicious: 'bg-warning text-dark', clean: 'bg-success', info: 'bg-info text-dark', unconfigured: 'bg-secondary', error: 'bg-secondary'};
+    return `<span class="badge ${map[verdict] || 'bg-secondary'}">${escHtml(verdict)}</span>`;
+}
+
+async function runIocEnrich() {
+    const resultsEl = document.getElementById('iocEnrichResults');
+    if (!lastLookupValue) return;
+    resultsEl.style.display = 'block';
+    resultsEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Enriching...';
+    try {
+        const res = await fetch('/api/ti/enrich', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({value: lastLookupValue, ioc_type: lastLookupIocType})
+        });
+        const data = await res.json();
+        if (!res.ok || !data.results) { resultsEl.innerHTML = `<span class="text-danger">${escHtml(data.message || data.error || 'Enrichment failed.')}</span>`; return; }
+        if (!data.results.length) { resultsEl.innerHTML = `<span class="text-muted">${escHtml(data.message || 'No analyzers available for this value.')}</span>`; return; }
+        resultsEl.innerHTML = data.results.map(r => `
+            <div class="border border-secondary rounded p-2 mb-1">
+                <strong>${escHtml(r.source)}</strong> ${enrichVerdictBadge(r.verdict)}
+                ${r.cached ? `<span class="text-muted small">(cached, ${escHtml(r.fetched_at || '')})</span>` : ''}
+                <div class="text-muted small">${escHtml(r.summary)}</div>
+            </div>`).join('');
+    } catch (e) {
+        resultsEl.innerHTML = `<span class="text-danger">Error: ${escHtml(String(e))}</span>`;
+    }
+}
+
+async function saveEnrichmentSettings() {
+    const msg = document.getElementById('enrichSettingsMsg');
+    const key = document.getElementById('abuseipdbKeyInput').value;
+    try {
+        const res = await fetch('/api/settings/enrichment', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({abuseipdb_api_key: key})
+        });
+        const data = await res.json();
+        if (!res.ok) { msg.className = 'small text-danger'; msg.innerText = data.error || 'Failed to save.'; return; }
+        msg.className = 'small text-success';
+        msg.innerText = 'Saved.';
+        document.getElementById('abuseipdbKeyInput').value = '';
+        loadEnrichmentSettings();
+    } catch (e) {
+        msg.className = 'small text-danger'; msg.innerText = 'Error: ' + e;
+    }
+}
+
+function loadEnrichmentSettings() {
+    const input = document.getElementById('abuseipdbKeyInput');
+    if (!input) return;  // non-admin: the section isn't rendered
+    fetch('/api/settings/enrichment').then(r => r.json()).then(data => {
+        // Pre-fill with the masked PLACEHOLDER VALUE (not just a hint in .placeholder) --
+        // same convention as the alert-notifications SMTP password field. This is what
+        // makes clicking Save without touching the field a no-op server-side (the route
+        // recognizes the placeholder and skips overwriting) rather than silently wiping
+        // an already-configured key by submitting an empty string.
+        input.value = data.abuseipdb_api_key || '';
+        input.placeholder = data.abuseipdb_api_key ? '' : 'Not configured';
+    }).catch(err => console.error('Error loading enrichment settings:', err));
 }
 
 function loadWarninglists() {
@@ -1140,7 +1228,9 @@ function loadIocs() {
                     <td>${escHtml(i.name || '')}</td>
                     <td class="text-muted small text-truncate" style="max-width:220px;" title="${escHtml(i.description || '')}">${escHtml(i.description || '—')}</td>
                     <td>${ioTypeBadge(i.ioc_type)}</td>
-                    <td class="text-muted small">${escHtml(i.source_name || 'Unknown')}</td>
+                    <td class="text-muted small">${escHtml(i.source_name || 'Unknown')}${i.corroboration_count > 1
+                        ? ` <span class="badge bg-info text-dark" title="Independently reported by ${i.corroboration_count} different feeds -- a real confidence signal">+${i.corroboration_count - 1} more</span>`
+                        : ''}</td>
                     <td class="text-nowrap small text-muted">${escHtml(i.valid_from || '')}</td>
                     <td>${i.revoked ? '<span class="badge bg-secondary">Revoked</span>' : '<span class="badge bg-danger">Active</span>'}</td>
                     <td>${i.sighting_count > 0
@@ -1155,6 +1245,7 @@ function loadIocs() {
 updateHuntStats();
 loadFeeds();
 loadWarninglists();
+loadEnrichmentSettings();
 loadIocs();
 loadIocFacets();
 initIocFilterDropdowns();
