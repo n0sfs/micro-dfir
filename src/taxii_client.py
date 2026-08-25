@@ -1,4 +1,4 @@
-import sqlite3, requests, datetime, re, os, shutil, tempfile, zipfile
+import sqlite3, requests, datetime, re, os, shutil, tempfile, zipfile, time
 DB_PATH = "/opt/micro-dfir/siem.db"
 # Duplicated from app.py's YARA_RULES_DIR rather than imported from it -- this module
 # is deliberately standalone (app.py imports FROM here), same reasoning as DB_PATH
@@ -169,12 +169,31 @@ def sync_otx(feed):
 # ~1.4MB for ~1700 events, too much to refetch every event file each sync, so (mirroring
 # OTX's "most recent slice, not full history" precedent above) only the N most-recently-
 # updated events are pulled per sync; re-running periodically cycles through the rest.
+#
+# Bounded by an OVERALL WALL-CLOCK BUDGET (manifest fetch + every event fetch
+# combined), not just event count: this whole sync runs inside one gunicorn worker
+# request, and microsoc-web.service has no --timeout override, so gunicorn's default
+# 30s worker-kill applies -- confirmed live that an earlier 50-event/30s-per-request
+# design could hang past 2 minutes with no client-visible error, since a killed
+# worker's connection doesn't reliably surface as a clean failure to the browser.
+# _MISP_FEED_TIME_BUDGET_SECONDS leaves a comfortable ~10s margin under that 30s
+# cutoff for DB writes and response serialization; _MISP_FEED_MAX_EVENTS_PER_SYNC is
+# now just an outer sanity cap, rarely the thing that actually stops the loop. A
+# shared Session reuses the TLS connection across every event fetch instead of paying
+# a fresh handshake each time.
 _MISP_FEED_MAX_EVENTS_PER_SYNC = 50
+_MISP_FEED_TIME_BUDGET_SECONDS = 20
+_MISP_FEED_EVENT_REQUEST_TIMEOUT = 5
 
 def sync_misp_feed(feed):
+    start = time.time()
     base = feed["discovery_url"].rstrip("/") + "/"
     headers = _abuse_ch_headers(feed)  # harmless no-op for feeds that don't use one
-    res = requests.get(base + "manifest.json", headers=headers, timeout=30)
+    session = requests.Session()
+    # manifest.json is a single request but can run ~1.4MB (e.g. CIRCL's OSINT feed) --
+    # capped at what's left of the overall budget rather than its own fixed timeout,
+    # since it counts against the same 20s ceiling as everything else in this sync.
+    res = session.get(base + "manifest.json", headers=headers, timeout=max(5, _MISP_FEED_TIME_BUDGET_SECONDS - (time.time() - start)))
     res.raise_for_status()
     manifest = res.json()
     if not isinstance(manifest, dict):
@@ -185,12 +204,15 @@ def sync_misp_feed(feed):
 
     conn = _connect(); c = 0
     for event_uuid, meta in entries:
+        if time.time() - start > _MISP_FEED_TIME_BUDGET_SECONDS:
+            break  # out of time for this cycle -- whatever's synced so far still commits below;
+                   # the next sync (this feed re-sorts by timestamp) picks up from the most recent again
         try:
-            ev_res = requests.get(base + f"{event_uuid}.json", headers=headers, timeout=30)
+            ev_res = session.get(base + f"{event_uuid}.json", headers=headers, timeout=_MISP_FEED_EVENT_REQUEST_TIMEOUT)
             ev_res.raise_for_status()
             raw = ev_res.json()
         except Exception:
-            continue  # one bad/missing event file shouldn't abort the whole sync
+            continue  # one bad/missing/slow event file shouldn't abort the whole sync
         event = raw.get("Event", raw) if isinstance(raw, dict) else {}
         info = event.get("info") or meta.get("info") or "MISP Event"
         event_date = event.get("date") or meta.get("date") or ""
