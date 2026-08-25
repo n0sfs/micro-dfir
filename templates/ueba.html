@@ -112,6 +112,7 @@
                         <option value="new_destination_ip">New Destination IP</option>
                         <option value="process_lineage">Suspicious Process Lineage</option>
                         <option value="off_hours_activity">Off-Hours Activity</option>
+                        <option value="rare_process_population">Rare Process (Fleet-Wide)</option>
                     </select>
                 </div>
             </div>
@@ -183,6 +184,14 @@
                     <div class="form-check form-switch mt-2">
                         <input class="form-check-input" type="checkbox" id="cfgOffHoursEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
                         <label class="form-check-label small" for="cfgOffHoursEnabled">Flag hosts/users active at an hour of day never seen for that entity before</label>
+                    </div>
+                    <div class="form-check form-switch mt-2 d-flex align-items-center flex-wrap gap-2">
+                        <div>
+                            <input class="form-check-input" type="checkbox" id="cfgRareProcessEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                            <label class="form-check-label small" for="cfgRareProcessEnabled">Flag processes rare across the whole fleet, seen on</label>
+                        </div>
+                        <input type="number" id="cfgRareProcessMaxHosts" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="50" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <span class="text-muted small">host(s) or fewer <span class="text-muted">(independent of any single host's own baseline)</span></span>
                     </div>
                     {% if current_user.role == 'admin' %}
                     <button class="btn btn-primary btn-sm mt-3" onclick="saveUebaConfig()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Tuning</button>
@@ -606,6 +615,7 @@ const DYNAMIC_SCORING_FIELDS = [
         {k: 'new_destination_ip', label: 'New Destination IP', desc: 'Added the first time a host is seen connecting to a destination IP it hasn\'t contacted before, within the lookback window.'},
         {k: 'process_lineage', label: 'Suspicious Process Lineage', desc: 'Added the first time a host is seen with a parent-to-child process relationship (e.g. an Office app spawning PowerShell) it hasn\'t had before, within the lookback window.'},
         {k: 'off_hours_activity', label: 'Off-Hours Activity', desc: 'Added when a host or user is active at an hour of day it hasn\'t been active in before, within the lookback window.'},
+        {k: 'rare_process_population', label: 'Rare Process (Fleet-Wide)', desc: 'Added when a host runs a process that\'s rare across the whole fleet (seen on very few hosts total), independent of that host\'s own baseline.'},
     ]},
     { group: 'Score Tiers (thresholds)',
       desc: 'The minimum summed score (over the Scoring Window above) an entity needs to reach each risk tier -- these are the Low/Medium/High/Critical badges shown throughout the UI. E.g. with High = 50, any entity whose current score reaches 50 is labeled High risk until its score drops back below that threshold.',
@@ -721,6 +731,7 @@ const INSIGHTS_MODEL_LABELS = {
     failed_login: 'Failed Login', first_time_action: 'First-Time Action', volume_anomaly: 'Volume Anomaly', new_source_ip: 'New Source IP',
     new_process: 'New Process', new_destination_ip: 'New Destination IP',
     process_lineage: 'Suspicious Process Lineage', off_hours_activity: 'Off-Hours Activity',
+    rare_process_population: 'Rare Process (Fleet-Wide)',
 };
 const DOW_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -869,6 +880,8 @@ function loadUebaConfig() {
             document.getElementById('cfgNewDestIpEnabled').checked = !!cfg.new_dest_ip_enabled;
             document.getElementById('cfgProcessLineageEnabled').checked = !!cfg.process_lineage_enabled;
             document.getElementById('cfgOffHoursEnabled').checked = !!cfg.off_hours_enabled;
+            document.getElementById('cfgRareProcessEnabled').checked = !!cfg.rare_process_enabled;
+            document.getElementById('cfgRareProcessMaxHosts').value = cfg.rare_process_max_hosts;
         })
         .catch(err => console.error('Error loading UEBA config:', err));
 }
@@ -883,7 +896,9 @@ function saveUebaConfig() {
         new_process_enabled: document.getElementById('cfgNewProcessEnabled').checked,
         new_dest_ip_enabled: document.getElementById('cfgNewDestIpEnabled').checked,
         process_lineage_enabled: document.getElementById('cfgProcessLineageEnabled').checked,
-        off_hours_enabled: document.getElementById('cfgOffHoursEnabled').checked
+        off_hours_enabled: document.getElementById('cfgOffHoursEnabled').checked,
+        rare_process_enabled: document.getElementById('cfgRareProcessEnabled').checked,
+        rare_process_max_hosts: parseInt(document.getElementById('cfgRareProcessMaxHosts').value, 10)
     };
     const msg = document.getElementById('cfgSaveMsg');
     fetch('/api/ueba/config', {
