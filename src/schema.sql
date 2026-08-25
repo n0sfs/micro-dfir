@@ -78,3 +78,7 @@ CREATE INDEX IF NOT EXISTS idx_warninglist_entries_wid ON warninglist_entries(wa
 -- stix_indicators itself so an indicator can accumulate multiple observed-here events.
 CREATE TABLE IF NOT EXISTS ioc_sightings (id INTEGER PRIMARY KEY AUTOINCREMENT, stix_id TEXT NOT NULL, seen_at DATETIME DEFAULT CURRENT_TIMESTAMP, source TEXT, log_ref TEXT);
 CREATE INDEX IF NOT EXISTS idx_ioc_sightings_stix_id ON ioc_sightings(stix_id);
+-- Cached on-demand enrichment analyzer results (src/analyzers.py) -- one row per
+-- (value, source) pair, refreshed once the cache TTL (see ENRICHMENT_CACHE_TTL_HOURS)
+-- has passed, so a repeat lookup on the same IOC doesn't re-hit a free-tier rate limit.
+CREATE TABLE IF NOT EXISTS enrichment_results (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL, source TEXT NOT NULL, verdict TEXT, summary TEXT, raw_json TEXT, fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(value, source));
