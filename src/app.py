@@ -12,6 +12,7 @@ except Exception as e:
     print(f"WAL setup error: {e}")
 
 import os, json, re, sqlite3, tempfile, yaml, secrets, subprocess
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from werkzeug.utils import secure_filename
 from werkzeug.security import check_password_hash
@@ -264,6 +265,45 @@ def _extract_source_ip(message):
     ip = m.group(1).strip()
     return ip if ip and ip != '-' else None
 
+# Per-channel Windows Event ID include/exclude filter, e.g. "4000-5000, 5200" ->
+# [(4000,5000), (5200,5200)]. Used both to validate a channel's saved filter_value at
+# save time (api_agent_channels) and to build the ready-made PowerShell clause sent to
+# the agent (agent_config) -- single source of truth, the agent does no parsing itself.
+_EVENT_ID_TOKEN_RE = re.compile(r'^(\d{1,10})(?:-(\d{1,10}))?$')
+_EVENT_ID_MAX_TOKENS = 50
+
+def _parse_event_id_ranges(value):
+    tokens = [t.strip() for t in (value or '').split(',') if t.strip()]
+    if len(tokens) > _EVENT_ID_MAX_TOKENS:
+        raise ValueError(f'too many entries (max {_EVENT_ID_MAX_TOKENS})')
+    ranges = []
+    for t in tokens:
+        m = _EVENT_ID_TOKEN_RE.match(t)
+        if not m:
+            raise ValueError(f"'{t}' is not a valid event ID or range")
+        lo = int(m.group(1))
+        hi = int(m.group(2)) if m.group(2) else lo
+        if hi < lo:
+            raise ValueError(f"'{t}': range start must be <= end")
+        ranges.append((lo, hi))
+    return ranges
+
+# Numeric -ge/-le comparison (not PowerShell's ".." range-array expansion) so a wide
+# range like 1-65535 costs nothing extra at runtime -- no array ever gets built.
+def _build_powershell_id_clause(ranges, mode):
+    if not ranges or mode not in ('include', 'exclude'):
+        return ''
+    parts = [f'($_.Id -ge {lo} -and $_.Id -le {hi})' for lo, hi in ranges]
+    expr = ' -or '.join(parts)
+    return f'-not ({expr})' if mode == 'exclude' else expr
+
+# Custom Windows Event Log channel names are spliced directly into a PowerShell
+# -FilterHashtable string (fetch_windows_logs in the Windows agent) with no escaping --
+# safe as long as the name can never contain a quote or PS metacharacter. The 6 preset
+# channel names have always been safe because they came from hardcoded checkboxes;
+# this allowlist is what keeps a free-typed custom channel name equally safe.
+_CHANNEL_NAME_RE = re.compile(r'^[A-Za-z0-9 _\-/.]{1,255}$')
+
 # Sysmon (and Security-log equivalents) render process-creation events as one
 # "Label: value" pair per line in the human-readable message body -- confirmed against
 # real published Sysmon Event ID 1 examples, not a sample from this deployment (none
@@ -289,6 +329,42 @@ def _extract_process_fields(message):
             val = m.group(1).strip()  # .strip() drops a trailing \r on CRLF-sourced text
             if val and val != '-':
                 out[col] = val
+    return out
+
+# Maps the same 5 target columns as _PROCESS_FIELD_PATTERNS above, but reads them from
+# a channel's raw event XML (captured when a channel has "Capture XML" enabled) instead
+# of guessing at the rendered Message text -- every <Data Name="..."> is explicit, so
+# this is strictly more reliable than the regex extractor whenever it's available.
+_XML_PROCESS_FIELD_MAP = {
+    'Image': 'process_image',
+    'CommandLine': 'command_line',
+    'ParentImage': 'parent_image',
+    'ParentCommandLine': 'parent_command_line',
+    'OriginalFileName': 'original_file_name',
+}
+
+def _extract_process_fields_from_xml(xml_text):
+    if not xml_text:
+        return {}
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return {}
+    out = {}
+    for elem in root.iter():
+        # The Windows Event Schema declares a default namespace (xmlns=...) on <Event>,
+        # so ElementTree tags come back as "{namespace}Data" -- strip it rather than
+        # hardcoding the exact namespace URI, which can vary by provider/OS version.
+        tag = elem.tag.split('}', 1)[-1] if '}' in elem.tag else elem.tag
+        if tag != 'Data':
+            continue
+        name = elem.get('Name')
+        col = _XML_PROCESS_FIELD_MAP.get(name)
+        if not col:
+            continue
+        val = (elem.text or '').strip()
+        if val and val != '-':
+            out[col] = val
     return out
 
 @app.route('/api/ingest', methods=['POST'])
@@ -333,14 +409,22 @@ def api_ingest():
             sip = log.get('source_ip') or _extract_source_ip(msg)
             if not sip and request.remote_addr not in ('127.0.0.1', '::1'):
                 sip = request.remote_addr
-            proc = _extract_process_fields(msg)
+            raw_xml = log.get('xml') or None
+            # XML (when a channel has "Capture XML" enabled) has every field explicitly
+            # tagged, so it's strictly more reliable than guessing at the rendered
+            # Message text -- prefer it when present and it actually yields something,
+            # falling back to the message-regex extractor otherwise (the common case,
+            # since XML capture is opt-in per channel).
+            proc = _extract_process_fields_from_xml(raw_xml) if raw_xml else {}
+            if not proc:
+                proc = _extract_process_fields(msg)
             db.execute(
                 "INSERT INTO live_logs (timestamp, host, app, severity, event_id, username, source_ip, message, "
-                "process_image, command_line, parent_image, parent_command_line, original_file_name) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (ts, hst, app_n, sev, eid, usr, sip, msg,
                  proc.get('process_image'), proc.get('command_line'), proc.get('parent_image'),
-                 proc.get('parent_command_line'), proc.get('original_file_name'))
+                 proc.get('parent_command_line'), proc.get('original_file_name'), raw_xml)
             )
             count += 1
 
@@ -372,7 +456,7 @@ def api_ingest():
 @login_required
 def dash():
     active_tab = request.args.get('tab', 'search')
-    return render_template('dashboard.html', channels=get_agent_channels(), active_tab=active_tab, current_user=current_user, compliance_frameworks=COMPLIANCE_FRAMEWORKS)
+    return render_template('dashboard.html', active_tab=active_tab, current_user=current_user, compliance_frameworks=COMPLIANCE_FRAMEWORKS)
 
 # Home count queries reuse existing canonical data sources rather than new bookkeeping:
 # ueba_entity_baselines is already this app's registry of every host/user the UEBA
@@ -2464,7 +2548,7 @@ def migrate_live_logs_process_columns():
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
         cols = {row[1] for row in conn.execute("PRAGMA table_info(live_logs)").fetchall()}
-        for col in ('process_image', 'command_line', 'parent_image', 'parent_command_line', 'original_file_name'):
+        for col in ('process_image', 'command_line', 'parent_image', 'parent_command_line', 'original_file_name', 'raw_xml'):
             if col not in cols:
                 conn.execute(f"ALTER TABLE live_logs ADD COLUMN {col} TEXT")
         conn.commit()
@@ -3115,7 +3199,23 @@ def agent_config():
                 return jsonify({'command': 'upgrade', 'source': source})
         return jsonify({'run_script': {'id': cmd_row['id'], 'script': cmd_row['script']}})
 
-    channels = ','.join(k for k, v in get_agent_channels().items() if v) or 'Security,System,Application,PowerShell'
+    all_channels = get_agent_channels()
+    enabled_channels = {name: v for name, v in all_channels.items() if v.get('enabled')}
+    channels = ','.join(enabled_channels.keys()) or 'Security,System,Application,PowerShell'
+
+    # Rich per-channel config for agents that understand it (capture_xml + a ready-made
+    # PowerShell Where-Object clause built from the saved event-ID filter) -- the flat
+    # 'channels' string above stays as a fallback for an agent mid-upgrade. filter_value
+    # was already validated at save time (api_agent_channels), but re-parsing is wrapped
+    # defensively so a corrupted config file can never break every agent's poll cycle.
+    channel_config = []
+    for name, v in enabled_channels.items():
+        try:
+            ranges = _parse_event_id_ranges(v.get('filter_value', ''))
+            where_clause = _build_powershell_id_clause(ranges, v.get('filter_mode', 'none'))
+        except ValueError:
+            where_clause = ''
+        channel_config.append({'name': name, 'capture_xml': bool(v.get('capture_xml')), 'where_clause': where_clause})
 
     # Grab the active Ingestion IP/Port to pass to the agent
     cursor = db.execute("SELECT key, value FROM settings")
@@ -3129,7 +3229,7 @@ def agent_config():
 
     dynamic_ingest_url = f"https://{ing_ip}:{ing_port}/api/ingest"
 
-    return jsonify({'channels': channels, 'ingest_url': dynamic_ingest_url})
+    return jsonify({'channels': channels, 'channel_config': channel_config, 'ingest_url': dynamic_ingest_url})
 
 # Log Search spans three tables that were previously siloed from each other: raw
 # ingested events (live_logs), Sigma/custom detection-rule hits (alerts), and UEBA
@@ -3140,7 +3240,7 @@ def agent_config():
 UNIFIED_LOGS_SQL = """(
 SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type,
        NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
-       process_image, command_line, parent_image, parent_command_line, original_file_name
+       process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml
 FROM live_logs
 UNION ALL
 SELECT a.timestamp, a.severity,
@@ -3157,14 +3257,14 @@ SELECT a.timestamp, a.severity,
        a.log_event_id as log_event_id,
        a.log_app as log_app,
        NULL as raw_json,
-       NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name
+       NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml
 FROM alerts a
 LEFT JOIN sigma_rules s ON a.rule_id = s.id
 UNION ALL
 SELECT timestamp, severity, hostname as host, 'UEBA Anomaly' as app, '-' as event_id, '-' as username,
        NULL as source_ip, NULL as destination_ip, message, 'anomaly' as log_type,
        NULL as rule_id, 'ueba' as rule_source, NULL as log_event_id, NULL as log_app, raw_json,
-       NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name
+       NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml
 FROM events
 WHERE app_name = 'duckdb_ueba'
 ) AS unified_logs"""
@@ -3230,7 +3330,8 @@ def _build_log_filters(args):
             params.extend(sevs)
 
     allowed_columns = ['username', 'host', 'event_id', 'source_ip', 'destination_ip', 'message', 'log_type',
-                       'process_image', 'command_line', 'parent_image', 'parent_command_line', 'original_file_name']
+                       'process_image', 'command_line', 'parent_image', 'parent_command_line', 'original_file_name',
+                       'raw_xml']
     if field_key and field_val:
         col = field_key if field_key in allowed_columns else 'message'
         if field_op == 'equals':
@@ -3364,36 +3465,59 @@ def api_logs_timeline():
     except Exception as e:
         return jsonify({'timeline': [], 'error': str(e)})
 
-# Global storage for agent channel template
-_ACTIVE_CHANNELS = {
+# --- PERSISTENT CHANNELS CONFIG ---
+import json, os
+AGENT_CONFIG_PATH = '/opt/micro-dfir/agent_config.json'
+
+_DEFAULT_CHANNEL_ENABLED = {
     'Security': True,
     'System': True,
     'Application': True,
     'PowerShell': False,
     'Sysmon': False,
-    'WindowsDefender': False
+    'WindowsDefender': False,
 }
 
-# --- PERSISTENT CHANNELS CONFIG ---
-import json, os
-AGENT_CONFIG_PATH = '/opt/micro-dfir/agent_config.json'
+def _default_channel_setting(enabled=False):
+    return {'enabled': bool(enabled), 'capture_xml': False, 'filter_mode': 'none', 'filter_value': ''}
 
 def get_agent_channels():
-    defaults = {
-        'Security': True,
-        'System': True,
-        'Application': True,
-        'PowerShell': False,
-        'Sysmon': False,
-        'WindowsDefender': False
-    }
-    if os.path.exists(AGENT_CONFIG_PATH):
+    file_existed = os.path.exists(AGENT_CONFIG_PATH)
+    data = {}
+    if file_existed:
         try:
             with open(AGENT_CONFIG_PATH, 'r') as f:
-                return json.load(f)
+                data = json.load(f)
         except Exception:
-            return defaults
-    return defaults
+            data = {}
+
+    # Transparently upgrades the old flat {"Security": true, ...} shape (each value a
+    # plain bool) to the richer per-channel settings object below -- same lazy-upgrade
+    # spirit as this file's migrate_*() functions, just for a JSON file instead of a
+    # SQL table. Any other malformed entry is dropped rather than crashing the page.
+    upgraded = False
+    channels = {}
+    for name, value in data.items():
+        if isinstance(value, bool):
+            channels[name] = _default_channel_setting(value)
+            upgraded = True
+        elif isinstance(value, dict):
+            setting = _default_channel_setting(value.get('enabled', False))
+            setting['capture_xml'] = bool(value.get('capture_xml', False))
+            if value.get('filter_mode') in ('none', 'include', 'exclude'):
+                setting['filter_mode'] = value.get('filter_mode')
+            setting['filter_value'] = str(value.get('filter_value') or '')
+            channels[name] = setting
+
+    for name, default_enabled in _DEFAULT_CHANNEL_ENABLED.items():
+        if name not in channels:
+            channels[name] = _default_channel_setting(default_enabled)
+            if file_existed:
+                upgraded = True
+
+    if file_existed and upgraded:
+        save_agent_channels(channels)
+    return channels
 
 def save_agent_channels(data):
     with open(AGENT_CONFIG_PATH, 'w') as f:
@@ -3403,15 +3527,39 @@ def save_agent_channels(data):
 @login_required
 def api_agent_channels():
     from flask import request, jsonify
-    channels = get_agent_channels()
     if request.method == 'POST':
-        data = request.json or {}
-        for k in channels.keys():
-            if k in data:
-                channels[k] = bool(data[k])
+        posted = request.json or {}
+        channels = {}
+        for name, value in posted.items():
+            name = (name or '').strip()
+            if not name:
+                continue
+            # Channel names are spliced unescaped into a PowerShell -FilterHashtable
+            # string on the agent (fetch_windows_logs) -- this allowlist is what makes
+            # a free-typed custom channel name as safe as the fixed presets always were.
+            if not _CHANNEL_NAME_RE.match(name):
+                return jsonify({'status': 'error', 'message': f"'{name}' is not a valid channel name"}), 400
+            if not isinstance(value, dict):
+                return jsonify({'status': 'error', 'message': f"'{name}': invalid channel settings"}), 400
+            filter_mode = value.get('filter_mode') if value.get('filter_mode') in ('none', 'include', 'exclude') else 'none'
+            filter_value = str(value.get('filter_value', '') or '')
+            if filter_mode != 'none':
+                try:
+                    _parse_event_id_ranges(filter_value)
+                except ValueError as e:
+                    return jsonify({'status': 'error', 'message': f"'{name}' event ID filter: {e}"}), 400
+            channels[name] = {
+                'enabled': bool(value.get('enabled')),
+                'capture_xml': bool(value.get('capture_xml')),
+                'filter_mode': filter_mode,
+                'filter_value': filter_value,
+            }
+        # Presets always exist even if the posted payload omitted one.
+        for name, default_enabled in _DEFAULT_CHANNEL_ENABLED.items():
+            channels.setdefault(name, _default_channel_setting(default_enabled))
         save_agent_channels(channels)
         return jsonify({'status': 'success', 'channels': channels})
-    return jsonify(channels)
+    return jsonify(get_agent_channels())
 
 
 
