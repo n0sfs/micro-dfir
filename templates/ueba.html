@@ -556,7 +556,7 @@ function loadRiskScores() {
             tbody.innerHTML = riskScoresData.map(r => `
                 <tr style="cursor:pointer;" onclick="viewRiskScoreDetail('${r.entity_type}', '${escHtml(r.entity_id).replace(/'/g, "\\'")}')">
                     <td class="ps-3">${entityBadge(r.entity_type)}<strong>${escHtml(r.entity_id)}</strong></td>
-                    <td class="fw-bold">${r.score}</td>
+                    <td class="fw-bold">${r.score}${r.multiplier && r.multiplier !== 1.0 ? ` <span class="badge bg-secondary" title="Raw score ${r.raw_score} &times; ${r.multiplier} criticality/privileged multiplier">&times;${r.multiplier}</span>` : ''}</td>
                     <td>${riskTierBadge(r.tier)}</td>
                     <td class="text-muted small">${r.event_count}</td>
                     <td class="text-muted small text-nowrap">${escHtml(r.last_event)}</td>

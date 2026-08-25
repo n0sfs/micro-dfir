@@ -18,6 +18,7 @@
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnNetwork" onclick="switchSettingsTab('network')"><i class="fa-solid fa-network-wired me-2"></i>Network</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnSystem" onclick="switchSettingsTab('system')"><i class="fa-solid fa-database me-2"></i>System</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnReports" onclick="switchSettingsTab('reports')"><i class="fa-solid fa-file-pdf me-2"></i>Reports</button></li>
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnAssetIdentity" onclick="switchSettingsTab('assetIdentity')"><i class="fa-solid fa-building-shield me-2"></i>Asset &amp; Identity</button></li>
             {% if current_user.role == 'admin' %}
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnAudit" onclick="switchSettingsTab('audit')"><i class="fa-solid fa-clipboard-list me-2"></i>Audit Log</button></li>
             {% endif %}
@@ -252,6 +253,60 @@
         </div>
     </div>
 
+    <!-- Asset & Identity pane -->
+    <div id="paneAssetIdentity" style="display:none;">
+        <div class="card-body">
+            <h6 class="text-info mb-3">Assets</h6>
+            <p class="text-muted small mb-3">Mark a host as more important than the fleet default so its UEBA risk score is weighted up -- a domain controller tripping the same indicator as a random workstation deserves more attention, not the same flat score.</p>
+            {% if current_user.role == 'admin' %}
+            <div class="row g-2 mb-3" style="max-width:640px;">
+                <div class="col-md-4"><input type="text" id="newAssetHost" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Hostname"></div>
+                <div class="col-md-3">
+                    <select id="newAssetCriticality" class="form-select form-select-sm bg-dark text-light border-secondary">
+                        <option value="standard">Standard (1x)</option>
+                        <option value="important">Important (1.5x)</option>
+                        <option value="critical">Critical (2x)</option>
+                    </select>
+                </div>
+                <div class="col-md-3"><input type="text" id="newAssetOwner" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Owner (optional)"></div>
+                <div class="col-md-2"><button class="btn btn-outline-primary btn-sm w-100" onclick="addAsset()"><i class="fa-solid fa-plus me-1"></i>Add</button></div>
+            </div>
+            <div id="assetError" class="text-danger small mb-2" style="display:none;"></div>
+            {% endif %}
+            <div class="table-responsive">
+                <table class="table table-dark table-sm align-middle mb-0">
+                    <thead><tr><th>Host</th><th>Criticality</th><th>Owner</th><th></th></tr></thead>
+                    <tbody id="assetsTableBody"><tr><td colspan="4" class="text-center text-muted py-3">Loading…</td></tr></tbody>
+                </table>
+            </div>
+
+            <hr class="border-secondary my-4">
+
+            <h6 class="text-info mb-3">Identities</h6>
+            <p class="text-muted small mb-3">Mark a user as privileged so their UEBA risk score is weighted up (&times;1.5) -- an admin account is a higher-value target than a standard one.</p>
+            {% if current_user.role == 'admin' %}
+            <div class="row g-2 mb-3" style="max-width:640px;">
+                <div class="col-md-4"><input type="text" id="newIdentityUsername" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Username"></div>
+                <div class="col-md-3"><input type="text" id="newIdentityDepartment" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Department (optional)"></div>
+                <div class="col-md-3 d-flex align-items-center">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="newIdentityPrivileged">
+                        <label class="form-check-label small" for="newIdentityPrivileged">Privileged</label>
+                    </div>
+                </div>
+                <div class="col-md-2"><button class="btn btn-outline-primary btn-sm w-100" onclick="addIdentity()"><i class="fa-solid fa-plus me-1"></i>Add</button></div>
+            </div>
+            <div id="identityError" class="text-danger small mb-2" style="display:none;"></div>
+            {% endif %}
+            <div class="table-responsive">
+                <table class="table table-dark table-sm align-middle mb-0">
+                    <thead><tr><th>Username</th><th>Department</th><th>Privileged</th><th></th></tr></thead>
+                    <tbody id="identitiesTableBody"><tr><td colspan="4" class="text-center text-muted py-3">Loading…</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
     {% if current_user.role == 'admin' %}
     <!-- Audit Log pane -->
     <div id="paneAudit" style="display:none;">
@@ -350,7 +405,7 @@ const SETTINGS_TAB_KEY = 'microdfir_settings_active_tab';
 // 'audit' is admin-only server-side (see the admin-role Jinja guard around its tab
 // button/pane above) -- a non-admin's DOM simply won't have those elements, so each
 // lookup below is null-checked rather than assumed to exist.
-const SETTINGS_TABS = ['security', 'network', 'system', 'reports', 'audit'];
+const SETTINGS_TABS = ['security', 'network', 'system', 'reports', 'assetIdentity', 'audit'];
 
 function switchSettingsTab(tab) {
     if (!SETTINGS_TABS.includes(tab)) tab = 'security';
@@ -378,6 +433,8 @@ document.addEventListener("DOMContentLoaded", function() {
     loadRetentionSettings();
     loadReportBranding();
     loadReportSchedule();
+    loadAssets();
+    loadIdentities();
     setInterval(loadMetrics, 5000);
 
     let certForm = document.getElementById('certUploadForm');
@@ -533,6 +590,126 @@ function loadUsers() {
                 `).join('');
             }
         });
+}
+
+// ---- Asset & Identity ----
+const ASSET_IS_ADMIN = {{ 'true' if current_user.role == 'admin' else 'false' }};
+const CRITICALITY_LABELS = {standard: 'Standard (1x)', important: 'Important (1.5x)', critical: 'Critical (2x)'};
+const CRITICALITY_BADGE = {standard: 'secondary', important: 'warning', critical: 'danger'};
+
+function loadAssets() {
+    fetch('/api/assets').then(r => r.json()).then(rows => {
+        const tbody = document.getElementById('assetsTableBody');
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="4" class="text-muted small">No assets yet.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map(a => `<tr>
+            <td class="fw-bold">${escHtml(a.host)}</td>
+            <td>${ASSET_IS_ADMIN
+                ? `<select class="form-select form-select-sm bg-dark text-light border-secondary d-inline-block w-auto" onchange="updateAssetCriticality(${a.id}, this.value)">
+                    ${Object.keys(CRITICALITY_LABELS).map(c => `<option value="${c}" ${c === a.criticality ? 'selected' : ''}>${CRITICALITY_LABELS[c]}</option>`).join('')}
+                   </select>`
+                : `<span class="badge bg-${CRITICALITY_BADGE[a.criticality] || 'secondary'}">${CRITICALITY_LABELS[a.criticality] || a.criticality}</span>`}</td>
+            <td class="small text-muted">${escHtml(a.owner || '')}</td>
+            <td>${ASSET_IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteAsset(${a.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
+        </tr>`).join('');
+    }).catch(err => console.error('Error loading assets:', err));
+}
+
+function addAsset() {
+    const payload = {
+        host: document.getElementById('newAssetHost').value.trim(),
+        criticality: document.getElementById('newAssetCriticality').value,
+        owner: document.getElementById('newAssetOwner').value.trim()
+    };
+    const errBox = document.getElementById('assetError');
+    errBox.style.display = 'none';
+    if (!payload.host) {
+        errBox.innerText = 'Host is required.'; errBox.style.display = 'block'; return;
+    }
+    fetch('/api/assets', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (ok) {
+            document.getElementById('newAssetHost').value = '';
+            document.getElementById('newAssetOwner').value = '';
+            loadAssets();
+        } else {
+            errBox.innerText = data.error || 'Failed to add asset.'; errBox.style.display = 'block';
+        }
+    }).catch(err => { errBox.innerText = 'Error: ' + err; errBox.style.display = 'block'; });
+}
+
+function updateAssetCriticality(aid, criticality) {
+    fetch(`/api/assets/${aid}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({criticality})
+    }).then(() => loadAssets())
+      .catch(err => toast('Error updating asset: ' + err, 'danger'));
+}
+
+async function deleteAsset(aid) {
+    if (!(await confirmDialog('Delete this asset?', {title: 'Delete asset', danger: true, confirmLabel: 'Delete'}))) return;
+    fetch(`/api/assets/${aid}`, {method: 'DELETE'})
+        .then(() => loadAssets())
+        .catch(err => toast('Error deleting asset: ' + err, 'danger'));
+}
+
+function loadIdentities() {
+    fetch('/api/identities').then(r => r.json()).then(rows => {
+        const tbody = document.getElementById('identitiesTableBody');
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="4" class="text-muted small">No identities yet.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map(i => `<tr>
+            <td class="fw-bold">${escHtml(i.username)}</td>
+            <td class="small text-muted">${escHtml(i.department || '')}</td>
+            <td>${ASSET_IS_ADMIN
+                ? `<input type="checkbox" class="form-check-input" ${i.privileged ? 'checked' : ''} onchange="updateIdentityPrivileged(${i.id}, this.checked)">`
+                : (i.privileged ? '<span class="badge bg-warning">Privileged</span>' : '<span class="badge bg-secondary">Standard</span>')}</td>
+            <td>${ASSET_IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteIdentity(${i.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
+        </tr>`).join('');
+    }).catch(err => console.error('Error loading identities:', err));
+}
+
+function addIdentity() {
+    const payload = {
+        username: document.getElementById('newIdentityUsername').value.trim(),
+        department: document.getElementById('newIdentityDepartment').value.trim(),
+        privileged: document.getElementById('newIdentityPrivileged').checked
+    };
+    const errBox = document.getElementById('identityError');
+    errBox.style.display = 'none';
+    if (!payload.username) {
+        errBox.innerText = 'Username is required.'; errBox.style.display = 'block'; return;
+    }
+    fetch('/api/identities', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (ok) {
+            document.getElementById('newIdentityUsername').value = '';
+            document.getElementById('newIdentityDepartment').value = '';
+            document.getElementById('newIdentityPrivileged').checked = false;
+            loadIdentities();
+        } else {
+            errBox.innerText = data.error || 'Failed to add identity.'; errBox.style.display = 'block';
+        }
+    }).catch(err => { errBox.innerText = 'Error: ' + err; errBox.style.display = 'block'; });
+}
+
+function updateIdentityPrivileged(iid, privileged) {
+    fetch(`/api/identities/${iid}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({privileged})
+    }).then(() => loadIdentities())
+      .catch(err => toast('Error updating identity: ' + err, 'danger'));
+}
+
+async function deleteIdentity(iid) {
+    if (!(await confirmDialog('Delete this identity?', {title: 'Delete identity', danger: true, confirmLabel: 'Delete'}))) return;
+    fetch(`/api/identities/${iid}`, {method: 'DELETE'})
+        .then(() => loadIdentities())
+        .catch(err => toast('Error deleting identity: ' + err, 'danger'));
 }
 
 function initModal() {

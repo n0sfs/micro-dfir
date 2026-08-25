@@ -1700,6 +1700,114 @@ def api_ueba_exclusion_detail(eid):
     db.commit()
     return jsonify({"status": "success"})
 
+# Applied at aggregation time (api_ueba_risk_scores' SUM(points) query) rather than at
+# every one of the ~10 INSERT INTO risk_score_events call sites across ueba_engine.py --
+# one place to change, and the raw per-event points stored in risk_score_events stay an
+# honest, un-weighted record of what actually happened regardless of an asset/identity
+# tag added or changed after the fact.
+CRITICALITY_MULTIPLIERS = {'standard': 1.0, 'important': 1.5, 'critical': 2.0}
+
+@app.route('/api/assets', methods=['GET', 'POST'])
+@login_required
+def api_assets():
+    db = get_db()
+    if request.method == 'GET':
+        rows = db.execute("SELECT id, host, criticality, owner, created_by, created_at FROM assets ORDER BY host").fetchall()
+        return jsonify([dict(r) for r in rows])
+
+    if current_user.role != 'admin':
+        return jsonify({"error": "Admin required"}), 403
+    data = request.get_json() or {}
+    host = (data.get('host') or '').strip()
+    criticality = (data.get('criticality') or 'standard').strip()
+    owner = (data.get('owner') or '').strip()
+    if not host:
+        return jsonify({"error": "Host is required"}), 400
+    if criticality not in CRITICALITY_MULTIPLIERS:
+        return jsonify({"error": f"criticality must be one of {', '.join(CRITICALITY_MULTIPLIERS)}"}), 400
+    if db.execute("SELECT 1 FROM assets WHERE host = ?", (host,)).fetchone():
+        return jsonify({"error": f"'{host}' already has an asset entry -- edit it instead of adding a duplicate"}), 400
+    db.execute(
+        "INSERT INTO assets (host, criticality, owner, created_by) VALUES (?, ?, ?, ?)",
+        (host, criticality, owner, current_user.username)
+    )
+    db.commit()
+    return jsonify({"status": "success"})
+
+@app.route('/api/assets/<int:aid>', methods=['PUT', 'DELETE'])
+@login_required
+def api_asset_detail(aid):
+    if current_user.role != 'admin':
+        return jsonify({"error": "Admin required"}), 403
+    db = get_db()
+    if not db.execute("SELECT 1 FROM assets WHERE id = ?", (aid,)).fetchone():
+        return jsonify({"error": "Asset not found"}), 404
+
+    if request.method == 'DELETE':
+        db.execute("DELETE FROM assets WHERE id = ?", (aid,))
+        db.commit()
+        return jsonify({"ok": 1})
+
+    data = request.get_json() or {}
+    existing = db.execute("SELECT criticality, owner FROM assets WHERE id = ?", (aid,)).fetchone()
+    criticality = (data['criticality'].strip() if 'criticality' in data and data['criticality'] else existing['criticality'])
+    if criticality not in CRITICALITY_MULTIPLIERS:
+        return jsonify({"error": f"criticality must be one of {', '.join(CRITICALITY_MULTIPLIERS)}"}), 400
+    owner = data['owner'].strip() if 'owner' in data else (existing['owner'] or '')
+    db.execute("UPDATE assets SET criticality = ?, owner = ? WHERE id = ?", (criticality, owner, aid))
+    db.commit()
+    return jsonify({"status": "success"})
+
+@app.route('/api/identities', methods=['GET', 'POST'])
+@login_required
+def api_identities():
+    db = get_db()
+    if request.method == 'GET':
+        rows = db.execute("SELECT id, username, department, privileged, created_by, created_at FROM identities ORDER BY username").fetchall()
+        return jsonify([dict(r) for r in rows])
+
+    if current_user.role != 'admin':
+        return jsonify({"error": "Admin required"}), 403
+    data = request.get_json() or {}
+    username = (data.get('username') or '').strip()
+    department = (data.get('department') or '').strip()
+    privileged = bool(data.get('privileged'))
+    if not username:
+        return jsonify({"error": "Username is required"}), 400
+    if db.execute("SELECT 1 FROM identities WHERE username = ?", (username,)).fetchone():
+        return jsonify({"error": f"'{username}' already has an identity entry -- edit it instead of adding a duplicate"}), 400
+    db.execute(
+        "INSERT INTO identities (username, department, privileged, created_by) VALUES (?, ?, ?, ?)",
+        (username, department, privileged, current_user.username)
+    )
+    db.commit()
+    return jsonify({"status": "success"})
+
+@app.route('/api/identities/<int:iid>', methods=['PUT', 'DELETE'])
+@login_required
+def api_identity_detail(iid):
+    if current_user.role != 'admin':
+        return jsonify({"error": "Admin required"}), 403
+    db = get_db()
+    if not db.execute("SELECT 1 FROM identities WHERE id = ?", (iid,)).fetchone():
+        return jsonify({"error": "Identity not found"}), 404
+
+    if request.method == 'DELETE':
+        db.execute("DELETE FROM identities WHERE id = ?", (iid,))
+        db.commit()
+        return jsonify({"ok": 1})
+
+    data = request.get_json() or {}
+    existing = db.execute("SELECT department, privileged FROM identities WHERE id = ?", (iid,)).fetchone()
+    department = data['department'].strip() if 'department' in data else (existing['department'] or '')
+    privileged = bool(data['privileged']) if 'privileged' in data else bool(existing['privileged'])
+    db.execute(
+        "UPDATE identities SET department = ?, privileged = ? WHERE id = ?",
+        (department, privileged, iid)
+    )
+    db.commit()
+    return jsonify({"status": "success"})
+
 UEBA_CONFIG_DEFAULTS = {
     'ueba_lookback_days': '30', 'ueba_stddev_multiplier': '3', 'ueba_min_baseline': '50',
     'ueba_min_days_observed': '4', 'ueba_new_ip_enabled': '1',
@@ -1880,10 +1988,33 @@ def _risk_tier(score, tiers):
 def api_ueba_risk_scores():
     db = get_db()
     cfg = get_risk_score_config(db)
+    # The criticality/privileged multiplier is applied INSIDE the query (not multiplied
+    # onto the raw SUM afterward in Python) so ranking and the LIMIT 200 cutoff both
+    # happen on the WEIGHTED score -- otherwise a high-criticality entity with a modest
+    # raw score could get cut from the top-200 before its weighting ever had a chance to
+    # matter, defeating the entire point of marking it important. The multiplier values
+    # here must match CRITICALITY_MULTIPLIERS above exactly (see test coverage) --
+    # duplicated rather than parameterized since SQLite has no clean way to join a
+    # Python dict in as a lookup table for 4 fixed values.
     rows = db.execute(
-        "SELECT entity_type, entity_id, SUM(points) as score, COUNT(*) as event_count, MAX(computed_at) as last_event "
-        "FROM risk_score_events WHERE computed_at >= datetime('now', ?) "
-        "GROUP BY entity_type, entity_id HAVING score > 0 ORDER BY score DESC LIMIT 200",
+        "SELECT rse.entity_type as entity_type, rse.entity_id as entity_id, "
+        "SUM(rse.points) as raw_score, "
+        "ROUND(SUM(rse.points) * COALESCE("
+        "    CASE WHEN rse.entity_type = 'host' THEN "
+        "        CASE a.criticality WHEN 'critical' THEN 2.0 WHEN 'important' THEN 1.5 ELSE 1.0 END "
+        "    WHEN rse.entity_type = 'user' THEN "
+        "        CASE WHEN i.privileged = 1 THEN 1.5 ELSE 1.0 END "
+        "    END, 1.0), 1) as score, "
+        "COALESCE(CASE WHEN rse.entity_type = 'host' THEN "
+        "    CASE a.criticality WHEN 'critical' THEN 2.0 WHEN 'important' THEN 1.5 ELSE 1.0 END "
+        "WHEN rse.entity_type = 'user' THEN "
+        "    CASE WHEN i.privileged = 1 THEN 1.5 ELSE 1.0 END END, 1.0) as multiplier, "
+        "COUNT(*) as event_count, MAX(rse.computed_at) as last_event "
+        "FROM risk_score_events rse "
+        "LEFT JOIN assets a ON rse.entity_type = 'host' AND rse.entity_id = a.host "
+        "LEFT JOIN identities i ON rse.entity_type = 'user' AND rse.entity_id = i.username "
+        "WHERE rse.computed_at >= datetime('now', ?) "
+        "GROUP BY rse.entity_type, rse.entity_id HAVING score > 0 ORDER BY score DESC LIMIT 200",
         (f"-{cfg['window_days']} days",)
     ).fetchall()
     out = [{**dict(r), 'tier': _risk_tier(r['score'], cfg['tiers'])} for r in rows]
@@ -2608,6 +2739,35 @@ def migrate_ueba_math_v2():
             conn.execute("ALTER TABLE ueba_entity_baselines ADD COLUMN days_seen INTEGER")
         if 'baseline_mode' not in cols:
             conn.execute("ALTER TABLE ueba_entity_baselines ADD COLUMN baseline_mode TEXT")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# Lets an admin mark a specific host or user as more important than the fleet default,
+# so its risk score is weighted up (see CRITICALITY_MULTIPLIERS and where it's applied
+# in api_ueba_risk_scores below) -- a domain controller or an
+# admin account tripping the same indicator as a random workstation deserves more
+# attention, not the same flat score. One row per host/username (UNIQUE), admin-managed.
+def migrate_assets_identities():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS assets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            host TEXT NOT NULL UNIQUE,
+            criticality TEXT NOT NULL DEFAULT 'standard',
+            owner TEXT,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS identities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            department TEXT,
+            privileged BOOLEAN DEFAULT 0,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
         conn.commit()
         conn.close()
     except Exception:
@@ -4397,6 +4557,7 @@ migrate_rule_tuning()
 migrate_compliance_tags()
 migrate_ueba_entities()
 migrate_ueba_math_v2()
+migrate_assets_identities()
 migrate_live_logs_ip_columns()
 migrate_live_logs_process_columns()
 migrate_agent_versions()
