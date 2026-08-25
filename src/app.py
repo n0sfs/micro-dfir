@@ -1937,6 +1937,7 @@ UEBA_CONFIG_DEFAULTS = {
     'ueba_rare_process_enabled': '1', 'ueba_rare_process_max_hosts': '2',
     'ueba_convergence_enabled': '1', 'ueba_convergence_min_indicators': '3',
     'ueba_convergence_window_hours': '24',
+    'ueba_priority_enabled': '1', 'ueba_priority_window_days': '30', 'ueba_priority_half_life_hours': '24',
 }
 
 @app.route('/api/ueba/config', methods=['GET', 'POST'])
@@ -1950,7 +1951,8 @@ def api_ueba_config():
             "('ueba_lookback_days', 'ueba_stddev_multiplier', 'ueba_min_baseline', 'ueba_min_days_observed', 'ueba_new_ip_enabled', "
             "'ueba_new_process_enabled', 'ueba_new_dest_ip_enabled', 'ueba_process_lineage_enabled', 'ueba_off_hours_enabled', "
             "'ueba_rare_process_enabled', 'ueba_rare_process_max_hosts', "
-            "'ueba_convergence_enabled', 'ueba_convergence_min_indicators', 'ueba_convergence_window_hours')"
+            "'ueba_convergence_enabled', 'ueba_convergence_min_indicators', 'ueba_convergence_window_hours', "
+            "'ueba_priority_enabled', 'ueba_priority_window_days', 'ueba_priority_half_life_hours')"
         ).fetchall()
         cfg = {**UEBA_CONFIG_DEFAULTS, **{r['key']: r['value'] for r in rows}}
         return jsonify({
@@ -1968,6 +1970,9 @@ def api_ueba_config():
             'convergence_enabled': str(cfg['ueba_convergence_enabled']) not in ('0', 'false', 'False'),
             'convergence_min_indicators': int(cfg['ueba_convergence_min_indicators']),
             'convergence_window_hours': int(cfg['ueba_convergence_window_hours']),
+            'priority_enabled': str(cfg['ueba_priority_enabled']) not in ('0', 'false', 'False'),
+            'priority_window_days': int(cfg['ueba_priority_window_days']),
+            'priority_half_life_hours': float(cfg['ueba_priority_half_life_hours']),
         })
 
     if current_user.role != 'admin':
@@ -1989,6 +1994,9 @@ def api_ueba_config():
         convergence_enabled = bool(data.get('convergence_enabled'))
         convergence_min_indicators = int(data.get('convergence_min_indicators'))
         convergence_window_hours = int(data.get('convergence_window_hours'))
+        priority_enabled = bool(data.get('priority_enabled'))
+        priority_window_days = int(data.get('priority_window_days'))
+        priority_half_life_hours = float(data.get('priority_half_life_hours'))
         if not (1 <= lookback_days <= 365): raise ValueError('lookback_days must be 1-365')
         if not (0.5 <= stddev_multiplier <= 10): raise ValueError('stddev_multiplier must be 0.5-10')
         if not (0 <= min_baseline <= 1000000): raise ValueError('min_baseline must be 0-1000000')
@@ -1996,6 +2004,8 @@ def api_ueba_config():
         if not (1 <= rare_process_max_hosts <= 50): raise ValueError('rare_process_max_hosts must be 1-50')
         if not (2 <= convergence_min_indicators <= 10): raise ValueError('convergence_min_indicators must be 2-10')
         if not (1 <= convergence_window_hours <= 168): raise ValueError('convergence_window_hours must be 1-168')
+        if not (1 <= priority_window_days <= 365): raise ValueError('priority_window_days must be 1-365')
+        if not (1 <= priority_half_life_hours <= 8760): raise ValueError('priority_half_life_hours must be 1-8760')
     except (TypeError, ValueError) as e:
         return jsonify({'error': str(e) or 'Invalid config values'}), 400
 
@@ -2013,6 +2023,9 @@ def api_ueba_config():
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_convergence_enabled', ?)", ('1' if convergence_enabled else '0',))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_convergence_min_indicators', ?)", (str(convergence_min_indicators),))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_convergence_window_hours', ?)", (str(convergence_window_hours),))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_priority_enabled', ?)", ('1' if priority_enabled else '0',))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_priority_window_days', ?)", (str(priority_window_days),))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_priority_half_life_hours', ?)", (str(priority_half_life_hours),))
     db.commit()
     return jsonify({'status': 'success'})
 
@@ -2130,10 +2143,12 @@ def api_ueba_risk_scores():
         "    CASE a.criticality WHEN 'critical' THEN 2.0 WHEN 'important' THEN 1.5 ELSE 1.0 END "
         "WHEN rse.entity_type = 'user' THEN "
         "    CASE WHEN i.privileged = 1 THEN 1.5 ELSE 1.0 END END, 1.0) as multiplier, "
-        "COUNT(*) as event_count, MAX(rse.computed_at) as last_event "
+        "COUNT(*) as event_count, MAX(rse.computed_at) as last_event, "
+        "ps.priority_score as priority_score "
         "FROM risk_score_events rse "
         "LEFT JOIN assets a ON rse.entity_type = 'host' AND rse.entity_id = a.host "
         "LEFT JOIN identities i ON rse.entity_type = 'user' AND rse.entity_id = i.username "
+        "LEFT JOIN ueba_priority_scores ps ON rse.entity_type = ps.entity_type AND rse.entity_id = ps.entity_id "
         "WHERE rse.computed_at >= datetime('now', ?) "
         "GROUP BY rse.entity_type, rse.entity_id HAVING score > 0 ORDER BY score DESC LIMIT 200",
         (f"-{cfg['window_days']} days",)
@@ -2153,8 +2168,13 @@ def api_ueba_risk_score_detail(entity_type, entity_id):
     ).fetchall()
     events = [dict(r) for r in rows]
     score = sum(e['points'] for e in events)
+    priority_row = db.execute(
+        "SELECT priority_score, distinct_indicators, peak_points, decay_score, computed_at FROM ueba_priority_scores "
+        "WHERE entity_type = ? AND entity_id = ?", (entity_type, entity_id)
+    ).fetchone()
     return jsonify({'entity_type': entity_type, 'entity_id': entity_id, 'score': score,
-                     'tier': _risk_tier(score, cfg['tiers']), 'events': events, 'window_days': cfg['window_days']})
+                     'tier': _risk_tier(score, cfg['tiers']), 'events': events, 'window_days': cfg['window_days'],
+                     'priority': dict(priority_row) if priority_row else None})
 
 @app.route('/api/ueba/risk-config', methods=['GET', 'POST'])
 @login_required
@@ -2933,6 +2953,24 @@ def migrate_live_logs_archive():
             parent_command_line TEXT, original_file_name TEXT, raw_xml TEXT
         )''')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_live_logs_archive_timestamp ON live_logs_archive(timestamp)')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_ueba_priority_scores():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS ueba_priority_scores (
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            priority_score REAL,
+            distinct_indicators INTEGER,
+            peak_points INTEGER,
+            decay_score REAL,
+            computed_at DATETIME,
+            PRIMARY KEY (entity_type, entity_id)
+        )''')
         conn.commit()
         conn.close()
     except Exception:
@@ -4898,6 +4936,7 @@ migrate_assets_identities()
 migrate_cases()
 migrate_live_logs_archive()
 migrate_fim_paths()
+migrate_ueba_priority_scores()
 migrate_live_logs_ip_columns()
 migrate_live_logs_process_columns()
 migrate_agent_versions()

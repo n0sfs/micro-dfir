@@ -1,4 +1,4 @@
-import copy, os, json, sqlite3, duckdb
+import copy, os, json, sqlite3, duckdb, math
 DB_PATH = "/opt/micro-dfir/siem.db"
 UEBA_DEFAULTS = {
     'ueba_lookback_days': 30, 'ueba_stddev_multiplier': 3.0, 'ueba_min_baseline': 50.0,
@@ -8,7 +8,21 @@ UEBA_DEFAULTS = {
     'ueba_rare_process_enabled': 1, 'ueba_rare_process_max_hosts': 2,
     'ueba_convergence_enabled': 1, 'ueba_convergence_min_indicators': 3,
     'ueba_convergence_window_hours': 24,
+    'ueba_priority_enabled': 1, 'ueba_priority_window_days': 30, 'ueba_priority_half_life_hours': 24,
 }
+
+# The 3-way blend weights and normalization caps below are a scoring heuristic, not a
+# per-admin tunable -- unlike the flat UEBA_DEFAULTS keys above, exposing 6 more knobs
+# for a blended score most admins will never want to hand-tune wasn't worth the added
+# Settings-UI surface. PRIORITY_PEAK_CAP matches RISK_SCORE_DEFAULTS['points']['alert_critical']
+# (the highest point value any single indicator can carry) so a lone critical alert
+# alone maxes out the peak-severity component.
+PRIORITY_PEAK_CAP = 40
+PRIORITY_BREADTH_CAP = 5
+PRIORITY_DECAY_CAP = 80
+PRIORITY_WEIGHT_PEAK = 0.4
+PRIORITY_WEIGHT_BREADTH = 0.3
+PRIORITY_WEIGHT_DECAY = 0.3
 
 # Point values an admin can retune without a schema change -- one JSON settings blob
 # rather than ~15 individual keys the way UEBA_DEFAULTS above does it, since that
@@ -169,6 +183,9 @@ def get_ueba_config():
         'convergence_enabled': str(cfg['ueba_convergence_enabled']) not in ('0', 'false', 'False'),
         'convergence_min_indicators': max(2, min(10, int(cfg['ueba_convergence_min_indicators']))),
         'convergence_window_hours': max(1, min(168, int(cfg['ueba_convergence_window_hours']))),
+        'priority_enabled': str(cfg['ueba_priority_enabled']) not in ('0', 'false', 'False'),
+        'priority_window_days': max(1, min(365, int(cfg['ueba_priority_window_days']))),
+        'priority_half_life_hours': max(1.0, float(cfg['ueba_priority_half_life_hours'])),
     }
 
 def _get_exclusions():
@@ -741,7 +758,69 @@ def run_convergence_scoring():
     finally:
         conn.close()
 
+# A second, separate read model over risk_score_events -- not a replacement for the
+# Risk Scoring tab's raw cumulative sum, which stays exactly as-is. This blends three
+# components into one 0-10 "what to look at first" number: how severe the worst single
+# thing was (peak), how many genuinely different detection mechanisms tripped (breadth),
+# and how fresh the activity is (exponential decay, half-life below) -- so a diffuse,
+# recent, multi-signal entity can outrank a single loud-but-stale alert from weeks ago,
+# which the raw sum alone can't express. Runs last, truncate-and-reinsert each cycle
+# (same disposable-snapshot pattern as ueba_entity_baselines), over a longer window than
+# the Risk Scoring tab's own (30 days here vs. 7) specifically so genuinely old activity
+# has room to decay toward zero instead of falling out of the window entirely.
+def run_priority_scoring():
+    cfg = get_ueba_config()
+    if not cfg['priority_enabled']:
+        return
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        window = f"-{cfg['priority_window_days']} days"
+        rows = conn.execute(
+            "SELECT entity_type, entity_id, indicator, points, "
+            "(julianday('now') - julianday(computed_at)) * 24 as hours_ago "
+            "FROM risk_score_events WHERE computed_at >= datetime('now', ?)",
+            (window,)
+        ).fetchall()
+
+        by_entity = {}
+        for r in rows:
+            by_entity.setdefault((r['entity_type'], r['entity_id']), []).append(r)
+
+        half_life = cfg['priority_half_life_hours']
+        results = []
+        for (entity_type, entity_id), events in by_entity.items():
+            distinct_indicators = len({e['indicator'] for e in events})
+            peak_points = max(e['points'] for e in events)
+            # max(hours_ago, 0) guards against a slightly-in-the-future computed_at
+            # (clock skew, or a row inserted mid-transaction) blowing up into a negative
+            # exponent, which would make a "future" event dominate the decay sum instead
+            # of just contributing full weight like any other very-recent event.
+            decay_score = sum(e['points'] * math.exp(-max(e['hours_ago'], 0) / half_life) for e in events)
+
+            peak_norm = min(peak_points, PRIORITY_PEAK_CAP) / PRIORITY_PEAK_CAP * 10
+            breadth_norm = min(distinct_indicators, PRIORITY_BREADTH_CAP) / PRIORITY_BREADTH_CAP * 10
+            decay_norm = min(decay_score, PRIORITY_DECAY_CAP) / PRIORITY_DECAY_CAP * 10
+            priority = round(
+                PRIORITY_WEIGHT_PEAK * peak_norm + PRIORITY_WEIGHT_BREADTH * breadth_norm + PRIORITY_WEIGHT_DECAY * decay_norm, 1
+            )
+            results.append((entity_type, entity_id, priority, distinct_indicators, peak_points, round(decay_score, 1)))
+
+        conn.execute("DELETE FROM ueba_priority_scores")
+        if results:
+            conn.executemany(
+                "INSERT INTO ueba_priority_scores (entity_type, entity_id, priority_score, distinct_indicators, peak_points, decay_score, computed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
+                results
+            )
+        conn.commit()
+    except Exception as e:
+        print(f"[-] Priority scoring run failed: {e}")
+    finally:
+        conn.close()
+
 if __name__ == "__main__":
     run_ueba_models()
     run_risk_scoring()
     run_convergence_scoring()
+    run_priority_scoring()
