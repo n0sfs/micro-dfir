@@ -140,6 +140,7 @@
                             <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" onclick="consoleShowParamForm('kill_process')"><i class="fa-solid fa-skull me-2"></i>Kill Process (PID)</button>
                             <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" onclick="consoleShowParamForm('collect_file')"><i class="fa-solid fa-file-arrow-down me-2"></i>Collect File</button>
                             <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" onclick="consoleRun('collect_triage')"><i class="fa-solid fa-microscope me-2"></i>Triage Collection</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" onclick="consoleRun('persistence_sweep')"><i class="fa-solid fa-clock-rotate-left me-2"></i>Persistence Sweep</button>
                             <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" onclick="consoleRun('ioc_sweep')"><i class="fa-solid fa-magnifying-glass me-2"></i>IOC Hash Sweep</button>
                             <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" onclick="consoleRun('string_sweep')"><i class="fa-solid fa-font me-2"></i>String Sweep</button>
                             <button type="button" class="btn btn-sm btn-outline-warning console-action-btn" onclick="consoleRun('isolate_host', {}, 'Isolate this host from the network? Only traffic to/from this SOC server will be allowed.')"><i class="fa-solid fa-network-wired me-2"></i>Isolate Host</button>
@@ -714,6 +715,7 @@ const CONSOLE_ACTION_DISPLAY = {
     windows: {
         list_processes: 'Get-Process (list running processes)',
         collect_triage: 'Collect-Triage (processes, connections, autoruns, users, startup items)',
+        persistence_sweep: 'Persistence-Sweep (scheduled tasks, services, Run/RunOnce keys, startup folders, WMI event subscriptions)',
         ioc_sweep: 'IOC-Sweep (hash recent files in Temp/Downloads/AppData/ProgramData against known-bad hashes)',
         string_sweep: 'String-Sweep (search recent files in Temp/Downloads/AppData/ProgramData for known-bad YARA strings)',
         isolate_host: 'Isolate-Host (block all traffic except this SOC server)',
@@ -723,6 +725,7 @@ const CONSOLE_ACTION_DISPLAY = {
     linux: {
         list_processes: 'ps (list running processes)',
         collect_triage: 'Collect-Triage (processes, connections, cron/systemd autostart, users)',
+        persistence_sweep: 'Persistence-Sweep (user crontabs, full enabled-unit list, init.d, shell profiles, LD_PRELOAD)',
         ioc_sweep: 'IOC-Sweep (hash recent files in /tmp, /var/tmp, ~/Downloads against known-bad hashes)',
         string_sweep: 'String-Sweep (search recent files in /tmp, /var/tmp, ~/Downloads for known-bad YARA strings)',
         isolate_host: 'Isolate-Host (iptables: block all traffic except this SOC server)',
