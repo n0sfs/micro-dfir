@@ -800,7 +800,7 @@ const CONSOLE_ACTION_DISPLAY = {
     windows: {
         list_processes: 'Get-Process (list running processes)',
         collect_triage: 'Collect-Triage (processes, connections, autoruns, users, startup items)',
-        persistence_sweep: 'Persistence-Sweep (scheduled tasks, services, Run/RunOnce keys, startup folders, WMI event subscriptions)',
+        persistence_sweep: 'Persistence-Sweep (scheduled tasks, services, Run/RunOnce keys, startup folders, WMI event subscriptions -- diffed against the last run on this host)',
         ioc_sweep: 'IOC-Sweep (hash recent files in Temp/Downloads/AppData/ProgramData against known-bad hashes)',
         string_sweep: 'String-Sweep (search recent files in Temp/Downloads/AppData/ProgramData for known-bad YARA strings)',
         collect_browser_artifacts: 'Collect-Browser-Artifacts (Chrome/Edge/Firefox history file metadata + recent downloads, all user profiles)',
@@ -813,7 +813,7 @@ const CONSOLE_ACTION_DISPLAY = {
     linux: {
         list_processes: 'ps (list running processes)',
         collect_triage: 'Collect-Triage (processes, connections, cron/systemd autostart, users)',
-        persistence_sweep: 'Persistence-Sweep (user crontabs, full enabled-unit list, init.d, shell profiles, LD_PRELOAD)',
+        persistence_sweep: 'Persistence-Sweep (user crontabs, full enabled-unit list, init.d, shell profiles, LD_PRELOAD -- diffed against the last run on this host)',
         ioc_sweep: 'IOC-Sweep (hash recent files in /tmp, /var/tmp, ~/Downloads against known-bad hashes)',
         string_sweep: 'String-Sweep (search recent files in /tmp, /var/tmp, ~/Downloads for known-bad YARA strings)',
         collect_ssh_artifacts: 'Collect-SSH-Artifacts (shell history, authorized_keys, known_hosts, all real users)',
