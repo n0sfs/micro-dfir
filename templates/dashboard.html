@@ -75,14 +75,83 @@
 <div id="paneSearch" style="display: {{ 'block' if active_tab == 'search' else 'none' }};">
 
 <!-- UNIFIED ADVANCED SOC TOOLBAR -->
-<div class="row g-2 mb-3 bg-dark p-3 rounded border border-secondary">
+<div class="bg-dark p-3 rounded border border-secondary mb-3">
 
-    <div class="col-md-2">
-        <label for="searchQuery" class="form-label text-muted small mb-1 fw-bold">Global Search</label>
-        <input type="text" id="searchQuery" class="form-control bg-dark text-light border-secondary form-control-sm" placeholder="Search keyword, ID..." title="Searches across hosts, apps, IDs, users, and messages.&#10;&#10;host:WIN-A severity:High  -- AND'd together, field:value scopes to one column&#10;&quot;exact phrase&quot;  -- quote to match literal text with spaces&#10;-exclude / NOT exclude  -- negate a term&#10;term1 OR term2  -- explicit OR (default is AND)&#10;win*  or  win?01  -- wildcards (* = any chars, ? = one char)" onkeyup="if(event.key === 'Enter') loadDashboardData()">
+    <!-- Search mode toggles -->
+    <div class="d-flex align-items-center gap-4 mb-2">
+        <div class="form-check form-switch mb-0">
+            <input class="form-check-input" type="checkbox" id="toggleAdvancedQuery" checked onchange="onSearchModeToggle()">
+            <label class="form-check-label small fw-bold" for="toggleAdvancedQuery">Advanced Query</label>
+        </div>
+        <div class="form-check form-switch mb-0">
+            <input class="form-check-input" type="checkbox" id="toggleBasicFilter" onchange="onSearchModeToggle()">
+            <label class="form-check-label small fw-bold" for="toggleBasicFilter">Basic Field Filter</label>
+        </div>
     </div>
 
-    <div class="col-md-2">
+    <!-- Advanced Query: full-width, with a click-to-insert syntax cheat sheet underneath
+         (a hover-only tooltip on a text box is easy to miss and impossible to act on
+         directly -- these are both readable AND directly usable). -->
+    <div id="advancedQuerySection" class="mb-2">
+        <label for="searchQuery" class="form-label text-muted small mb-1 fw-bold">Advanced Query</label>
+        <input type="text" id="searchQuery" class="form-control bg-dark text-light border-secondary" placeholder='host:WIN-A -powershell "exact phrase" severity:High' title="Searches across hosts, apps, IDs, users, and messages by default; field:value scopes to one column." onkeyup="if(event.key === 'Enter') loadDashboardData()">
+        <div class="d-flex flex-wrap align-items-center gap-2 mt-1">
+            <span class="text-muted small">Try:</span>
+            <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 query-hint-btn" style="font-size:.72rem;" onclick="insertQueryHint('host:WIN-A')" title="Scope a term to one column">host:WIN-A</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 query-hint-btn" style="font-size:.72rem;" onclick="insertQueryHint(String.fromCharCode(34) + 'exact phrase' + String.fromCharCode(34))" title="Quote to match literal text with spaces">"exact phrase"</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 query-hint-btn" style="font-size:.72rem;" onclick="insertQueryHint('-exclude')" title="Negate a term (NOT exclude also works)">-exclude</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 query-hint-btn" style="font-size:.72rem;" onclick="insertQueryHint('term1 OR term2')" title="Explicit OR -- terms are AND'd by default">term1 OR term2</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 query-hint-btn" style="font-size:.72rem;" onclick="insertQueryHint('win*')" title="* = any characters, ? = one character">win*</button>
+        </div>
+    </div>
+
+    <!-- Basic Field Filter: the old single-field contains/equals/starts/ends/&gt;/&lt; picker.
+         Mostly superseded by the query language above (field:value covers contains/equals,
+         -/NOT covers not_equals, wildcards cover starts/ends-with) -- kept available since
+         gt/lt numeric comparison has no query-language equivalent yet. Off by default. -->
+    <div id="basicFilterSection" class="row g-2 mb-2" style="display:none;">
+        <div class="col-md-4">
+            <label for="fieldKey" class="form-label text-muted small mb-1 fw-bold">Target Field</label>
+            <div class="input-group input-group-sm" title="Select a specific database field to target your filter query">
+                <select id="fieldKey" class="form-select bg-dark text-light border-secondary">
+                    <option value="">-- Field --</option>
+                    <option value="username">User</option>
+                    <option value="host">Host</option>
+                    <option value="event_id">Event ID</option>
+                    <option value="source_ip">Src IP</option>
+                    <option value="destination_ip">Dest IP</option>
+                    <option value="message">Message</option>
+                    <option value="process_image">Process Image</option>
+                    <option value="command_line">Command Line</option>
+                    <option value="parent_image">Parent Image</option>
+                    <option value="parent_command_line">Parent Command Line</option>
+                    <option value="original_file_name">Original File Name</option>
+                </select>
+                <button class="btn btn-outline-secondary text-light" type="button" data-bs-toggle="modal" data-bs-target="#fieldManagerModal" title="Manage, add, edit, or delete custom search fields"><i class="fa-solid fa-gear"></i></button>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <label for="fieldOp" class="form-label text-muted small mb-1 fw-bold">Operator</label>
+            <select id="fieldOp" class="form-select bg-dark text-light border-secondary form-select-sm" title="Select conditional operator (contains, equals, starts with, etc.)">
+                <option value="contains" selected>contains</option>
+                <option value="equals">=</option>
+                <option value="not_equals">!=</option>
+                <option value="starts_with">starts</option>
+                <option value="ends_with">ends</option>
+                <option value="gt">&gt;</option>
+                <option value="lt">&lt;</option>
+            </select>
+        </div>
+        <div class="col-md-6">
+            <label for="fieldVal" class="form-label text-muted small mb-1 fw-bold">Field Value</label>
+            <input type="text" id="fieldVal" class="form-control bg-dark text-light border-secondary form-control-sm" placeholder="Value..." title="Enter target string or numeric value to match against the selected field" onkeyup="if(event.key === 'Enter') loadDashboardData()">
+        </div>
+    </div>
+
+    <!-- Categorical filters (dropdowns, not text) + run controls -- always visible
+         regardless of which search mode(s) are shown above. -->
+    <div class="row g-2">
+    <div class="col-md-3">
         <label class="form-label text-muted small mb-1 fw-bold">Log Source / App</label>
         <div class="dropdown">
             <button class="btn btn-sm bg-dark text-light border-secondary text-start d-flex justify-content-between align-items-center dropdown-toggle w-100" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" title="Filter logs by one or more Windows event channels">
@@ -100,7 +169,7 @@
         </div>
     </div>
 
-    <div class="col-md-1">
+    <div class="col-md-2">
         <label class="form-label text-muted small mb-1 fw-bold">Severity</label>
         <div class="dropdown">
             <button class="btn btn-sm bg-dark text-light border-secondary text-start d-flex justify-content-between align-items-center dropdown-toggle w-100" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" title="Filter by one or more event severities">
@@ -119,7 +188,7 @@
         </div>
     </div>
 
-    <div class="col-md-2">
+    <div class="col-md-3">
         <label for="timeRangeBtn" class="form-label text-muted small mb-1 fw-bold">Time Window</label>
         <div class="dropdown">
             <button id="timeRangeBtn" class="btn btn-sm bg-dark text-light border-secondary text-start d-flex justify-content-between align-items-center dropdown-toggle w-100" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" title="Pick a relative window, an exact date/time range, or a saved favorite">
@@ -157,48 +226,10 @@
         </div>
     </div>
 
-    <div class="col-md-2">
-        <label for="fieldKey" class="form-label text-muted small mb-1 fw-bold">Target Field</label>
-        <div class="input-group input-group-sm" title="Select a specific database field to target your filter query">
-            <select id="fieldKey" class="form-select bg-dark text-light border-secondary">
-                <option value="">-- Field --</option>
-                <option value="username">User</option>
-                <option value="host">Host</option>
-                <option value="event_id">Event ID</option>
-                <option value="source_ip">Src IP</option>
-                <option value="destination_ip">Dest IP</option>
-                <option value="message">Message</option>
-                <option value="process_image">Process Image</option>
-                <option value="command_line">Command Line</option>
-                <option value="parent_image">Parent Image</option>
-                <option value="parent_command_line">Parent Command Line</option>
-                <option value="original_file_name">Original File Name</option>
-            </select>
-            <button class="btn btn-outline-secondary text-light" type="button" data-bs-toggle="modal" data-bs-target="#fieldManagerModal" title="Manage, add, edit, or delete custom search fields"><i class="fa-solid fa-gear"></i></button>
-        </div>
-    </div>
-
-    <div class="col-md-1 px-1">
-        <label for="fieldOp" class="form-label text-muted small mb-1 fw-bold">Operator</label>
-        <select id="fieldOp" class="form-select bg-dark text-light border-secondary form-select-sm" title="Select conditional operator (contains, equals, starts with, etc.)">
-            <option value="contains" selected>contains</option>
-            <option value="equals">=</option>
-            <option value="not_equals">!=</option>
-            <option value="starts_with">starts</option>
-            <option value="ends_with">ends</option>
-            <option value="gt">&gt;</option>
-            <option value="lt">&lt;</option>
-        </select>
-    </div>
-
-    <div class="col-md-2">
-        <label for="fieldVal" class="form-label text-muted small mb-1 fw-bold">Field Value</label>
-        <input type="text" id="fieldVal" class="form-control bg-dark text-light border-secondary form-control-sm" placeholder="Value..." title="Enter target string or numeric value to match against the selected field" onkeyup="if(event.key === 'Enter') loadDashboardData()">
-    </div>
-
-    <div class="col-md-1 d-flex align-items-end gap-1">
-        <button class="btn btn-primary btn-sm w-100" onclick="loadDashboardData()" title="Execute search query"><i class="fa-solid fa-search"></i></button>
+    <div class="col-md-4 d-flex align-items-end gap-1">
+        <button class="btn btn-primary btn-sm" onclick="loadDashboardData()" title="Execute search query"><i class="fa-solid fa-search me-1"></i>Search</button>
         <button id="streamToggleBtn" class="btn btn-outline-secondary btn-sm" title="Toggle Live Streaming Mode (Auto-refresh every 5s)" onclick="toggleStream()"><i class="fa-solid fa-play"></i></button>
+    </div>
     </div>
 </div>
 
@@ -1275,29 +1306,86 @@ let logSortState = {col: 'timestamp', dir: 'desc'};
 // sort/poll params only need adding in one place, not four.
 function buildLogQueryParams(opts) {
     opts = opts || {};
-    let q = document.getElementById('searchQuery').value;
+    // A hidden section's stale field values must NOT silently keep filtering -- otherwise
+    // turning a toggle off wouldn't actually turn it off from the search's perspective,
+    // which is exactly the "looks disabled but still active" trap Log Search already had
+    // one real bug from (the old Field Manager issue).
+    const showAdvanced = document.getElementById('toggleAdvancedQuery').checked;
+    const showBasic = document.getElementById('toggleBasicFilter').checked;
+    let q = showAdvanced ? document.getElementById('searchQuery').value : '';
     let app = Array.from(document.querySelectorAll('.app-chk:checked')).map(c=>c.value).join(',');
     let sev = Array.from(document.querySelectorAll('.sev-chk:checked')).map(c=>c.value).join(',');
-    let fieldKey = document.getElementById('fieldKey').value;
-    let fieldOp = document.getElementById('fieldOp').value;
-    let fieldVal = document.getElementById('fieldVal').value;
+    let fieldKey = showBasic ? document.getElementById('fieldKey').value : '';
+    let fieldOp = showBasic ? document.getElementById('fieldOp').value : 'contains';
+    let fieldVal = showBasic ? document.getElementById('fieldVal').value : '';
     let params = `q=${encodeURIComponent(q)}&${timeRangeQuery()}&app=${encodeURIComponent(app)}&severity=${encodeURIComponent(sev)}&fieldKey=${encodeURIComponent(fieldKey)}&fieldOp=${encodeURIComponent(fieldOp)}&fieldVal=${encodeURIComponent(fieldVal)}${includeArchiveParam()}`;
     params += `&sort=${encodeURIComponent(logSortState.col)}&dir=${encodeURIComponent(logSortState.dir)}`;
     if (opts.auto) params += '&poll=1';
     return params;
 }
 
+// ---- Advanced Query / Basic Field Filter mode toggles ----
+function updateSearchModeVisibility(persist) {
+    const showAdvanced = document.getElementById('toggleAdvancedQuery').checked;
+    const showBasic = document.getElementById('toggleBasicFilter').checked;
+    document.getElementById('advancedQuerySection').style.display = showAdvanced ? '' : 'none';
+    document.getElementById('basicFilterSection').style.display = showBasic ? '' : 'none';
+    if (persist !== false) {
+        try {
+            localStorage.setItem('microdfir_search_show_advanced', showAdvanced ? '1' : '0');
+            localStorage.setItem('microdfir_search_show_basic', showBasic ? '1' : '0');
+        } catch (e) {}
+    }
+}
+
+function onSearchModeToggle() {
+    updateSearchModeVisibility(true);
+    loadDashboardData();
+}
+
+function loadSearchModePrefs() {
+    let showAdvanced = true, showBasic = false; // Advanced on, Basic off -- sensible default now that the query language covers most of what Basic used to be needed for
+    try {
+        const a = localStorage.getItem('microdfir_search_show_advanced');
+        const b = localStorage.getItem('microdfir_search_show_basic');
+        if (a !== null) showAdvanced = a === '1';
+        if (b !== null) showBasic = b === '1';
+    } catch (e) {}
+    document.getElementById('toggleAdvancedQuery').checked = showAdvanced;
+    document.getElementById('toggleBasicFilter').checked = showBasic;
+    updateSearchModeVisibility(false); // don't re-persist what was just loaded
+}
+
+// Inserts a syntax example at the end of the current query (space-separated) and refocuses
+// the box -- these are realistic examples to edit in place, not fill-in-the-blank templates,
+// which keeps the insertion logic trivial (append + focus, no mid-string cursor placement).
+function insertQueryHint(snippet) {
+    const input = document.getElementById('searchQuery');
+    input.value = input.value ? `${input.value} ${snippet}` : snippet;
+    input.focus();
+    const pos = input.value.length;
+    input.setSelectionRange(pos, pos);
+}
+
 // Clicking a pivotable cell sets it as an exact-match field filter and re-searches --
 // event.stopPropagation() keeps the row's own onclick (open detail modal) from also firing.
+// Inserts a field:value term into the Advanced Query box rather than driving the Basic
+// Field Filter trio -- works regardless of whether Basic is toggled on, and (since the
+// term is visibly typed into the query box) doubles as a live example of the syntax.
 function pivotFilter(evt, col, idx) {
     evt.stopPropagation();
     const log = currentLogs[idx];
     if (!log) return;
     const val = log[col];
     if (val === null || val === undefined || val === '') return;
-    document.getElementById('fieldKey').value = col;
-    document.getElementById('fieldOp').value = 'equals';
-    document.getElementById('fieldVal').value = val;
+    const strVal = String(val);
+    const term = strVal.includes(' ') ? `${col}:"${strVal}"` : `${col}:${strVal}`;
+    const input = document.getElementById('searchQuery');
+    input.value = input.value ? `${input.value} ${term}` : term;
+    if (!document.getElementById('toggleAdvancedQuery').checked) {
+        document.getElementById('toggleAdvancedQuery').checked = true;
+        updateSearchModeVisibility(true);
+    }
     loadDashboardData();
 }
 
@@ -1510,6 +1598,8 @@ function collectSearchFilterState() {
         includeArchive: document.getElementById('includeArchive').checked,
         sort: logSortState.col,
         dir: logSortState.dir,
+        showAdvanced: document.getElementById('toggleAdvancedQuery').checked,
+        showBasic: document.getElementById('toggleBasicFilter').checked,
     };
 }
 
@@ -1523,6 +1613,12 @@ function applySearchFilterState(params) {
     timeRangeState = { range: params.range || '24h', start: params.start || '', end: params.end || '' };
     document.getElementById('includeArchive').checked = !!params.includeArchive;
     logSortState = { col: params.sort || 'timestamp', dir: params.dir || 'desc' };
+    // Older saved searches (from before the toggle UI existed) have neither key -- default
+    // to showing whichever section actually has a value set, so a saved search someone made
+    // using the old single-field UI doesn't silently stop applying its own filter.
+    document.getElementById('toggleAdvancedQuery').checked = params.showAdvanced !== undefined ? !!params.showAdvanced : !!params.q;
+    document.getElementById('toggleBasicFilter').checked = params.showBasic !== undefined ? !!params.showBasic : !!params.fieldKey;
+    updateSearchModeVisibility(true);
     setTimeRangeLabel();
     markActivePresetBtn(timeRangeState.range);
     renderLogsTableHead();
@@ -1749,6 +1845,7 @@ function initSearchTab() {
     initChart();
     setTimeRangeLabel();
     markActivePresetBtn(timeRangeState.range);
+    loadSearchModePrefs();
     renderFavorites();
     loadFieldPicklist();
     renderColumnPicker();
