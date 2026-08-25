@@ -4197,6 +4197,88 @@ def _build_log_sort(args):
     direction = 'ASC' if args.get('dir', 'desc').lower() == 'asc' else 'DESC'
     return f"ORDER BY {col} {direction}"
 
+# The Global Search query language: space-separated terms AND together implicitly (like
+# every mature search box -- Splunk/Elastic/Google all treat unquoted multi-word input as
+# an implicit AND of terms, not one literal substring, which is the actual behavior change
+# from the old single-LIKE-blob this replaces). Supports "quoted phrases", -exclude / NOT
+# exclude negation, explicit OR between two terms, field:value scoping to one column
+# (validated against LOG_SEARCH_ALLOWED_FIELDS -- an unrecognized field: prefix is honestly
+# treated as a literal term rather than silently redirected, unlike the old Field Manager
+# bug), and * / ? wildcards translated to SQL LIKE's % / _.
+_QUERY_TOKEN_RE = re.compile(r'"([^"]*)"|(\S+)')
+_QUERY_DEFAULT_COLUMNS = ('host', 'app', 'event_id', 'username', 'message')
+
+def _tokenize_search_query(q):
+    return [m.group(1) if m.group(1) is not None else m.group(2) for m in _QUERY_TOKEN_RE.finditer(q.strip())]
+
+def _wildcard_term_to_like(value):
+    # Escape SQL LIKE's own special chars first so a literal % or _ in the search term
+    # (e.g. searching for "50%") isn't misinterpreted as a wildcard -- done BEFORE
+    # translating * / ? so those two never collide with the escaping step. A term
+    # containing * or ? is used as the user wrote it (translated to SQL's % / _, no
+    # auto-wrap) since the wildcard placement is deliberate; a plain term with neither
+    # gets wrapped in %...% for the usual substring/"contains" behavior.
+    has_wildcard = '*' in value or '?' in value
+    escaped = value.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+    if has_wildcard:
+        return escaped.replace('*', '%').replace('?', '_')
+    return f'%{escaped}%'
+
+def _parse_search_query(q):
+    allowed_fields = {f['key'] for f in LOG_SEARCH_ALLOWED_FIELDS}
+    tokens = _tokenize_search_query(q)
+    clauses = []  # list of (join, sql, params); join is how this clause joins the PREVIOUS one
+    pending_join = 'AND'
+    pending_not = False
+    for raw_tok in tokens:
+        upper = raw_tok.upper()
+        if upper == 'AND':
+            pending_join = 'AND'
+            continue
+        if upper == 'OR':
+            pending_join = 'OR'
+            continue
+        if upper == 'NOT':
+            pending_not = True
+            continue
+
+        term = raw_tok
+        negate = pending_not
+        pending_not = False
+        if term.startswith('-') and len(term) > 1:
+            negate = True
+            term = term[1:]
+
+        field = None
+        value = term
+        if ':' in term and not term.startswith(':'):
+            maybe_field, maybe_value = term.split(':', 1)
+            if maybe_field in allowed_fields and maybe_value:
+                field, value = maybe_field, maybe_value
+
+        like_value = _wildcard_term_to_like(value).lower()
+
+        if field:
+            sql = f"LOWER({field}) LIKE ? ESCAPE '\\'"
+            term_params = [like_value]
+        else:
+            sql = '(' + ' OR '.join(f"LOWER({c}) LIKE ? ESCAPE '\\'" for c in _QUERY_DEFAULT_COLUMNS) + ')'
+            term_params = [like_value] * len(_QUERY_DEFAULT_COLUMNS)
+
+        if negate:
+            sql = f"NOT {sql}"
+        clauses.append((pending_join, sql, term_params))
+        pending_join = 'AND'
+
+    if not clauses:
+        return None, []
+    sql = clauses[0][1]
+    params = list(clauses[0][2])
+    for join, clause_sql, clause_params in clauses[1:]:
+        sql += f' {join} {clause_sql}'
+        params.extend(clause_params)
+    return f'({sql})', params
+
 def _build_log_filters(args):
     import datetime
     q = args.get('q', '').lower()
@@ -4269,8 +4351,10 @@ def _build_log_filters(args):
             conditions.append(f"LOWER({col}) LIKE ?"); params.append(f'%{field_val}%')
 
     if q:
-        conditions.append("(LOWER(host) LIKE ? OR LOWER(app) LIKE ? OR LOWER(event_id) LIKE ? OR LOWER(username) LIKE ? OR LOWER(message) LIKE ?)")
-        params.extend([f'%{q}%'] * 5)
+        query_sql, query_params = _parse_search_query(q)
+        if query_sql:
+            conditions.append(query_sql)
+            params.extend(query_params)
 
     where_clause = (" WHERE " + " and ".join(conditions)) if conditions else ""
     return where_clause, params

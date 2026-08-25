@@ -79,7 +79,7 @@
 
     <div class="col-md-2">
         <label for="searchQuery" class="form-label text-muted small mb-1 fw-bold">Global Search</label>
-        <input type="text" id="searchQuery" class="form-control bg-dark text-light border-secondary form-control-sm" placeholder="Search keyword, ID..." title="Searches across hosts, apps, IDs, users, and messages" onkeyup="if(event.key === 'Enter') loadDashboardData()">
+        <input type="text" id="searchQuery" class="form-control bg-dark text-light border-secondary form-control-sm" placeholder="Search keyword, ID..." title="Searches across hosts, apps, IDs, users, and messages.&#10;&#10;host:WIN-A severity:High  -- AND'd together, field:value scopes to one column&#10;&quot;exact phrase&quot;  -- quote to match literal text with spaces&#10;-exclude / NOT exclude  -- negate a term&#10;term1 OR term2  -- explicit OR (default is AND)&#10;win*  or  win?01  -- wildcards (* = any chars, ? = one char)" onkeyup="if(event.key === 'Enter') loadDashboardData()">
     </div>
 
     <div class="col-md-2">
