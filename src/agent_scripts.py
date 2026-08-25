@@ -220,6 +220,24 @@ foreach ($p in $paths) {
 # Silencing progress up front keeps every template's stdout clean.
 _PROGRESS_SILENT = "$ProgressPreference = 'SilentlyContinue'\n"
 
+# A dedicated, much deeper enumeration than collect_triage()'s 2-key autoruns snippet
+# above -- Run/RunOnce under both HKLM and HKCU, scheduled tasks, services (with their
+# binary path, since a malicious service often points somewhere outside System32),
+# every Startup folder (per-user and all-users), and WMI event subscriptions (a classic
+# fileless-persistence technique: __EventFilter/__EventConsumer/__FilterToConsumerBinding).
+# Inspired by Sysinternals Autoruns and Velociraptor's persistence-focused artifacts.
+def persistence_sweep():
+    return r"""$result = @{}
+$result.scheduled_tasks = Get-ScheduledTask -ErrorAction SilentlyContinue | Select-Object TaskName,TaskPath,State,@{N='Actions';E={($_.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)" }) -join '; '}}
+$result.services = Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | Select-Object Name,DisplayName,State,StartMode,PathName
+$result.run_keys = Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run','HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce','HKCU:\Software\Microsoft\Windows\CurrentVersion\Run','HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce' -ErrorAction SilentlyContinue
+$result.startup_files = Get-ChildItem "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp","$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup" -ErrorAction SilentlyContinue | Select-Object FullName,LastWriteTime
+$result.wmi_event_filters = Get-CimInstance -Namespace root\subscription -ClassName __EventFilter -ErrorAction SilentlyContinue | Select-Object Name,Query
+$result.wmi_event_consumers = Get-CimInstance -Namespace root\subscription -ClassName __EventConsumer -ErrorAction SilentlyContinue | Select-Object Name,CommandLineTemplate,ScriptFileName
+$result.wmi_bindings = Get-CimInstance -Namespace root\subscription -ClassName __FilterToConsumerBinding -ErrorAction SilentlyContinue | Select-Object Filter,Consumer
+$result | ConvertTo-Json -Depth 5 -Compress
+"""
+
 # label -> (builder, required param names)
 WINDOWS_TEMPLATES = {
     'list_processes': (lambda params: _PROGRESS_SILENT + list_processes(), []),
@@ -227,6 +245,7 @@ WINDOWS_TEMPLATES = {
     'isolate_host': (lambda params: _PROGRESS_SILENT + isolate_host(params['soc_ip']), ['soc_ip']),
     'restore_network': (lambda params: _PROGRESS_SILENT + restore_network(), []),
     'collect_triage': (lambda params: _PROGRESS_SILENT + collect_triage(), []),
+    'persistence_sweep': (lambda params: _PROGRESS_SILENT + persistence_sweep(), []),
     'collect_file': (lambda params: _PROGRESS_SILENT + collect_file(params['path']), ['path']),
     # 'hashes'/'md5_hashes'/'sha1_hashes' and 'patterns' are always server-populated
     # from the live IOC list / imported YARA rules right before dispatch (see app.py's
@@ -452,12 +471,45 @@ PYEOF
 """
     return script.replace('__PATTERN_MAP__', pattern_map_src)
 
+# Deeper than collect_triage_linux()'s lighter cron/systemd touch above -- every user's
+# own crontab individually (not just the system-wide files), the FULL enabled-unit list
+# (no head cap), /etc/init.d SysV scripts, shell profile files (a classic persistence
+# spot -- .bashrc/.profile run on every login), and any LD_PRELOAD reference (a
+# well-known library-injection persistence technique). Inspired by the same
+# Autoruns/Velociraptor philosophy as persistence_sweep() above, just for Linux's own
+# autostart mechanisms.
+def persistence_sweep_linux():
+    return r"""echo "=== User Crontabs ==="
+for u in $(cut -f1 -d: /etc/passwd); do
+    out=$(crontab -l -u "$u" 2>/dev/null)
+    [ -n "$out" ] && echo "--$u--" && echo "$out"
+done
+echo
+echo "=== System Cron ==="
+for f in /etc/crontab /etc/cron.d/*; do [ -f "$f" ] && echo "--$f--" && cat "$f"; done 2>/dev/null
+echo
+echo "=== Enabled systemd Units (full list) ==="
+systemctl list-unit-files --state=enabled --no-legend 2>/dev/null
+echo
+echo "=== /etc/init.d Scripts ==="
+ls -la /etc/init.d/ 2>/dev/null
+echo
+echo "=== Shell Profile Files ==="
+for f in /etc/profile /etc/profile.d/*.sh /root/.bashrc /root/.profile; do
+    [ -f "$f" ] && echo "--$f--" && cat "$f"
+done 2>/dev/null
+echo
+echo "=== LD_PRELOAD References ==="
+grep -H LD_PRELOAD /etc/environment /etc/ld.so.preload 2>/dev/null || echo "(none found)"
+"""
+
 LINUX_TEMPLATES = {
     'list_processes': (lambda params: list_processes_linux(), []),
     'kill_process': (lambda params: kill_process_linux(params['pid']), ['pid']),
     'isolate_host': (lambda params: isolate_host_linux(params['soc_ip']), ['soc_ip']),
     'restore_network': (lambda params: restore_network_linux(), []),
     'collect_triage': (lambda params: collect_triage_linux(), []),
+    'persistence_sweep': (lambda params: persistence_sweep_linux(), []),
     'collect_file': (lambda params: collect_file_linux(params['path']), ['path']),
     'ioc_sweep': (lambda params: ioc_sweep_linux(params.get('hashes', []), params.get('md5_hashes', []), params.get('sha1_hashes', [])), []),
     'string_sweep': (lambda params: string_sweep_linux(params.get('patterns', [])), []),
