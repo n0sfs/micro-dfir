@@ -223,6 +223,16 @@
     </div>
     <div class="d-flex align-items-center gap-2">
     <div class="dropdown">
+        <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" title="Save the current filters as a reusable search, or load one you saved before">
+            <i class="fa-solid fa-bookmark me-1"></i> Saved Searches
+        </button>
+        <ul id="savedSearchMenu" class="dropdown-menu dropdown-menu-dark dropdown-menu-end shadow p-2" style="min-width: 280px; max-height: 360px; overflow-y: auto;">
+            <li><button type="button" class="btn btn-sm btn-outline-primary w-100 mb-2" onclick="saveCurrentSearch()"><i class="fa-solid fa-plus me-1"></i>Save Current Search</button></li>
+            <li><hr class="dropdown-divider border-secondary"></li>
+            <li class="text-muted small px-2">No saved searches yet.</li>
+        </ul>
+    </div>
+    <div class="dropdown">
         <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" title="Choose which columns to show in the results table">
             <i class="fa-solid fa-table-columns me-1"></i> Columns
         </button>
@@ -1482,6 +1492,94 @@ window.exportJSON = function() {
     window.location.href = `/api/logs/export?format=json&${buildLogQueryParams()}`;
 };
 
+// ---- Saved Searches (server-side, shared across users -- unlike the time-range-only
+// Favorites above, which are per-browser localStorage) ----
+let savedSearches = [];
+
+function collectSearchFilterState() {
+    return {
+        q: document.getElementById('searchQuery').value,
+        app: Array.from(document.querySelectorAll('.app-chk:checked')).map(c => c.value),
+        severity: Array.from(document.querySelectorAll('.sev-chk:checked')).map(c => c.value),
+        fieldKey: document.getElementById('fieldKey').value,
+        fieldOp: document.getElementById('fieldOp').value,
+        fieldVal: document.getElementById('fieldVal').value,
+        range: timeRangeState.range,
+        start: timeRangeState.start,
+        end: timeRangeState.end,
+        includeArchive: document.getElementById('includeArchive').checked,
+        sort: logSortState.col,
+        dir: logSortState.dir,
+    };
+}
+
+function applySearchFilterState(params) {
+    document.getElementById('searchQuery').value = params.q || '';
+    document.querySelectorAll('.app-chk').forEach(c => { c.checked = (params.app || []).includes(c.value); });
+    document.querySelectorAll('.sev-chk').forEach(c => { c.checked = (params.severity || []).includes(c.value); });
+    document.getElementById('fieldKey').value = params.fieldKey || '';
+    document.getElementById('fieldOp').value = params.fieldOp || 'contains';
+    document.getElementById('fieldVal').value = params.fieldVal || '';
+    timeRangeState = { range: params.range || '24h', start: params.start || '', end: params.end || '' };
+    document.getElementById('includeArchive').checked = !!params.includeArchive;
+    logSortState = { col: params.sort || 'timestamp', dir: params.dir || 'desc' };
+    setTimeRangeLabel();
+    markActivePresetBtn(timeRangeState.range);
+    renderLogsTableHead();
+    updateFilters(); // refreshes the App/Sev label text and triggers the actual search
+}
+
+function loadSavedSearches() {
+    fetch('/api/saved-searches')
+        .then(r => r.json())
+        .then(data => { savedSearches = data || []; renderSavedSearchMenu(); })
+        .catch(e => console.log('Error loading saved searches:', e));
+}
+
+function renderSavedSearchMenu() {
+    const menu = document.getElementById('savedSearchMenu');
+    if (!menu) return;
+    const listPart = savedSearches.length
+        ? savedSearches.map(s => `
+            <li class="d-flex align-items-center justify-content-between px-2 py-1">
+                <a href="#" class="text-light small text-truncate" style="max-width:190px;" title="${escHtml(s.name)}" onclick="event.preventDefault(); loadSavedSearch(${s.id});">${escHtml(s.name)}</a>
+                <button type="button" class="btn btn-sm btn-outline-danger py-0 px-1" title="Delete" onclick="event.stopPropagation(); deleteSavedSearch(${s.id});"><i class="fa-solid fa-trash"></i></button>
+            </li>
+        `).join('')
+        : `<li class="text-muted small px-2">No saved searches yet.</li>`;
+    menu.innerHTML = `
+        <li><button type="button" class="btn btn-sm btn-outline-primary w-100 mb-2" onclick="saveCurrentSearch()"><i class="fa-solid fa-plus me-1"></i>Save Current Search</button></li>
+        <li><hr class="dropdown-divider border-secondary"></li>
+        ${listPart}
+    `;
+}
+
+function saveCurrentSearch() {
+    const name = prompt('Name this saved search:');
+    if (!name || !name.trim()) return;
+    fetch('/api/saved-searches', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ name: name.trim(), query_params: collectSearchFilterState() })
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (ok) { loadSavedSearches(); } else { toast('Error saving search: ' + (data.error || 'unknown'), 'danger'); }
+    }).catch(err => toast('Error saving search: ' + err, 'danger'));
+}
+
+function loadSavedSearch(id) {
+    const s = savedSearches.find(x => x.id === id);
+    if (!s) return;
+    let params;
+    try { params = JSON.parse(s.query_params); } catch (e) { toast('Saved search data is corrupted.', 'danger'); return; }
+    applySearchFilterState(params);
+}
+
+async function deleteSavedSearch(id) {
+    if (!(await confirmDialog('Delete this saved search?', {title: 'Delete saved search', danger: true, confirmLabel: 'Delete'}))) return;
+    fetch(`/api/saved-searches/${id}`, {method: 'DELETE'})
+        .then(() => loadSavedSearches())
+        .catch(err => toast('Error deleting saved search: ' + err, 'danger'));
+}
+
 let isStreaming = false;
 let streamInterval = null;
 
@@ -1654,6 +1752,7 @@ function initSearchTab() {
     renderFavorites();
     loadFieldPicklist();
     renderColumnPicker();
+    loadSavedSearches();
     renderLogsTableHead();
     loadDashboardData();
 }

@@ -3102,6 +3102,21 @@ def migrate_fim_paths():
     except Exception:
         pass
 
+def migrate_saved_searches():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS saved_searches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            query_params TEXT NOT NULL,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_live_logs_ip_columns():
     # source_ip/destination_ip were added to schema.sql at some point but no migration
     # ever backfilled them onto already-deployed databases, and no ingest path ever
@@ -4539,6 +4554,46 @@ def api_logs_timeline():
     except Exception as e:
         return jsonify({'timeline': [], 'error': str(e)})
 
+# Saved searches store the same filter-state object the frontend already builds for every
+# /api/logs/search call (q/app/severity/range/start/end/fieldKey/fieldOp/fieldVal/types/
+# sort/dir/include_archive) as one JSON blob -- loading one just repopulates the filter
+# panel and re-runs the existing search, no separate query-execution path needed. Shared
+# across all users (not scoped to created_by), matching every other shared resource in
+# this app (cases, alerts, rules) -- there's no per-user data privacy model here.
+@app.route('/api/saved-searches', methods=['GET', 'POST'])
+@login_required
+def api_saved_searches():
+    db = get_db()
+    if request.method == 'GET':
+        rows = db.execute("SELECT id, name, query_params, created_by, created_at FROM saved_searches ORDER BY name COLLATE NOCASE").fetchall()
+        return jsonify([dict(r) for r in rows])
+    data = request.get_json() or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'name is required'}), 400
+    query_params = data.get('query_params')
+    if not isinstance(query_params, dict):
+        return jsonify({'error': 'query_params must be an object'}), 400
+    db.execute(
+        "INSERT INTO saved_searches (name, query_params, created_by) VALUES (?, ?, ?)",
+        (name, json.dumps(query_params), current_user.username)
+    )
+    db.commit()
+    log_audit('saved_search_create', 'saved_search', None, name)
+    return jsonify({'status': 'success'})
+
+@app.route('/api/saved-searches/<int:sid>', methods=['DELETE'])
+@login_required
+def api_saved_search_delete(sid):
+    db = get_db()
+    row = db.execute("SELECT name FROM saved_searches WHERE id = ?", (sid,)).fetchone()
+    if not row:
+        return jsonify({'error': 'Saved search not found'}), 404
+    db.execute("DELETE FROM saved_searches WHERE id = ?", (sid,))
+    db.commit()
+    log_audit('saved_search_delete', 'saved_search', sid, row['name'])
+    return jsonify({'status': 'success'})
+
 # --- PERSISTENT CHANNELS CONFIG ---
 import json, os
 AGENT_CONFIG_PATH = '/opt/micro-dfir/agent_config.json'
@@ -5321,6 +5376,7 @@ migrate_risk_score_events_rule_id()
 migrate_report_history()
 migrate_log_search_indexes()
 migrate_alerts_triage()
+migrate_saved_searches()
 
 try:
     # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every
