@@ -444,7 +444,26 @@ def api_ingest():
                 alert_sev = "LOW"
                 
             if triggered_rule:
-                db.execute("INSERT INTO alerts (timestamp, rule_name, severity, host, message) VALUES (?, ?, ?, ?, ?)", (ts, triggered_rule, alert_sev, hst, msg))
+                # Collapse a rule re-firing against the same host within a short rolling
+                # window into the existing alert row (occurrence_count++, last_seen bumped)
+                # instead of inserting a new one every time -- see migrate_alerts_dedup_columns.
+                # rule_id IS NULL identifies this heuristic path's own rows (vs sigma_engine.py's
+                # rule_id-based alerts), so rule_name is the match key here instead.
+                existing = db.execute(
+                    "SELECT id FROM alerts WHERE rule_id IS NULL AND rule_name = ? AND host = ? "
+                    "AND COALESCE(last_seen, timestamp) >= datetime('now', '-15 minutes') ORDER BY id DESC LIMIT 1",
+                    (triggered_rule, hst)
+                ).fetchone()
+                if existing:
+                    db.execute(
+                        "UPDATE alerts SET occurrence_count = occurrence_count + 1, last_seen = datetime('now'), message = ?, severity = ? WHERE id = ?",
+                        (msg, alert_sev, existing['id'])
+                    )
+                else:
+                    db.execute(
+                        "INSERT INTO alerts (timestamp, rule_name, severity, host, message, occurrence_count, last_seen) VALUES (?, ?, ?, ?, ?, 1, ?)",
+                        (ts, triggered_rule, alert_sev, hst, msg, ts)
+                    )
             # -------------------------------
         db.commit()
         return jsonify({'status': 'success', 'ingested': count}), 200
@@ -2490,6 +2509,25 @@ def migrate_alerts_enrichment():
     except Exception:
         pass
 
+# The same rule firing repeatedly against the same host/user within a short window used
+# to insert a brand-new alerts row every time -- occurrence_count/last_seen let a
+# recurrence update the existing row instead (see sigma_engine.py's pending_alerts
+# write phase and api_ingest's inline heuristic path), collapsing repeat noise into one
+# tracked alert with a count. occurrence_count defaults to 1 so every pre-existing row
+# reads correctly without a backfill pass.
+def migrate_alerts_dedup_columns():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(alerts)").fetchall()}
+        if 'occurrence_count' not in cols:
+            conn.execute("ALTER TABLE alerts ADD COLUMN occurrence_count INTEGER DEFAULT 1")
+        if 'last_seen' not in cols:
+            conn.execute("ALTER TABLE alerts ADD COLUMN last_seen DATETIME")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_sigma_rules_columns():
     # sigma_rules originally had no provenance columns — rules bulk-imported from SigmaHQ
     # and rules hand-written in the editor were indistinguishable. ALTER TABLE catches
@@ -3438,7 +3476,8 @@ def agent_config():
 UNIFIED_LOGS_SQL = """(
 SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type,
        NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
-       process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml
+       process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
+       NULL as occurrence_count, NULL as last_seen
 FROM live_logs
 UNION ALL
 SELECT a.timestamp, a.severity,
@@ -3455,14 +3494,16 @@ SELECT a.timestamp, a.severity,
        a.log_event_id as log_event_id,
        a.log_app as log_app,
        NULL as raw_json,
-       NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml
+       NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
+       a.occurrence_count as occurrence_count, a.last_seen as last_seen
 FROM alerts a
 LEFT JOIN sigma_rules s ON a.rule_id = s.id
 UNION ALL
 SELECT timestamp, severity, hostname as host, 'UEBA Anomaly' as app, '-' as event_id, '-' as username,
        NULL as source_ip, NULL as destination_ip, message, 'anomaly' as log_type,
        NULL as rule_id, 'ueba' as rule_source, NULL as log_event_id, NULL as log_app, raw_json,
-       NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml
+       NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
+       NULL as occurrence_count, NULL as last_seen
 FROM events
 WHERE app_name = 'duckdb_ueba'
 ) AS unified_logs"""
@@ -4350,6 +4391,7 @@ migrate_stix_indicators()
 migrate_agent_commands()
 migrate_alerts_columns()
 migrate_alerts_enrichment()
+migrate_alerts_dedup_columns()
 migrate_sigma_rules_columns()
 migrate_rule_tuning()
 migrate_compliance_tags()

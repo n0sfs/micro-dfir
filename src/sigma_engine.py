@@ -217,11 +217,43 @@ def run_detection_cycle():
             print(f"[-] Rule '{r['title']}' failed to convert/execute: {e}")
 
     if pending_alerts:
-        cursor.executemany(
-            "INSERT INTO alerts (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            pending_alerts
-        )
+        # Collapse duplicate hits within THIS cycle's own batch by (rule_id, host,
+        # username) before ever touching the alerts table -- a bursty rule matching the
+        # same host/user combo dozens of times in one sweep shouldn't create dozens of
+        # rows or dozens of dedup lookups, just one candidate per combo (using the last
+        # match's fields, since pending_alerts is populated in ascending id order so the
+        # last one seen is the most recent occurrence) tagged with how many hit.
+        grouped = {}
+        for tup in pending_alerts:
+            key = (tup[0], tup[3], tup[5])  # rule_id, host, username
+            g = grouped.setdefault(key, {'count': 0, 'latest': tup})
+            g['count'] += 1
+            g['latest'] = tup
+
+        # One SELECT + one INSERT/UPDATE per distinct (rule, host, user) combo this
+        # cycle -- bounded by how many DISTINCT things fired, not how many times they
+        # fired, so this stays a brief final write phase rather than reopening the
+        # long-write-lock problem the pending_alerts batching above exists to avoid.
+        for (rule_id, host, username), g in grouped.items():
+            (_, event_id, severity, _, message, _, source_ip, destination_ip, log_event_id, log_app) = g['latest']
+            existing = cursor.execute(
+                "SELECT id, occurrence_count FROM alerts WHERE rule_id IS ? AND host = ? AND username IS ? "
+                "AND COALESCE(last_seen, timestamp) >= datetime('now', '-15 minutes') ORDER BY id DESC LIMIT 1",
+                (rule_id, host, username)
+            ).fetchone()
+            if existing:
+                cursor.execute(
+                    "UPDATE alerts SET occurrence_count = occurrence_count + ?, last_seen = datetime('now'), "
+                    "event_id = ?, message = ?, source_ip = ?, destination_ip = ?, log_event_id = ?, log_app = ?, severity = ? "
+                    "WHERE id = ?",
+                    (g['count'], event_id, message, source_ip, destination_ip, log_event_id, log_app, severity, existing['id'])
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO alerts (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app, occurrence_count, last_seen) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+                    (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app, g['count'])
+                )
     conn.commit(); conn.close()
     json.dump({"last_id": current_max}, open(STATE_FILE, 'w'))
 
