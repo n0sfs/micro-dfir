@@ -55,6 +55,7 @@ echo "[*] Setting up Automation Cron Jobs..."
 (crontab -l 2>/dev/null | grep -v "ueba_engine.py"; echo "0 * * * * $SOC_DIR/venv/bin/python3 $SOC_DIR/src/ueba_engine.py >> /var/log/microdfir-ueba.log 2>&1") | crontab -
 (crontab -l 2>/dev/null | grep -v "taxii_client.py"; echo "0 2 * * * $SOC_DIR/venv/bin/python3 $SOC_DIR/src/taxii_client.py >> /var/log/microdfir-taxii.log 2>&1") | crontab -
 (crontab -l 2>/dev/null | grep -v "geoip_update.py"; echo "0 3 1 * * $SOC_DIR/venv/bin/python3 $SOC_DIR/src/geoip_update.py >> /var/log/microdfir-geoip.log 2>&1") | crontab -
+(crontab -l 2>/dev/null | grep -v "archive_logs.py"; echo "0 4 * * * $SOC_DIR/venv/bin/python3 $SOC_DIR/src/archive_logs.py >> /var/log/microdfir-archive.log 2>&1") | crontab -
 # Report generation is scheduled per-type from Settings > Reports > Schedule (saved to
 # the settings table, applied live by app.py) rather than a single hardcoded line here
 # -- this seeds the default schedule (security only, monthly) into crontab so a fresh

@@ -2921,6 +2921,23 @@ def migrate_cases():
     except Exception:
         pass
 
+def migrate_live_logs_archive():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS live_logs_archive (
+            id INTEGER PRIMARY KEY,
+            timestamp DATETIME NOT NULL,
+            host TEXT, app TEXT, severity TEXT, event_id TEXT, username TEXT,
+            source_ip TEXT, destination_ip TEXT, message TEXT NOT NULL,
+            process_image TEXT, command_line TEXT, parent_image TEXT,
+            parent_command_line TEXT, original_file_name TEXT, raw_xml TEXT
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_live_logs_archive_timestamp ON live_logs_archive(timestamp)')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_live_logs_ip_columns():
     # source_ip/destination_ip were added to schema.sql at some point but no migration
     # ever backfilled them onto already-deployed databases, and no ingest path ever
@@ -3554,6 +3571,60 @@ def api_settings_retention():
     log_audit('retention_policy_change', 'settings', None, f'{days} days')
     return jsonify({'status': 'success', 'days': days})
 
+# Mirrors archive_logs.py's own DEFAULT_ARCHIVE_DAYS -- duplicated rather than imported
+# since this route only needs the number for display, not the archiving logic itself.
+DEFAULT_LOG_ARCHIVE_DAYS = 90
+
+@app.route('/api/settings/archive', methods=['GET', 'POST'])
+@login_required
+def api_settings_archive():
+    from flask import request, jsonify
+    db = get_db()
+
+    if request.method == 'GET':
+        days_row = db.execute("SELECT value FROM settings WHERE key = 'log_archive_days'").fetchone()
+        last_row = db.execute("SELECT value FROM settings WHERE key = 'log_archive_last_run'").fetchone()
+        days = int(days_row['value']) if days_row and days_row['value'] else DEFAULT_LOG_ARCHIVE_DAYS
+        return jsonify({'days': days, 'last_run': last_row['value'] if last_row and last_row['value'] else None})
+
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    d = request.json or {}
+    days = d.get('days')
+    if days in (None, '', 0, '0'):
+        # Disabling archiving entirely -- everything stays in the hot live_logs table
+        # forever (subject to the separate retention purge, if that's enabled).
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('log_archive_days', '0')")
+        db.commit()
+        log_audit('archive_policy_change', 'settings', None, 'disabled')
+        return jsonify({'status': 'success', 'days': 0})
+    try:
+        days = int(days)
+        if days < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({'error': 'days must be a positive integer, or 0 to disable archiving'}), 400
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('log_archive_days', ?)", (str(days),))
+    db.commit()
+    log_audit('archive_policy_change', 'settings', None, f'{days} days')
+    return jsonify({'status': 'success', 'days': days})
+
+@app.route('/api/settings/archive/run', methods=['POST'])
+@login_required
+def api_settings_archive_run():
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    from archive_logs import archive_old_logs
+    days_override = (request.json or {}).get('days') if request.is_json else None
+    if days_override is not None:
+        try:
+            days_override = int(days_override)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'days must be a positive integer'}), 400
+    result = archive_old_logs(days_override)
+    log_audit('manual_log_archive', 'settings', None, f"archived={result['archived']}, cutoff={result['cutoff']}")
+    return jsonify({'status': 'success', **result})
+
 @app.route('/api/settings/vacuum', methods=['POST'])
 @login_required
 def api_settings_vacuum():
@@ -3816,6 +3887,51 @@ FROM events
 WHERE app_name = 'duckdb_ueba'
 ) AS unified_logs"""
 
+# Same shape as UNIFIED_LOGS_SQL plus a 4th branch over live_logs_archive -- kept as a
+# separate constant rather than always unioning the archive in, so a normal Log Search
+# query (the default, and the vast majority of queries) never pays the archive table's
+# scan cost. Only used when the request explicitly opts in via include_archive=1.
+UNIFIED_LOGS_SQL_WITH_ARCHIVE = """(
+SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type,
+       NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
+       process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
+       NULL as occurrence_count, NULL as last_seen, NULL as item_id
+FROM live_logs
+UNION ALL
+SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type,
+       NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
+       process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
+       NULL as occurrence_count, NULL as last_seen, NULL as item_id
+FROM live_logs_archive
+UNION ALL
+SELECT a.timestamp, a.severity,
+       COALESCE(a.host, 'UNKNOWN') as host,
+       COALESCE(s.title, a.rule_name, 'Custom/YARA Rule') as app,
+       '-' as event_id,
+       COALESCE(a.username, '-') as username,
+       a.source_ip as source_ip,
+       a.destination_ip as destination_ip,
+       COALESCE(a.message, '') as message,
+       'alert' as log_type,
+       a.rule_id as rule_id,
+       CASE WHEN a.rule_id IS NULL THEN 'heuristic' ELSE COALESCE(s.source, 'sigma') END as rule_source,
+       a.log_event_id as log_event_id,
+       a.log_app as log_app,
+       NULL as raw_json,
+       NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
+       a.occurrence_count as occurrence_count, a.last_seen as last_seen, a.id as item_id
+FROM alerts a
+LEFT JOIN sigma_rules s ON a.rule_id = s.id
+UNION ALL
+SELECT timestamp, severity, hostname as host, 'UEBA Anomaly' as app, '-' as event_id, '-' as username,
+       NULL as source_ip, NULL as destination_ip, message, 'anomaly' as log_type,
+       NULL as rule_id, 'ueba' as rule_source, NULL as log_event_id, NULL as log_app, raw_json,
+       NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
+       NULL as occurrence_count, NULL as last_seen, id as item_id
+FROM events
+WHERE app_name = 'duckdb_ueba'
+) AS unified_logs"""
+
 _RANGE_DELTAS = {
     '5m': ('minutes', 5), '15m': ('minutes', 15), '30m': ('minutes', 30),
     '1h': ('hours', 1), '4h': ('hours', 4), '12h': ('hours', 12), '24h': ('hours', 24),
@@ -3910,9 +4026,10 @@ def api_logs_search():
     try:
         db = get_db()
         where_clause, params = _build_log_filters(request.args)
+        source_sql = UNIFIED_LOGS_SQL_WITH_ARCHIVE if request.args.get('include_archive') == '1' else UNIFIED_LOGS_SQL
 
-        total_count = db.execute(f"SELECT COUNT(*) FROM {UNIFIED_LOGS_SQL}{where_clause}", params).fetchone()[0]
-        rows = db.execute(f"SELECT * FROM {UNIFIED_LOGS_SQL}{where_clause} ORDER BY timestamp DESC LIMIT 300", params).fetchall()
+        total_count = db.execute(f"SELECT COUNT(*) FROM {source_sql}{where_clause}", params).fetchone()[0]
+        rows = db.execute(f"SELECT * FROM {source_sql}{where_clause} ORDER BY timestamp DESC LIMIT 300", params).fetchall()
 
         logs = [{
             'id': r['item_id'],
@@ -3953,9 +4070,10 @@ def export_logs_csv():
     try:
         db = get_db()
         where_clause, params = _build_log_filters(request.args)
+        source_sql = UNIFIED_LOGS_SQL_WITH_ARCHIVE if request.args.get('include_archive') == '1' else UNIFIED_LOGS_SQL
 
         # Increased export limit (10,000 records) for deep incident analysis.
-        query = f"SELECT * FROM {UNIFIED_LOGS_SQL}{where_clause} ORDER BY timestamp DESC LIMIT 10000"
+        query = f"SELECT * FROM {source_sql}{where_clause} ORDER BY timestamp DESC LIMIT 10000"
         cursor = db.execute(query, params)
         rows = cursor.fetchall()
 
@@ -4013,7 +4131,8 @@ def api_logs_timeline():
             # 3d/7d/30d/all
             time_format = "strftime('%Y-%m-%d', timestamp)"
 
-        query = f"SELECT {time_format} as t_bucket, COUNT(*) as count FROM {UNIFIED_LOGS_SQL}{where_clause} GROUP BY t_bucket ORDER BY t_bucket ASC"
+        source_sql = UNIFIED_LOGS_SQL_WITH_ARCHIVE if request.args.get('include_archive') == '1' else UNIFIED_LOGS_SQL
+        query = f"SELECT {time_format} as t_bucket, COUNT(*) as count FROM {source_sql}{where_clause} GROUP BY t_bucket ORDER BY t_bucket ASC"
         rows = db.execute(query, params).fetchall()
 
         timeline = [{'time': r['t_bucket'], 'count': r['count']} for r in rows]
@@ -4716,6 +4835,7 @@ migrate_ueba_entities()
 migrate_ueba_math_v2()
 migrate_assets_identities()
 migrate_cases()
+migrate_live_logs_archive()
 migrate_live_logs_ip_columns()
 migrate_live_logs_process_columns()
 migrate_agent_versions()

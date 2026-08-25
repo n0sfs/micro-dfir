@@ -178,6 +178,27 @@
             </div>
             <button class="btn btn-outline-primary btn-sm" onclick="saveRetentionPolicy()"><i class="fa-solid fa-save me-1"></i> Save Retention Policy</button>
             <div class="small text-muted mt-2" id="retentionStatus"></div>
+
+            <hr class="border-secondary my-4">
+
+            <!-- Hot/Cold Log Archiving -->
+            <h6 class="text-info mb-3">Log Archiving</h6>
+            <p class="text-muted small mb-3">Move logs older than the archive window out of the live search index into cold storage in the same database, so Log Search stays fast without losing older data outright. Independent of Log Retention above -- if both are enabled, keep the retention period longer than the archive window, or retention will purge logs before they get a chance to be archived.</p>
+            <div class="row g-2 align-items-end mb-3">
+                <div class="col-auto">
+                    <label class="form-label small text-muted mb-1">Archive window (days)</label>
+                    <input type="number" min="1" id="archiveDays" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;">
+                </div>
+                <div class="col-auto">
+                    <button class="btn btn-outline-secondary btn-sm" onclick="archiveNow()"><i class="fa-solid fa-box-archive me-1"></i> Archive Now</button>
+                </div>
+            </div>
+            <div class="form-check form-switch mb-2">
+                <input class="form-check-input" type="checkbox" id="archiveAutoEnabled">
+                <label class="form-check-label small" for="archiveAutoEnabled">Automatically archive logs older than the window above (checked daily)</label>
+            </div>
+            <button class="btn btn-outline-primary btn-sm" onclick="saveArchivePolicy()"><i class="fa-solid fa-save me-1"></i> Save Archive Policy</button>
+            <div class="small text-muted mt-2" id="archiveStatus"></div>
         </div>
     </div>
 
@@ -431,6 +452,7 @@ document.addEventListener("DOMContentLoaded", function() {
     loadMetrics();
     loadUsers();
     loadRetentionSettings();
+    loadArchiveSettings();
     loadReportBranding();
     loadReportSchedule();
     loadAssets();
@@ -873,6 +895,62 @@ function saveRetentionPolicy() {
             toast(res.error || 'Failed to save retention policy.', 'danger');
         }
     }).catch(err => toast('Error saving retention policy: ' + err, 'danger'));
+}
+
+// ---- Log Archiving ----
+function loadArchiveSettings() {
+    fetch('/api/settings/archive')
+        .then(r => r.json())
+        .then(data => {
+            document.getElementById('archiveDays').value = data.days || 90;
+            document.getElementById('archiveAutoEnabled').checked = !!data.days;
+            renderArchiveStatus(data);
+        })
+        .catch(e => console.log('Archive settings load issue:', e));
+}
+
+function renderArchiveStatus(data) {
+    const el = document.getElementById('archiveStatus');
+    if (data.days) {
+        const last = data.last_run ? `Last archive run: ${data.last_run}.` : 'No archive run yet (checked daily).';
+        el.innerText = `Automatic archiving is ON — logs older than ${data.days} day(s) move to cold storage. ${last}`;
+    } else {
+        el.innerText = 'Automatic archiving is OFF. Use "Archive Now" for a one-time run.';
+    }
+}
+
+function archiveNow() {
+    const days = parseInt(document.getElementById('archiveDays').value, 10);
+    if (!days || days < 1) { toast('Enter a valid number of days.', 'warning'); return; }
+    fetch('/api/settings/archive/run', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({days: days})
+    })
+        .then(r => r.json())
+        .then(res => {
+            if (res.status === 'success') {
+                toast(res.enabled ? `Archived ${res.archived} log(s) older than ${res.cutoff}.` : 'Archiving is currently disabled -- set a window and save first.', 'success', {duration: 6000});
+                loadArchiveSettings();
+            } else {
+                toast(res.error || 'Archive run failed.', 'danger');
+            }
+        }).catch(err => toast('Error running archive: ' + err, 'danger'));
+}
+
+function saveArchivePolicy() {
+    const autoEnabled = document.getElementById('archiveAutoEnabled').checked;
+    const days = parseInt(document.getElementById('archiveDays').value, 10);
+    if (autoEnabled && (!days || days < 1)) { toast('Enter a valid number of days.', 'warning'); return; }
+    fetch('/api/settings/archive', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({days: autoEnabled ? days : 0})
+    }).then(r => r.json()).then(res => {
+        if (res.status === 'success') {
+            loadArchiveSettings();
+        } else {
+            toast(res.error || 'Failed to save archive policy.', 'danger');
+        }
+    }).catch(err => toast('Error saving archive policy: ' + err, 'danger'));
 }
 
 // ---- Audit Log ----
