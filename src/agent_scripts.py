@@ -226,16 +226,80 @@ _PROGRESS_SILENT = "$ProgressPreference = 'SilentlyContinue'\n"
 # every Startup folder (per-user and all-users), and WMI event subscriptions (a classic
 # fileless-persistence technique: __EventFilter/__EventConsumer/__FilterToConsumerBinding).
 # Inspired by Sysinternals Autoruns and Velociraptor's persistence-focused artifacts.
+#
+# Diffs against a baseline persisted to persistence_baseline.json in the agent's own
+# INSTALL_DIR (the first script of its kind to read-diff-write local JSON state in
+# PowerShell rather than Python -- ConvertFrom-Json/ConvertTo-Json handle the
+# serialization, PSObject.Properties rebuilds a hashtable for key lookups since
+# ConvertFrom-Json returns a PSCustomObject, not a hashtable) -- an analyst re-running
+# this repeatedly during an investigation sees only what's new/changed/gone since the
+# last run, not a full re-dump every time. The very first run against a host with no
+# baseline yet reports everything as "new" (first_run=true) -- expected, not a bug,
+# same as the FIM feature's own first-check behavior. Runs as a one-shot dispatched
+# script (see run_remote_script() in micro_agent_windows.py), not the always-running
+# poll loop, so two sweeps queued back-to-back faster than one poll cycle apart could
+# theoretically race on this same file -- low-probability given typical usage, not
+# guarded against here.
 def persistence_sweep():
-    return r"""$result = @{}
-$result.scheduled_tasks = Get-ScheduledTask -ErrorAction SilentlyContinue | Select-Object TaskName,TaskPath,State,@{N='Actions';E={($_.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)" }) -join '; '}}
-$result.services = Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | Select-Object Name,DisplayName,State,StartMode,PathName
-$result.run_keys = Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run','HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce','HKCU:\Software\Microsoft\Windows\CurrentVersion\Run','HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce' -ErrorAction SilentlyContinue
-$result.startup_files = Get-ChildItem "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp","$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup" -ErrorAction SilentlyContinue | Select-Object FullName,LastWriteTime
-$result.wmi_event_filters = Get-CimInstance -Namespace root\subscription -ClassName __EventFilter -ErrorAction SilentlyContinue | Select-Object Name,Query
-$result.wmi_event_consumers = Get-CimInstance -Namespace root\subscription -ClassName __EventConsumer -ErrorAction SilentlyContinue | Select-Object Name,CommandLineTemplate,ScriptFileName
-$result.wmi_bindings = Get-CimInstance -Namespace root\subscription -ClassName __FilterToConsumerBinding -ErrorAction SilentlyContinue | Select-Object Filter,Consumer
-$result | ConvertTo-Json -Depth 5 -Compress
+    return r"""$StatePath = "C:\Program Files\MicroDFIR\persistence_baseline.json"
+$current = @{}
+Get-ScheduledTask -ErrorAction SilentlyContinue | ForEach-Object {
+    $actions = ($_.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)" }) -join '; '
+    $current["task:$($_.TaskPath)$($_.TaskName)"] = "$($_.State)|$actions"
+}
+Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | ForEach-Object {
+    $current["service:$($_.Name)"] = "$($_.State)|$($_.StartMode)|$($_.PathName)"
+}
+foreach ($key in @('HKLM:\Software\Microsoft\Windows\CurrentVersion\Run','HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce','HKCU:\Software\Microsoft\Windows\CurrentVersion\Run','HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce')) {
+    $props = Get-ItemProperty $key -ErrorAction SilentlyContinue
+    if ($props) {
+        $props.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object {
+            $current["runkey:$key\$($_.Name)"] = "$($_.Value)"
+        }
+    }
+}
+Get-ChildItem "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp","$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup" -ErrorAction SilentlyContinue | ForEach-Object {
+    $current["startup:$($_.FullName)"] = "$($_.Length)|$($_.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))"
+}
+Get-CimInstance -Namespace root\subscription -ClassName __EventFilter -ErrorAction SilentlyContinue | ForEach-Object {
+    $current["wmi_filter:$($_.Name)"] = "$($_.Query)"
+}
+Get-CimInstance -Namespace root\subscription -ClassName __EventConsumer -ErrorAction SilentlyContinue | ForEach-Object {
+    $current["wmi_consumer:$($_.Name)"] = "$($_.CommandLineTemplate)$($_.ScriptFileName)"
+}
+Get-CimInstance -Namespace root\subscription -ClassName __FilterToConsumerBinding -ErrorAction SilentlyContinue | ForEach-Object {
+    $current["wmi_binding:$($_.Filter)"] = "$($_.Consumer)"
+}
+
+$baseline = @{}
+if (Test-Path $StatePath) {
+    try {
+        $loaded = Get-Content $StatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $loaded.PSObject.Properties | ForEach-Object { $baseline[$_.Name] = $_.Value }
+    } catch {}
+}
+
+$newEntries = @{}
+$changedEntries = @{}
+$removedKeys = @()
+foreach ($k in $current.Keys) {
+    if (-not $baseline.ContainsKey($k)) {
+        $newEntries[$k] = $current[$k]
+    } elseif ($baseline[$k] -ne $current[$k]) {
+        $changedEntries[$k] = @{ old = $baseline[$k]; new = $current[$k] }
+    }
+}
+foreach ($k in $baseline.Keys) {
+    if (-not $current.ContainsKey($k)) { $removedKeys += $k }
+}
+
+try {
+    $stateDir = Split-Path $StatePath -Parent
+    if (-not (Test-Path $stateDir)) { New-Item -ItemType Directory -Path $stateDir -Force | Out-Null }
+    $current | ConvertTo-Json -Depth 4 -Compress | Set-Content -Path $StatePath -Encoding utf8
+} catch {}
+
+@{ total_entries = $current.Count; new = $newEntries; changed = $changedEntries; removed = $removedKeys; first_run = ($baseline.Count -eq 0) } | ConvertTo-Json -Depth 5 -Compress
 """
 
 # Metadata/listing only, not binary parsing -- History/places.sqlite are locked while
@@ -582,29 +646,100 @@ PYEOF
 # well-known library-injection persistence technique). Inspired by the same
 # Autoruns/Velociraptor philosophy as persistence_sweep() above, just for Linux's own
 # autostart mechanisms.
+#
+# Diffs against a baseline persisted to persistence_baseline.json in the agent's own
+# INSTALL_DIR -- same python3-heredoc pattern already used elsewhere in this file
+# (collect_file_linux, ioc_sweep_linux) for real JSON/dict logic bash can't do cleanly.
+# An analyst re-running this repeatedly during an investigation sees only what's
+# new/changed/gone since the last run, not a full re-dump every time. The very first
+# run against a host with no baseline yet reports everything as "new" (first_run=true)
+# -- expected, not a bug, same as the FIM feature's own first-check behavior.
 def persistence_sweep_linux():
-    return r"""echo "=== User Crontabs ==="
-for u in $(cut -f1 -d: /etc/passwd); do
-    out=$(crontab -l -u "$u" 2>/dev/null)
-    [ -n "$out" ] && echo "--$u--" && echo "$out"
-done
-echo
-echo "=== System Cron ==="
-for f in /etc/crontab /etc/cron.d/*; do [ -f "$f" ] && echo "--$f--" && cat "$f"; done 2>/dev/null
-echo
-echo "=== Enabled systemd Units (full list) ==="
-systemctl list-unit-files --state=enabled --no-legend 2>/dev/null
-echo
-echo "=== /etc/init.d Scripts ==="
-ls -la /etc/init.d/ 2>/dev/null
-echo
-echo "=== Shell Profile Files ==="
-for f in /etc/profile /etc/profile.d/*.sh /root/.bashrc /root/.profile; do
-    [ -f "$f" ] && echo "--$f--" && cat "$f"
-done 2>/dev/null
-echo
-echo "=== LD_PRELOAD References ==="
-grep -H LD_PRELOAD /etc/environment /etc/ld.so.preload 2>/dev/null || echo "(none found)"
+    return r"""python3 - <<'PYEOF'
+import glob, json, os, subprocess
+
+STATE_PATH = '/opt/microdfir-agent/persistence_baseline.json'
+
+def load_state():
+    try:
+        with open(STATE_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_state(state):
+    try:
+        os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+        with open(STATE_PATH, 'w') as f:
+            json.dump(state, f)
+    except Exception:
+        pass
+
+def run(cmd):
+    try:
+        return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=20).stdout
+    except Exception:
+        return ''
+
+current = {}
+
+for u in run("cut -f1 -d: /etc/passwd").split():
+    out = run("crontab -l -u %s 2>/dev/null" % u).strip()
+    if out:
+        current['crontab:%s' % u] = out
+
+for path in ['/etc/crontab'] + glob.glob('/etc/cron.d/*'):
+    if os.path.isfile(path):
+        try:
+            with open(path) as f:
+                current['file:%s' % path] = f.read()
+        except Exception:
+            pass
+
+for line in run("systemctl list-unit-files --state=enabled --no-legend 2>/dev/null").splitlines():
+    parts = line.split()
+    if parts:
+        current['unit:%s' % parts[0]] = line.strip()
+
+if os.path.isdir('/etc/init.d'):
+    for name in os.listdir('/etc/init.d'):
+        path = os.path.join('/etc/init.d', name)
+        if os.path.isfile(path):
+            try:
+                st = os.stat(path)
+                current['initd:%s' % path] = '%d:%d' % (st.st_size, int(st.st_mtime))
+            except Exception:
+                pass
+
+for path in ['/etc/profile', '/root/.bashrc', '/root/.profile'] + glob.glob('/etc/profile.d/*.sh'):
+    if os.path.isfile(path):
+        try:
+            with open(path) as f:
+                current['file:%s' % path] = f.read()
+        except Exception:
+            pass
+
+ld_out = run("grep -H LD_PRELOAD /etc/environment /etc/ld.so.preload 2>/dev/null").strip()
+if ld_out:
+    current['ld_preload'] = ld_out
+
+baseline = load_state()
+new_entries = {}
+changed_entries = {}
+for k, v in current.items():
+    if k not in baseline:
+        new_entries[k] = v
+    elif baseline[k] != v:
+        changed_entries[k] = {'old': baseline[k], 'new': v}
+removed_keys = [k for k in baseline if k not in current]
+
+print(json.dumps({
+    'total_entries': len(current), 'new': new_entries, 'changed': changed_entries,
+    'removed': removed_keys, 'first_run': (not baseline),
+}))
+
+save_state(current)
+PYEOF
 """
 
 # Same uid>=1000-or-root user enumeration idiom as collect_triage_linux()'s
