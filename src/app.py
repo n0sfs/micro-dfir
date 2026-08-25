@@ -3390,6 +3390,51 @@ def migrate_ioc_sightings():
     except Exception:
         pass
 
+# The __IOC_..._LIST__ correlation mechanism (see sigma_engine.py) is a capability, not
+# an active rule -- nothing alerts on it until some rule actually references one of the
+# placeholders. Seeded once (matched by title, so a user who deletes/edits it doesn't
+# get it silently reinstated on the next update) so IOC correlation is live immediately
+# after this feature ships, not just configurable. source='sigma' (not 'custom') makes
+# it read-only-until-cloned in the UI, same protection SigmaHQ-imported rules get,
+# since editing it in place is easy to break silently (a typo'd field name just stops
+# matching, with no error surfaced anywhere).
+_IOC_CORRELATION_RULE_TITLE = 'Known-Bad IOC Matched (IP / Hash / DNS Query)'
+_IOC_CORRELATION_RULE_YAML = f"""title: {_IOC_CORRELATION_RULE_TITLE}
+description: Fires when a log's source/destination IP, file hash, or DNS query name matches a currently-synced Threat Intel IOC (Threat Intel & Hunting > IOCs). The match set is recomputed every detection cycle, not frozen at rule-creation time.
+status: stable
+level: high
+logsource:
+  category: custom
+  product: custom
+detection:
+  sel_ip_src:
+    SourceIpIOC: __IOC_IP_LIST__
+  sel_ip_dst:
+    DestinationIpIOC: __IOC_IP_LIST__
+  sel_hash:
+    FileHashIOC: __IOC_HASH_LIST__
+  sel_domain:
+    DestinationDomainIOC: __IOC_DOMAIN_LIST__
+  condition: sel_ip_src or sel_ip_dst or sel_hash or sel_domain
+tags:
+  - attack.command-and-control
+"""
+
+def migrate_seed_ioc_correlation_rule():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        existing = conn.execute("SELECT 1 FROM sigma_rules WHERE title = ?", (_IOC_CORRELATION_RULE_TITLE,)).fetchone()
+        if not existing:
+            conn.execute(
+                "INSERT INTO sigma_rules (title, rule_yaml, enabled, source, created_by, created_at) "
+                "VALUES (?, ?, 1, 'sigma', 'system', CURRENT_TIMESTAMP)",
+                (_IOC_CORRELATION_RULE_TITLE, _IOC_CORRELATION_RULE_YAML)
+            )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_live_logs_ip_columns():
     # source_ip/destination_ip were added to schema.sql at some point but no migration
     # ever backfilled them onto already-deployed databases, and no ingest path ever
@@ -5743,6 +5788,7 @@ migrate_alerts_triage()
 migrate_saved_searches()
 migrate_warninglists()
 migrate_ioc_sightings()
+migrate_seed_ioc_correlation_rule()
 
 try:
     # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every
