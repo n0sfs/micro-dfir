@@ -1684,6 +1684,8 @@ def api_ueba_exclusion_detail(eid):
 UEBA_CONFIG_DEFAULTS = {
     'ueba_lookback_days': '30', 'ueba_stddev_multiplier': '3', 'ueba_min_baseline': '50',
     'ueba_min_days_observed': '4', 'ueba_new_ip_enabled': '1',
+    'ueba_new_process_enabled': '1', 'ueba_new_dest_ip_enabled': '1',
+    'ueba_process_lineage_enabled': '1', 'ueba_off_hours_enabled': '1',
 }
 
 @app.route('/api/ueba/config', methods=['GET', 'POST'])
@@ -1694,7 +1696,8 @@ def api_ueba_config():
     if request.method == 'GET':
         rows = db.execute(
             "SELECT key, value FROM settings WHERE key IN "
-            "('ueba_lookback_days', 'ueba_stddev_multiplier', 'ueba_min_baseline', 'ueba_min_days_observed', 'ueba_new_ip_enabled')"
+            "('ueba_lookback_days', 'ueba_stddev_multiplier', 'ueba_min_baseline', 'ueba_min_days_observed', 'ueba_new_ip_enabled', "
+            "'ueba_new_process_enabled', 'ueba_new_dest_ip_enabled', 'ueba_process_lineage_enabled', 'ueba_off_hours_enabled')"
         ).fetchall()
         cfg = {**UEBA_CONFIG_DEFAULTS, **{r['key']: r['value'] for r in rows}}
         return jsonify({
@@ -1703,6 +1706,10 @@ def api_ueba_config():
             'min_baseline': float(cfg['ueba_min_baseline']),
             'min_days_observed': int(cfg['ueba_min_days_observed']),
             'new_ip_enabled': str(cfg['ueba_new_ip_enabled']) not in ('0', 'false', 'False'),
+            'new_process_enabled': str(cfg['ueba_new_process_enabled']) not in ('0', 'false', 'False'),
+            'new_dest_ip_enabled': str(cfg['ueba_new_dest_ip_enabled']) not in ('0', 'false', 'False'),
+            'process_lineage_enabled': str(cfg['ueba_process_lineage_enabled']) not in ('0', 'false', 'False'),
+            'off_hours_enabled': str(cfg['ueba_off_hours_enabled']) not in ('0', 'false', 'False'),
         })
 
     if current_user.role != 'admin':
@@ -1715,6 +1722,10 @@ def api_ueba_config():
         min_baseline = float(data.get('min_baseline'))
         min_days_observed = int(data.get('min_days_observed'))
         new_ip_enabled = bool(data.get('new_ip_enabled'))
+        new_process_enabled = bool(data.get('new_process_enabled'))
+        new_dest_ip_enabled = bool(data.get('new_dest_ip_enabled'))
+        process_lineage_enabled = bool(data.get('process_lineage_enabled'))
+        off_hours_enabled = bool(data.get('off_hours_enabled'))
         if not (1 <= lookback_days <= 365): raise ValueError('lookback_days must be 1-365')
         if not (0.5 <= stddev_multiplier <= 10): raise ValueError('stddev_multiplier must be 0.5-10')
         if not (0 <= min_baseline <= 1000000): raise ValueError('min_baseline must be 0-1000000')
@@ -1727,6 +1738,10 @@ def api_ueba_config():
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_min_baseline', ?)", (str(min_baseline),))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_min_days_observed', ?)", (str(min_days_observed),))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_new_ip_enabled', ?)", ('1' if new_ip_enabled else '0',))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_new_process_enabled', ?)", ('1' if new_process_enabled else '0',))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_new_dest_ip_enabled', ?)", ('1' if new_dest_ip_enabled else '0',))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_process_lineage_enabled', ?)", ('1' if process_lineage_enabled else '0',))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_off_hours_enabled', ?)", ('1' if off_hours_enabled else '0',))
     db.commit()
     return jsonify({'status': 'success'})
 
@@ -1741,6 +1756,7 @@ RISK_SCORE_DEFAULTS = {
         'sweep_hit': 35, 'failed_login': 10,
         'volume_anomaly_critical': 30, 'volume_anomaly_high': 20, 'volume_anomaly_medium': 10,
         'new_source_ip': 15,
+        'new_process': 20, 'new_destination_ip': 15, 'process_lineage': 25, 'off_hours_activity': 10,
     },
     'tiers': {'low': 0, 'medium': 20, 'high': 50, 'critical': 100},
 }
@@ -2282,6 +2298,10 @@ def migrate_settings():
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_min_baseline', '50')")
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_min_days_observed', '4')")
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_new_ip_enabled', '1')")
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_new_process_enabled', '1')")
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_new_dest_ip_enabled', '1')")
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_process_lineage_enabled', '1')")
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_off_hours_enabled', '1')")
         conn.commit()
         conn.close()
     except Exception:

@@ -108,6 +108,10 @@
                         <option value="first_time_action">First-Time Action</option>
                         <option value="volume_anomaly">Volume Anomaly</option>
                         <option value="new_source_ip">New Source IP</option>
+                        <option value="new_process">New Process</option>
+                        <option value="new_destination_ip">New Destination IP</option>
+                        <option value="process_lineage">Suspicious Process Lineage</option>
+                        <option value="off_hours_activity">Off-Hours Activity</option>
                     </select>
                 </div>
             </div>
@@ -163,6 +167,22 @@
                     <div class="form-check form-switch mt-3">
                         <input class="form-check-input" type="checkbox" id="cfgNewIpEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
                         <label class="form-check-label small" for="cfgNewIpEnabled">Flag users active from a source IP never seen for them before <span class="text-muted">(needs source IPs to be present in ingested logs — best-effort, extracted from Windows auth event text)</span></label>
+                    </div>
+                    <div class="form-check form-switch mt-2">
+                        <input class="form-check-input" type="checkbox" id="cfgNewProcessEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <label class="form-check-label small" for="cfgNewProcessEnabled">Flag hosts running a process never seen on that host before <span class="text-muted">(needs process_image, agent-sourced logs only)</span></label>
+                    </div>
+                    <div class="form-check form-switch mt-2">
+                        <input class="form-check-input" type="checkbox" id="cfgNewDestIpEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <label class="form-check-label small" for="cfgNewDestIpEnabled">Flag hosts connecting to a destination IP never seen from that host before</label>
+                    </div>
+                    <div class="form-check form-switch mt-2">
+                        <input class="form-check-input" type="checkbox" id="cfgProcessLineageEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <label class="form-check-label small" for="cfgProcessLineageEnabled">Flag hosts with a parent-to-child process relationship never seen before <span class="text-muted">(needs process_image + parent_image)</span></label>
+                    </div>
+                    <div class="form-check form-switch mt-2">
+                        <input class="form-check-input" type="checkbox" id="cfgOffHoursEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <label class="form-check-label small" for="cfgOffHoursEnabled">Flag hosts/users active at an hour of day never seen for that entity before</label>
                     </div>
                     {% if current_user.role == 'admin' %}
                     <button class="btn btn-primary btn-sm mt-3" onclick="saveUebaConfig()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Tuning</button>
@@ -582,6 +602,10 @@ const DYNAMIC_SCORING_FIELDS = [
         {k: 'failed_login', label: 'Failed Login', desc: 'Added each time a failed authentication event is recorded for this entity.'},
         {k: 'sweep_hit', label: 'IOC/String Sweep Hit', desc: 'Added when an agent\'s IOC hash sweep or string sweep finds a match on this host.'},
         {k: 'new_source_ip', label: 'New Source IP', desc: 'Added the first time this entity is seen connecting from a source IP that hasn\'t been seen for it before, within the lookback window.'},
+        {k: 'new_process', label: 'New Process', desc: 'Added the first time a host is seen executing a process it hasn\'t run before, within the lookback window.'},
+        {k: 'new_destination_ip', label: 'New Destination IP', desc: 'Added the first time a host is seen connecting to a destination IP it hasn\'t contacted before, within the lookback window.'},
+        {k: 'process_lineage', label: 'Suspicious Process Lineage', desc: 'Added the first time a host is seen with a parent-to-child process relationship (e.g. an Office app spawning PowerShell) it hasn\'t had before, within the lookback window.'},
+        {k: 'off_hours_activity', label: 'Off-Hours Activity', desc: 'Added when a host or user is active at an hour of day it hasn\'t been active in before, within the lookback window.'},
     ]},
     { group: 'Score Tiers (thresholds)',
       desc: 'The minimum summed score (over the Scoring Window above) an entity needs to reach each risk tier -- these are the Low/Medium/High/Critical badges shown throughout the UI. E.g. with High = 50, any entity whose current score reaches 50 is labeled High risk until its score drops back below that threshold.',
@@ -695,6 +719,8 @@ let insightsSearchDebounce = null;
 const INSIGHTS_MODEL_LABELS = {
     sigma_alert: 'Sigma Alert', ioc_sweep_hit: 'IOC/String Sweep Hit', custom_alert_rule: 'Custom Alert Rule',
     failed_login: 'Failed Login', first_time_action: 'First-Time Action', volume_anomaly: 'Volume Anomaly', new_source_ip: 'New Source IP',
+    new_process: 'New Process', new_destination_ip: 'New Destination IP',
+    process_lineage: 'Suspicious Process Lineage', off_hours_activity: 'Off-Hours Activity',
 };
 const DOW_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -839,6 +865,10 @@ function loadUebaConfig() {
             document.getElementById('cfgMinBaseline').value = cfg.min_baseline;
             document.getElementById('cfgMinDaysObserved').value = cfg.min_days_observed;
             document.getElementById('cfgNewIpEnabled').checked = !!cfg.new_ip_enabled;
+            document.getElementById('cfgNewProcessEnabled').checked = !!cfg.new_process_enabled;
+            document.getElementById('cfgNewDestIpEnabled').checked = !!cfg.new_dest_ip_enabled;
+            document.getElementById('cfgProcessLineageEnabled').checked = !!cfg.process_lineage_enabled;
+            document.getElementById('cfgOffHoursEnabled').checked = !!cfg.off_hours_enabled;
         })
         .catch(err => console.error('Error loading UEBA config:', err));
 }
@@ -849,7 +879,11 @@ function saveUebaConfig() {
         stddev_multiplier: parseFloat(document.getElementById('cfgStddev').value),
         min_baseline: parseFloat(document.getElementById('cfgMinBaseline').value),
         min_days_observed: parseInt(document.getElementById('cfgMinDaysObserved').value, 10),
-        new_ip_enabled: document.getElementById('cfgNewIpEnabled').checked
+        new_ip_enabled: document.getElementById('cfgNewIpEnabled').checked,
+        new_process_enabled: document.getElementById('cfgNewProcessEnabled').checked,
+        new_dest_ip_enabled: document.getElementById('cfgNewDestIpEnabled').checked,
+        process_lineage_enabled: document.getElementById('cfgProcessLineageEnabled').checked,
+        off_hours_enabled: document.getElementById('cfgOffHoursEnabled').checked
     };
     const msg = document.getElementById('cfgSaveMsg');
     fetch('/api/ueba/config', {
