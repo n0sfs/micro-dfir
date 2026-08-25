@@ -6,6 +6,8 @@ UEBA_DEFAULTS = {
     'ueba_new_process_enabled': 1, 'ueba_new_dest_ip_enabled': 1,
     'ueba_process_lineage_enabled': 1, 'ueba_off_hours_enabled': 1,
     'ueba_rare_process_enabled': 1, 'ueba_rare_process_max_hosts': 2,
+    'ueba_convergence_enabled': 1, 'ueba_convergence_min_indicators': 3,
+    'ueba_convergence_window_hours': 24,
 }
 
 # Point values an admin can retune without a schema change -- one JSON settings blob
@@ -24,6 +26,7 @@ RISK_SCORE_DEFAULTS = {
         'new_source_ip': 15,
         'new_process': 20, 'new_destination_ip': 15, 'process_lineage': 25, 'off_hours_activity': 10,
         'rare_process_population': 18,
+        'multi_signal_convergence': 30,
     },
     'tiers': {'low': 0, 'medium': 20, 'high': 50, 'critical': 100},
 }
@@ -163,6 +166,9 @@ def get_ueba_config():
         'off_hours_enabled': str(cfg['ueba_off_hours_enabled']) not in ('0', 'false', 'False'),
         'rare_process_enabled': str(cfg['ueba_rare_process_enabled']) not in ('0', 'false', 'False'),
         'rare_process_max_hosts': max(1, min(50, int(cfg['ueba_rare_process_max_hosts']))),
+        'convergence_enabled': str(cfg['ueba_convergence_enabled']) not in ('0', 'false', 'False'),
+        'convergence_min_indicators': max(2, min(10, int(cfg['ueba_convergence_min_indicators']))),
+        'convergence_window_hours': max(1, min(168, int(cfg['ueba_convergence_window_hours']))),
     }
 
 def _get_exclusions():
@@ -687,6 +693,55 @@ def run_risk_scoring():
     finally:
         conn.close()
 
+# One slightly abnormal event alone shouldn't read as high-confidence -- but an entity
+# that trips several genuinely DIFFERENT detection mechanisms close together (a Sigma
+# alert AND a new-process hit AND an off-hours flag, say) is a materially stronger
+# signal than any one of those alone. This runs last, after both run_ueba_models() and
+# run_risk_scoring() have written this cycle's indicators, since it needs the full
+# picture across both alert-based and model-based risk_score_events to see a
+# convergence at all. Inspired by Splunk's risk-based-alerting (many low-weight "risk
+# events" promoted to one high-fidelity "risk notable") and Exabeam's model-confidence
+# gating -- see this session's architecture research.
+def run_convergence_scoring():
+    cfg = get_ueba_config()
+    if not cfg['convergence_enabled']:
+        return
+    risk_cfg = get_risk_score_config()
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        window = f"-{cfg['convergence_window_hours']} hours"
+        rows = conn.execute(
+            "SELECT entity_type, entity_id, COUNT(DISTINCT indicator) as distinct_indicators, "
+            "GROUP_CONCAT(DISTINCT indicator) as indicators FROM risk_score_events "
+            "WHERE computed_at >= datetime('now', ?) AND indicator != 'multi_signal_convergence' "
+            "GROUP BY entity_type, entity_id HAVING distinct_indicators >= ?",
+            (window, cfg['convergence_min_indicators'])
+        ).fetchall()
+        for r in rows:
+            # Dedup: don't stack a second convergence bonus for the same entity while
+            # an earlier one from this same window is still standing.
+            already = conn.execute(
+                "SELECT COUNT(*) FROM risk_score_events WHERE entity_type = ? AND entity_id = ? "
+                "AND indicator = 'multi_signal_convergence' AND computed_at >= datetime('now', ?)",
+                (r['entity_type'], r['entity_id'], window)
+            ).fetchone()[0]
+            if already:
+                continue
+            detail = (f"{r['distinct_indicators']} distinct signal types converged within "
+                      f"{cfg['convergence_window_hours']}h: {r['indicators']}")
+            conn.execute(
+                "INSERT INTO risk_score_events (entity_type, entity_id, indicator, points, detail, source_table, source_id, rule_id) VALUES (?,?,?,?,?,?,?,?)",
+                (r['entity_type'], r['entity_id'], 'multi_signal_convergence',
+                 risk_cfg['points']['multi_signal_convergence'], detail, 'risk_score_events', None, None)
+            )
+        conn.commit()
+    except Exception as e:
+        print(f"[-] Convergence scoring run failed: {e}")
+    finally:
+        conn.close()
+
 if __name__ == "__main__":
     run_ueba_models()
     run_risk_scoring()
+    run_convergence_scoring()
