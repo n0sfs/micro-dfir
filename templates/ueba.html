@@ -63,7 +63,13 @@
     <div id="paneRisk" style="display:none;">
         <div class="card-body py-2 px-3 border-bottom border-secondary d-flex justify-content-between align-items-center">
             <span class="text-muted small"><i class="fa-solid fa-circle-info me-1"></i>Composite point-based risk per entity — Sigma alert severity, IOC sweep hits, custom alert rule matches, failed logins, and the existing statistical anomalies, summed over a rolling window. Click a row for the full breakdown.</span>
-            <button class="btn btn-outline-secondary btn-sm" onclick="loadRiskScores()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
+            <div class="d-flex align-items-center gap-2">
+                <div class="btn-group btn-group-sm" role="group">
+                    <button type="button" class="btn btn-outline-secondary active" id="riskSortScore" onclick="setRiskSort('score')">Sort: Score</button>
+                    <button type="button" class="btn btn-outline-secondary" id="riskSortPriority" onclick="setRiskSort('priority')" title="Blends peak severity, how many distinct signal types fired, and how recent the activity is -- so a diffuse, fresh actor can outrank a single loud-but-stale alert">Sort: Priority</button>
+                </div>
+                <button class="btn btn-outline-secondary btn-sm" onclick="loadRiskScores()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
+            </div>
         </div>
         <div class="card-body p-0">
             <div class="table-responsive" style="max-height: 500px; overflow-y: auto;">
@@ -72,13 +78,14 @@
                         <tr>
                             <th class="ps-3">Entity</th>
                             <th>Score</th>
+                            <th title="0-10, blends peak severity / signal breadth / recency">Priority</th>
                             <th>Tier</th>
                             <th>Contributing Events</th>
                             <th>Last Activity</th>
                         </tr>
                     </thead>
                     <tbody id="riskScoresTableBody">
-                        <tr><td colspan="5" class="text-center text-muted py-4">Loading…</td></tr>
+                        <tr><td colspan="6" class="text-center text-muted py-4">Loading…</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -203,6 +210,16 @@
                         <span class="text-muted small">distinct signal types within</span>
                         <input type="number" id="cfgConvergenceWindowHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="168" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
                         <span class="text-muted small">hours <span class="text-muted">(one weak signal alone isn't much -- several different ones close together is)</span></span>
+                    </div>
+                    <div class="form-check form-switch mt-2 d-flex align-items-center flex-wrap gap-2">
+                        <div>
+                            <input class="form-check-input" type="checkbox" id="cfgPriorityEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                            <label class="form-check-label small" for="cfgPriorityEnabled">Compute an Investigation Priority score over the trailing</label>
+                        </div>
+                        <input type="number" id="cfgPriorityWindowDays" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:60px;" min="1" max="365" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <span class="text-muted small">day(s), decaying activity with a</span>
+                        <input type="number" id="cfgPriorityHalfLifeHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="8760" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <span class="text-muted small">hour half-life <span class="text-muted">(a "what to look at first" ranking, separate from the raw score -- see the Risk Scoring tab)</span></span>
                     </div>
                     {% if current_user.role == 'admin' %}
                     <button class="btn btn-primary btn-sm mt-3" onclick="saveUebaConfig()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Tuning</button>
@@ -533,10 +550,18 @@ function loadUebaDetections() {
 // ---- Risk Scoring ----
 let riskScoresData = [];
 let riskScoresLoadedOnce = false;
+let riskSortMode = 'score';
 
 function riskTierBadge(tier) {
     const cls = {Critical: 'bg-danger', High: 'bg-danger', Medium: 'bg-warning text-dark', Low: 'bg-secondary'}[tier] || 'bg-secondary';
     return `<span class="badge ${cls}">${escHtml(tier)}</span>`;
+}
+
+function setRiskSort(mode) {
+    riskSortMode = mode;
+    document.getElementById('riskSortScore').classList.toggle('active', mode === 'score');
+    document.getElementById('riskSortPriority').classList.toggle('active', mode === 'priority');
+    renderRiskScores();
 }
 
 function loadRiskScores() {
@@ -546,24 +571,41 @@ function loadRiskScores() {
             riskScoresData = data.entities || [];
             riskScoresLoadedOnce = true;
             updateSharedStats();
-
             document.getElementById('riskScoresWindowNote').innerText = `Scored over the trailing ${data.window_days} day(s). Recomputed hourly alongside the anomaly models.`;
-            const tbody = document.getElementById('riskScoresTableBody');
-            if (!riskScoresData.length) {
-                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">No entities have scored any risk in this window yet.</td></tr>';
-                return;
-            }
-            tbody.innerHTML = riskScoresData.map(r => `
-                <tr style="cursor:pointer;" onclick="viewRiskScoreDetail('${r.entity_type}', '${escHtml(r.entity_id).replace(/'/g, "\\'")}')">
-                    <td class="ps-3">${entityBadge(r.entity_type)}<strong>${escHtml(r.entity_id)}</strong></td>
-                    <td class="fw-bold">${r.score}${r.multiplier && r.multiplier !== 1.0 ? ` <span class="badge bg-secondary" title="Raw score ${r.raw_score} &times; ${r.multiplier} criticality/privileged multiplier">&times;${r.multiplier}</span>` : ''}</td>
-                    <td>${riskTierBadge(r.tier)}</td>
-                    <td class="text-muted small">${r.event_count}</td>
-                    <td class="text-muted small text-nowrap">${escHtml(r.last_event)}</td>
-                </tr>
-            `).join('');
+            renderRiskScores();
         })
         .catch(err => console.error('Error loading risk scores:', err));
+}
+
+function renderRiskScores() {
+    const tbody = document.getElementById('riskScoresTableBody');
+    if (!riskScoresData.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">No entities have scored any risk in this window yet.</td></tr>';
+        return;
+    }
+    // Priority-sorted entities with no priority score yet (e.g. priority scoring just
+    // enabled, hasn't run its first hourly cycle) sink to the bottom rather than being
+    // treated as 0 -- a real 0 and "not computed yet" shouldn't look the same.
+    const rows = [...riskScoresData].sort((a, b) => {
+        if (riskSortMode === 'priority') {
+            const ap = a.priority_score, bp = b.priority_score;
+            if (ap == null && bp == null) return b.score - a.score;
+            if (ap == null) return 1;
+            if (bp == null) return -1;
+            return bp - ap;
+        }
+        return b.score - a.score;
+    });
+    tbody.innerHTML = rows.map(r => `
+        <tr style="cursor:pointer;" onclick="viewRiskScoreDetail('${r.entity_type}', '${escHtml(r.entity_id).replace(/'/g, "\\'")}')">
+            <td class="ps-3">${entityBadge(r.entity_type)}<strong>${escHtml(r.entity_id)}</strong></td>
+            <td class="fw-bold">${r.score}${r.multiplier && r.multiplier !== 1.0 ? ` <span class="badge bg-secondary" title="Raw score ${r.raw_score} &times; ${r.multiplier} criticality/privileged multiplier">&times;${r.multiplier}</span>` : ''}</td>
+            <td>${r.priority_score != null ? `<span class="badge bg-info text-dark">${r.priority_score}</span>` : '<span class="text-muted small">—</span>'}</td>
+            <td>${riskTierBadge(r.tier)}</td>
+            <td class="text-muted small">${r.event_count}</td>
+            <td class="text-muted small text-nowrap">${escHtml(r.last_event)}</td>
+        </tr>
+    `).join('');
 }
 
 function viewRiskScoreDetail(entityType, entityId) {
@@ -583,9 +625,17 @@ function viewRiskScoreDetail(entityType, entityId) {
                     <td class="small text-muted">${escHtml(e.detail || '')}</td>
                 </tr>
             `).join('');
+            const p = data.priority;
+            const priorityHtml = p ? `
+                <div class="mb-3 p-2 border border-secondary rounded">
+                    <strong>Priority:</strong> <span class="badge bg-info text-dark">${p.priority_score}</span>
+                    <span class="text-muted small ms-2">"what to look at first" — blends peak severity, signal breadth, and recency, separate from the raw score above</span>
+                    <div class="small text-muted mt-1">Peak single indicator: <b>${p.peak_points}</b> pts &middot; Distinct signal types: <b>${p.distinct_indicators}</b> &middot; Recency-weighted total: <b>${p.decay_score}</b></div>
+                </div>` : '';
             document.getElementById('riskDetailModalBody').innerHTML = `
                 <div class="mb-3"><strong>Total score:</strong> ${data.score} ${riskTierBadge(data.tier)}
                     <span class="text-muted small ms-2">over the trailing ${data.window_days} day(s)</span></div>
+                ${priorityHtml}
                 <div class="table-responsive">
                     <table class="table table-dark table-sm table-striped mb-0">
                         <thead><tr><th>When</th><th>Indicator</th><th>Points</th><th>Detail</th></tr></thead>
@@ -898,6 +948,9 @@ function loadUebaConfig() {
             document.getElementById('cfgConvergenceEnabled').checked = !!cfg.convergence_enabled;
             document.getElementById('cfgConvergenceMinIndicators').value = cfg.convergence_min_indicators;
             document.getElementById('cfgConvergenceWindowHours').value = cfg.convergence_window_hours;
+            document.getElementById('cfgPriorityEnabled').checked = !!cfg.priority_enabled;
+            document.getElementById('cfgPriorityWindowDays').value = cfg.priority_window_days;
+            document.getElementById('cfgPriorityHalfLifeHours').value = cfg.priority_half_life_hours;
         })
         .catch(err => console.error('Error loading UEBA config:', err));
 }
@@ -917,7 +970,10 @@ function saveUebaConfig() {
         rare_process_max_hosts: parseInt(document.getElementById('cfgRareProcessMaxHosts').value, 10),
         convergence_enabled: document.getElementById('cfgConvergenceEnabled').checked,
         convergence_min_indicators: parseInt(document.getElementById('cfgConvergenceMinIndicators').value, 10),
-        convergence_window_hours: parseInt(document.getElementById('cfgConvergenceWindowHours').value, 10)
+        convergence_window_hours: parseInt(document.getElementById('cfgConvergenceWindowHours').value, 10),
+        priority_enabled: document.getElementById('cfgPriorityEnabled').checked,
+        priority_window_days: parseInt(document.getElementById('cfgPriorityWindowDays').value, 10),
+        priority_half_life_hours: parseFloat(document.getElementById('cfgPriorityHalfLifeHours').value)
     };
     const msg = document.getElementById('cfgSaveMsg');
     fetch('/api/ueba/config', {
