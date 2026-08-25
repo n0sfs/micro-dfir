@@ -1197,10 +1197,16 @@ window.loadLogs = function() {
 };
 
 function loadTimeline() {
+    let q = document.getElementById('searchQuery').value;
     let app = Array.from(document.querySelectorAll('.app-chk:checked')).map(c=>c.value).join(',');
     let sev = Array.from(document.querySelectorAll('.sev-chk:checked')).map(c=>c.value).join(',');
+    let fieldKey = document.getElementById('fieldKey').value;
+    let fieldOp = document.getElementById('fieldOp').value;
+    let fieldVal = document.getElementById('fieldVal').value;
 
-    fetch(`/api/logs/timeline?${timeRangeQuery()}&app=${encodeURIComponent(app)}&severity=${encodeURIComponent(sev)}`)
+    // Mirror loadLogs()'s exact filter set so the chart never shows volume for logs the
+    // search table itself excludes -- both hit the same _build_log_filters() server-side.
+    fetch(`/api/logs/timeline?q=${encodeURIComponent(q)}&${timeRangeQuery()}&app=${encodeURIComponent(app)}&severity=${encodeURIComponent(sev)}&fieldKey=${encodeURIComponent(fieldKey)}&fieldOp=${encodeURIComponent(fieldOp)}&fieldVal=${encodeURIComponent(fieldVal)}`)
         .then(r => r.json())
         .then(data => {
             if (!timelineChart || !data.timeline) return;
