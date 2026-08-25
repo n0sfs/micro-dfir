@@ -1,4 +1,5 @@
 import sqlite3, requests, datetime, re, os, shutil, tempfile, zipfile, time
+from stix2patterns.pattern import Pattern
 DB_PATH = "/opt/micro-dfir/siem.db"
 # Duplicated from app.py's YARA_RULES_DIR rather than imported from it -- this module
 # is deliberately standalone (app.py imports FROM here), same reasoning as DB_PATH
@@ -21,12 +22,68 @@ def _connect():
 # "[domain-name:value = 'evil.com' AND file:hashes.SHA256 = '...']" — pulling the
 # first object-type token out of the pattern is a best-effort classification (a
 # generic TAXII feed doesn't otherwise expose a clean "this is an IP/domain/hash"
-# field the way the other feeds do), not a full STIX pattern parse.
+# field the way the other feeds do), not a full STIX pattern parse. Used only as the
+# fallback below, for whatever the real parser (Pattern.inspect(), see
+# _parse_stix_pattern_comparisons) can't handle.
 _STIX_PATTERN_TYPE_RE = re.compile(r'\[\s*([a-zA-Z0-9\-]+):')
 
 def _guess_stix_pattern_type(pattern):
     m = _STIX_PATTERN_TYPE_RE.match(pattern or '')
     return m.group(1) if m else 'stix-pattern'
+
+# Maps a STIX Cyber Observable's (object-type, property-path) onto this app's existing
+# ioc_type vocabulary -- the same one every other feed's sync_*() already writes, so
+# stix2-patterns-parsed indicators correlate identically (IP/hash/domain matching all
+# key off ioc_type or pattern shape, not off "which feed did this come from").
+_STIX_PATH_TO_IOC_TYPE = {
+    ('ipv4-addr', 'value'): 'ip', ('ipv6-addr', 'value'): 'ip',
+    ('domain-name', 'value'): 'domain',
+    ('url', 'value'): 'url',
+    ('email-addr', 'value'): 'email',
+    ('file', 'hashes.MD5'): 'md5', ('file', 'hashes.MD5-1'): 'md5',
+    ('file', 'hashes.SHA-1'): 'sha1', ('file', 'hashes.SHA1'): 'sha1',
+    ('file', 'hashes.SHA-256'): 'sha256', ('file', 'hashes.SHA256'): 'sha256',
+}
+
+def _stix_ioc_type(obs_type, path):
+    path_str = '.'.join(path)
+    return _STIX_PATH_TO_IOC_TYPE.get((obs_type, path_str)) or f"{obs_type}:{path_str}"
+
+def _unquote_stix_value(raw):
+    # inspect() returns comparison values as their still-quoted source text
+    # (e.g. "'evil.com'") since a STIX pattern value can itself be any STIX type,
+    # not just a string -- only string literals (single-quoted) need unescaping here;
+    # a bare numeric literal (e.g. a port number) passes through unquoted already.
+    v = (raw or '').strip()
+    if len(v) >= 2 and v[0] == "'" and v[-1] == "'":
+        return v[1:-1].replace("\\'", "'").replace('\\\\', '\\')
+    return v
+
+def _parse_stix_pattern_comparisons(pattern):
+    # A compound pattern ("[domain-name:value = 'x' AND file:hashes.SHA256 = 'y']")
+    # represents 2 DISTINCT, independently-matchable IOCs, not one -- the old
+    # _guess_stix_pattern_type()-only approach stored the whole raw pattern string as
+    # a single mis-typed row, which correlation could never actually match against a
+    # real domain or hash column. Real parsing (stix2-patterns, the OASIS reference
+    # implementation) splits it into one comparison per observable property.
+    # Only '='/'==' comparisons become IOC rows -- LIKE/MATCHES/IN/inequality
+    # operators don't represent one discrete value the flat stix_indicators row model
+    # (one row = one exact-match value) can represent.
+    try:
+        insp = Pattern(pattern).inspect()
+    except Exception:
+        return []  # caller falls back to the legacy whole-pattern storage
+    out = []
+    for obs_type, comparisons in (insp.comparisons or {}).items():
+        for path, op, raw_value in comparisons:
+            if op not in ('=', '=='):
+                continue
+            value = _unquote_stix_value(raw_value)
+            if not value:
+                continue
+            out.append({'ioc_type': _stix_ioc_type(obs_type, path), 'value': value,
+                        'id_suffix': f"{obs_type}--{'.'.join(path)}"})
+    return out
 
 def sync_taxii(feed):
     headers = {"Accept": "application/taxii+json;version=2.1"}
@@ -47,12 +104,29 @@ def sync_taxii(feed):
     for obj in objects:
         if obj.get("type") == "indicator":
             pattern = obj.get("pattern", "")
-            conn.execute(
-                "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (obj.get("id"), "indicator", _guess_stix_pattern_type(pattern), obj.get("name", ""), obj.get("description", ""),
-                 pattern, obj.get("valid_from", ""), 1 if obj.get("revoked", False) else 0, feed["id"])
-            )
-            c += 1
+            obj_id = obj.get("id")
+            name = obj.get("name", "")
+            desc = obj.get("description", "")
+            valid_from = obj.get("valid_from", "")
+            revoked = 1 if obj.get("revoked", False) else 0
+            comparisons = _parse_stix_pattern_comparisons(pattern)
+            if comparisons:
+                for cmp in comparisons:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (f"{obj_id}--{cmp['id_suffix']}", "indicator", cmp['ioc_type'], name, desc,
+                         cmp['value'], valid_from, revoked, feed["id"])
+                    )
+                    c += 1
+            else:
+                # Nothing the real parser could extract (a malformed/unsupported
+                # pattern) -- fall back to the old best-effort whole-pattern storage
+                # rather than silently dropping the indicator.
+                conn.execute(
+                    "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (obj_id, "indicator", _guess_stix_pattern_type(pattern), name, desc, pattern, valid_from, revoked, feed["id"])
+                )
+                c += 1
     conn.commit(); conn.close()
     return c
 
