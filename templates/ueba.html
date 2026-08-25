@@ -129,18 +129,59 @@
         </div>
     </div>
 
-    <!-- Timeline pane (placeholder) -->
+    <!-- Timeline pane -->
     <div id="paneTimeline" style="display:none;">
-        <div class="card-body">
-            <div class="card bg-dark border-secondary">
-                <div class="card-body text-center py-5">
-                    <i class="fa-solid fa-timeline text-muted mb-3" style="font-size:2.5rem;"></i>
-                    <h5>Entity Timeline — Coming Soon</h5>
-                    <p class="text-muted small mx-auto" style="max-width:640px;">
-                        A chronological, per-entity view of everything behind a risk score — logins, Sigma alerts, IOC sweep hits,
-                        and matched anomaly rules on one timeline, each event annotated with the points it contributed and why
-                        (first-time activity, a specific matched rule, etc). This tab is a placeholder; nothing is wired up yet.
-                    </p>
+        <div class="row g-0">
+            <div class="col-12 col-lg-3 border-end border-secondary p-3">
+                <h6 class="text-muted text-uppercase small mb-3" style="letter-spacing:.05em;"><i class="fa-solid fa-filter me-1"></i>Filters</h6>
+                <div class="mb-3">
+                    <label class="form-label small text-muted mb-1">Event Types</label>
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="tlTypeAnomaly" checked onchange="timelineLimit=300; loadTimeline();">
+                        <label class="form-check-label small" for="tlTypeAnomaly"><span class="badge bg-info text-dark" style="font-size:.6rem;">UEBA</span> UEBA Alerts</label>
+                    </div>
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="tlTypeAlert" checked onchange="timelineLimit=300; loadTimeline();">
+                        <label class="form-check-label small" for="tlTypeAlert"><span class="badge bg-danger" style="font-size:.6rem;">Alert</span> Sigma &amp; Custom Alerts</label>
+                    </div>
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="tlTypeLog" onchange="timelineLimit=300; loadTimeline();">
+                        <label class="form-check-label small" for="tlTypeLog"><span class="badge bg-secondary" style="font-size:.6rem;">Log</span> All Logs</label>
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label small text-muted mb-1" for="tlRange">Time Range</label>
+                    <select id="tlRange" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onTimelineRangeChange(); timelineLimit=300; loadTimeline();">
+                        <option value="1h">Last 1 hour</option>
+                        <option value="4h">Last 4 hours</option>
+                        <option value="12h">Last 12 hours</option>
+                        <option value="24h" selected>Last 24 hours</option>
+                        <option value="3d">Last 3 days</option>
+                        <option value="7d">Last 7 days</option>
+                        <option value="30d">Last 30 days</option>
+                        <option value="all">All time</option>
+                        <option value="custom">Custom range…</option>
+                    </select>
+                </div>
+                <div id="tlCustomRange" class="mb-3 d-flex flex-column gap-2" style="display:none;">
+                    <input type="datetime-local" id="tlStart" class="form-control form-control-sm bg-dark text-light border-secondary" onchange="timelineLimit=300; loadTimeline();">
+                    <input type="datetime-local" id="tlEnd" class="form-control form-control-sm bg-dark text-light border-secondary" onchange="timelineLimit=300; loadTimeline();">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label small text-muted mb-1" for="tlSearch">Search</label>
+                    <input type="text" id="tlSearch" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Host, user, message…" onkeydown="if(event.key==='Enter'){timelineLimit=300; loadTimeline();}">
+                </div>
+                <button class="btn btn-outline-secondary btn-sm w-100" onclick="timelineLimit=300; loadTimeline();"><i class="fa-solid fa-rotate me-1"></i> Apply / Refresh</button>
+            </div>
+            <div class="col-12 col-lg-9">
+                <div class="card-body py-2 px-3 border-bottom border-secondary">
+                    <span class="text-muted small" id="timelineCountNote"><i class="fa-solid fa-circle-info me-1"></i>Most recent events first, across everything selected on the left.</span>
+                </div>
+                <div id="timelineBody" style="max-height: 640px; overflow-y: auto;">
+                    <div class="text-center text-muted py-5">Loading…</div>
+                </div>
+                <div id="timelineLoadMoreWrap" class="text-center py-2 border-top border-secondary" style="display:none;">
+                    <button class="btn btn-outline-secondary btn-sm" onclick="loadMoreTimeline()">Load more</button>
                 </div>
             </div>
         </div>
@@ -470,6 +511,7 @@ function switchUebaTab(tab) {
     });
     if (tab === 'risk' && !riskScoresLoadedOnce) loadRiskScores();
     if (tab === 'rules' && !anomalyRulesLoadedOnce) loadAnomalyRules();
+    if (tab === 'timeline' && !timelineLoadedOnce) loadTimeline();
     updateSharedStats();
 }
 
@@ -522,7 +564,18 @@ function updateSharedStats() {
         // "—" placeholders that just waste header space.
         setStatTile(0, 'Mode', insightsMode === 'entity' ? 'By Entity' : 'By Model', false);
     } else if (activeUebaTab === 'timeline') {
-        setStatTile(0, 'Status', 'Placeholder', false);
+        if (!timelineLoadedOnce) {
+            setStatTile(0, 'Events Shown', '—', true);
+            setStatTile(1, 'UEBA Alerts', '—', true);
+            setStatTile(2, 'Sigma/Custom Alerts', '—', true);
+            setStatTile(3, 'All Logs', '—', true);
+        } else {
+            const rows = (timelineData && timelineData.logs) || [];
+            setStatTile(0, 'Events Shown', rows.length, true);
+            setStatTile(1, 'UEBA Alerts', rows.filter(r => r.type === 'anomaly').length, true);
+            setStatTile(2, 'Sigma/Custom Alerts', rows.filter(r => r.type === 'alert').length, true);
+            setStatTile(3, 'All Logs', rows.filter(r => r.type === 'log').length, true);
+        }
     } else if (activeUebaTab === 'rules') {
         if (!anomalyRulesLoadedOnce) {
             setStatTile(0, 'Total Rules', '—', true);
@@ -600,6 +653,131 @@ function loadUebaDetections() {
             `).join('');
         })
         .catch(err => console.error('Error loading UEBA detections:', err));
+}
+
+// ---- Timeline ----
+let timelineData = null;
+let timelineLoadedOnce = false;
+let timelineLimit = 300;
+
+function onTimelineRangeChange() {
+    document.getElementById('tlCustomRange').style.display = (document.getElementById('tlRange').value === 'custom') ? 'flex' : 'none';
+}
+
+function getTimelineTypes() {
+    const types = [];
+    if (document.getElementById('tlTypeAnomaly').checked) types.push('anomaly');
+    if (document.getElementById('tlTypeAlert').checked) types.push('alert');
+    if (document.getElementById('tlTypeLog').checked) types.push('log');
+    return types;
+}
+
+function timelineTypeBadge(t) {
+    if (t === 'alert') return '<span class="badge bg-danger" style="font-size:.65rem;"><i class="fa-solid fa-triangle-exclamation me-1"></i>Alert</span>';
+    if (t === 'anomaly') return '<span class="badge bg-info text-dark" style="font-size:.65rem;"><i class="fa-solid fa-user-secret me-1"></i>UEBA</span>';
+    return '<span class="badge bg-secondary" style="font-size:.65rem;"><i class="fa-solid fa-file-lines me-1"></i>Log</span>';
+}
+
+// Same "basename headline, full path/command as monospace detail" idea as
+// renderDetectionProcess() above, but generalized for the raw process_image/
+// command_line columns UNIFIED_LOGS_SQL exposes directly (not a parsed detections row).
+function renderTimelineProcess(ev) {
+    if (!ev.process_image && !ev.command_line) return '';
+    const name = ev.process_image ? ev.process_image.split(/[\\/]/).pop() : '';
+    const cmd = ev.command_line || '';
+    const cmdShort = cmd.length > 90 ? cmd.slice(0, 90) + '…' : cmd;
+    return `<div class="small mt-1">${name ? `<code class="text-info">${escHtml(name)}</code> ` : ''}${cmd ? `<span class="text-muted font-monospace" style="font-size:.7rem;" title="${escHtml(cmd)}">${escHtml(cmdShort)}</span>` : ''}</div>`;
+}
+
+function loadTimeline() {
+    const types = getTimelineTypes();
+    const body = document.getElementById('timelineBody');
+    document.getElementById('timelineLoadMoreWrap').style.display = 'none';
+    if (!types.length) {
+        timelineData = {logs: [], count: 0, total_matches: 0};
+        timelineLoadedOnce = true;
+        body.innerHTML = '<div class="text-center text-muted py-5">Select at least one event type on the left to see events.</div>';
+        document.getElementById('timelineCountNote').innerText = 'No event types selected.';
+        updateSharedStats();
+        return;
+    }
+    const range = document.getElementById('tlRange').value;
+    const params = new URLSearchParams();
+    params.set('types', types.join(','));
+    params.set('range', range);
+    params.set('limit', timelineLimit);
+    const q = document.getElementById('tlSearch').value.trim();
+    if (q) params.set('q', q);
+    if (range === 'custom') {
+        params.set('start', document.getElementById('tlStart').value);
+        params.set('end', document.getElementById('tlEnd').value);
+    }
+    body.innerHTML = '<div class="text-center text-muted py-5">Loading…</div>';
+    fetch('/api/logs/search?' + params.toString())
+        .then(r => r.json())
+        .then(data => {
+            timelineData = data;
+            timelineLoadedOnce = true;
+            renderTimeline();
+            updateSharedStats();
+        })
+        .catch(err => { body.innerHTML = `<div class="text-center text-danger py-5">Error loading timeline: ${escHtml(String(err))}</div>`; });
+}
+
+function loadMoreTimeline() {
+    timelineLimit += 300;
+    loadTimeline();
+}
+
+function renderTimeline() {
+    const body = document.getElementById('timelineBody');
+    const rows = (timelineData && timelineData.logs) || [];
+    if (!rows.length) {
+        body.innerHTML = '<div class="text-center text-muted py-5">No events match the current filters.</div>';
+        document.getElementById('timelineCountNote').innerText = 'No matching events.';
+        return;
+    }
+    let html = '';
+    let lastDate = null;
+    for (const ev of rows) {
+        const ts = ev.time || '';
+        const spaceIdx = ts.indexOf(' ');
+        const datePart = spaceIdx === -1 ? ts : ts.slice(0, spaceIdx);
+        const timePart = spaceIdx === -1 ? '' : ts.slice(spaceIdx + 1);
+        if (datePart !== lastDate) {
+            html += `<div class="px-3 py-2 text-uppercase text-muted small fw-bold" style="letter-spacing:.05em; background:var(--bg-inset);">${escHtml(datePart)}</div>`;
+            lastDate = datePart;
+        }
+        const msg = ev.message || '';
+        const msgShort = msg.length > 160 ? msg.slice(0, 160) + '…' : msg;
+        const headline = ev.type === 'alert'
+            ? `<strong>${escHtml(ev.app || 'Alert')}</strong>${msg ? ' — ' + escHtml(msgShort) : ''}`
+            : ev.type === 'anomaly'
+            ? escHtml(msgShort)
+            : `<strong>${escHtml(ev.app || '')}</strong>${ev.event_id && ev.event_id !== '-' ? ' <span class="text-muted">(Event ID ' + escHtml(ev.event_id) + ')</span>' : ''}${msg ? ' — ' + escHtml(msgShort) : ''}`;
+        const recur = ev.occurrence_count > 1
+            ? ` <span class="badge bg-secondary" title="Recurred ${ev.occurrence_count} times, last at ${escHtml(ev.last_seen || '')}">&times;${ev.occurrence_count}</span>` : '';
+        html += `
+            <div class="d-flex gap-3 py-2 px-3 border-bottom border-secondary">
+                <div class="text-nowrap text-muted small" style="width:70px;">${escHtml(timePart)}</div>
+                <div class="flex-grow-1">
+                    <div class="d-flex align-items-center gap-2 mb-1 flex-wrap">
+                        ${timelineTypeBadge(ev.type)}
+                        ${severityBadge(ev.severity)}
+                        <strong>${escHtml(ev.host || 'UNKNOWN')}</strong>
+                        ${ev.username && ev.username !== '-' ? `<span class="text-muted small">&middot; ${escHtml(ev.username)}</span>` : ''}
+                        ${recur}
+                    </div>
+                    <div class="small">${headline}</div>
+                    ${renderTimelineProcess(ev)}
+                </div>
+            </div>`;
+    }
+    body.innerHTML = html;
+    document.getElementById('timelineCountNote').innerText =
+        `Showing ${rows.length} of ${timelineData.total_matches ?? rows.length} matching events, most recent first`;
+    document.getElementById('timelineLoadMoreWrap').style.display =
+        (timelineData.total_matches > rows.length) ? 'block' : 'none';
 }
 
 // ---- Risk Scoring ----
