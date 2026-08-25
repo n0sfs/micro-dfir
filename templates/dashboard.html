@@ -288,6 +288,10 @@
             </table>
         </div>
     </div>
+    <div id="logsLoadMoreWrap" class="text-center py-2 border-top border-secondary" style="display:none;">
+        <span id="logsLoadMoreNote" class="text-muted small d-block mb-1"></span>
+        <button type="button" class="btn btn-outline-secondary btn-sm" onclick="loadMoreLogs()"><i class="fa-solid fa-angles-down me-1"></i>Load More</button>
+    </div>
 </div>
 
 </div>
@@ -1399,6 +1403,39 @@ function setSortColumn(col) {
     loadDashboardData();
 }
 
+// ---- Log Search pagination (cursor-based Load More, not offset/ever-growing LIMIT) ----
+let logsTotalMatchesCache = null;
+// Maps a sortable backend column name to the corresponding key on a log object returned by
+// /api/logs/search -- two of the nine don't match 1:1 (timestamp -> time, log_type -> type).
+const SORT_COL_TO_LOG_FIELD = {
+    timestamp: 'time', severity: 'severity', host: 'host', app: 'app', event_id: 'event_id',
+    username: 'username', source_ip: 'source_ip', destination_ip: 'destination_ip', log_type: 'type',
+};
+
+function updateSearchStatsFromCurrentLogs() {
+    searchStats.totalMatches = logsTotalMatchesCache;
+    searchStats.alertCount = currentLogs.filter(l => l.type === 'alert' || l.type === 'anomaly').length;
+    searchStats.uniqueHosts = new Set(currentLogs.map(l => l.host)).size;
+    searchStats.timeWindow = timeRangeState.range === 'custom' ? 'Custom' : (RANGE_LABELS[timeRangeState.range] || timeRangeState.range);
+    updateSharedStats('search');
+}
+
+function updateLogCountBadge() {
+    let badge = document.getElementById('logCountBadge');
+    if (badge) {
+        badge.innerText = `Total Matches: ${logsTotalMatchesCache} (Showing latest ${currentLogs.length})`;
+    }
+}
+
+function updateLoadMoreVisibility() {
+    const wrap = document.getElementById('logsLoadMoreWrap');
+    if (!wrap) return;
+    const hasMore = typeof logsTotalMatchesCache === 'number' && currentLogs.length < logsTotalMatchesCache;
+    wrap.style.display = hasMore ? 'block' : 'none';
+    const note = document.getElementById('logsLoadMoreNote');
+    if (note) note.innerText = `Showing ${currentLogs.length} of ${logsTotalMatchesCache} matching events`;
+}
+
 window.loadLogs = function(opts) {
     let q = document.getElementById('searchQuery').value;
     let fieldKey = document.getElementById('fieldKey').value;
@@ -1414,23 +1451,44 @@ window.loadLogs = function(opts) {
     fetch(`/api/logs/search?${buildLogQueryParams(opts)}`)
         .then(r => r.json())
         .then(data => {
-            let badge = document.getElementById('logCountBadge');
-            if (badge) {
-                badge.innerText = `Total Matches: ${data.total_matches !== undefined ? data.total_matches : data.count} (Showing latest ${data.count})`;
-            }
-
-            const logs = data.logs || [];
-            currentLogs = logs;
-            searchStats.totalMatches = data.total_matches !== undefined ? data.total_matches : data.count;
-            searchStats.alertCount = logs.filter(l => l.type === 'alert' || l.type === 'anomaly').length;
-            searchStats.uniqueHosts = new Set(logs.map(l => l.host)).size;
-            searchStats.timeWindow = timeRangeState.range === 'custom' ? 'Custom' : (RANGE_LABELS[timeRangeState.range] || timeRangeState.range);
-            updateSharedStats('search');
-
-            renderLogsTableRows(logs);
+            currentLogs = data.logs || [];
+            logsTotalMatchesCache = data.total_matches !== undefined ? data.total_matches : data.count;
+            updateLogCountBadge();
+            updateSearchStatsFromCurrentLogs();
+            renderLogsTableRows(currentLogs);
+            updateLoadMoreVisibility();
         })
         .catch(err => console.error("Error fetching logs:", err));
 };
+
+// Fetches the NEXT page via a cursor keyed on the last row currently shown (not a bigger
+// LIMIT re-scanning from row 1) and appends it to what's already loaded.
+function loadMoreLogs() {
+    if (!currentLogs.length) return;
+    const last = currentLogs[currentLogs.length - 1];
+    const sortCol = logSortState.col;
+    // cursor_tiebreak (the last row's message) breaks ties within the same sort_col+timestamp
+    // group -- see _build_log_cursor()'s server-side comment for why a 2-level cursor isn't
+    // enough at this app's event volume.
+    let params = `${buildLogQueryParams()}&cursor_time=${encodeURIComponent(last.time)}&cursor_tiebreak=${encodeURIComponent(last.message || '')}&skip_count=1`;
+    if (sortCol !== 'timestamp') {
+        const jsField = SORT_COL_TO_LOG_FIELD[sortCol] || sortCol;
+        params += `&cursor_sort=${encodeURIComponent(last[jsField] ?? '')}`;
+    }
+    const btn = document.querySelector('#logsLoadMoreWrap button');
+    if (btn) btn.disabled = true;
+    fetch(`/api/logs/search?${params}`)
+        .then(r => r.json())
+        .then(data => {
+            currentLogs = currentLogs.concat(data.logs || []);
+            updateLogCountBadge();
+            updateSearchStatsFromCurrentLogs();
+            renderLogsTableRows(currentLogs);
+            updateLoadMoreVisibility();
+        })
+        .catch(err => console.error("Error loading more logs:", err))
+        .finally(() => { if (btn) btn.disabled = false; });
+}
 
 // ---- Log Search results table: user-configurable columns ----
 // Order here is the fixed on-screen column order regardless of the order a user

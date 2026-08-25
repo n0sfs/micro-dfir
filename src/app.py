@@ -4205,12 +4205,61 @@ LOG_SEARCH_ALLOWED_FIELDS = [
 _SORTABLE_LOG_COLUMNS = {'timestamp', 'severity', 'host', 'app', 'event_id', 'username',
                           'source_ip', 'destination_ip', 'log_type'}
 
-def _build_log_sort(args):
+def _resolve_sort_column(args):
     col = args.get('sort', 'timestamp')
-    if col not in _SORTABLE_LOG_COLUMNS:
-        col = 'timestamp'
+    return col if col in _SORTABLE_LOG_COLUMNS else 'timestamp'
+
+def _build_log_sort(args):
+    col = _resolve_sort_column(args)
     direction = 'ASC' if args.get('dir', 'desc').lower() == 'asc' else 'DESC'
-    return f"ORDER BY {col} {direction}"
+    # Must include the SAME tiebreak columns _build_log_cursor() compares on, in the same
+    # order -- SQLite makes no guarantee about the relative order of tied rows unless the
+    # ORDER BY itself fully disambiguates them, so an ORDER BY that stops at just the sort
+    # column would let ties come back in a different order on each paginated query,
+    # silently breaking the cursor's "no gaps, no dupes" guarantee for exactly the rows
+    # that share a sort_col+timestamp value.
+    if col == 'timestamp':
+        return f"ORDER BY timestamp {direction}, message {direction}"
+    return f"ORDER BY {col} {direction}, timestamp {direction}, message {direction}"
+
+# Keyset ("cursor") pagination for Log Search's Load More: rather than re-scanning from row
+# 1 with an ever-larger LIMIT on every click (which is what UEBA Timeline's own Load More
+# still does -- fine at its scale, but exactly the "offset paging, not cursor" pattern the
+# SIEM gap audit called out), each page after the first carries the last row it rendered as
+# a WHERE-clause continuation token, so the next page's query only has to seek forward from
+# that point instead of re-scanning everything before it.
+#
+# Neither the sort column alone nor (sort_col, timestamp) together are guaranteed unique --
+# this app's own event volume (~100k+/day on a busy host) makes multiple rows sharing both
+# the same sort-column value AND the same to-the-second timestamp a real, not theoretical,
+# case (a burst of Sysmon events for one host in one second). A 2-level cursor silently
+# DROPS whichever tied rows land past the cursor's own tie-group boundary -- caught by a
+# real-fixture test with an intentional exact-timestamp tie before this was fixed to a
+# 3-level (sort_col, timestamp, message) tiebreak. `message` isn't a guaranteed-unique
+# tiebreaker either (two genuinely identical log lines at the same timestamp would still
+# tie) but at that point the two rows are indistinguishable from each other anyway -- this
+# is the same "good enough, not mathematically perfect" trade-off the surrounding query-
+# language code already makes elsewhere (e.g. no true USN-journal parsing).
+def _build_log_cursor(args):
+    cursor_time = args.get('cursor_time')
+    if not cursor_time:
+        return None, []
+    sort_col = _resolve_sort_column(args)
+    op = '>' if args.get('dir', 'desc').lower() == 'asc' else '<'
+    cursor_tiebreak = args.get('cursor_tiebreak', '')
+    if sort_col == 'timestamp':
+        # The tuple collapses to (timestamp, message) since sort_col IS timestamp already.
+        return (
+            f"(timestamp {op} ? OR (timestamp = ? AND COALESCE(message, '') {op} COALESCE(?, '')))",
+            [cursor_time, cursor_time, cursor_tiebreak]
+        )
+    cursor_val = args.get('cursor_sort', '')
+    return (
+        f"(COALESCE({sort_col}, '') {op} COALESCE(?, '') "
+        f"OR (COALESCE({sort_col}, '') = COALESCE(?, '') AND timestamp {op} ?) "
+        f"OR (COALESCE({sort_col}, '') = COALESCE(?, '') AND timestamp = ? AND COALESCE(message, '') {op} COALESCE(?, '')))",
+        [cursor_val, cursor_val, cursor_time, cursor_val, cursor_time, cursor_tiebreak]
+    )
 
 # The Global Search query language: space-separated terms AND together implicitly (like
 # every mature search box -- Splunk/Elastic/Google all treat unquoted multi-word input as
@@ -4445,14 +4494,32 @@ def api_logs_search():
         sort_clause = _build_log_sort(request.args)
         limit = max(1, min(request.args.get('limit', 300, type=int) or 300, 2000))
 
-        total_count = db.execute(f"SELECT COUNT(*) FROM {source_sql}{where_clause}", params).fetchone()[0]
-        rows = db.execute(f"SELECT * FROM {source_sql}{where_clause} {sort_clause} LIMIT ?", params + [limit]).fetchall()
+        # Load More passes cursor_time (+ cursor_sort when not sorting by timestamp) from
+        # the last row of the page it already has -- folded into the same WHERE as an
+        # additional AND'd condition, same connective as every other filter here.
+        cursor_clause, cursor_params = _build_log_cursor(request.args)
+        full_where = where_clause
+        full_params = list(params)
+        if cursor_clause:
+            full_params += cursor_params
+            full_where = f"{where_clause} AND {cursor_clause}" if where_clause else f" WHERE {cursor_clause}"
+
+        # The total-match count never changes between pages of the SAME search (filters
+        # are identical, only the cursor differs), so Load More passes skip_count=1 to
+        # avoid re-running that full COUNT(*) scan on every click -- the frontend already
+        # has the real total from page 1 and just keeps displaying it.
+        if request.args.get('skip_count') == '1':
+            total_count = None
+        else:
+            total_count = db.execute(f"SELECT COUNT(*) FROM {source_sql}{where_clause}", params).fetchone()[0]
+        rows = db.execute(f"SELECT * FROM {source_sql}{full_where} {sort_clause} LIMIT ?", full_params + [limit]).fetchall()
         logs = _build_log_response_rows(rows)
 
         # `poll=1` marks an auto-refresh (UEBA Timeline's Live Streaming Mode), not a
         # deliberate search -- auditing every 5-second poll would flood audit_log with
         # near-duplicate entries for an otherwise-idle browser tab. A user-initiated search
-        # (button click, filter change, Timeline tab load) always gets logged.
+        # (button click, filter change, Timeline tab load) always gets logged. A Load More
+        # click is real user activity too, so it's still logged (only poll=1 is excluded).
         if request.args.get('poll') != '1':
             log_audit('log_search', 'search', None,
                       f"q={request.args.get('q', '')[:100]!r} range={request.args.get('range', '24h')} matches={total_count}")
