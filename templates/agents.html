@@ -123,7 +123,18 @@
         <!-- File Integrity Monitoring -->
         <div class="card-body border-top border-secondary">
             <h6 class="text-info mb-2"><i class="fa-solid fa-file-shield me-2"></i>File Integrity Monitoring</h6>
-            <p class="text-muted small mb-3">Individual file paths to watch for changes, checked by every agent roughly every 5 minutes (not directories, and not recursive). A new, changed, or removed file shows up in Log Search as an <code>app: "FIM"</code> entry. Applies to both Windows and Linux endpoints -- an agent silently skips any path that doesn't exist on its own OS.</p>
+            <p class="text-muted small mb-2">Individual file paths to watch for changes (not directories, and not recursive). A new, changed, or removed file shows up in Log Search as an <code>app: "FIM"</code> entry. Applies to both Windows and Linux endpoints -- an agent silently skips any path that doesn't exist on its own OS.</p>
+            <div class="row g-2 align-items-end mb-3">
+                <div class="col-auto">
+                    <label class="form-label small text-muted mb-1">Check interval (seconds)</label>
+                    <input type="number" min="60" max="86400" id="fimIntervalSeconds" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                </div>
+                {% if current_user.role == 'admin' %}
+                <div class="col-auto"><button class="btn btn-outline-primary btn-sm" onclick="saveFimInterval()"><i class="fa-solid fa-floppy-disk me-1"></i>Save</button></div>
+                {% endif %}
+                <div class="col-auto"><span id="fimIntervalMsg" class="small" style="display:none;"></span></div>
+            </div>
+            <p class="text-muted small mb-3" id="fimIntervalNote"></p>
             {% if current_user.role == 'admin' %}
             <div class="row g-2 mb-3" style="max-width:720px;">
                 <div class="col-md-6"><input type="text" id="newFimPath" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. /etc/passwd or C:\Windows\System32\drivers\etc\hosts"></div>
@@ -291,6 +302,7 @@ document.addEventListener("DOMContentLoaded", function() {
     renderConsoleFavSelect();
     initEndpointFilterDropdowns();
     loadFimPaths();
+    loadFimInterval();
     setInterval(loadUniqueEndpoints, 30000);
     // The agent itself only checks in roughly every 8s, so polling much faster than
     // that wouldn't surface results any sooner — this just keeps the steady-state
@@ -318,6 +330,34 @@ function escHtml(str) {
 
 // ---- File Integrity Monitoring ----
 const FIM_IS_ADMIN = {{ 'true' if current_user.role == 'admin' else 'false' }};
+
+function loadFimInterval() {
+    fetch('/api/fim/interval').then(r => r.json()).then(data => {
+        document.getElementById('fimIntervalSeconds').value = data.interval_seconds;
+        document.getElementById('fimIntervalNote').innerText =
+            `Applies on each agent's next check-in (usually within ~15s) -- no need to re-upgrade the agent for interval changes alone.`;
+    }).catch(err => console.error('Error loading FIM interval:', err));
+}
+
+function saveFimInterval() {
+    const seconds = parseInt(document.getElementById('fimIntervalSeconds').value, 10);
+    const msg = document.getElementById('fimIntervalMsg');
+    if (!seconds || seconds < 60 || seconds > 86400) {
+        msg.className = 'small text-danger'; msg.innerText = 'Enter a value between 60 and 86400 seconds.'; msg.style.display = 'inline'; return;
+    }
+    fetch('/api/fim/interval', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({interval_seconds: seconds})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        msg.style.display = 'inline';
+        if (ok) {
+            msg.className = 'small text-success'; msg.innerText = 'Saved.';
+            loadFimInterval();
+        } else {
+            msg.className = 'small text-danger'; msg.innerText = data.error || 'Failed to save.';
+        }
+        setTimeout(() => { msg.style.display = 'none'; }, 4000);
+    }).catch(err => { msg.className = 'small text-danger'; msg.innerText = 'Error: ' + err; msg.style.display = 'inline'; });
+}
 
 function loadFimPaths() {
     fetch('/api/fim/paths').then(r => r.json()).then(rows => {

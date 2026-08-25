@@ -3899,8 +3899,15 @@ def agent_config():
     dynamic_ingest_url = f"https://{ing_ip}:{ing_port}/api/ingest"
 
     fim_paths = [r['path'] for r in db.execute("SELECT path FROM fim_paths WHERE enabled = 1").fetchall()]
+    try:
+        fim_interval_seconds = int(s.get('fim_interval_seconds') or DEFAULT_FIM_INTERVAL_SECONDS)
+    except (TypeError, ValueError):
+        fim_interval_seconds = DEFAULT_FIM_INTERVAL_SECONDS
 
-    return jsonify({'channels': channels, 'channel_config': channel_config, 'ingest_url': dynamic_ingest_url, 'fim_paths': fim_paths})
+    return jsonify({
+        'channels': channels, 'channel_config': channel_config, 'ingest_url': dynamic_ingest_url,
+        'fim_paths': fim_paths, 'fim_interval_seconds': fim_interval_seconds,
+    })
 
 # Log Search spans three tables that were previously siloed from each other: raw
 # ingested events (live_logs), Sigma/custom detection-rule hits (alerts), and UEBA
@@ -4723,6 +4730,33 @@ def agent_checkins():
     except Exception as e:
         print("Checkins error:", e)
         return jsonify([])
+
+# Was hardcoded as FIM_INTERVAL = 300 directly in both agent scripts -- moved here so
+# it's viewable/settable from the Agents page instead of requiring a code change +
+# redeploy + re-upgrade of every endpoint just to retune how often FIM runs.
+DEFAULT_FIM_INTERVAL_SECONDS = 300
+
+@app.route('/api/fim/interval', methods=['GET', 'POST'])
+@login_required
+def api_fim_interval():
+    db = get_db()
+    if request.method == 'GET':
+        row = db.execute("SELECT value FROM settings WHERE key = 'fim_interval_seconds'").fetchone()
+        seconds = int(row['value']) if row and row['value'] else DEFAULT_FIM_INTERVAL_SECONDS
+        return jsonify({'interval_seconds': seconds})
+
+    if current_user.role != 'admin':
+        return jsonify({"error": "Admin required"}), 403
+    data = request.get_json() or {}
+    try:
+        seconds = int(data.get('interval_seconds'))
+        if not (60 <= seconds <= 86400):
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "interval_seconds must be an integer between 60 (1 minute) and 86400 (24 hours)"}), 400
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('fim_interval_seconds', ?)", (str(seconds),))
+    db.commit()
+    return jsonify({"status": "success", "interval_seconds": seconds})
 
 @app.route('/api/fim/paths', methods=['GET', 'POST'])
 @login_required

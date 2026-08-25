@@ -4,7 +4,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, tem
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.08.25.1"
+AGENT_VERSION = "2026.08.25.2"
 
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
@@ -314,9 +314,12 @@ def run_agent():
     last_fim_check = 0
     LOG_INTERVAL = 8
     CONFIG_INTERVAL = 8
-    # Deliberately much coarser than LOG_INTERVAL -- hashing a handful of files every 8s
-    # would be wasted work when nothing on disk changes anywhere near that often.
-    FIM_INTERVAL = 300
+    # Deliberately much coarser than LOG_INTERVAL by default -- hashing a handful of
+    # files every 8s would be wasted work when nothing on disk changes anywhere near
+    # that often. Server-configurable (Agents page > File Integrity Monitoring) rather
+    # than a fixed constant -- updated from each config check-in below, same as
+    # active_fim_paths.
+    fim_interval = 300
 
     while True:
         current_time = time.time()
@@ -375,6 +378,9 @@ def run_agent():
                         if data.get('fim_paths') is not None:
                             active_fim_paths = data['fim_paths']
 
+                        if data.get('fim_interval_seconds'):
+                            fim_interval = data['fim_interval_seconds']
+
                     print("[+] Check-in successful!", flush=True)
                     break
                 except Exception as e:
@@ -388,7 +394,7 @@ def run_agent():
             print("[*] Fetching Windows event logs...", flush=True)
             new_logs = fetch_windows_logs(active_channel_configs, LOG_INTERVAL)
 
-            if current_time - last_fim_check > FIM_INTERVAL:
+            if current_time - last_fim_check > fim_interval:
                 if active_fim_paths:
                     try:
                         fim_logs = run_fim_check(active_fim_paths)
