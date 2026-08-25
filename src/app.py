@@ -1686,6 +1686,7 @@ UEBA_CONFIG_DEFAULTS = {
     'ueba_min_days_observed': '4', 'ueba_new_ip_enabled': '1',
     'ueba_new_process_enabled': '1', 'ueba_new_dest_ip_enabled': '1',
     'ueba_process_lineage_enabled': '1', 'ueba_off_hours_enabled': '1',
+    'ueba_rare_process_enabled': '1', 'ueba_rare_process_max_hosts': '2',
 }
 
 @app.route('/api/ueba/config', methods=['GET', 'POST'])
@@ -1697,7 +1698,8 @@ def api_ueba_config():
         rows = db.execute(
             "SELECT key, value FROM settings WHERE key IN "
             "('ueba_lookback_days', 'ueba_stddev_multiplier', 'ueba_min_baseline', 'ueba_min_days_observed', 'ueba_new_ip_enabled', "
-            "'ueba_new_process_enabled', 'ueba_new_dest_ip_enabled', 'ueba_process_lineage_enabled', 'ueba_off_hours_enabled')"
+            "'ueba_new_process_enabled', 'ueba_new_dest_ip_enabled', 'ueba_process_lineage_enabled', 'ueba_off_hours_enabled', "
+            "'ueba_rare_process_enabled', 'ueba_rare_process_max_hosts')"
         ).fetchall()
         cfg = {**UEBA_CONFIG_DEFAULTS, **{r['key']: r['value'] for r in rows}}
         return jsonify({
@@ -1710,6 +1712,8 @@ def api_ueba_config():
             'new_dest_ip_enabled': str(cfg['ueba_new_dest_ip_enabled']) not in ('0', 'false', 'False'),
             'process_lineage_enabled': str(cfg['ueba_process_lineage_enabled']) not in ('0', 'false', 'False'),
             'off_hours_enabled': str(cfg['ueba_off_hours_enabled']) not in ('0', 'false', 'False'),
+            'rare_process_enabled': str(cfg['ueba_rare_process_enabled']) not in ('0', 'false', 'False'),
+            'rare_process_max_hosts': int(cfg['ueba_rare_process_max_hosts']),
         })
 
     if current_user.role != 'admin':
@@ -1726,10 +1730,13 @@ def api_ueba_config():
         new_dest_ip_enabled = bool(data.get('new_dest_ip_enabled'))
         process_lineage_enabled = bool(data.get('process_lineage_enabled'))
         off_hours_enabled = bool(data.get('off_hours_enabled'))
+        rare_process_enabled = bool(data.get('rare_process_enabled'))
+        rare_process_max_hosts = int(data.get('rare_process_max_hosts'))
         if not (1 <= lookback_days <= 365): raise ValueError('lookback_days must be 1-365')
         if not (0.5 <= stddev_multiplier <= 10): raise ValueError('stddev_multiplier must be 0.5-10')
         if not (0 <= min_baseline <= 1000000): raise ValueError('min_baseline must be 0-1000000')
         if not (1 <= min_days_observed <= 52): raise ValueError('min_days_observed must be 1-52')
+        if not (1 <= rare_process_max_hosts <= 50): raise ValueError('rare_process_max_hosts must be 1-50')
     except (TypeError, ValueError) as e:
         return jsonify({'error': str(e) or 'Invalid config values'}), 400
 
@@ -1742,6 +1749,8 @@ def api_ueba_config():
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_new_dest_ip_enabled', ?)", ('1' if new_dest_ip_enabled else '0',))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_process_lineage_enabled', ?)", ('1' if process_lineage_enabled else '0',))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_off_hours_enabled', ?)", ('1' if off_hours_enabled else '0',))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_rare_process_enabled', ?)", ('1' if rare_process_enabled else '0',))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_rare_process_max_hosts', ?)", (str(rare_process_max_hosts),))
     db.commit()
     return jsonify({'status': 'success'})
 
@@ -1757,6 +1766,7 @@ RISK_SCORE_DEFAULTS = {
         'volume_anomaly_critical': 30, 'volume_anomaly_high': 20, 'volume_anomaly_medium': 10,
         'new_source_ip': 15,
         'new_process': 20, 'new_destination_ip': 15, 'process_lineage': 25, 'off_hours_activity': 10,
+        'rare_process_population': 18,
     },
     'tiers': {'low': 0, 'medium': 20, 'high': 50, 'critical': 100},
 }
@@ -2302,6 +2312,8 @@ def migrate_settings():
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_new_dest_ip_enabled', '1')")
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_process_lineage_enabled', '1')")
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_off_hours_enabled', '1')")
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_rare_process_enabled', '1')")
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ueba_rare_process_max_hosts', '2')")
         conn.commit()
         conn.close()
     except Exception:

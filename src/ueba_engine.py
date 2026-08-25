@@ -5,6 +5,7 @@ UEBA_DEFAULTS = {
     'ueba_min_days_observed': 4, 'ueba_new_ip_enabled': 1,
     'ueba_new_process_enabled': 1, 'ueba_new_dest_ip_enabled': 1,
     'ueba_process_lineage_enabled': 1, 'ueba_off_hours_enabled': 1,
+    'ueba_rare_process_enabled': 1, 'ueba_rare_process_max_hosts': 2,
 }
 
 # Point values an admin can retune without a schema change -- one JSON settings blob
@@ -22,6 +23,7 @@ RISK_SCORE_DEFAULTS = {
         'volume_anomaly_critical': 30, 'volume_anomaly_high': 20, 'volume_anomaly_medium': 10,
         'new_source_ip': 15,
         'new_process': 20, 'new_destination_ip': 15, 'process_lineage': 25, 'off_hours_activity': 10,
+        'rare_process_population': 18,
     },
     'tiers': {'low': 0, 'medium': 20, 'high': 50, 'critical': 100},
 }
@@ -159,6 +161,8 @@ def get_ueba_config():
         'new_dest_ip_enabled': str(cfg['ueba_new_dest_ip_enabled']) not in ('0', 'false', 'False'),
         'process_lineage_enabled': str(cfg['ueba_process_lineage_enabled']) not in ('0', 'false', 'False'),
         'off_hours_enabled': str(cfg['ueba_off_hours_enabled']) not in ('0', 'false', 'False'),
+        'rare_process_enabled': str(cfg['ueba_rare_process_enabled']) not in ('0', 'false', 'False'),
+        'rare_process_max_hosts': max(1, min(50, int(cfg['ueba_rare_process_max_hosts']))),
     }
 
 def _get_exclusions():
@@ -249,6 +253,11 @@ def _run_model(con, model, cfg):
 # A second, non-volume signal: a user active today from a source IP that's never been
 # associated with them in the lookback window before. Cheap classic UEBA "new location"
 # check using data we already capture — no new ingestion needed.
+#
+# entity_days gates this on cfg['min_days_observed'] -- the same confidence threshold
+# the volume model already uses -- so a user with only 1-2 days of any history doesn't
+# get every one of their early source IPs flagged as "new" just because their own
+# baseline is still too thin to know what's actually normal for them yet.
 def _run_new_source_ip_model(con, cfg):
     if not cfg['new_ip_enabled']:
         return []
@@ -261,10 +270,15 @@ def _run_new_source_ip_model(con, cfg):
         "today_pairs AS (SELECT username, source_ip, count(*) as c FROM siem.live_logs "
         "    WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE "
         "      AND username IS NOT NULL AND username NOT IN ('', '-') "
-        "      AND source_ip IS NOT NULL AND source_ip NOT IN ('', '-') GROUP BY 1, 2) "
+        "      AND source_ip IS NOT NULL AND source_ip NOT IN ('', '-') GROUP BY 1, 2), "
+        "entity_days AS (SELECT username as entity_id, COUNT(DISTINCT date_trunc('day', CAST(timestamp AS TIMESTAMP))) as days_seen "
+        f"    FROM siem.live_logs WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE - INTERVAL {cfg['lookback_days']} DAY "
+        "      AND CAST(timestamp AS TIMESTAMP) < CURRENT_DATE "
+        "      AND username IS NOT NULL AND username NOT IN ('', '-') GROUP BY 1) "
         "SELECT tp.username, tp.source_ip, tp.c FROM today_pairs tp "
         "LEFT JOIN known k ON tp.username = k.username AND tp.source_ip = k.source_ip "
-        "WHERE k.username IS NULL LIMIT 200"
+        "JOIN entity_days ed ON tp.username = ed.entity_id "
+        f"WHERE k.username IS NULL AND ed.days_seen >= {cfg['min_days_observed']} LIMIT 200"
     )
     return [{'username': u, 'source_ip': ip, 'count': c} for u, ip, c in con.execute(query).fetchall()]
 
@@ -285,10 +299,15 @@ def _run_new_process_model(con, cfg):
         "today_pairs AS (SELECT host, process_image, count(*) as c FROM siem.live_logs "
         "    WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE "
         "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN') "
-        "      AND process_image IS NOT NULL AND process_image != '' GROUP BY 1, 2) "
+        "      AND process_image IS NOT NULL AND process_image != '' GROUP BY 1, 2), "
+        "entity_days AS (SELECT host as entity_id, COUNT(DISTINCT date_trunc('day', CAST(timestamp AS TIMESTAMP))) as days_seen "
+        f"    FROM siem.live_logs WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE - INTERVAL {cfg['lookback_days']} DAY "
+        "      AND CAST(timestamp AS TIMESTAMP) < CURRENT_DATE "
+        "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN') GROUP BY 1) "
         "SELECT tp.host, tp.process_image, tp.c FROM today_pairs tp "
         "LEFT JOIN known k ON tp.host = k.host AND tp.process_image = k.process_image "
-        "WHERE k.host IS NULL LIMIT 200"
+        "JOIN entity_days ed ON tp.host = ed.entity_id "
+        f"WHERE k.host IS NULL AND ed.days_seen >= {cfg['min_days_observed']} LIMIT 200"
     )
     return [{'host': h, 'process_image': p, 'count': c} for h, p, c in con.execute(query).fetchall()]
 
@@ -307,10 +326,15 @@ def _run_new_destination_ip_model(con, cfg):
         "today_pairs AS (SELECT host, destination_ip, count(*) as c FROM siem.live_logs "
         "    WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE "
         "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN') "
-        "      AND destination_ip IS NOT NULL AND destination_ip NOT IN ('', '-') GROUP BY 1, 2) "
+        "      AND destination_ip IS NOT NULL AND destination_ip NOT IN ('', '-') GROUP BY 1, 2), "
+        "entity_days AS (SELECT host as entity_id, COUNT(DISTINCT date_trunc('day', CAST(timestamp AS TIMESTAMP))) as days_seen "
+        f"    FROM siem.live_logs WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE - INTERVAL {cfg['lookback_days']} DAY "
+        "      AND CAST(timestamp AS TIMESTAMP) < CURRENT_DATE "
+        "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN') GROUP BY 1) "
         "SELECT tp.host, tp.destination_ip, tp.c FROM today_pairs tp "
         "LEFT JOIN known k ON tp.host = k.host AND tp.destination_ip = k.destination_ip "
-        "WHERE k.host IS NULL LIMIT 200"
+        "JOIN entity_days ed ON tp.host = ed.entity_id "
+        f"WHERE k.host IS NULL AND ed.days_seen >= {cfg['min_days_observed']} LIMIT 200"
     )
     return [{'host': h, 'destination_ip': ip, 'count': c} for h, ip, c in con.execute(query).fetchall()]
 
@@ -332,10 +356,15 @@ def _run_process_lineage_model(con, cfg):
         "    WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE "
         "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN') "
         "      AND parent_image IS NOT NULL AND parent_image != '' "
-        "      AND process_image IS NOT NULL AND process_image != '' GROUP BY 1, 2, 3) "
+        "      AND process_image IS NOT NULL AND process_image != '' GROUP BY 1, 2, 3), "
+        "entity_days AS (SELECT host as entity_id, COUNT(DISTINCT date_trunc('day', CAST(timestamp AS TIMESTAMP))) as days_seen "
+        f"    FROM siem.live_logs WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE - INTERVAL {cfg['lookback_days']} DAY "
+        "      AND CAST(timestamp AS TIMESTAMP) < CURRENT_DATE "
+        "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN') GROUP BY 1) "
         "SELECT tp.host, tp.parent_image, tp.process_image, tp.c FROM today_pairs tp "
         "LEFT JOIN known k ON tp.host = k.host AND tp.parent_image = k.parent_image AND tp.process_image = k.process_image "
-        "WHERE k.host IS NULL LIMIT 200"
+        "JOIN entity_days ed ON tp.host = ed.entity_id "
+        f"WHERE k.host IS NULL AND ed.days_seen >= {cfg['min_days_observed']} LIMIT 200"
     )
     return [{'host': h, 'parent_image': pi, 'process_image': p, 'count': c} for h, pi, p, c in con.execute(query).fetchall()]
 
@@ -373,6 +402,32 @@ def _run_off_hours_model(con, cfg):
             out.append({'entity_type': entity_type, 'entity_id': entity_id, 'hour': hr, 'count': c})
     return out
 
+# Complements _run_new_process_model above rather than duplicating it: that model
+# asks "has THIS HOST ever run this process before" (needs the host's own history to
+# have built up first); this one asks "how many hosts fleet-wide ever run this process
+# at all" -- catches something rare across the whole environment even on a host with
+# plenty of its own baseline (e.g. a well-established host quietly running a tool that
+# no other host touches). host_counts intentionally includes today's activity in the
+# denominator -- this is a population-rarity measure, not a first-time-seen check, so
+# there's no known-vs-today split the way the pair-based models above have.
+def _run_rare_process_population_model(con, cfg):
+    if not cfg['rare_process_enabled']:
+        return []
+    query = (
+        "WITH host_counts AS (SELECT process_image, COUNT(DISTINCT host) as host_count FROM siem.live_logs "
+        f"    WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE - INTERVAL {cfg['lookback_days']} DAY "
+        "      AND process_image IS NOT NULL AND process_image != '' "
+        "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN') GROUP BY 1), "
+        "today_hosts AS (SELECT DISTINCT host, process_image FROM siem.live_logs "
+        "    WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE "
+        "      AND process_image IS NOT NULL AND process_image != '' "
+        "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN')) "
+        "SELECT th.host, th.process_image, hc.host_count FROM today_hosts th "
+        "JOIN host_counts hc ON th.process_image = hc.process_image "
+        f"WHERE hc.host_count <= {cfg['rare_process_max_hosts']} LIMIT 200"
+    )
+    return [{'host': h, 'process_image': p, 'host_count': hc} for h, p, hc in con.execute(query).fetchall()]
+
 def run_ueba_models():
     try:
         cfg = get_ueba_config()
@@ -388,6 +443,7 @@ def run_ueba_models():
         new_dest_ip_hits = _run_new_destination_ip_model(con, cfg)
         lineage_hits = _run_process_lineage_model(con, cfg)
         off_hours_hits = _run_off_hours_model(con, cfg)
+        rare_process_hits = _run_rare_process_population_model(con, cfg)
         con.close()
     except Exception as e:
         print(f"[-] UEBA model run failed: {e}")
@@ -400,6 +456,7 @@ def run_ueba_models():
     new_dest_ip_hits = [h for h in new_dest_ip_hits if ('host', h['host']) not in excluded]
     lineage_hits = [h for h in lineage_hits if ('host', h['host']) not in excluded]
     off_hours_hits = [h for h in off_hours_hits if (h['entity_type'], h['entity_id']) not in excluded]
+    rare_process_hits = [h for h in rare_process_hits if ('host', h['host']) not in excluded]
 
     conn = sqlite3.connect(DB_PATH, timeout=30)
 
@@ -501,6 +558,18 @@ def run_ueba_models():
             conn.execute(
                 "INSERT INTO risk_score_events (entity_type, entity_id, indicator, points, detail, source_table, source_id, rule_id) VALUES (?,?,?,?,?,?,?,?)",
                 (h['entity_type'], h['entity_id'], 'off_hours_activity', risk_cfg['points']['off_hours_activity'], message, 'events', None, None)
+            )
+        for h in rare_process_hits:
+            message = (f"{h['host']} (host) is running a process rare across the whole fleet -- seen on only "
+                       f"{h['host_count']} host(s) in the past {cfg['lookback_days']} days: {h['process_image']}.")
+            conn.execute(
+                "INSERT INTO events (timestamp, hostname, entity_type, app_name, severity, message, raw_json) "
+                "VALUES (datetime('now'), ?, 'host', 'duckdb_ueba', 'Medium', ?, ?)",
+                (h['host'], message, json.dumps({**h, 'detection_type': 'rare_process_population'}))
+            )
+            conn.execute(
+                "INSERT INTO risk_score_events (entity_type, entity_id, indicator, points, detail, source_table, source_id, rule_id) VALUES (?,?,?,?,?,?,?,?)",
+                ('host', h['host'], 'rare_process_population', risk_cfg['points']['rare_process_population'], message, 'events', None, None)
             )
         conn.commit()
     except Exception as e:
