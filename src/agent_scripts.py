@@ -503,6 +503,34 @@ echo "=== LD_PRELOAD References ==="
 grep -H LD_PRELOAD /etc/environment /etc/ld.so.preload 2>/dev/null || echo "(none found)"
 """
 
+def enable_exec_auditing():
+    return r"""RULES_FILE=/etc/audit/rules.d/microdfir.rules
+if ! command -v auditctl >/dev/null 2>&1; then
+    echo "auditd is not installed on this host -- install the 'audit' (or 'auditd') package first."
+    exit 1
+fi
+mkdir -p /etc/audit/rules.d
+cat > "$RULES_FILE" <<'EOF'
+-a exec,always -F arch=b64 -S execve -k microdfir_exec
+-a exec,always -F arch=b32 -S execve -k microdfir_exec
+EOF
+auditctl -a exec,always -F arch=b64 -S execve -k microdfir_exec 2>/dev/null
+auditctl -a exec,always -F arch=b32 -S execve -k microdfir_exec 2>/dev/null
+# augenrules persists the rule file across a reboot/auditd restart; auditctl above loads
+# it into the running kernel rule set immediately, without waiting for that reload.
+augenrules --load 2>/dev/null
+echo "Exec auditing enabled (key=microdfir_exec). Rule persisted to $RULES_FILE."
+"""
+
+def disable_exec_auditing():
+    return r"""RULES_FILE=/etc/audit/rules.d/microdfir.rules
+rm -f "$RULES_FILE"
+auditctl -d exec,always -F arch=b64 -S execve -k microdfir_exec 2>/dev/null
+auditctl -d exec,always -F arch=b32 -S execve -k microdfir_exec 2>/dev/null
+augenrules --load 2>/dev/null
+echo "Exec auditing disabled and rule file removed."
+"""
+
 LINUX_TEMPLATES = {
     'list_processes': (lambda params: list_processes_linux(), []),
     'kill_process': (lambda params: kill_process_linux(params['pid']), ['pid']),
@@ -513,6 +541,8 @@ LINUX_TEMPLATES = {
     'collect_file': (lambda params: collect_file_linux(params['path']), ['path']),
     'ioc_sweep': (lambda params: ioc_sweep_linux(params.get('hashes', []), params.get('md5_hashes', []), params.get('sha1_hashes', [])), []),
     'string_sweep': (lambda params: string_sweep_linux(params.get('patterns', [])), []),
+    'enable_exec_auditing': (lambda params: enable_exec_auditing(), []),
+    'disable_exec_auditing': (lambda params: disable_exec_auditing(), []),
 }
 
 TEMPLATES_BY_OS = {'windows': WINDOWS_TEMPLATES, 'linux': LINUX_TEMPLATES}
