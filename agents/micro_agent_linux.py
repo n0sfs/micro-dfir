@@ -4,7 +4,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, ssl, threading
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.08.24.1"
+AGENT_VERSION = "2026.08.24.2"
 
 INSTALL_DIR = "/opt/microdfir-agent"
 SERVICE_NAME = "microdfir-agent"
@@ -180,9 +180,9 @@ def fetch_journal_logs(last_seconds):
             "severity": _PRIORITY_SEVERITY.get(str(e.get('PRIORITY', '6')), 'INFO'),
             "event_id": "-",
             "username": e.get('_UID', 'root') if e.get('_UID') is not None else 'root',
-            # 4000 (was 1000) -- matches the Windows agent's own bump, for consistency
-            # and headroom on verbose journald entries (e.g. audit subsystem messages).
-            "message": str(e.get('MESSAGE', ''))[:4000],
+            # No length cap -- the server stores the entire raw message (live_logs.message
+            # is plain TEXT with no size limit).
+            "message": str(e.get('MESSAGE', '')),
         })
     return logs
 

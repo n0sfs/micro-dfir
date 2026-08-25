@@ -4,7 +4,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, tem
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.08.24.1"
+AGENT_VERSION = "2026.08.24.2"
 
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
@@ -171,11 +171,18 @@ _CHANNEL_LOG_NAMES = {
     'powershell': ('PowerShell', 'Windows PowerShell'),
 }
 
-def fetch_windows_logs(channels, last_seconds):
+def fetch_windows_logs(channel_configs, last_seconds):
     logs = []
     host = socket.gethostname()
-    for channel in channels:
-        channel = channel.strip()
+    for cfg in channel_configs:
+        channel = (cfg.get('name') or '').strip()
+        if not channel:
+            continue
+        capture_xml = bool(cfg.get('capture_xml'))
+        # Pre-built server-side (see _build_powershell_id_clause in app.py) from the
+        # channel's saved include/exclude event-ID filter -- this agent does zero
+        # parsing/validation of its own, just splices the ready expression in.
+        where_clause = cfg.get('where_clause') or ''
         raw_base = channel.split(" (")[0].strip()
         # The server's channel config key ("WindowsDefender", no space — the JSON key the
         # Log Pipeline UI saves) doesn't match the display name ("Windows Defender", with a
@@ -184,9 +191,22 @@ def fetch_windows_logs(channels, last_seconds):
         # nothing every cycle. Matching on a space/case-normalized key fixes that regardless
         # of which form the channel arrives in, and canonicalizes the display name too so
         # historical and future rows use the same "app" value instead of splitting in two.
+        # Unrecognized names (custom channels) fall through to using the raw string
+        # directly as the LogName -- this is what lets an admin-added custom channel
+        # work with no agent-side changes.
         lookup_key = raw_base.replace(' ', '').replace('-', '').lower()
         base, log_name = _CHANNEL_LOG_NAMES.get(lookup_key, (raw_base, raw_base))
-        cmd = "powershell -Command \"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-WinEvent -FilterHashtable @{LogName='" + log_name + "'; StartTime=(Get-Date).AddSeconds(-" + str(last_seconds) + ")} -ErrorAction SilentlyContinue | Select-Object @{N='TimeCreated';E={$_.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')}}, Id, LevelDisplayName, @{N='User';E={if($_.UserId){try{(New-Object System.Security.Principal.SecurityIdentifier($_.UserId.Value)).Translate([System.Security.Principal.NTAccount]).Value}catch{$_.UserId.Value}}else{'SYSTEM'}}}, Message | ConvertTo-Json -Compress\""
+        where_stage = f" | Where-Object {{ {where_clause} }}" if where_clause else ""
+        xml_prop = ", @{N='Xml';E={$_.ToXml()}}" if capture_xml else ""
+        cmd = (
+            "powershell -Command \"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+            "Get-WinEvent -FilterHashtable @{LogName='" + log_name + "'; StartTime=(Get-Date).AddSeconds(-" + str(last_seconds) + ")} -ErrorAction SilentlyContinue"
+            + where_stage +
+            " | Select-Object @{N='TimeCreated';E={$_.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')}}, Id, LevelDisplayName, "
+            "@{N='User';E={if($_.UserId){try{(New-Object System.Security.Principal.SecurityIdentifier($_.UserId.Value)).Translate([System.Security.Principal.NTAccount]).Value}catch{$_.UserId.Value}}else{'SYSTEM'}}}, Message"
+            + xml_prop +
+            " | ConvertTo-Json -Compress\""
+        )
         try:
             out = subprocess.check_output(cmd, shell=True, encoding='utf-8', errors='ignore', stderr=subprocess.DEVNULL).strip()
             if out:
@@ -199,13 +219,14 @@ def fetch_windows_logs(channels, last_seconds):
                     _sent_event_sigs.add(sig)
                     if len(_sent_event_sigs) > _SENT_SIG_CAP:
                         _sent_event_sigs.pop()
-                    # 4000 (was 1000) -- a Sysmon process-creation message's ParentImage/
-                    # ParentCommandLine fields (which the server now parses out, see
-                    # _extract_process_fields in app.py) sit near the end of the message,
-                    # well past 1000 chars once Description/Product/Company/Hashes are
-                    # included, so the old cap silently dropped them before they ever left
-                    # this agent.
-                    logs.append({"time": str(e.get('TimeCreated', '')), "host": host, "app": base, "severity": "ALERT" if e.get('LevelDisplayName') in ['Error', 'Critical'] else "WARN" if e.get('LevelDisplayName') == 'Warning' else "INFO", "event_id": str(e.get('Id', '-')), "username": str(e.get('User', 'SYSTEM')).split('\\')[-1], "message": str(e.get('Message', ''))[:4000]})
+                    # No length cap -- the server stores the entire raw message (live_logs.message
+                    # is plain TEXT with no size limit), and last session's field-parsing logic
+                    # depends on seeing the whole thing (ParentImage/ParentCommandLine/Hashes can
+                    # all sit past where any fixed cap would cut).
+                    log_entry = {"time": str(e.get('TimeCreated', '')), "host": host, "app": base, "severity": "ALERT" if e.get('LevelDisplayName') in ['Error', 'Critical'] else "WARN" if e.get('LevelDisplayName') == 'Warning' else "INFO", "event_id": str(e.get('Id', '-')), "username": str(e.get('User', 'SYSTEM')).split('\\')[-1], "message": str(e.get('Message', ''))}
+                    if capture_xml and e.get('Xml'):
+                        log_entry["xml"] = str(e.get('Xml'))
+                    logs.append(log_entry)
         except: pass
     return logs
 
@@ -213,7 +234,10 @@ def run_agent():
     global INGEST_URL
     print("[*] Agent starting up! Initializing...", flush=True)
     context = build_ssl_context()
-    active_channels = ['Security', 'System']
+    active_channel_configs = [
+        {'name': 'Security', 'capture_xml': False, 'where_clause': ''},
+        {'name': 'System', 'capture_xml': False, 'where_clause': ''},
+    ]
     last_config_check = 0
     LOG_INTERVAL = 8
     CONFIG_INTERVAL = 8
@@ -253,9 +277,17 @@ def run_agent():
                                 target=run_remote_script, args=(context, rs.get('id'), rs.get('script', '')), daemon=True
                             ).start()
 
-                        # Update Channels
-                        if data.get('channels'):
-                            active_channels = data['channels'].split(',')
+                        # Update Channels -- channel_config (per-channel capture_xml/
+                        # where_clause) takes priority; the flat 'channels' string is
+                        # kept only as a fallback for a server that hasn't been updated
+                        # yet (or an in-flight upgrade window).
+                        if data.get('channel_config') is not None:
+                            active_channel_configs = data['channel_config']
+                        elif data.get('channels'):
+                            active_channel_configs = [
+                                {'name': c, 'capture_xml': False, 'where_clause': ''}
+                                for c in data['channels'].split(',')
+                            ]
 
                         # Zero-Touch Ingestion Routing!
                         if data.get('ingest_url'):
@@ -274,7 +306,7 @@ def run_agent():
         # 2. Log Ingestion
         try:
             print("[*] Fetching Windows event logs...", flush=True)
-            new_logs = fetch_windows_logs(active_channels, LOG_INTERVAL)
+            new_logs = fetch_windows_logs(active_channel_configs, LOG_INTERVAL)
             if new_logs:
                 print(f"[*] Sending {len(new_logs)} logs to {INGEST_URL}...", flush=True)
                 payload = json.dumps({"logs": new_logs}).encode('utf-8')
