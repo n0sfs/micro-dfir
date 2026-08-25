@@ -2938,6 +2938,22 @@ def migrate_live_logs_archive():
     except Exception:
         pass
 
+def migrate_fim_paths():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS fim_paths (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT NOT NULL,
+            description TEXT,
+            enabled BOOLEAN DEFAULT 1,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_live_logs_ip_columns():
     # source_ip/destination_ip were added to schema.sql at some point but no migration
     # ever backfilled them onto already-deployed databases, and no ingest path ever
@@ -3844,7 +3860,9 @@ def agent_config():
 
     dynamic_ingest_url = f"https://{ing_ip}:{ing_port}/api/ingest"
 
-    return jsonify({'channels': channels, 'channel_config': channel_config, 'ingest_url': dynamic_ingest_url})
+    fim_paths = [r['path'] for r in db.execute("SELECT path FROM fim_paths WHERE enabled = 1").fetchall()]
+
+    return jsonify({'channels': channels, 'channel_config': channel_config, 'ingest_url': dynamic_ingest_url, 'fim_paths': fim_paths})
 
 # Log Search spans three tables that were previously siloed from each other: raw
 # ingested events (live_logs), Sigma/custom detection-rule hits (alerts), and UEBA
@@ -4668,6 +4686,49 @@ def agent_checkins():
         print("Checkins error:", e)
         return jsonify([])
 
+@app.route('/api/fim/paths', methods=['GET', 'POST'])
+@login_required
+def api_fim_paths():
+    db = get_db()
+    if request.method == 'GET':
+        rows = db.execute(
+            "SELECT id, path, description, enabled, created_by, created_at FROM fim_paths ORDER BY path"
+        ).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+    if current_user.role != 'admin':
+        return jsonify({"error": "Admin required"}), 403
+    data = request.get_json() or {}
+    path = (data.get('path') or '').strip()
+    description = (data.get('description') or '').strip()
+    if not path:
+        return jsonify({"error": "Path is required"}), 400
+    db.execute(
+        "INSERT INTO fim_paths (path, description, enabled, created_by) VALUES (?, ?, 1, ?)",
+        (path, description, current_user.username)
+    )
+    db.commit()
+    return jsonify({"status": "success"})
+
+@app.route('/api/fim/paths/<int:fid>', methods=['PUT', 'DELETE'])
+@login_required
+def api_fim_path_detail(fid):
+    if current_user.role != 'admin':
+        return jsonify({"error": "Admin required"}), 403
+    db = get_db()
+    if not db.execute("SELECT 1 FROM fim_paths WHERE id = ?", (fid,)).fetchone():
+        return jsonify({"error": "Path not found"}), 404
+
+    if request.method == 'DELETE':
+        db.execute("DELETE FROM fim_paths WHERE id = ?", (fid,))
+        db.commit()
+        return jsonify({"ok": 1})
+
+    data = request.get_json() or {}
+    db.execute("UPDATE fim_paths SET enabled = ? WHERE id = ?", (1 if data.get('enabled') else 0, fid))
+    db.commit()
+    return jsonify({"status": "success"})
+
 @app.route('/api/agent/commands', methods=['GET', 'POST'])
 @login_required
 def api_agent_commands():
@@ -4836,6 +4897,7 @@ migrate_ueba_math_v2()
 migrate_assets_identities()
 migrate_cases()
 migrate_live_logs_archive()
+migrate_fim_paths()
 migrate_live_logs_ip_columns()
 migrate_live_logs_process_columns()
 migrate_agent_versions()

@@ -1,10 +1,10 @@
 # Micro DFIR Linux Agent
-import urllib.request, json, time, sys, os, subprocess, socket, ssl, threading
+import urllib.request, json, time, sys, os, subprocess, socket, ssl, threading, hashlib, re
 
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.08.24.2"
+AGENT_VERSION = "2026.08.25.1"
 
 INSTALL_DIR = "/opt/microdfir-agent"
 SERVICE_NAME = "microdfir-agent"
@@ -186,13 +186,148 @@ def fetch_journal_logs(last_seconds):
         })
     return logs
 
+# ---- File Integrity Monitoring ----
+# A plain JSON file living next to the agent script in INSTALL_DIR -- upgrade_agent()
+# only ever overwrites the script file itself, so this baseline survives a remote
+# self-upgrade the same way sigma_engine.py's own STATE_FILE survives an app restart.
+FIM_STATE_PATH = os.path.join(INSTALL_DIR, "fim_state.json")
+
+def _load_fim_state():
+    try:
+        with open(FIM_STATE_PATH, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_fim_state(state):
+    try:
+        os.makedirs(INSTALL_DIR, exist_ok=True)
+        with open(FIM_STATE_PATH, 'w', encoding='utf-8') as f:
+            json.dump(state, f)
+    except Exception:
+        pass
+
+def _hash_file(path):
+    try:
+        h = hashlib.sha256()
+        with open(path, 'rb') as f:
+            for chunk in iter(lambda: f.read(65536), b''):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
+
+# Single files only, not directories, not recursive -- deliberately lightweight (a
+# handful of high-value paths like /etc/passwd or /etc/shadow, not a full-tree watcher).
+# A path from a fresh admin config always logs one "now being monitored" event on its
+# first check (nothing in the baseline yet to compare against) -- expected, not a bug.
+def run_fim_check(paths):
+    host = socket.gethostname()
+    state = _load_fim_state()
+    logs = []
+    seen = set()
+    now = time.strftime('%Y-%m-%d %H:%M:%S')
+    for path in paths:
+        seen.add(path)
+        prev = state.get(path)
+        if not os.path.isfile(path):
+            if prev:
+                logs.append({"time": now, "host": host, "app": "FIM", "severity": "HIGH", "event_id": "-", "username": "-", "message": f"File removed: {path}"})
+                del state[path]
+            continue
+        try:
+            st = os.stat(path)
+        except Exception:
+            continue
+        cur = {"mtime": st.st_mtime, "size": st.st_size}
+        if prev is None:
+            cur["hash"] = _hash_file(path)
+            state[path] = cur
+            logs.append({"time": now, "host": host, "app": "FIM", "severity": "MEDIUM", "event_id": "-", "username": "-", "message": f"New file now being monitored: {path}"})
+        elif prev.get("mtime") != cur["mtime"] or prev.get("size") != cur["size"]:
+            cur["hash"] = _hash_file(path)
+            if cur["hash"] != prev.get("hash"):
+                logs.append({"time": now, "host": host, "app": "FIM", "severity": "HIGH", "event_id": "-", "username": "-", "message": f"File changed: {path}"})
+            state[path] = cur
+    # A path an admin stopped watching is just dropped from the baseline, silently --
+    # only paths still in the config can ever produce a "removed" alert above.
+    for stale in list(state.keys()):
+        if stale not in seen:
+            del state[stale]
+    _save_fim_state(state)
+    return logs
+
+# ---- auditd exec auditing ----
+# Always attempted every cycle regardless of whether the microdfir_exec rule is
+# currently active (enable/disable_exec_auditing in agent_scripts.py) -- ausearch
+# just returns nothing if the rule isn't loaded, so there's no need for local state
+# to track whether auditing was ever turned on for this host.
+_sent_audit_sigs = set()
+_SENT_AUDIT_SIG_CAP = 5000
+
+def fetch_audit_exec_logs(last_seconds):
+    logs = []
+    host = socket.gethostname()
+    try:
+        out = subprocess.check_output(
+            ['ausearch', '-k', 'microdfir_exec', '-ts', f'-{last_seconds}s', '-i'],
+            encoding='utf-8', errors='ignore', stderr=subprocess.DEVNULL
+        )
+    except Exception:
+        return logs
+    # ausearch -i groups each execve syscall into a multi-line record separated by a
+    # blank line, headed by a "----" separator and a "type=SYSCALL ... id=<serial>" line
+    # that carries the one stable identifier (audit(timestamp:serial)) for dedup.
+    for record in out.split('----'):
+        record = record.strip()
+        if not record or 'type=SYSCALL' not in record:
+            continue
+        sig = None
+        exe, cmd_line, uid, ts = '', '', 'root', ''
+        for line in record.splitlines():
+            if 'audit(' in line and sig is None:
+                try:
+                    sig = line.split('audit(', 1)[1].split(')', 1)[0]
+                except Exception:
+                    pass
+            if line.startswith('type=SYSCALL'):
+                for token in line.split():
+                    if token.startswith('exe='):
+                        exe = token.split('=', 1)[1].strip('"')
+                    elif token.startswith('auid=') and 'unset' not in token:
+                        uid = token.split('=', 1)[1]
+            if line.startswith('type=EXECVE'):
+                # Reconstructs the real argv from the record's a0="...", a1="...", ...
+                # tokens (in order) -- the raw line also carries unrelated audit
+                # metadata (msg=audit(...), argc=N) that isn't part of the command.
+                cmd_line = ' '.join(re.findall(r'a\d+="((?:[^"\\]|\\.)*)"', line))
+        if not sig or sig in _sent_audit_sigs:
+            continue
+        _sent_audit_sigs.add(sig)
+        if len(_sent_audit_sigs) > _SENT_AUDIT_SIG_CAP:
+            _sent_audit_sigs.pop()
+        try:
+            ts = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(float(sig.split(':', 1)[0])))
+        except (ValueError, IndexError):
+            ts = ''
+        logs.append({
+            "time": ts, "host": host, "app": "auditd", "severity": "INFO", "event_id": "execve",
+            "username": uid, "message": f"exec: {exe} {cmd_line}".strip(),
+        })
+    return logs
+
 def run_agent():
     global INGEST_URL
     print("[*] Agent starting up! Initializing...", flush=True)
     context = build_ssl_context()
+    active_fim_paths = []
     last_config_check = 0
+    last_fim_check = 0
     LOG_INTERVAL = 8
     CONFIG_INTERVAL = 8
+    # Deliberately much coarser than LOG_INTERVAL -- hashing a handful of files every 8s
+    # would be wasted work when nothing on disk changes anywhere near that often.
+    FIM_INTERVAL = 300
 
     while True:
         current_time = time.time()
@@ -236,6 +371,9 @@ def run_agent():
                                 print(f"[*] Network Shift Detected! Updating Ingest URL to: {new_ingest}", flush=True)
                                 INGEST_URL = new_ingest
 
+                        if data.get('fim_paths') is not None:
+                            active_fim_paths = data['fim_paths']
+
                     print("[+] Check-in successful!", flush=True)
                     break
                 except Exception as e:
@@ -244,10 +382,29 @@ def run_agent():
             last_config_check = time.time()
 
         # 2. Log Ingestion (system journal — not scoped to the Windows Event Log
-        # "channel" names, since journald has no equivalent grouping to filter by)
+        # "channel" names, since journald has no equivalent grouping to filter by).
+        # FIM and auditd exec logs fold into this same batch/POST -- no separate ingest
+        # endpoint or request needed, they're just more rows in the same "logs" list.
         try:
             print("[*] Fetching journal logs...", flush=True)
             new_logs = fetch_journal_logs(LOG_INTERVAL)
+
+            if current_time - last_fim_check > FIM_INTERVAL:
+                if active_fim_paths:
+                    try:
+                        fim_logs = run_fim_check(active_fim_paths)
+                        if fim_logs:
+                            print(f"[*] FIM detected {len(fim_logs)} change(s).", flush=True)
+                        new_logs.extend(fim_logs)
+                    except Exception as e:
+                        print(f"[-] FIM check failed: {e}", flush=True)
+                last_fim_check = current_time
+
+            try:
+                new_logs.extend(fetch_audit_exec_logs(LOG_INTERVAL))
+            except Exception as e:
+                print(f"[-] auditd exec log fetch failed: {e}", flush=True)
+
             if new_logs:
                 print(f"[*] Sending {len(new_logs)} logs to {INGEST_URL}...", flush=True)
                 payload = json.dumps({"logs": new_logs}).encode('utf-8')

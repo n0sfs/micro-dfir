@@ -1,10 +1,10 @@
 # Micro DFIR Windows Agent
-import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, tempfile, threading
+import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, tempfile, threading, hashlib
 
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.08.24.2"
+AGENT_VERSION = "2026.08.25.1"
 
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
@@ -230,6 +230,77 @@ def fetch_windows_logs(channel_configs, last_seconds):
         except: pass
     return logs
 
+# ---- File Integrity Monitoring ----
+# A plain JSON file living next to the agent script in INSTALL_DIR -- upgrade_agent()
+# only ever overwrites the script file itself, so this baseline survives a remote
+# self-upgrade the same way sigma_engine.py's own STATE_FILE survives an app restart.
+FIM_STATE_PATH = os.path.join(INSTALL_DIR, "fim_state.json")
+
+def _load_fim_state():
+    try:
+        with open(FIM_STATE_PATH, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_fim_state(state):
+    try:
+        if not os.path.exists(INSTALL_DIR): os.makedirs(INSTALL_DIR)
+        with open(FIM_STATE_PATH, 'w', encoding='utf-8') as f:
+            json.dump(state, f)
+    except Exception:
+        pass
+
+def _hash_file(path):
+    try:
+        h = hashlib.sha256()
+        with open(path, 'rb') as f:
+            for chunk in iter(lambda: f.read(65536), b''):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
+
+# Single files only, not directories, not recursive -- deliberately lightweight (a
+# handful of high-value paths like hosts or a config file, not a full-tree watcher).
+# A path from a fresh admin config always logs one "now being monitored" event on its
+# first check (nothing in the baseline yet to compare against) -- expected, not a bug.
+def run_fim_check(paths):
+    host = socket.gethostname()
+    state = _load_fim_state()
+    logs = []
+    seen = set()
+    now = time.strftime('%Y-%m-%d %H:%M:%S')
+    for path in paths:
+        seen.add(path)
+        prev = state.get(path)
+        if not os.path.isfile(path):
+            if prev:
+                logs.append({"time": now, "host": host, "app": "FIM", "severity": "HIGH", "event_id": "-", "username": "-", "message": f"File removed: {path}"})
+                del state[path]
+            continue
+        try:
+            st = os.stat(path)
+        except Exception:
+            continue
+        cur = {"mtime": st.st_mtime, "size": st.st_size}
+        if prev is None:
+            cur["hash"] = _hash_file(path)
+            state[path] = cur
+            logs.append({"time": now, "host": host, "app": "FIM", "severity": "MEDIUM", "event_id": "-", "username": "-", "message": f"New file now being monitored: {path}"})
+        elif prev.get("mtime") != cur["mtime"] or prev.get("size") != cur["size"]:
+            cur["hash"] = _hash_file(path)
+            if cur["hash"] != prev.get("hash"):
+                logs.append({"time": now, "host": host, "app": "FIM", "severity": "HIGH", "event_id": "-", "username": "-", "message": f"File changed: {path}"})
+            state[path] = cur
+    # A path an admin stopped watching is just dropped from the baseline, silently --
+    # only paths still in the config can ever produce a "removed" alert above.
+    for stale in list(state.keys()):
+        if stale not in seen:
+            del state[stale]
+    _save_fim_state(state)
+    return logs
+
 def run_agent():
     global INGEST_URL
     print("[*] Agent starting up! Initializing...", flush=True)
@@ -238,10 +309,15 @@ def run_agent():
         {'name': 'Security', 'capture_xml': False, 'where_clause': ''},
         {'name': 'System', 'capture_xml': False, 'where_clause': ''},
     ]
+    active_fim_paths = []
     last_config_check = 0
+    last_fim_check = 0
     LOG_INTERVAL = 8
     CONFIG_INTERVAL = 8
-    
+    # Deliberately much coarser than LOG_INTERVAL -- hashing a handful of files every 8s
+    # would be wasted work when nothing on disk changes anywhere near that often.
+    FIM_INTERVAL = 300
+
     while True:
         current_time = time.time()
         
@@ -296,17 +372,33 @@ def run_agent():
                                 print(f"[*] Network Shift Detected! Updating Ingest URL to: {new_ingest}", flush=True)
                                 INGEST_URL = new_ingest
 
+                        if data.get('fim_paths') is not None:
+                            active_fim_paths = data['fim_paths']
+
                     print("[+] Check-in successful!", flush=True)
                     break
                 except Exception as e:
                     print(f"[-] Config Check Attempt {attempt + 1} Failed: {e}", flush=True)
                     time.sleep(1)
             last_config_check = time.time()
-            
-        # 2. Log Ingestion
+
+        # 2. Log Ingestion (FIM folds into this same batch/POST -- no separate ingest
+        # endpoint or request needed, it's just more rows in the same "logs" list)
         try:
             print("[*] Fetching Windows event logs...", flush=True)
             new_logs = fetch_windows_logs(active_channel_configs, LOG_INTERVAL)
+
+            if current_time - last_fim_check > FIM_INTERVAL:
+                if active_fim_paths:
+                    try:
+                        fim_logs = run_fim_check(active_fim_paths)
+                        if fim_logs:
+                            print(f"[*] FIM detected {len(fim_logs)} change(s).", flush=True)
+                        new_logs.extend(fim_logs)
+                    except Exception as e:
+                        print(f"[-] FIM check failed: {e}", flush=True)
+                last_fim_check = current_time
+
             if new_logs:
                 print(f"[*] Sending {len(new_logs)} logs to {INGEST_URL}...", flush=True)
                 payload = json.dumps({"logs": new_logs}).encode('utf-8')
