@@ -319,6 +319,12 @@ _PROCESS_FIELD_PATTERNS = {
     'original_file_name': re.compile(r'^[ \t]*OriginalFileName:\s*(.+)$', re.MULTILINE),
 }
 
+# "-" and "." both show up as real Sysmon/Windows Event placeholder-for-empty values
+# depending on the field/provider (confirmed in production: a rare-process detection
+# whose entire displayed process was a bare "." once this got past the old "-"-only
+# check) -- neither is a real process identity, so both are rejected the same way.
+_PROCESS_FIELD_PLACEHOLDER_VALUES = ('-', '.')
+
 def _extract_process_fields(message):
     if not message:
         return {}
@@ -327,7 +333,7 @@ def _extract_process_fields(message):
         m = pattern.search(message)
         if m:
             val = m.group(1).strip()  # .strip() drops a trailing \r on CRLF-sourced text
-            if val and val != '-':
+            if val and val not in _PROCESS_FIELD_PLACEHOLDER_VALUES:
                 out[col] = val
     return out
 
@@ -363,7 +369,7 @@ def _extract_process_fields_from_xml(xml_text):
         if not col:
             continue
         val = (elem.text or '').strip()
-        if val and val != '-':
+        if val and val not in _PROCESS_FIELD_PLACEHOLDER_VALUES:
             out[col] = val
     return out
 
@@ -1620,13 +1626,35 @@ def ueba_tuning():
 @app.route('/api/ueba/detections')
 @login_required
 def api_ueba_detections():
+    import ntpath
     db = get_db()
     limit = request.args.get('limit', 100, type=int)
     rows = db.execute(
-        "SELECT timestamp, hostname, entity_type, severity, message FROM events WHERE app_name = 'duckdb_ueba' ORDER BY id DESC LIMIT ?",
+        "SELECT timestamp, hostname, entity_type, severity, message, raw_json FROM events WHERE app_name = 'duckdb_ueba' ORDER BY id DESC LIMIT ?",
         (limit,)
     ).fetchall()
-    detections = [dict(r) for r in rows]
+    detections = []
+    for r in rows:
+        d = {'timestamp': r['timestamp'], 'hostname': r['hostname'], 'entity_type': r['entity_type'],
+             'severity': r['severity'], 'message': r['message']}
+        try:
+            raw = json.loads(r['raw_json']) if r['raw_json'] else {}
+        except (TypeError, ValueError):
+            raw = {}
+        # Not every detection_type carries these -- e.g. volume_baseline/off_hours_activity
+        # are pure count anomalies with no process involved at all, so these come back
+        # None for those rows and the UI just shows the message column alone.
+        d['detection_type'] = raw.get('detection_type')
+        process_image = raw.get('process_image')
+        d['process_image'] = process_image
+        # ntpath (not os.path) specifically -- these are always Windows paths regardless
+        # of what OS this server itself runs on, and ntpath.basename handles both '\' and
+        # '/' separators so it degrades gracefully on a bare value with no path at all
+        # (e.g. Sysmon's literal "System" for the kernel process) by just returning it as-is.
+        d['process_name'] = ntpath.basename(process_image) if process_image else None
+        d['command_line'] = raw.get('command_line')
+        d['parent_image'] = raw.get('parent_image')
+        detections.append(d)
     total = db.execute("SELECT COUNT(*) FROM events WHERE app_name = 'duckdb_ueba'").fetchone()[0]
     today = db.execute("SELECT COUNT(*) FROM events WHERE app_name = 'duckdb_ueba' AND date(timestamp) = date('now')").fetchone()[0]
     entities_flagged = db.execute("SELECT COUNT(DISTINCT hostname || '|' || COALESCE(entity_type, '')) FROM events WHERE app_name = 'duckdb_ueba'").fetchone()[0]
