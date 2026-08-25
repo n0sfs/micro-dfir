@@ -392,14 +392,22 @@ def _run_process_lineage_model(con, cfg):
     return [{'host': h, 'parent_image': pi, 'process_image': p, 'count': c} for h, pi, p, c in con.execute(query).fetchall()]
 
 # A different shape from the 3 pair-based models above: per entity (host/user, reusing
-# ENTITY_MODELS), flags today's activity in an hour-of-day this entity has never been
-# active in during the lookback window. Deliberately kept to a simple "seen this hour
-# before, yes/no" check rather than a full per-hour median/MAD model -- 24 buckets
-# spread thin over a day-level lookback window don't carry enough samples per bucket for
-# a statistical model to be meaningful, and this app already has a day-of-week
-# statistical model (_run_model above) for the volume signal. Guarded by
-# min_days_observed so a brand-new entity's very first hour of activity isn't flagged
-# just because it has no history at all yet.
+# ENTITY_MODELS), a 24-hour x 7-day-of-week histogram baseline per (entity, dow, hr)
+# cell -- median/MAD over that cell's own history, same statistic _run_model already
+# uses for the daily-volume signal, just one dimension finer. Replaced the original
+# binary "seen this hour before, yes/no" version: that check collapsed day-of-week
+# entirely (an hour's first-ever occurrence, on ANY day, permanently whitelisted it for
+# the rest of the lookback window), so it under-detected genuinely day-specific anomalies
+# -- e.g. a user's first-ever weekend activity at an hour that's completely normal on
+# weekdays was invisible to it.
+#
+# A cell with fewer than min_days_observed same-(dow,hr) samples -- including a cell
+# with ZERO samples, i.e. an hour this entity has truly never been active in on this
+# day of week -- falls back to a flat per-entity baseline (typical hourly count,
+# pooling every (day, hour) sample regardless of which day or hour) rather than either
+# always-flagging (a hair-trigger on any first-time hour) or never-flagging (silently
+# accepting it). A genuinely novel hour still gets compared against something -- just a
+# coarser something -- instead of an automatic pass/fail.
 def _run_off_hours_model(con, cfg):
     if not cfg['off_hours_enabled']:
         return []
@@ -407,22 +415,48 @@ def _run_off_hours_model(con, cfg):
     for model in ENTITY_MODELS:
         entity_type, col, extra_filter = model['entity_type'], model['column'], model['extra_filter']
         query = (
-            f"WITH hist AS (SELECT {col} as entity_id, date_trunc('day', CAST(timestamp AS TIMESTAMP)) as day "
+            f"WITH cell AS (SELECT {col} as entity_id, "
+            f"    CAST(date_part('dow', CAST(timestamp AS TIMESTAMP)) AS INTEGER) as dow, "
+            f"    CAST(date_part('hour', CAST(timestamp AS TIMESTAMP)) AS INTEGER) as hr, "
+            f"    date_trunc('day', CAST(timestamp AS TIMESTAMP)) as day, count(*) as c "
             f"    FROM siem.live_logs WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE - INTERVAL {cfg['lookback_days']} DAY "
-            f"      AND CAST(timestamp AS TIMESTAMP) < CURRENT_DATE AND {extra_filter} GROUP BY 1, 2), "
-            "days_seen AS (SELECT entity_id, count(*) as n FROM hist GROUP BY 1), "
-            f"known_hours AS (SELECT DISTINCT {col} as entity_id, CAST(date_part('hour', CAST(timestamp AS TIMESTAMP)) AS INTEGER) as hr "
-            f"    FROM siem.live_logs WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE - INTERVAL {cfg['lookback_days']} DAY "
-            f"      AND CAST(timestamp AS TIMESTAMP) < CURRENT_DATE AND {extra_filter}), "
-            f"today_hours AS (SELECT {col} as entity_id, CAST(date_part('hour', CAST(timestamp AS TIMESTAMP)) AS INTEGER) as hr, count(*) as c "
+            f"      AND CAST(timestamp AS TIMESTAMP) < CURRENT_DATE AND {extra_filter} GROUP BY 1, 2, 3, 4), "
+            "cell_stats AS (SELECT entity_id, dow, hr, median(c) as med_c, count(*) as days_seen FROM cell GROUP BY 1, 2, 3), "
+            "cell_mad AS (SELECT c.entity_id, c.dow, c.hr, median(abs(c.c - s.med_c)) as mad_c "
+            "    FROM cell c JOIN cell_stats s ON c.entity_id = s.entity_id AND c.dow = s.dow AND c.hr = s.hr GROUP BY 1, 2, 3), "
+            "flat_stats AS (SELECT entity_id, median(c) as med_c, count(*) as days_seen FROM cell GROUP BY 1), "
+            "flat_mad AS (SELECT c.entity_id, median(abs(c.c - s.med_c)) as mad_c "
+            "    FROM cell c JOIN flat_stats s ON c.entity_id = s.entity_id GROUP BY 1), "
+            f"today AS (SELECT {col} as entity_id, "
+            f"    CAST(date_part('hour', CAST(timestamp AS TIMESTAMP)) AS INTEGER) as hr, count(*) as cur_c "
             f"    FROM siem.live_logs WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE AND {extra_filter} GROUP BY 1, 2) "
-            "SELECT th.entity_id, th.hr, th.c FROM today_hours th "
-            "JOIN days_seen ds ON th.entity_id = ds.entity_id "
-            "LEFT JOIN known_hours kh ON th.entity_id = kh.entity_id AND th.hr = kh.hr "
-            f"WHERE kh.entity_id IS NULL AND ds.n >= {cfg['min_days_observed']} LIMIT 200"
+            "SELECT t.entity_id, t.hr, t.cur_c, "
+            f"    COALESCE(CASE WHEN cs.days_seen >= {cfg['min_days_observed']} THEN cs.med_c END, fs.med_c) as med_c, "
+            f"    COALESCE(CASE WHEN cs.days_seen >= {cfg['min_days_observed']} THEN cm.mad_c END, fm.mad_c) as mad_c, "
+            f"    COALESCE(CASE WHEN cs.days_seen >= {cfg['min_days_observed']} THEN cs.days_seen END, fs.days_seen, 0) as days_seen, "
+            f"    CASE WHEN cs.days_seen >= {cfg['min_days_observed']} THEN 'cell' ELSE 'flat' END as baseline_mode "
+            "FROM today t "
+            f"LEFT JOIN cell_stats cs ON t.entity_id = cs.entity_id AND t.hr = cs.hr AND cs.dow = CAST(date_part('dow', CURRENT_DATE) AS INTEGER) "
+            "LEFT JOIN cell_mad cm ON cs.entity_id = cm.entity_id AND cs.dow = cm.dow AND cs.hr = cm.hr "
+            "LEFT JOIN flat_stats fs ON t.entity_id = fs.entity_id "
+            "LEFT JOIN flat_mad fm ON t.entity_id = fm.entity_id "
+            "LIMIT 2000"
         )
-        for entity_id, hr, c in con.execute(query).fetchall():
-            out.append({'entity_type': entity_type, 'entity_id': entity_id, 'hour': hr, 'count': c})
+        # Threshold comparison happens here rather than in SQL: it needs med_c/mad_c,
+        # which are only resolved after the cell-vs-flat fallback above, and doing that
+        # CASE logic a second time in a WHERE clause would just duplicate it verbatim.
+        for entity_id, hr, cur_c, med_c, mad_c, days_seen, baseline_mode in con.execute(query).fetchall():
+            if med_c is None or days_seen < cfg['min_days_observed']:
+                continue
+            spread = (mad_c or 0) / MAD_TO_STDDEV
+            threshold = med_c + (cfg['stddev_multiplier'] * spread)
+            if cur_c <= threshold:
+                continue
+            out.append({
+                'entity_type': entity_type, 'entity_id': entity_id, 'hour': hr, 'count': cur_c,
+                'baseline_avg': round(med_c, 1), 'baseline_stddev': round(spread, 1),
+                'days_seen': days_seen, 'baseline_mode': baseline_mode,
+            })
     return out
 
 # Complements _run_new_process_model above rather than duplicating it: that model
@@ -571,8 +605,11 @@ def run_ueba_models():
             )
         for h in off_hours_hits:
             label = 'host' if h['entity_type'] == 'host' else 'user'
-            message = (f"{h['entity_id']} ({label}) was active at {h['hour']:02d}:00, an hour of day never seen for this "
-                       f"{label} in the past {cfg['lookback_days']} days ({h['count']} events).")
+            basis = f"same-hour-of-week baseline of {h['baseline_avg']} (±{h['baseline_stddev']}, {h['days_seen']} weeks observed)" \
+                if h['baseline_mode'] == 'cell' else \
+                f"overall hourly baseline of {h['baseline_avg']} (±{h['baseline_stddev']}, {h['days_seen']} days observed — not enough same-hour-of-week history yet)"
+            message = (f"{h['entity_id']} ({label}) was active at {h['hour']:02d}:00 with {h['count']} event(s), "
+                       f"exceeding its {basis}.")
             conn.execute(
                 "INSERT INTO events (timestamp, hostname, entity_type, app_name, severity, message, raw_json) "
                 "VALUES (datetime('now'), ?, ?, 'duckdb_ueba', 'Medium', ?, ?)",
