@@ -725,7 +725,7 @@ def threat_intel():
 
     return render_template('threat_intel.html', matches=matches, yara_files=yara_files, active_tab=active_tab, current_user=current_user)
 
-TI_FEED_TYPES = ('taxii', 'threatfox', 'otx', 'urlhaus', 'feodotracker', 'yaraify', 'csv')
+TI_FEED_TYPES = ('taxii', 'threatfox', 'otx', 'urlhaus', 'feodotracker', 'yaraify', 'misp', 'sslbl', 'spamhaus_drop', 'tor_exit', 'csv')
 
 _CSV_VALUE_COLS = ('value', 'indicator', 'ioc', 'pattern', 'ip', 'url', 'domain', 'hash', 'ioc_value')
 _CSV_TYPE_COLS = ('type', 'ioc_type')
@@ -828,6 +828,8 @@ def api_ti_feeds():
         return jsonify({'error': 'TAXII feeds require a discovery_url and collection_id'}), 400
     if feed_type == 'otx' and not d.get('api_key'):
         return jsonify({'error': 'OTX feeds require an API key'}), 400
+    if feed_type == 'misp' and not d.get('discovery_url'):
+        return jsonify({'error': 'MISP feeds require a feed base URL (the directory containing manifest.json)'}), 400
     db.execute(
         "INSERT INTO ti_feeds (name, feed_type, discovery_url, collection_id, username, password, api_key, sync_interval_minutes, enabled) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
@@ -953,12 +955,83 @@ def api_ti_iocs():
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     rows = db.execute(
         f"SELECT si.stix_id, si.type, si.ioc_type, si.name, si.description, si.pattern, si.valid_from, si.revoked, "
-        f"si.inserted_at, si.feed_id, tf.name AS source_name FROM stix_indicators si "
+        f"si.inserted_at, si.feed_id, tf.name AS source_name, "
+        f"(SELECT COUNT(*) FROM ioc_sightings s WHERE s.stix_id = si.stix_id) AS sighting_count, "
+        f"(SELECT MAX(seen_at) FROM ioc_sightings s WHERE s.stix_id = si.stix_id) AS last_sighted "
+        f"FROM stix_indicators si "
         f"LEFT JOIN ti_feeds tf ON si.feed_id = tf.id {where} ORDER BY si.inserted_at DESC LIMIT ?",
         params + [limit]
     ).fetchall()
     total = db.execute(f"SELECT COUNT(*) FROM stix_indicators si {where}", params).fetchone()[0]
     return jsonify({'iocs': [dict(r) for r in rows], 'total': total})
+
+def _build_actor_summary(rows):
+    """Cross-references IOC (name, description) rows against a curated threat-actor/
+    malware reference table (src/threat_actors.py) -- purely informational, surfaced
+    next to the MITRE coverage heatmap so an analyst can see which known actors the
+    currently-synced feed data implicates and which techniques they're commonly
+    associated with. `rows` is any iterable of objects with ['name']/['description']
+    keys (a sqlite3.Row list or plain dicts)."""
+    from threat_actors import find_actor_context
+    from mitre_attack import lookup as mitre_lookup, TACTIC_LABELS
+
+    matched = {}  # actor name -> {actor, ioc_count}
+    for r in rows:
+        actor = find_actor_context(r['name']) or find_actor_context(r['description'])
+        if not actor:
+            continue
+        entry = matched.setdefault(actor['name'], {'actor': actor, 'ioc_count': 0})
+        entry['ioc_count'] += 1
+
+    out = []
+    for name, entry in matched.items():
+        actor = entry['actor']
+        techniques = []
+        for tid in actor['techniques']:
+            tname, tactic = mitre_lookup(tid)
+            techniques.append({'id': tid, 'name': tname, 'tactic': tactic, 'tactic_label': TACTIC_LABELS.get(tactic, tactic)})
+        out.append({
+            'name': name, 'aliases': actor['aliases'], 'type': actor['type'],
+            'description': actor['description'], 'ioc_count': entry['ioc_count'],
+            'techniques': techniques,
+        })
+    out.sort(key=lambda a: -a['ioc_count'])
+    return out
+
+@app.route('/api/ti/actor-summary', methods=['GET'])
+@login_required
+def api_ti_actor_summary():
+    db = get_db()
+    rows = db.execute(
+        "SELECT name, description FROM stix_indicators WHERE revoked = 0 AND (name IS NOT NULL OR description IS NOT NULL)"
+    ).fetchall()
+    return jsonify({'actors': _build_actor_summary(rows)})
+
+@app.route('/api/ti/warninglists', methods=['GET'])
+@login_required
+def api_ti_warninglists():
+    db = get_db()
+    rows = db.execute(
+        "SELECT w.id, w.name, w.description, w.type, w.enabled, COUNT(e.id) AS entry_count "
+        "FROM warninglists w LEFT JOIN warninglist_entries e ON e.warninglist_id = w.id "
+        "GROUP BY w.id ORDER BY w.name"
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+@app.route('/api/ti/warninglists/<int:wid>', methods=['PUT'])
+@login_required
+def api_ti_warninglist_toggle(wid):
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    d = request.json or {}
+    db = get_db()
+    if not db.execute("SELECT 1 FROM warninglists WHERE id = ?", (wid,)).fetchone():
+        return jsonify({'error': 'Warninglist not found'}), 404
+    enabled = 1 if d.get('enabled') else 0
+    db.execute("UPDATE warninglists SET enabled = ? WHERE id = ?", (enabled, wid))
+    db.commit()
+    log_audit('warninglist_toggle', 'warninglist', wid, 'enabled' if enabled else 'disabled')
+    return jsonify({'status': 'success'})
 
 @app.route('/api/ti/iocs/facets', methods=['GET'])
 @login_required
@@ -3171,6 +3244,57 @@ def migrate_saved_searches():
             created_by TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_warninglists():
+    try:
+        from warninglists import SEED_WARNINGLISTS
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS warninglists (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT,
+            type TEXT NOT NULL,
+            enabled BOOLEAN DEFAULT 1
+        )''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS warninglist_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            warninglist_id INTEGER NOT NULL,
+            value TEXT NOT NULL
+        )''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_warninglist_entries_wid ON warninglist_entries(warninglist_id)")
+        # Seed once, on an empty table only -- an admin who's since disabled one of the
+        # curated lists shouldn't have it silently re-enabled by a later restart/update.
+        if conn.execute("SELECT COUNT(*) FROM warninglists").fetchone()[0] == 0:
+            for wl in SEED_WARNINGLISTS:
+                cur = conn.execute(
+                    "INSERT INTO warninglists (name, description, type, enabled) VALUES (?, ?, ?, 1)",
+                    (wl['name'], wl['description'], wl['type'])
+                )
+                wid = cur.lastrowid
+                conn.executemany(
+                    "INSERT INTO warninglist_entries (warninglist_id, value) VALUES (?, ?)",
+                    [(wid, v) for v in wl['entries']]
+                )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_ioc_sightings():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS ioc_sightings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stix_id TEXT NOT NULL,
+            seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            source TEXT,
+            log_ref TEXT
+        )''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ioc_sightings_stix_id ON ioc_sightings(stix_id)")
         conn.commit()
         conn.close()
     except Exception:
@@ -5503,6 +5627,8 @@ migrate_report_history()
 migrate_log_search_indexes()
 migrate_alerts_triage()
 migrate_saved_searches()
+migrate_warninglists()
+migrate_ioc_sightings()
 
 try:
     # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every

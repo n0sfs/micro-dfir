@@ -1,5 +1,6 @@
 import os, json, re, time, sqlite3, requests, datetime
 from notifications import notify_if_configured
+from warninglists import filter_warninglisted_ips
 from dataclasses import dataclass, field as dc_field
 from sigma.collection import SigmaCollection
 from sigma.backends.sqlite import sqliteBackend
@@ -133,6 +134,11 @@ def _get_ioc_ip_list_yaml(cursor):
         v = _PORT_SUFFIX_RE.sub('', (r['pattern'] or '').strip())
         if v:
             values.add(v)
+    # Drop anything covered by an enabled warninglist (CDN ranges, public DNS
+    # resolvers, RFC1918) before it can ever fire the IOC-IP rule -- a phishing kit
+    # that transiently sits on a shared Cloudflare IP shouldn't turn ordinary CDN
+    # traffic into a "known-bad IP matched" alert.
+    values = set(filter_warninglisted_ips(cursor, values))
     if not values:
         # An empty `field: []` is invalid Sigma/YAML (and `IN ()` is invalid SQL) — a
         # sentinel that can never appear in real traffic keeps the rule syntactically
@@ -140,6 +146,30 @@ def _get_ioc_ip_list_yaml(cursor):
         return "['__NO_IOCS_YET__']"
     escaped = sorted(v.replace("'", "''") for v in values)
     return '[' + ', '.join(f"'{v}'" for v in escaped) + ']'
+
+# Records one ioc_sightings row per stix_indicators IP that actually contributed to
+# a NEW alert firing via the IOC-IP correlation -- the only automatic IOC-to-log
+# correlation that exists today, so this is the only place a genuine "observed in our
+# environment" event can currently be derived from. Only called for brand-new alerts
+# (not re-occurrences within the 15-minute dedup window), mirroring the same
+# once-per-burst restraint already applied to notify_if_configured() below.
+def _record_ioc_sightings(cursor, rule_id, host, source_ip, destination_ip, alert_id, rule_title, rule_uses_ioc_ip):
+    if not rule_uses_ioc_ip.get(rule_id):
+        return
+    ips = [ip for ip in (source_ip, destination_ip) if ip]
+    if not ips:
+        return
+    placeholders = ','.join('?' * len(ips))
+    rows = cursor.execute(
+        f"SELECT stix_id FROM stix_indicators WHERE pattern IN ({placeholders}) "
+        f"AND LOWER(ioc_type) LIKE '%ip%' AND revoked = 0",
+        ips
+    ).fetchall()
+    for row in rows:
+        cursor.execute(
+            "INSERT INTO ioc_sightings (stix_id, source, log_ref) VALUES (?, ?, ?)",
+            (row['stix_id'], f"alert:{rule_title}", f"alert_id={alert_id}, host={host}")
+        )
 
 def _substitute_ioc_placeholder(rule_yaml_text, cursor, cache):
     if IOC_IP_PLACEHOLDER not in rule_yaml_text:
@@ -167,6 +197,7 @@ def run_detection_cycle():
     cursor.execute(f"CREATE TEMP VIEW recent_events AS SELECT * FROM live_logs WHERE id > {last_id} AND id <= {current_max}")
     rules = cursor.execute("SELECT id, title, rule_yaml, severity_override FROM sigma_rules WHERE enabled = 1").fetchall()
     rule_titles = {r['id']: r['title'] for r in rules}
+    rule_uses_ioc_ip = {r['id']: IOC_IP_PLACEHOLDER in r['rule_yaml'] for r in rules}
     backend = _make_backend()
 
     exclusions_by_rule = {}
@@ -256,6 +287,7 @@ def run_detection_cycle():
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
                     (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app, g['count'])
                 )
+                _record_ioc_sightings(cursor, rule_id, host, source_ip, destination_ip, cursor.lastrowid, rule_titles.get(rule_id, 'Custom/YARA Rule'), rule_uses_ioc_ip)
                 # Only a brand-new alert notifies, not a re-occurrence within the same
                 # 15-minute dedup window (the `existing` branch above) -- otherwise a noisy
                 # rule would re-notify every cycle it keeps matching instead of once per burst.

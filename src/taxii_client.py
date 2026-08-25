@@ -160,6 +160,135 @@ def sync_otx(feed):
     conn.commit(); conn.close()
     return c
 
+# A generic MISP-format feed: a directory of static files (no MISP instance, no auth)
+# served over plain HTTP -- manifest.json keyed by event UUID (metadata: info/date/Tag),
+# plus one <uuid>.json per event holding the full Attribute list. This is exactly how
+# MISP's own free default feeds (CIRCL OSINT, Botvrij.eu, and the ~50 others at
+# misp-project.org/feeds/) are published; consuming one needs nothing but requests+json.
+# Confirmed live against https://www.circl.lu/doc/misp/feed-osint/ -- manifest.json is
+# ~1.4MB for ~1700 events, too much to refetch every event file each sync, so (mirroring
+# OTX's "most recent slice, not full history" precedent above) only the N most-recently-
+# updated events are pulled per sync; re-running periodically cycles through the rest.
+_MISP_FEED_MAX_EVENTS_PER_SYNC = 50
+
+def sync_misp_feed(feed):
+    base = feed["discovery_url"].rstrip("/") + "/"
+    headers = _abuse_ch_headers(feed)  # harmless no-op for feeds that don't use one
+    res = requests.get(base + "manifest.json", headers=headers, timeout=30)
+    res.raise_for_status()
+    manifest = res.json()
+    if not isinstance(manifest, dict):
+        raise ValueError("manifest.json did not contain the expected {event_uuid: {...}} object")
+
+    entries = sorted(manifest.items(), key=lambda kv: kv[1].get("timestamp", 0), reverse=True)
+    entries = entries[:_MISP_FEED_MAX_EVENTS_PER_SYNC]
+
+    conn = _connect(); c = 0
+    for event_uuid, meta in entries:
+        try:
+            ev_res = requests.get(base + f"{event_uuid}.json", headers=headers, timeout=30)
+            ev_res.raise_for_status()
+            raw = ev_res.json()
+        except Exception:
+            continue  # one bad/missing event file shouldn't abort the whole sync
+        event = raw.get("Event", raw) if isinstance(raw, dict) else {}
+        info = event.get("info") or meta.get("info") or "MISP Event"
+        event_date = event.get("date") or meta.get("date") or ""
+        tags = ", ".join(t.get("name", "") for t in (event.get("Tag") or meta.get("Tag") or []) if t.get("name"))
+        for attr in (event.get("Attribute") or []):
+            # to_ids=false attributes are context (a report link, a comment) rather than
+            # something MISP itself considers detection-worthy -- same filter MISP's own
+            # IDS export applies. Deleted attributes are tombstones, not live IOCs.
+            if attr.get("deleted") or not attr.get("to_ids", False):
+                continue
+            value = (attr.get("value") or "").strip()
+            if not value:
+                continue
+            stix_id = f"misp--{event_uuid}--{attr.get('uuid') or value}"
+            desc_parts = [f"category={attr.get('category', '')}"]
+            if tags:
+                desc_parts.append(f"tags={tags}")
+            if attr.get("comment"):
+                desc_parts.append(f"comment={attr['comment']}")
+            conn.execute(
+                "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
+                (stix_id, "indicator", (attr.get("type") or "unknown").lower(), info, ", ".join(desc_parts), value, event_date, feed["id"])
+            )
+            c += 1
+    conn.commit(); conn.close()
+    return c
+
+# abuse.ch SSLBL's malicious TLS certificate blacklist (SHA1 fingerprints) -- their IP
+# blacklist (sslipblacklist.csv) was deprecated 2025-01-03 and is permanently empty now,
+# confirmed live, so this deliberately targets the still-active certificate list instead.
+# Format confirmed live: "Listingdate,SHA1,Listingreason" CSV with a '#'-commented banner.
+def sync_sslbl(feed):
+    res = requests.get("https://sslbl.abuse.ch/blacklist/sslblacklist.csv", headers=_abuse_ch_headers(feed), timeout=20)
+    res.raise_for_status()
+    conn = _connect(); c = 0
+    for line in res.text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        parts = [p.strip() for p in line.split(',')]
+        if len(parts) < 3:
+            continue
+        listing_date, sha1, reason = parts[0], parts[1], ','.join(parts[2:])
+        stix_id = f"sslbl--{sha1}"
+        conn.execute(
+            "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) VALUES (?, 'indicator', 'tls-cert-sha1', ?, ?, ?, ?, 0, ?)",
+            (stix_id, reason, "source=SSLBL certificate blacklist", sha1, listing_date, feed["id"])
+        )
+        c += 1
+    conn.commit(); conn.close()
+    return c
+
+# Spamhaus DROP ("Don't Route Or Peer") -- hijacked/criminal-controlled netblocks, plain
+# text, no auth, no API key. EDROP was merged into drop.txt itself (confirmed live: the
+# edrop.txt endpoint now just says so) so this single list already covers both.
+_DROP_LINE_RE = re.compile(r'^([0-9./]+)\s*;\s*(\S+)')
+
+def sync_spamhaus_drop(feed):
+    res = requests.get("https://www.spamhaus.org/drop/drop.txt", timeout=20)
+    res.raise_for_status()
+    conn = _connect(); c = 0
+    for line in res.text.splitlines():
+        line = line.strip()
+        if not line or line.startswith(';'):
+            continue
+        m = _DROP_LINE_RE.match(line)
+        if not m:
+            continue
+        cidr, sbl_ref = m.group(1), m.group(2)
+        stix_id = f"spamhaus-drop--{cidr}"
+        conn.execute(
+            "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) VALUES (?, 'indicator', 'ip-cidr', ?, ?, ?, '', 0, ?)",
+            (stix_id, f"Spamhaus DROP ({sbl_ref})", "source=Spamhaus DROP", cidr, feed["id"])
+        )
+        c += 1
+    conn.commit(); conn.close()
+    return c
+
+# Tor Project's official bulk exit-node list -- one IP per line, plain text, no auth.
+# Not inherently malicious, but a source IP that's a known Tor exit node is useful
+# context on an alert regardless (anonymized/likely-adversarial traffic origin).
+def sync_tor_exit(feed):
+    res = requests.get("https://check.torproject.org/torbulkexitlist", timeout=20)
+    res.raise_for_status()
+    conn = _connect(); c = 0
+    for line in res.text.splitlines():
+        ip = line.strip()
+        if not ip or ip.startswith('#'):
+            continue
+        stix_id = f"tor-exit--{ip}"
+        conn.execute(
+            "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) VALUES (?, 'indicator', 'ip', 'Tor Exit Node', 'source=Tor Project bulk exit list', ?, '', 0, ?)",
+            (stix_id, ip, feed["id"])
+        )
+        c += 1
+    conn.commit(); conn.close()
+    return c
+
 def _extract_zip_safely(zip_path, dest_dir, max_total_bytes=_YARAIFY_MAX_EXTRACTED_BYTES):
     # dest_dir must already exist and be empty. Returns the number of files written.
     # Two defenses zipfile.extractall() alone doesn't give you, even for a zip from a
@@ -256,6 +385,14 @@ def sync_feed(feed):
         return sync_otx(feed)
     elif feed["feed_type"] == "yaraify":
         return sync_yaraify(feed)
+    elif feed["feed_type"] == "misp":
+        return sync_misp_feed(feed)
+    elif feed["feed_type"] == "sslbl":
+        return sync_sslbl(feed)
+    elif feed["feed_type"] == "spamhaus_drop":
+        return sync_spamhaus_drop(feed)
+    elif feed["feed_type"] == "tor_exit":
+        return sync_tor_exit(feed)
     elif feed["feed_type"] == "csv":
         # CSV feeds are a one-time snapshot uploaded through /api/ti/feeds/upload_csv —
         # there's no remote source to re-fetch from, so "Sync Now" / sync_all_feeds()
