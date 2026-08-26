@@ -777,6 +777,21 @@
             {% endif %}
         </div>
 
+        <h6 class="text-info mb-2"><i class="fa-solid fa-folder-plus me-1"></i>Automation <span class="text-muted small">— auto-create a Case the first time this rule fires on a host/user (repeat occurrences within the existing 15-min alert window just add to that same alert, not a new case)</span></h6>
+        <div class="d-flex align-items-center flex-wrap gap-2 mb-4">
+            <div class="form-check form-switch mb-0">
+                <input class="form-check-input" type="checkbox" id="tuneAutoCaseEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                <label class="form-check-label small" for="tuneAutoCaseEnabled">Auto-create a case when this rule fires</label>
+            </div>
+            <select id="tuneAutoCaseTemplate" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                <option value="">No template — empty task list</option>
+            </select>
+            {% if current_user.role == 'admin' %}
+            <button type="button" class="btn btn-sm btn-outline-primary" onclick="saveAutoCase()"><i class="fa-solid fa-floppy-disk me-1"></i> Save</button>
+            <span id="tuneAutoCaseMsg" class="small text-success" style="display:none;"></span>
+            {% endif %}
+        </div>
+
         <h6 class="text-info mb-2"><i class="fa-solid fa-filter-circle-xmark me-1"></i>Exclusions <span class="text-muted small">— suppress alerts from this rule when a match also satisfies one of these</span></h6>
         <div class="table-responsive mb-2">
             <table class="table table-dark table-sm align-middle mb-2">
@@ -3104,6 +3119,11 @@ function openTuneModal(id) {
     const msg = document.getElementById('tuneSeverityMsg');
     if (msg) { msg.style.display = 'none'; }
 
+    document.getElementById('tuneAutoCaseEnabled').checked = !!r.auto_case;
+    const acMsg = document.getElementById('tuneAutoCaseMsg');
+    if (acMsg) { acMsg.style.display = 'none'; }
+    loadCaseTemplatesForTune(r.auto_case_template_id);
+
     if (IS_ADMIN) {
         const fieldSel = document.getElementById('exclField');
         fieldSel.innerHTML = TUNE_FIELDS.map(fld => `<option value="${fld.value}">${fld.label}</option>`).join('');
@@ -3159,6 +3179,41 @@ function saveSeverity() {
             toast(data.error || 'Failed to save severity override.', 'danger');
         }
     }).catch(err => toast('Error saving severity: ' + err, 'danger'));
+}
+
+let caseTemplatesForTuneCache = null;
+function loadCaseTemplatesForTune(selectedId) {
+    const sel = document.getElementById('tuneAutoCaseTemplate');
+    const populate = (templates) => {
+        sel.innerHTML = '<option value="">No template — empty task list</option>' +
+            templates.map(t => `<option value="${t.id}">${escHtml(t.name)} (${t.tasks.length} tasks)</option>`).join('');
+        sel.value = selectedId || '';
+    };
+    if (caseTemplatesForTuneCache) { populate(caseTemplatesForTuneCache); return; }
+    fetch('/api/case-templates').then(r => r.json()).then(templates => {
+        caseTemplatesForTuneCache = templates || [];
+        populate(caseTemplatesForTuneCache);
+    }).catch(() => { sel.innerHTML = '<option value="">No template — empty task list</option>'; });
+}
+
+function saveAutoCase() {
+    if (!activeTuneRuleId) return;
+    const payload = {
+        auto_case: document.getElementById('tuneAutoCaseEnabled').checked,
+        auto_case_template_id: document.getElementById('tuneAutoCaseTemplate').value ? parseInt(document.getElementById('tuneAutoCaseTemplate').value, 10) : null
+    };
+    fetch(`/api/rules/${activeTuneRuleId}/autocase`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        const msg = document.getElementById('tuneAutoCaseMsg');
+        if (ok) {
+            msg.className = 'small text-success'; msg.innerText = 'Saved.'; msg.style.display = 'inline';
+            setTimeout(() => { msg.style.display = 'none'; }, 3000);
+            tuneLoad();
+        } else {
+            toast(data.error || 'Failed to save automation setting.', 'danger');
+        }
+    }).catch(err => toast('Error saving automation setting: ' + err, 'danger'));
 }
 
 function addExclusion() {
