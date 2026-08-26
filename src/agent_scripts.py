@@ -433,16 +433,20 @@ $result.usb_history = @(try {
             $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
             [PSCustomObject]@{ device = $deviceKey.PSChildName; serial = $_.PSChildName; friendly_name = $props.FriendlyName; mfg = $props.Mfg }
         }
-    }
+    } | Select-Object -First 50
 } catch { @() })
 
-$result.ps_console_history = @(Get-ChildItem 'C:\Users\*\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt' -ErrorAction SilentlyContinue | ForEach-Object {
+$maxPsHistoryUsers = 8
+$maxPsHistoryLines = 15
+$psHistoryFiles = @(Get-ChildItem 'C:\Users\*\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt' -ErrorAction SilentlyContinue)
+$result.ps_console_history = @($psHistoryFiles | Select-Object -First $maxPsHistoryUsers | ForEach-Object {
     [PSCustomObject]@{
         user = $_.FullName.Split('\')[2]
         last_write = $_.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')
-        recent_lines = @(Get-Content $_.FullName -ErrorAction SilentlyContinue -Tail 40)
+        recent_lines = @(Get-Content $_.FullName -ErrorAction SilentlyContinue -Tail $maxPsHistoryLines)
     }
 })
+$result.ps_console_history_truncated = ($psHistoryFiles.Count -gt $maxPsHistoryUsers)
 
 # Capped well below string_sweep's own hard-won 60-event/200-char limits (see that
 # function's comment above on the server's 60000-char stdout storage cap silently
@@ -475,12 +479,20 @@ Get-ChildItem 'C:\Users' -Directory -ErrorAction SilentlyContinue | ForEach-Obje
     $uname = $_.Name
     $recentDir = Join-Path $_.FullName 'AppData\Roaming\Microsoft\Windows\Recent'
     if (Test-Path $recentDir) {
-        Get-ChildItem $recentDir -Filter '*.lnk' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 40 | ForEach-Object {
+        Get-ChildItem $recentDir -Filter '*.lnk' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 15 | ForEach-Object {
             [void]$lnkHits.Add([PSCustomObject]@{ user = $uname; name = $_.Name; last_write = $_.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss') })
         }
     }
 }
-$result.recent_lnk_files = $lnkHits
+# Per-user cap above bounds one user's Recent folder from monopolizing the collection,
+# but a box with several real profiles (confirmed in production -- a single active
+# profile alone produced enough .lnk entries to matter) can still add up past the
+# server's 60000-char stdout cap. Re-sort the combined set and take the 60 most
+# recent overall, same explicit-flag discipline as security_events_truncated above.
+$maxLnkFiles = 60
+$lnkSorted = @($lnkHits | Sort-Object last_write -Descending)
+$result.recent_lnk_files = @($lnkSorted | Select-Object -First $maxLnkFiles)
+$result.recent_lnk_files_truncated = ($lnkSorted.Count -gt $maxLnkFiles)
 
 $result.note = "BitLocker recovery keys and USB/PowerShell/LNK history are metadata/secrets, not raw disk or memory images -- collect a specific file via 'Collect File' for anything needing deeper offline analysis."
 $result | ConvertTo-Json -Depth 5 -Compress
