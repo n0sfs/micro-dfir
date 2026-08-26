@@ -9,6 +9,8 @@ UEBA_DEFAULTS = {
     'ueba_convergence_enabled': 1, 'ueba_convergence_min_indicators': 3,
     'ueba_convergence_window_hours': 24,
     'ueba_priority_enabled': 1, 'ueba_priority_window_days': 30, 'ueba_priority_half_life_hours': 24,
+    'ueba_autocase_enabled': 0, 'ueba_autocase_threshold': 80, 'ueba_autocase_template_id': None,
+    'ueba_autocase_cooldown_hours': 24,
 }
 
 # The 3-way blend weights and normalization caps below are a scoring heuristic, not a
@@ -186,6 +188,10 @@ def get_ueba_config():
         'priority_enabled': str(cfg['ueba_priority_enabled']) not in ('0', 'false', 'False'),
         'priority_window_days': max(1, min(365, int(cfg['ueba_priority_window_days']))),
         'priority_half_life_hours': max(1.0, float(cfg['ueba_priority_half_life_hours'])),
+        'autocase_enabled': str(cfg['ueba_autocase_enabled']) not in ('0', 'false', 'False'),
+        'autocase_threshold': max(1, int(cfg['ueba_autocase_threshold'])),
+        'autocase_template_id': int(cfg['ueba_autocase_template_id']) if str(cfg.get('ueba_autocase_template_id') or '') not in ('', 'None') else None,
+        'autocase_cooldown_hours': max(1, int(cfg['ueba_autocase_cooldown_hours'])),
     }
 
 def _get_exclusions():
@@ -869,8 +875,93 @@ def run_priority_scoring():
     finally:
         conn.close()
 
+# Unlike sigma_engine.py's alert-triggered auto-case (one clean alert_id to link as a
+# case_item), a UEBA risk score is an aggregate over many risk_score_events rows with no
+# single natural item to attach -- so the top contributing indicators go straight into
+# the case description instead, giving an analyst the same "why did this fire" context
+# without forcing a case_items link that doesn't really fit the data shape.
+def _auto_create_ueba_case(conn, entity_type, entity_id, score, top_indicators, template_id):
+    label = 'Host' if entity_type == 'host' else 'User'
+    title = f"High UEBA Risk Score — {entity_id}"
+    breakdown = ', '.join(f"{t['indicator']} ({t['pts']} pts)" for t in top_indicators) if top_indicators else 'no breakdown available'
+    detail = f"Auto-created because {label.lower()} '{entity_id}' crossed the UEBA auto-case risk threshold (score: {score}). Top contributing signals: {breakdown}."
+    conn.execute(
+        "INSERT INTO cases (title, status, description, created_by, tlp, pap) VALUES (?, 'open', ?, 'system:auto-case', 'amber', 'amber')",
+        (title, detail)
+    )
+    cid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute("INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'system', 'created', ?)", (cid, title))
+    if template_id:
+        tpl = conn.execute("SELECT name, tasks FROM case_templates WHERE id = ?", (template_id,)).fetchone()
+        if tpl:
+            tasks = json.loads(tpl['tasks'])
+            conn.executemany(
+                "INSERT INTO case_tasks (case_id, title, position, created_by) VALUES (?, ?, ?, 'system')",
+                [(cid, t, i) for i, t in enumerate(tasks)]
+            )
+            conn.execute("INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'system', 'template_applied', ?)", (cid, tpl['name']))
+    return cid
+
+# Uses the SAME weighted-score SQL as /api/ueba/risk-scores (app.py) so the number an
+# admin sets the threshold against on screen is exactly the number this checks -- see
+# that endpoint's comment for why the criticality/privileged multiplier is applied
+# inside the query rather than in Python. A ueba_autocase_log row per entity is the only
+# dedup guard: an entity that stays above threshold every cycle only gets one case per
+# cooldown window, not one every run.
+def run_autocase_check():
+    cfg = get_ueba_config()
+    if not cfg['autocase_enabled']:
+        return
+    risk_cfg = get_risk_score_config()
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        window = f"-{risk_cfg['window_days']} days"
+        rows = conn.execute(
+            "SELECT rse.entity_type as entity_type, rse.entity_id as entity_id, "
+            "ROUND(SUM(rse.points) * COALESCE("
+            "    CASE WHEN rse.entity_type = 'host' THEN "
+            "        CASE a.criticality WHEN 'critical' THEN 2.0 WHEN 'important' THEN 1.5 ELSE 1.0 END "
+            "    WHEN rse.entity_type = 'user' THEN "
+            "        CASE WHEN i.privileged = 1 THEN 1.5 ELSE 1.0 END "
+            "    END, 1.0), 1) as score "
+            "FROM risk_score_events rse "
+            "LEFT JOIN assets a ON rse.entity_type = 'host' AND rse.entity_id = a.host "
+            "LEFT JOIN identities i ON rse.entity_type = 'user' AND rse.entity_id = i.username "
+            "WHERE rse.computed_at >= datetime('now', ?) "
+            "GROUP BY rse.entity_type, rse.entity_id HAVING score >= ?",
+            (window, cfg['autocase_threshold'])
+        ).fetchall()
+
+        cooldown_window = f"-{cfg['autocase_cooldown_hours']} hours"
+        for r in rows:
+            entity_type, entity_id, score = r['entity_type'], r['entity_id'], r['score']
+            recent = conn.execute(
+                "SELECT 1 FROM ueba_autocase_log WHERE entity_type = ? AND entity_id = ? AND last_triggered_at >= datetime('now', ?)",
+                (entity_type, entity_id, cooldown_window)
+            ).fetchone()
+            if recent:
+                continue
+            top = conn.execute(
+                "SELECT indicator, SUM(points) as pts FROM risk_score_events WHERE entity_type = ? AND entity_id = ? "
+                "AND computed_at >= datetime('now', ?) GROUP BY indicator ORDER BY pts DESC LIMIT 5",
+                (entity_type, entity_id, window)
+            ).fetchall()
+            cid = _auto_create_ueba_case(conn, entity_type, entity_id, score, top, cfg['autocase_template_id'])
+            conn.execute(
+                "INSERT INTO ueba_autocase_log (entity_type, entity_id, last_triggered_at, case_id) VALUES (?, ?, datetime('now'), ?) "
+                "ON CONFLICT(entity_type, entity_id) DO UPDATE SET last_triggered_at = excluded.last_triggered_at, case_id = excluded.case_id",
+                (entity_type, entity_id, cid)
+            )
+        conn.commit()
+    except Exception as e:
+        print(f"[-] UEBA auto-case check failed: {e}")
+    finally:
+        conn.close()
+
 if __name__ == "__main__":
     run_ueba_models()
     run_risk_scoring()
     run_convergence_scoring()
     run_priority_scoring()
+    run_autocase_check()

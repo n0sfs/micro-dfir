@@ -250,6 +250,20 @@
                         <input type="number" id="cfgPriorityHalfLifeHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="8760" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
                         <span class="text-muted small">hour half-life <span class="text-muted">(a "what to look at first" ranking, separate from the raw score -- see the Risk Scoring tab)</span></span>
                     </div>
+                    <div class="form-check form-switch mt-2 d-flex align-items-center flex-wrap gap-2">
+                        <div>
+                            <input class="form-check-input" type="checkbox" id="cfgAutocaseEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                            <label class="form-check-label small" for="cfgAutocaseEnabled">Auto-create a Case when an entity's weighted risk score reaches</label>
+                        </div>
+                        <input type="number" id="cfgAutocaseThreshold" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="1000" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <span class="text-muted small">points, using template</span>
+                        <select id="cfgAutocaseTemplate" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                            <option value="">No template — empty task list</option>
+                        </select>
+                        <span class="text-muted small">, waiting at least</span>
+                        <input type="number" id="cfgAutocaseCooldownHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="8760" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <span class="text-muted small">hour(s) before creating another one for the same entity <span class="text-muted">(same rolling window as the Risk Scoring tab)</span></span>
+                    </div>
                     {% if current_user.role == 'admin' %}
                     <button class="btn btn-primary btn-sm mt-3" onclick="saveUebaConfig()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Tuning</button>
                     <span id="cfgSaveMsg" class="small ms-2" style="display:none;"></span>
@@ -1135,8 +1149,27 @@ function loadUebaConfig() {
             document.getElementById('cfgPriorityEnabled').checked = !!cfg.priority_enabled;
             document.getElementById('cfgPriorityWindowDays').value = cfg.priority_window_days;
             document.getElementById('cfgPriorityHalfLifeHours').value = cfg.priority_half_life_hours;
+            document.getElementById('cfgAutocaseEnabled').checked = !!cfg.autocase_enabled;
+            document.getElementById('cfgAutocaseThreshold').value = cfg.autocase_threshold;
+            document.getElementById('cfgAutocaseCooldownHours').value = cfg.autocase_cooldown_hours;
+            loadCaseTemplatesForUeba(cfg.autocase_template_id);
         })
         .catch(err => console.error('Error loading UEBA config:', err));
+}
+
+let caseTemplatesForUebaCache = null;
+function loadCaseTemplatesForUeba(selectedId) {
+    const sel = document.getElementById('cfgAutocaseTemplate');
+    const populate = (templates) => {
+        sel.innerHTML = '<option value="">No template — empty task list</option>' +
+            templates.map(t => `<option value="${t.id}">${escHtml(t.name)} (${t.tasks.length} tasks)</option>`).join('');
+        sel.value = selectedId || '';
+    };
+    if (caseTemplatesForUebaCache) { populate(caseTemplatesForUebaCache); return; }
+    fetch('/api/case-templates').then(r => r.json()).then(templates => {
+        caseTemplatesForUebaCache = templates || [];
+        populate(caseTemplatesForUebaCache);
+    }).catch(() => { sel.innerHTML = '<option value="">No template — empty task list</option>'; });
 }
 
 function saveUebaConfig() {
@@ -1157,7 +1190,11 @@ function saveUebaConfig() {
         convergence_window_hours: parseInt(document.getElementById('cfgConvergenceWindowHours').value, 10),
         priority_enabled: document.getElementById('cfgPriorityEnabled').checked,
         priority_window_days: parseInt(document.getElementById('cfgPriorityWindowDays').value, 10),
-        priority_half_life_hours: parseFloat(document.getElementById('cfgPriorityHalfLifeHours').value)
+        priority_half_life_hours: parseFloat(document.getElementById('cfgPriorityHalfLifeHours').value),
+        autocase_enabled: document.getElementById('cfgAutocaseEnabled').checked,
+        autocase_threshold: parseInt(document.getElementById('cfgAutocaseThreshold').value, 10),
+        autocase_template_id: document.getElementById('cfgAutocaseTemplate').value ? parseInt(document.getElementById('cfgAutocaseTemplate').value, 10) : null,
+        autocase_cooldown_hours: parseInt(document.getElementById('cfgAutocaseCooldownHours').value, 10)
     };
     const msg = document.getElementById('cfgSaveMsg');
     fetch('/api/ueba/config', {

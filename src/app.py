@@ -2675,6 +2675,8 @@ UEBA_CONFIG_DEFAULTS = {
     'ueba_convergence_enabled': '1', 'ueba_convergence_min_indicators': '3',
     'ueba_convergence_window_hours': '24',
     'ueba_priority_enabled': '1', 'ueba_priority_window_days': '30', 'ueba_priority_half_life_hours': '24',
+    'ueba_autocase_enabled': '0', 'ueba_autocase_threshold': '80', 'ueba_autocase_template_id': '',
+    'ueba_autocase_cooldown_hours': '24',
 }
 
 @app.route('/api/ueba/config', methods=['GET', 'POST'])
@@ -2689,7 +2691,8 @@ def api_ueba_config():
             "'ueba_new_process_enabled', 'ueba_new_dest_ip_enabled', 'ueba_process_lineage_enabled', 'ueba_off_hours_enabled', "
             "'ueba_rare_process_enabled', 'ueba_rare_process_max_hosts', "
             "'ueba_convergence_enabled', 'ueba_convergence_min_indicators', 'ueba_convergence_window_hours', "
-            "'ueba_priority_enabled', 'ueba_priority_window_days', 'ueba_priority_half_life_hours')"
+            "'ueba_priority_enabled', 'ueba_priority_window_days', 'ueba_priority_half_life_hours', "
+            "'ueba_autocase_enabled', 'ueba_autocase_threshold', 'ueba_autocase_template_id', 'ueba_autocase_cooldown_hours')"
         ).fetchall()
         cfg = {**UEBA_CONFIG_DEFAULTS, **{r['key']: r['value'] for r in rows}}
         return jsonify({
@@ -2710,6 +2713,10 @@ def api_ueba_config():
             'priority_enabled': str(cfg['ueba_priority_enabled']) not in ('0', 'false', 'False'),
             'priority_window_days': int(cfg['ueba_priority_window_days']),
             'priority_half_life_hours': float(cfg['ueba_priority_half_life_hours']),
+            'autocase_enabled': str(cfg['ueba_autocase_enabled']) not in ('0', 'false', 'False'),
+            'autocase_threshold': int(cfg['ueba_autocase_threshold']),
+            'autocase_template_id': int(cfg['ueba_autocase_template_id']) if str(cfg['ueba_autocase_template_id']) not in ('', 'None') else None,
+            'autocase_cooldown_hours': int(cfg['ueba_autocase_cooldown_hours']),
         })
 
     if current_user.role != 'admin':
@@ -2734,6 +2741,11 @@ def api_ueba_config():
         priority_enabled = bool(data.get('priority_enabled'))
         priority_window_days = int(data.get('priority_window_days'))
         priority_half_life_hours = float(data.get('priority_half_life_hours'))
+        autocase_enabled = bool(data.get('autocase_enabled'))
+        autocase_threshold = int(data.get('autocase_threshold'))
+        autocase_template_id = data.get('autocase_template_id')
+        autocase_template_id = int(autocase_template_id) if autocase_template_id not in (None, '') else None
+        autocase_cooldown_hours = int(data.get('autocase_cooldown_hours'))
         if not (1 <= lookback_days <= 365): raise ValueError('lookback_days must be 1-365')
         if not (0.5 <= stddev_multiplier <= 10): raise ValueError('stddev_multiplier must be 0.5-10')
         if not (0 <= min_baseline <= 1000000): raise ValueError('min_baseline must be 0-1000000')
@@ -2743,6 +2755,10 @@ def api_ueba_config():
         if not (1 <= convergence_window_hours <= 168): raise ValueError('convergence_window_hours must be 1-168')
         if not (1 <= priority_window_days <= 365): raise ValueError('priority_window_days must be 1-365')
         if not (1 <= priority_half_life_hours <= 8760): raise ValueError('priority_half_life_hours must be 1-8760')
+        if not (1 <= autocase_threshold <= 1000): raise ValueError('autocase_threshold must be 1-1000')
+        if not (1 <= autocase_cooldown_hours <= 8760): raise ValueError('autocase_cooldown_hours must be 1-8760')
+        if autocase_template_id and not db.execute("SELECT 1 FROM case_templates WHERE id = ?", (autocase_template_id,)).fetchone():
+            raise ValueError('Template not found')
     except (TypeError, ValueError) as e:
         return jsonify({'error': str(e) or 'Invalid config values'}), 400
 
@@ -2763,6 +2779,10 @@ def api_ueba_config():
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_priority_enabled', ?)", ('1' if priority_enabled else '0',))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_priority_window_days', ?)", (str(priority_window_days),))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_priority_half_life_hours', ?)", (str(priority_half_life_hours),))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_autocase_enabled', ?)", ('1' if autocase_enabled else '0',))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_autocase_threshold', ?)", (str(autocase_threshold),))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_autocase_template_id', ?)", (str(autocase_template_id) if autocase_template_id else '',))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_autocase_cooldown_hours', ?)", (str(autocase_cooldown_hours),))
     db.commit()
     return jsonify({'status': 'success'})
 
@@ -3811,6 +3831,25 @@ def migrate_ueba_priority_scores():
             peak_points INTEGER,
             decay_score REAL,
             computed_at DATETIME,
+            PRIMARY KEY (entity_type, entity_id)
+        )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_ueba_autocase():
+    # Tracks the last time each entity crossed the UEBA auto-case risk threshold, so a
+    # persistently-high-risk entity doesn't spawn a new case every scoring cycle -- the
+    # cooldown window (ueba_autocase_cooldown_hours) is checked against last_triggered_at
+    # before creating another one.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS ueba_autocase_log (
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            last_triggered_at DATETIME,
+            case_id INTEGER,
             PRIMARY KEY (entity_type, entity_id)
         )''')
         conn.commit()
@@ -6346,6 +6385,7 @@ migrate_case_upgrade()
 migrate_live_logs_archive()
 migrate_fim_paths()
 migrate_ueba_priority_scores()
+migrate_ueba_autocase()
 migrate_live_logs_ip_columns()
 migrate_live_logs_process_columns()
 migrate_live_logs_hash_dns_columns()
