@@ -284,6 +284,7 @@
         <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
+        <div id="resultAddToCaseWrap" class="mb-2"></div>
         <pre id="cmdResultBody" class="bg-black p-3 rounded border border-secondary small font-monospace" style="white-space:pre-wrap;"></pre>
       </div>
     </div>
@@ -1303,6 +1304,81 @@ function sweepResultHtml(c, parsed, isString) {
     `;
 }
 
+// Generic renderer for the collect_*/persistence_sweep family: none of them share one
+// fixed schema (a flat object of arrays for most, a diff-shaped {new,changed,removed}
+// for persistence_sweep), so rather than a bespoke table per action (which is what
+// sweepResultHtml above does for ioc_sweep/string_sweep's one well-known shape) this
+// walks whatever JSON actually came back and renders it structurally: arrays of
+// objects become tables, arrays of scalars become lists, a "wide" object (more keys
+// than a small named-fields record would have) becomes a Key/Value table -- covering
+// persistence_sweep's new/changed maps too -- and everything else (strings, booleans,
+// numbers) becomes a short labeled note. Falls back to the raw-text view below when
+// stdout isn't JSON at all (kill_process/isolate_host/etc. return plain strings).
+function titleCaseKey(key) {
+    return key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function collectResultCellHtml(v) {
+    if (v === null || v === undefined || v === '') return '<span class="text-muted">—</span>';
+    if (Array.isArray(v)) {
+        if (v.length === 0) return '<span class="text-muted">—</span>';
+        if (typeof v[0] === 'object') return `<span class="text-muted">${v.length} item(s)</span>`;
+        return `<details><summary class="small" style="cursor:pointer;">${v.length} line(s)</summary><pre class="small mb-0 mt-1" style="white-space:pre-wrap;">${escHtml(v.join('\n'))}</pre></details>`;
+    }
+    if (typeof v === 'object') return `<span class="small">${escHtml(JSON.stringify(v))}</span>`;
+    if (typeof v === 'boolean') return v ? '<span class="badge bg-warning text-dark">yes</span>' : '<span class="text-muted">no</span>';
+    return escHtml(String(v));
+}
+
+function collectResultTable(rows) {
+    const cols = [];
+    rows.forEach(r => Object.keys(r).forEach(k => { if (!cols.includes(k)) cols.push(k); }));
+    const head = cols.map(c => `<th>${titleCaseKey(c)}</th>`).join('');
+    const body = rows.map(r => `<tr>${cols.map(c => `<td class="small">${collectResultCellHtml(r[c])}</td>`).join('')}</tr>`).join('');
+    return `<div class="table-responsive"><table class="table table-dark table-sm table-striped mb-0"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function collectResultSection(key, value) {
+    const label = titleCaseKey(key);
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'string') {
+        return `<div class="alert alert-secondary py-2 px-3 small mb-3"><i class="fa-solid fa-circle-info me-1"></i>${escHtml(value)}</div>`;
+    }
+    if (typeof value === 'boolean') {
+        return value ? `<div class="alert alert-warning py-2 px-3 small mb-3"><i class="fa-solid fa-triangle-exclamation me-1"></i>${label}: results were capped for size -- there may be more than shown.</div>` : '';
+    }
+    if (typeof value === 'number') {
+        return `<div class="small text-muted mt-3">${label}: <span class="text-light">${value}</span></div>`;
+    }
+    if (Array.isArray(value)) {
+        const header = `<h6 class="small text-uppercase text-muted mt-3 mb-2">${label} (${value.length})</h6>`;
+        if (value.length === 0) return header + '<p class="text-muted small">None found.</p>';
+        if (typeof value[0] !== 'object') {
+            return header + `<ul class="small mb-0">${value.map(v => `<li>${escHtml(String(v))}</li>`).join('')}</ul>`;
+        }
+        return header + collectResultTable(value);
+    }
+    if (typeof value === 'object') {
+        const entries = Object.entries(value);
+        if (entries.length === 0) return `<h6 class="small text-uppercase text-muted mt-3 mb-1">${label}</h6><p class="text-muted small">None.</p>`;
+        // More than a handful of keys reads as a map (persistence_sweep's new/changed,
+        // keyed by arbitrary registry/task/service names) rather than a small named-
+        // fields record -- render those as a Key/Value table instead of N sub-headers.
+        if (entries.length > 3) {
+            const rows = entries.map(([k, v]) => `<tr><td class="small font-monospace">${escHtml(k)}</td><td class="small">${collectResultCellHtml(v)}</td></tr>`).join('');
+            return `<h6 class="small text-uppercase text-muted mt-3 mb-2">${label} (${entries.length})</h6><div class="table-responsive"><table class="table table-dark table-sm table-striped mb-0"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+        }
+        return `<h6 class="small text-uppercase text-muted mt-3 mb-2">${label}</h6>` + entries.map(([k, v]) => collectResultSection(k, v)).join('');
+    }
+    return '';
+}
+
+function renderCollectResultHtml(c, parsed) {
+    const header = `<div class="mb-2 small"><strong>Host:</strong> ${escHtml(c.hostname)} &nbsp; <strong>Action:</strong> <code>${escHtml(c.label)}</code> &nbsp; <strong>Exit code:</strong> ${c.exit_code}</div>`;
+    const body = Array.isArray(parsed) ? collectResultTable(parsed) : Object.entries(parsed).map(([k, v]) => collectResultSection(k, v)).join('');
+    return `<div style="white-space:normal;">${header}${body}</div>`;
+}
+
 function viewCommandResult(id) {
     const c = cmdHistoryCache.find(r => r.id === id);
     if (!c) return;
@@ -1312,15 +1388,79 @@ function viewCommandResult(id) {
         const parsed = parseIocSweepResult(c.stdout);
         if (parsed) {
             resultBody.innerHTML = sweepResultHtml(c, parsed, c.label === 'string_sweep');
+            renderResultAddToCaseControl(c);
             new bootstrap.Modal(document.getElementById('cmdResultModal')).show();
             return;
         }
     }
 
+    if (c.stdout) {
+        try {
+            const parsed = JSON.parse(c.stdout);
+            if (parsed && typeof parsed === 'object') {
+                resultBody.innerHTML = renderCollectResultHtml(c, parsed);
+                renderResultAddToCaseControl(c);
+                new bootstrap.Modal(document.getElementById('cmdResultModal')).show();
+                return;
+            }
+        } catch (e) { /* not JSON -- fall through to the raw-text view below */ }
+    }
+
     let body = `Host: ${c.hostname}\nAction: ${c.label}\nExit code: ${c.exit_code}\n\n--- STDOUT ---\n${c.stdout || '(empty)'}`;
     if (c.stderr) body += `\n\n--- STDERR ---\n${c.stderr}`;
     resultBody.innerText = body;
+    renderResultAddToCaseControl(c);
     new bootstrap.Modal(document.getElementById('cmdResultModal')).show();
+}
+
+// Mirrors dashboard.html's renderAddToCaseControl()/addToCase() for alert/anomaly log
+// rows, targeting a case_items item_type of 'command_result' (id = agent_commands.id)
+// instead of 'alert'/'ueba_event'.
+function renderResultAddToCaseControl(c) {
+    const wrap = document.getElementById('resultAddToCaseWrap');
+    if (!wrap) return;
+    wrap.innerHTML = `<span class="text-muted small">Loading cases…</span>`;
+    fetch('/api/cases').then(r => r.json()).then(cases => {
+        const openCases = (cases || []).filter(cs => cs.status === 'open');
+        const options = openCases.map(cs => `<option value="${cs.id}">${escHtml(cs.title)}</option>`).join('');
+        wrap.innerHTML = `
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+                <select id="resultAddToCaseSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:260px;">
+                    <option value="">Add to case…</option>
+                    ${options}
+                    <option value="__new__">+ New Case</option>
+                </select>
+                <button type="button" class="btn btn-sm btn-outline-primary" onclick="addResultToCase(${c.id})"><i class="fa-solid fa-folder-plus me-1"></i>Add</button>
+            </div>
+            <div id="resultAddToCaseMsg" class="small mt-1" style="display:none;"></div>
+        `;
+    }).catch(() => { wrap.innerHTML = '<span class="text-muted small">Could not load cases.</span>'; });
+}
+
+async function addResultToCase(commandId) {
+    const select = document.getElementById('resultAddToCaseSelect');
+    const msg = document.getElementById('resultAddToCaseMsg');
+    let caseId = select.value;
+    if (!caseId) {
+        msg.className = 'small mt-1 text-danger'; msg.innerText = 'Pick a case first.'; msg.style.display = 'block'; return;
+    }
+    if (caseId === '__new__') {
+        const title = prompt('New case title:');
+        if (!title || !title.trim()) return;
+        const createResp = await fetch('/api/cases', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title: title.trim()})});
+        const createData = await createResp.json();
+        if (!createResp.ok) {
+            msg.className = 'small mt-1 text-danger'; msg.innerText = createData.error || 'Failed to create case.'; msg.style.display = 'block'; return;
+        }
+        caseId = createData.id;
+    }
+    fetch(`/api/cases/${caseId}/items`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({item_type: 'command_result', item_id: commandId})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        msg.className = 'small mt-1 ' + (ok ? 'text-success' : 'text-danger');
+        msg.innerText = ok ? 'Added to case.' : (data.error || 'Failed to add.');
+        msg.style.display = 'block';
+    }).catch(err => { msg.className = 'small mt-1 text-danger'; msg.innerText = 'Error: ' + err; msg.style.display = 'block'; });
 }
 </script>
 {% endblock %}
