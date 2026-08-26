@@ -23,14 +23,16 @@
                 <tr>
                     <th class="ps-3">Title</th>
                     <th>Status</th>
+                    <th>TLP</th>
                     <th>Assignee</th>
                     <th>Items</th>
+                    <th>Tasks</th>
                     <th>Created</th>
                     <th></th>
                 </tr>
             </thead>
             <tbody id="casesTableBody">
-                <tr><td colspan="6" class="text-center text-muted py-4">Loading…</td></tr>
+                <tr><td colspan="8" class="text-center text-muted py-4">Loading…</td></tr>
             </tbody>
         </table>
     </div>
@@ -50,8 +52,25 @@
                     <input type="text" id="newCaseTitle" class="form-control bg-dark text-light border-secondary" placeholder="e.g. Suspicious activity on WIN-DC01">
                 </div>
                 <div class="mb-2">
-                    <label class="form-label small text-muted mb-1">Assignee (optional)</label>
-                    <input type="text" id="newCaseAssignee" class="form-control bg-dark text-light border-secondary">
+                    <label class="form-label small text-muted mb-1">Template (optional)</label>
+                    <select id="newCaseTemplate" class="form-select bg-dark text-light border-secondary">
+                        <option value="">None — start with an empty task list</option>
+                    </select>
+                    <div class="form-text text-muted">Applies that template's task checklist to the new case.</div>
+                </div>
+                <div class="row g-2 mb-2">
+                    <div class="col-6">
+                        <label class="form-label small text-muted mb-1">Assignee (optional)</label>
+                        <input type="text" id="newCaseAssignee" class="form-control bg-dark text-light border-secondary">
+                    </div>
+                    <div class="col-3">
+                        <label class="form-label small text-muted mb-1">TLP</label>
+                        <select id="newCaseTlp" class="form-select bg-dark text-light border-secondary"></select>
+                    </div>
+                    <div class="col-3">
+                        <label class="form-label small text-muted mb-1">PAP</label>
+                        <select id="newCasePap" class="form-select bg-dark text-light border-secondary"></select>
+                    </div>
                 </div>
                 <div class="mb-2">
                     <label class="form-label small text-muted mb-1">Description (optional)</label>
@@ -104,6 +123,29 @@ function caseStatusBadge(status) {
         : '<span class="badge bg-success">Open</span>';
 }
 
+// Standard TLP/PAP color convention -- red/amber/green/clear (TLP), same 4-step scale for PAP.
+const TLP_VALUES = ['clear', 'green', 'amber', 'amber-strict', 'red'];
+const PAP_VALUES = ['clear', 'green', 'amber', 'red'];
+const TLP_PAP_COLORS = {clear: 'bg-secondary', green: 'bg-success', amber: 'bg-warning text-dark', 'amber-strict': 'bg-warning text-dark', red: 'bg-danger'};
+
+function tlpBadge(v) { return `<span class="badge ${TLP_PAP_COLORS[v] || 'bg-secondary'}" title="Traffic Light Protocol">TLP:${escHtml((v || 'clear').toUpperCase())}</span>`; }
+function papBadge(v) { return `<span class="badge ${TLP_PAP_COLORS[v] || 'bg-secondary'}" title="Permissible Actions Protocol">PAP:${escHtml((v || 'clear').toUpperCase())}</span>`; }
+
+function populateTlpPapSelect(elId, values, current) {
+    const el = document.getElementById(elId);
+    el.innerHTML = values.map(v => `<option value="${v}" ${v === current ? 'selected' : ''}>${v.toUpperCase()}</option>`).join('');
+}
+
+let caseTemplates = [];
+function loadCaseTemplates() {
+    return fetch('/api/case-templates').then(r => r.json()).then(templates => {
+        caseTemplates = templates || [];
+        const sel = document.getElementById('newCaseTemplate');
+        sel.innerHTML = '<option value="">None — start with an empty task list</option>' +
+            caseTemplates.map(t => `<option value="${t.id}">${escHtml(t.name)} (${t.tasks.length} tasks)</option>`).join('');
+    }).catch(err => console.error('Error loading case templates:', err));
+}
+
 function setCaseFilter(f) {
     caseFilter = f;
     ['All', 'Open', 'Closed'].forEach(cap => {
@@ -123,15 +165,17 @@ function renderCases() {
     const tbody = document.getElementById('casesTableBody');
     const rows = caseFilter === 'all' ? allCases : allCases.filter(c => c.status === caseFilter);
     if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">No cases yet. Click "New Case" to start one, or add an alert/anomaly to a case from Log Search.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-4">No cases yet. Click "New Case" to start one, or add an alert/anomaly to a case from Log Search.</td></tr>';
         return;
     }
     tbody.innerHTML = rows.map(c => `
         <tr style="cursor:pointer;" onclick="openCaseDetail(${c.id})">
             <td class="ps-3 fw-bold">${escHtml(c.title)}</td>
             <td>${caseStatusBadge(c.status)}</td>
+            <td>${tlpBadge(c.tlp)}</td>
             <td class="text-muted small">${escHtml(c.assignee || '-')}</td>
             <td class="text-muted small">${c.item_count}</td>
+            <td class="text-muted small">${c.task_count > 0 ? `${c.task_done_count}/${c.task_count}` : '—'}</td>
             <td class="text-muted small text-nowrap">${escHtml(c.created_at)}</td>
             <td class="text-end pe-3" onclick="event.stopPropagation()">
                 <button class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete Case" onclick="deleteCase(${c.id})"><i class="fa-solid fa-trash"></i></button>
@@ -145,15 +189,22 @@ function showNewCaseModal() {
     document.getElementById('newCaseAssignee').value = '';
     document.getElementById('newCaseDescription').value = '';
     document.getElementById('newCaseError').style.display = 'none';
+    populateTlpPapSelect('newCaseTlp', TLP_VALUES, 'clear');
+    populateTlpPapSelect('newCasePap', PAP_VALUES, 'clear');
+    if (!caseTemplates.length) loadCaseTemplates();
     if (!newCaseModal) newCaseModal = new bootstrap.Modal(document.getElementById('newCaseModal'));
     newCaseModal.show();
 }
 
 function createCase() {
+    const templateId = document.getElementById('newCaseTemplate').value;
     const payload = {
         title: document.getElementById('newCaseTitle').value.trim(),
         assignee: document.getElementById('newCaseAssignee').value.trim(),
-        description: document.getElementById('newCaseDescription').value.trim()
+        description: document.getElementById('newCaseDescription').value.trim(),
+        tlp: document.getElementById('newCaseTlp').value,
+        pap: document.getElementById('newCasePap').value,
+        template_id: templateId ? parseInt(templateId, 10) : null
     };
     const errBox = document.getElementById('newCaseError');
     errBox.style.display = 'none';
@@ -190,6 +241,48 @@ function itemSummaryLine(item) {
            `<span class="small">${escHtml((s.message || '').slice(0, 200))}</span>`;
 }
 
+function taskRow(t) {
+    const done = t.status === 'done';
+    return `
+        <div class="d-flex align-items-center border border-secondary rounded p-2 mb-1">
+            <input type="checkbox" class="form-check-input me-2" ${done ? 'checked' : ''} onchange="toggleCaseTask(${t.id}, '${t.status}')">
+            <span class="flex-grow-1 ${done ? 'text-decoration-line-through text-muted' : ''}">${escHtml(t.title)}</span>
+            ${t.assignee ? `<span class="badge bg-secondary me-2">${escHtml(t.assignee)}</span>` : ''}
+            <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove task" onclick="deleteCaseTask(${t.id})"><i class="fa-solid fa-xmark"></i></button>
+        </div>`;
+}
+
+function caseEventLabel(e) {
+    const map = {
+        created: 'Case created',
+        status_change: `Status changed to <strong>${escHtml(e.detail)}</strong>`,
+        assignee_change: `Assignee changed to <strong>${escHtml(e.detail)}</strong>`,
+        tlp_change: `TLP changed to <strong>${escHtml((e.detail || '').toUpperCase())}</strong>`,
+        pap_change: `PAP changed to <strong>${escHtml((e.detail || '').toUpperCase())}</strong>`,
+        item_added: `Item added: ${escHtml(e.detail)}`,
+        item_removed: `Item removed: ${escHtml(e.detail)}`,
+        task_added: `Task added: "${escHtml(e.detail)}"`,
+        task_done: `Task completed: "${escHtml(e.detail)}"`,
+        task_reopened: `Task reopened: "${escHtml(e.detail)}"`,
+        task_removed: `Task removed: "${escHtml(e.detail)}"`,
+        template_applied: `Template applied: ${escHtml(e.detail)}`,
+        note: escHtml(e.detail),
+    };
+    return map[e.event_type] || escHtml(e.event_type);
+}
+
+function eventRow(e) {
+    const icon = e.event_type === 'note' ? 'fa-note-sticky text-info' : 'fa-circle text-muted';
+    return `
+        <div class="d-flex gap-2 small mb-2">
+            <i class="fa-solid ${icon} mt-1" style="font-size:.5rem;"></i>
+            <div class="flex-grow-1">
+                <div>${caseEventLabel(e)}</div>
+                <div class="text-muted">${escHtml(e.actor || '')} · ${escHtml(e.ts)}</div>
+            </div>
+        </div>`;
+}
+
 function openCaseDetail(cid) {
     activeCaseId = cid;
     fetch(`/api/cases/${cid}`).then(r => r.json()).then(c => {
@@ -206,9 +299,17 @@ function openCaseDetail(cid) {
                         <option value="closed" ${c.status === 'closed' ? 'selected' : ''}>Closed</option>
                     </select>
                 </div>
-                <div class="col-md-6">
+                <div class="col-md-4">
                     <label class="form-label small text-muted mb-1">Assignee</label>
                     <input type="text" id="editCaseAssignee" class="form-control bg-dark text-light border-secondary" value="${escHtml(c.assignee || '')}">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small text-muted mb-1">TLP</label>
+                    <select id="editCaseTlp" class="form-select bg-dark text-light border-secondary"></select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small text-muted mb-1">PAP</label>
+                    <select id="editCasePap" class="form-select bg-dark text-light border-secondary"></select>
                 </div>
                 <div class="col-12">
                     <label class="form-label small text-muted mb-1">Description</label>
@@ -218,6 +319,15 @@ function openCaseDetail(cid) {
             <button type="button" class="btn btn-sm btn-outline-primary mb-3" onclick="saveCaseDetail()"><i class="fa-solid fa-floppy-disk me-1"></i>Save</button>
             <span id="caseSaveMsg" class="small text-success ms-2" style="display:none;">Saved.</span>
             <hr class="border-secondary">
+
+            <label class="form-label small text-muted mb-2">Tasks (${c.tasks.filter(t => t.status === 'done').length}/${c.tasks.length})</label>
+            <div id="caseTasksList">${c.tasks.length ? c.tasks.map(taskRow).join('') : '<p class="text-muted small">No tasks yet.</p>'}</div>
+            <div class="d-flex gap-2 mb-3">
+                <input type="text" id="newCaseTaskInput" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Add a task..." onkeyup="if(event.key === 'Enter') addCaseTask()">
+                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addCaseTask()"><i class="fa-solid fa-plus"></i></button>
+            </div>
+            <hr class="border-secondary">
+
             <label class="form-label small text-muted mb-2">Items (${c.items.length}) <span class="text-muted">— added from Log Search's detail view</span></label>
             ${c.items.length ? c.items.map(it => `
                 <div class="d-flex justify-content-between align-items-start border border-secondary rounded p-2 mb-2">
@@ -225,7 +335,19 @@ function openCaseDetail(cid) {
                     <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2 ms-2" title="Remove from case" onclick="removeCaseItem(${it.id})"><i class="fa-solid fa-xmark"></i></button>
                 </div>
             `).join('') : '<p class="text-muted small">No items added yet.</p>'}
+            <hr class="border-secondary">
+
+            <label class="form-label small text-muted mb-2">Timeline</label>
+            <div class="d-flex gap-2 mb-3">
+                <input type="text" id="newCaseNoteInput" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Add a note..." onkeyup="if(event.key === 'Enter') addCaseNote()">
+                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addCaseNote()"><i class="fa-solid fa-plus"></i></button>
+            </div>
+            <div style="max-height:260px; overflow-y:auto;">
+                ${c.events.length ? c.events.map(eventRow).join('') : '<p class="text-muted small">No timeline events yet.</p>'}
+            </div>
         `;
+        populateTlpPapSelect('editCaseTlp', TLP_VALUES, c.tlp);
+        populateTlpPapSelect('editCasePap', PAP_VALUES, c.pap);
         if (!caseDetailModal) caseDetailModal = new bootstrap.Modal(document.getElementById('caseDetailModal'));
         caseDetailModal.show();
     }).catch(err => toast('Error loading case: ' + err, 'danger'));
@@ -236,7 +358,9 @@ function saveCaseDetail() {
         title: document.getElementById('editCaseTitle').value.trim(),
         status: document.getElementById('editCaseStatus').value,
         assignee: document.getElementById('editCaseAssignee').value.trim(),
-        description: document.getElementById('editCaseDescription').value.trim()
+        description: document.getElementById('editCaseDescription').value.trim(),
+        tlp: document.getElementById('editCaseTlp').value,
+        pap: document.getElementById('editCasePap').value
     };
     fetch(`/api/cases/${activeCaseId}`, {
         method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
@@ -245,6 +369,7 @@ function saveCaseDetail() {
         msg.style.display = 'inline';
         setTimeout(() => msg.style.display = 'none', 2000);
         loadCases();
+        openCaseDetail(activeCaseId);  // refresh the timeline with whatever just got logged
     }).catch(err => toast('Error saving case: ' + err, 'danger'));
 }
 
@@ -254,6 +379,41 @@ async function removeCaseItem(itemRowId) {
         .then(() => openCaseDetail(activeCaseId))
         .then(() => loadCases())
         .catch(err => toast('Error removing item: ' + err, 'danger'));
+}
+
+function addCaseTask() {
+    const input = document.getElementById('newCaseTaskInput');
+    const title = input.value.trim();
+    if (!title) return;
+    fetch(`/api/cases/${activeCaseId}/tasks`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title})
+    }).then(r => r.json()).then(() => { input.value = ''; openCaseDetail(activeCaseId); loadCases(); })
+      .catch(err => toast('Error adding task: ' + err, 'danger'));
+}
+
+function toggleCaseTask(tid, currentStatus) {
+    const newStatus = currentStatus === 'done' ? 'open' : 'done';
+    fetch(`/api/cases/${activeCaseId}/tasks/${tid}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({status: newStatus})
+    }).then(() => { openCaseDetail(activeCaseId); loadCases(); })
+      .catch(err => toast('Error updating task: ' + err, 'danger'));
+}
+
+async function deleteCaseTask(tid) {
+    if (!(await confirmDialog('Remove this task?', {title: 'Remove task', danger: true, confirmLabel: 'Remove'}))) return;
+    fetch(`/api/cases/${activeCaseId}/tasks/${tid}`, {method: 'DELETE'})
+        .then(() => { openCaseDetail(activeCaseId); loadCases(); })
+        .catch(err => toast('Error removing task: ' + err, 'danger'));
+}
+
+function addCaseNote() {
+    const input = document.getElementById('newCaseNoteInput');
+    const text = input.value.trim();
+    if (!text) return;
+    fetch(`/api/cases/${activeCaseId}/notes`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text})
+    }).then(r => r.json()).then(() => { input.value = ''; openCaseDetail(activeCaseId); })
+      .catch(err => toast('Error adding note: ' + err, 'danger'));
 }
 
 document.addEventListener("DOMContentLoaded", function() {

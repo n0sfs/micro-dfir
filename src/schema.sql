@@ -43,8 +43,19 @@ CREATE TABLE IF NOT EXISTS ueba_entity_baselines (entity_type TEXT NOT NULL, ent
 CREATE TABLE IF NOT EXISTS ueba_priority_scores (entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, priority_score REAL, distinct_indicators INTEGER, peak_points INTEGER, decay_score REAL, computed_at DATETIME, PRIMARY KEY (entity_type, entity_id));
 CREATE TABLE IF NOT EXISTS assets (id INTEGER PRIMARY KEY AUTOINCREMENT, host TEXT NOT NULL UNIQUE, criticality TEXT NOT NULL DEFAULT 'standard', owner TEXT, created_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS identities (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, department TEXT, privileged BOOLEAN DEFAULT 0, created_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS cases (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', assignee TEXT, description TEXT, created_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, closed_at DATETIME);
+CREATE TABLE IF NOT EXISTS cases (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', assignee TEXT, description TEXT, created_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, closed_at DATETIME, tlp TEXT NOT NULL DEFAULT 'clear', pap TEXT NOT NULL DEFAULT 'clear');
 CREATE TABLE IF NOT EXISTS case_items (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id INTEGER NOT NULL, item_type TEXT NOT NULL, item_id TEXT NOT NULL, added_by TEXT, added_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+-- Tier 3 Track B: case task checklist (TheHive-informed) -- position keeps a stable
+-- manual sort order independent of insertion/id order.
+CREATE TABLE IF NOT EXISTS case_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id INTEGER NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', assignee TEXT, position INTEGER NOT NULL DEFAULT 0, created_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS idx_case_tasks_case ON case_tasks(case_id);
+-- Append-only case timeline, auto-logged by every mutating case route plus a manual
+-- "Add Note" action -- never UPDATEd/DELETEd, only ever inserted into.
+CREATE TABLE IF NOT EXISTS case_events (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id INTEGER NOT NULL, ts DATETIME DEFAULT CURRENT_TIMESTAMP, actor TEXT, event_type TEXT NOT NULL, detail TEXT);
+CREATE INDEX IF NOT EXISTS idx_case_events_case ON case_events(case_id);
+-- A named, admin-editable list of default tasks (JSON array of task titles) offered
+-- when creating a new case.
+CREATE TABLE IF NOT EXISTS case_templates (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, description TEXT, tasks TEXT NOT NULL, created_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS idx_case_items_case ON case_items(case_id);
 CREATE TABLE IF NOT EXISTS fim_paths (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT NOT NULL, description TEXT, enabled BOOLEAN DEFAULT 1, created_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS saved_searches (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, query_params TEXT NOT NULL, created_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
