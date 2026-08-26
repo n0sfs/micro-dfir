@@ -1,21 +1,375 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-header">
-    <h2><i class="fa-solid fa-robot me-2"></i>SOAR</h2>
-    <p>Security Orchestration, Automation, and Response.</p>
+<div class="page-header d-flex justify-content-between align-items-start flex-wrap gap-2">
+    <div>
+        <h2><i class="fa-solid fa-robot me-2"></i>SOAR</h2>
+        <p>Automated response playbooks triggered by case lifecycle events.</p>
+    </div>
+    {% if current_user.role == 'admin' %}
+    <button type="button" class="btn btn-primary" onclick="showPlaybookModal()"><i class="fa-solid fa-plus me-1"></i>New Playbook</button>
+    {% endif %}
+</div>
+
+<div class="card bg-dark border-secondary mb-3">
+    <div class="card-body p-2 small text-muted">
+        <i class="fa-solid fa-circle-info me-1"></i>
+        Playbooks run automatically, in the same request that fires their trigger event -- when a
+        case is created, or its status, queue, or assignee changes. Scope a playbook to a specific
+        queue, TLP, or status, then chain together actions (apply a case template, add a
+        task/note, set queue, run host/user analysis, or post to a webhook/Slack) that run in
+        order every time it fires.
+    </div>
 </div>
 
 <div class="card bg-dark border-secondary">
-    <div class="card-body text-center py-5">
-        <i class="fa-solid fa-robot text-muted mb-3" style="font-size:2.5rem;"></i>
-        <h5>Playbooks &amp; Automated Response — Coming Soon</h5>
-        <p class="text-muted small mx-auto" style="max-width:640px;">
-            The SOAR engine already runs as a backend service today, receiving
-            high-severity Sigma alerts by webhook and acknowledging them -- this tab
-            will let you define and manage the automated response playbooks
-            (containment actions, notifications, enrichment) triggered from those
-            alerts. This page is a placeholder; nothing is wired up in the UI yet.
-        </p>
+    <div class="table-responsive">
+        <table class="table table-dark table-sm align-middle mb-0">
+            <thead><tr>
+                <th class="ps-3">Name</th><th>Trigger</th><th>Conditions</th><th>Actions</th>
+                <th>Runs</th><th>Enabled</th><th class="text-end pe-3"></th>
+            </tr></thead>
+            <tbody id="playbooksTableBody"><tr><td colspan="7" class="text-center text-muted py-4">Loading&hellip;</td></tr></tbody>
+        </table>
     </div>
 </div>
+
+<!-- New/Edit Playbook modal -->
+<div class="modal fade" id="playbookModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content bg-dark text-light border-secondary">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title" id="playbookModalTitle">New Playbook</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="pbId">
+                <div class="row g-2 mb-2">
+                    <div class="col-md-6">
+                        <label class="form-label small text-muted mb-1">Name</label>
+                        <input type="text" id="pbName" class="form-control bg-dark text-light border-secondary">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small text-muted mb-1">Trigger Event</label>
+                        <select id="pbTrigger" class="form-select bg-dark text-light border-secondary">
+                            <option value="case_created">Case created</option>
+                            <option value="status_changed">Status changed</option>
+                            <option value="queue_changed">Queue changed</option>
+                            <option value="assignee_changed">Assignee changed</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label small text-muted mb-1">Description (optional)</label>
+                    <input type="text" id="pbDescription" class="form-control bg-dark text-light border-secondary">
+                </div>
+                <div class="row g-2 mb-3">
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted mb-1">Only if Queue is&hellip;</label>
+                        <select id="pbCondQueue" class="form-select bg-dark text-light border-secondary"><option value="">Any queue</option></select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted mb-1">Only if TLP is&hellip;</label>
+                        <select id="pbCondTlp" class="form-select bg-dark text-light border-secondary"><option value="">Any TLP</option></select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted mb-1">Only if Status is&hellip;</label>
+                        <select id="pbCondStatus" class="form-select bg-dark text-light border-secondary">
+                            <option value="">Any status</option>
+                            <option value="open">Open</option>
+                            <option value="closed">Closed</option>
+                        </select>
+                    </div>
+                </div>
+                <hr class="border-secondary">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <label class="form-label small text-muted mb-0">Actions (run in order)</label>
+                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="addPlaybookActionRow()"><i class="fa-solid fa-plus me-1"></i>Add Action</button>
+                </div>
+                <div id="pbActionsList"></div>
+                <div id="pbError" class="text-danger small mt-2" style="display:none;"></div>
+            </div>
+            <div class="modal-footer border-secondary">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="savePlaybook()">Save Playbook</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Recent Runs modal -->
+<div class="modal fade" id="playbookRunsModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content bg-dark text-light border-secondary">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title" id="playbookRunsModalTitle">Recent Runs</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="table-responsive">
+                    <table class="table table-dark table-sm align-middle mb-0">
+                        <thead><tr><th>Time</th><th>Case</th><th>Status</th><th>Detail</th></tr></thead>
+                        <tbody id="playbookRunsTableBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+const IS_ADMIN = {{ 'true' if current_user.role == 'admin' else 'false' }};
+let allPlaybooks = [];
+let allQueuesForPb = [];
+let caseTemplatesForPb = [];
+let pbActionSeq = 0;
+let playbookModal, playbookRunsModal;
+
+const TRIGGER_LABELS = {
+    case_created: 'Case created', status_changed: 'Status changed',
+    queue_changed: 'Queue changed', assignee_changed: 'Assignee changed'
+};
+const ACTION_LABELS = {
+    apply_template: 'Apply case template', add_task: 'Add task', add_note: 'Add note',
+    set_queue: 'Set queue', analyze_entity: 'Analyze entity', send_webhook: 'Send webhook',
+    send_slack: 'Send Slack message'
+};
+
+function escHtml(s) {
+    return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function escJs(s) {
+    return String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+function loadQueuesForPlaybooks() {
+    return fetch('/api/case-queues').then(r => r.json()).then(qs => { allQueuesForPb = qs || []; }).catch(() => { allQueuesForPb = []; });
+}
+
+function loadTemplatesForPlaybooks() {
+    return fetch('/api/case-templates').then(r => r.json()).then(t => { caseTemplatesForPb = t || []; }).catch(() => { caseTemplatesForPb = []; });
+}
+
+function loadPlaybooks() {
+    fetch('/api/playbooks').then(r => r.json()).then(data => {
+        allPlaybooks = data || [];
+        renderPlaybooksTable();
+    }).catch(err => console.error('Error loading playbooks:', err));
+}
+
+function conditionSummary(p) {
+    const parts = [];
+    if (p.condition_queue_name) parts.push(`Queue: ${escHtml(p.condition_queue_name)}`);
+    if (p.condition_tlp) parts.push(`TLP: ${escHtml(p.condition_tlp.toUpperCase())}`);
+    if (p.condition_status) parts.push(`Status: ${escHtml(p.condition_status)}`);
+    return parts.length ? parts.map(x => `<span class="badge bg-secondary me-1">${x}</span>`).join('') : '<span class="text-muted">any</span>';
+}
+
+function renderPlaybooksTable() {
+    const tbody = document.getElementById('playbooksTableBody');
+    if (!allPlaybooks.length) {
+        tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-4">No playbooks yet.${IS_ADMIN ? ' Click "New Playbook" to create one.' : ''}</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = allPlaybooks.map(p => `
+        <tr>
+            <td class="ps-3 fw-bold">${escHtml(p.name)}${p.description ? `<div class="text-muted small fw-normal">${escHtml(p.description)}</div>` : ''}</td>
+            <td class="small">${TRIGGER_LABELS[p.trigger_event] || escHtml(p.trigger_event)}</td>
+            <td class="small">${conditionSummary(p)}</td>
+            <td class="small">${p.actions.length} step${p.actions.length === 1 ? '' : 's'}</td>
+            <td class="small"><a href="#" onclick="showPlaybookRuns(${p.id}, '${escJs(p.name)}'); return false;">${p.run_count}</a></td>
+            <td>
+                ${IS_ADMIN
+                    ? `<div class="form-check form-switch mb-0"><input class="form-check-input" type="checkbox" role="switch" ${p.enabled ? 'checked' : ''} onchange="togglePlaybook(${p.id}, this.checked)"></div>`
+                    : (p.enabled ? '<span class="badge bg-success">On</span>' : '<span class="badge bg-secondary">Off</span>')}
+            </td>
+            <td class="text-end pe-3">
+                ${IS_ADMIN ? `
+                <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 me-1" title="Edit" onclick="editPlaybook(${p.id})"><i class="fa-solid fa-pen"></i></button>
+                <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete" onclick="deletePlaybook(${p.id}, '${escJs(p.name)}')"><i class="fa-solid fa-trash"></i></button>` : ''}
+            </td>
+        </tr>
+    `).join('');
+}
+
+function populatePbConditionSelects(current) {
+    current = current || {};
+    const qSel = document.getElementById('pbCondQueue');
+    qSel.innerHTML = '<option value="">Any queue</option>' + allQueuesForPb.map(q => `<option value="${q.id}">${escHtml(q.name)}</option>`).join('');
+    qSel.value = current.condition_queue_id ? String(current.condition_queue_id) : '';
+    const tlpSel = document.getElementById('pbCondTlp');
+    tlpSel.innerHTML = '<option value="">Any TLP</option>' + ['clear', 'green', 'amber', 'amber-strict', 'red'].map(v => `<option value="${v}">${v.toUpperCase()}</option>`).join('');
+    tlpSel.value = current.condition_tlp || '';
+    document.getElementById('pbCondStatus').value = current.condition_status || '';
+}
+
+function actionParamsFieldsHtml(seq, actionType, params) {
+    params = params || {};
+    switch (actionType) {
+        case 'apply_template':
+            return `<select class="form-select form-select-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_template_id">
+                <option value="">Select a template&hellip;</option>
+                ${caseTemplatesForPb.map(t => `<option value="${t.id}" ${String(t.id) === String(params.template_id) ? 'selected' : ''}>${escHtml(t.name)}</option>`).join('')}
+            </select>`;
+        case 'add_task':
+            return `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_title" placeholder="Task title" value="${escHtml(params.title || '')}">`;
+        case 'add_note':
+            return `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_text" placeholder="Note text (case_id/case_title/status/tlp/pap placeholders supported)" value="${escHtml(params.text || '')}">`;
+        case 'set_queue':
+            return `<select class="form-select form-select-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_queue_id">
+                <option value="">Unassigned</option>
+                ${allQueuesForPb.map(q => `<option value="${q.id}" ${String(q.id) === String(params.queue_id) ? 'selected' : ''}>${escHtml(q.name)}</option>`).join('')}
+            </select>`;
+        case 'analyze_entity':
+            return `<select class="form-select form-select-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_entity_type">
+                <option value="host" ${params.entity_type !== 'user' ? 'selected' : ''}>Host</option>
+                <option value="user" ${params.entity_type === 'user' ? 'selected' : ''}>User</option>
+            </select>`;
+        case 'send_webhook':
+            return `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_url" placeholder="https://&hellip;" value="${escHtml(params.url || '')}">
+                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_body" placeholder="JSON body (optional -- case_id/case_title/status/tlp/pap placeholders supported)" value="${escHtml(params.body || '')}">`;
+        case 'send_slack':
+            return `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_webhook_url" placeholder="Slack incoming webhook URL" value="${escHtml(params.webhook_url || '')}">
+                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_message" placeholder="Message (optional -- case_id/case_title/status/tlp/pap placeholders supported)" value="${escHtml(params.message || '')}">`;
+        default:
+            return '';
+    }
+}
+
+function addPlaybookActionRow(actionType, params) {
+    const seq = pbActionSeq++;
+    const list = document.getElementById('pbActionsList');
+    const div = document.createElement('div');
+    div.className = 'd-flex gap-2 align-items-start border border-secondary rounded p-2 mb-2';
+    div.id = `pbActionRow_${seq}`;
+    const chosenType = actionType || 'add_note';
+    div.innerHTML = `
+        <div style="width:180px;">
+            <select class="form-select form-select-sm bg-dark text-light border-secondary" id="pbActType_${seq}" onchange="onPlaybookActionTypeChange(${seq})">
+                ${Object.entries(ACTION_LABELS).map(([k, label]) => `<option value="${k}" ${k === chosenType ? 'selected' : ''}>${label}</option>`).join('')}
+            </select>
+        </div>
+        <div class="flex-grow-1" id="pbActParams_${seq}"></div>
+        <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove" onclick="document.getElementById('pbActionRow_${seq}').remove()"><i class="fa-solid fa-xmark"></i></button>
+    `;
+    list.appendChild(div);
+    document.getElementById(`pbActParams_${seq}`).innerHTML = actionParamsFieldsHtml(seq, chosenType, params);
+}
+
+function onPlaybookActionTypeChange(seq) {
+    const actionType = document.getElementById(`pbActType_${seq}`).value;
+    document.getElementById(`pbActParams_${seq}`).innerHTML = actionParamsFieldsHtml(seq, actionType, {});
+}
+
+function collectActionRow(row) {
+    const seq = row.id.split('_')[1];
+    const actionType = document.getElementById(`pbActType_${seq}`).value;
+    const getVal = (name) => { const el = document.getElementById(`pbActParam_${seq}_${name}`); return el ? el.value.trim() : ''; };
+    const params = {};
+    switch (actionType) {
+        case 'apply_template': params.template_id = getVal('template_id') ? parseInt(getVal('template_id'), 10) : null; break;
+        case 'add_task': params.title = getVal('title'); break;
+        case 'add_note': params.text = getVal('text'); break;
+        case 'set_queue': params.queue_id = getVal('queue_id') ? parseInt(getVal('queue_id'), 10) : null; break;
+        case 'analyze_entity': params.entity_type = getVal('entity_type'); break;
+        case 'send_webhook': params.url = getVal('url'); params.body = getVal('body'); break;
+        case 'send_slack': params.webhook_url = getVal('webhook_url'); params.message = getVal('message'); break;
+    }
+    return { action_type: actionType, params };
+}
+
+async function showPlaybookModal() {
+    document.getElementById('playbookModalTitle').innerText = 'New Playbook';
+    document.getElementById('pbId').value = '';
+    document.getElementById('pbName').value = '';
+    document.getElementById('pbDescription').value = '';
+    document.getElementById('pbTrigger').value = 'case_created';
+    document.getElementById('pbError').style.display = 'none';
+    document.getElementById('pbActionsList').innerHTML = '';
+    if (!allQueuesForPb.length) await loadQueuesForPlaybooks();
+    if (!caseTemplatesForPb.length) await loadTemplatesForPlaybooks();
+    populatePbConditionSelects({});
+    addPlaybookActionRow('add_note', {});
+    if (!playbookModal) playbookModal = new bootstrap.Modal(document.getElementById('playbookModal'));
+    playbookModal.show();
+}
+
+async function editPlaybook(pid) {
+    const p = allPlaybooks.find(x => x.id === pid);
+    if (!p) return;
+    document.getElementById('playbookModalTitle').innerText = 'Edit Playbook';
+    document.getElementById('pbId').value = p.id;
+    document.getElementById('pbName').value = p.name;
+    document.getElementById('pbDescription').value = p.description || '';
+    document.getElementById('pbTrigger').value = p.trigger_event;
+    document.getElementById('pbError').style.display = 'none';
+    document.getElementById('pbActionsList').innerHTML = '';
+    if (!allQueuesForPb.length) await loadQueuesForPlaybooks();
+    if (!caseTemplatesForPb.length) await loadTemplatesForPlaybooks();
+    populatePbConditionSelects(p);
+    (p.actions.length ? p.actions : [{ action_type: 'add_note', params: {} }]).forEach(a => addPlaybookActionRow(a.action_type, a.params));
+    if (!playbookModal) playbookModal = new bootstrap.Modal(document.getElementById('playbookModal'));
+    playbookModal.show();
+}
+
+function savePlaybook() {
+    const errBox = document.getElementById('pbError');
+    errBox.style.display = 'none';
+    const pid = document.getElementById('pbId').value;
+    const rows = Array.from(document.getElementById('pbActionsList').children);
+    const actions = rows.map(collectActionRow);
+    const payload = {
+        name: document.getElementById('pbName').value.trim(),
+        description: document.getElementById('pbDescription').value.trim(),
+        trigger_event: document.getElementById('pbTrigger').value,
+        condition_queue_id: document.getElementById('pbCondQueue').value ? parseInt(document.getElementById('pbCondQueue').value, 10) : null,
+        condition_tlp: document.getElementById('pbCondTlp').value || null,
+        condition_status: document.getElementById('pbCondStatus').value || null,
+        actions
+    };
+    if (!payload.name) { errBox.innerText = 'Name is required.'; errBox.style.display = 'block'; return; }
+    if (!actions.length) { errBox.innerText = 'At least one action is required.'; errBox.style.display = 'block'; return; }
+    const url = pid ? `/api/playbooks/${pid}` : '/api/playbooks';
+    const method = pid ? 'PUT' : 'POST';
+    fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+        .then(r => r.json().then(data => ({ ok: r.ok, data })))
+        .then(({ ok, data }) => {
+            if (ok) { playbookModal.hide(); loadPlaybooks(); }
+            else { errBox.innerText = data.error || 'Failed to save playbook.'; errBox.style.display = 'block'; }
+        }).catch(err => { errBox.innerText = 'Error: ' + err; errBox.style.display = 'block'; });
+}
+
+async function deletePlaybook(pid, name) {
+    if (!(await confirmDialog(`Delete the "${name}" playbook? Its run history will also be removed.`, { title: 'Delete playbook', danger: true, confirmLabel: 'Delete' }))) return;
+    fetch(`/api/playbooks/${pid}`, { method: 'DELETE' }).then(() => loadPlaybooks()).catch(err => toast('Error deleting playbook: ' + err, 'danger'));
+}
+
+function togglePlaybook(pid, enabled) {
+    fetch(`/api/playbooks/${pid}/toggle`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) })
+        .then(() => loadPlaybooks())
+        .catch(err => toast('Error toggling playbook: ' + err, 'danger'));
+}
+
+function showPlaybookRuns(pid, name) {
+    document.getElementById('playbookRunsModalTitle').innerText = `Recent Runs — ${name}`;
+    document.getElementById('playbookRunsTableBody').innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">Loading&hellip;</td></tr>';
+    if (!playbookRunsModal) playbookRunsModal = new bootstrap.Modal(document.getElementById('playbookRunsModal'));
+    playbookRunsModal.show();
+    fetch(`/api/playbooks/${pid}/runs`).then(r => r.json()).then(runs => {
+        const tbody = document.getElementById('playbookRunsTableBody');
+        if (!runs.length) { tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">No runs yet.</td></tr>'; return; }
+        tbody.innerHTML = runs.map(r => `
+            <tr>
+                <td class="text-nowrap small">${escHtml(r.triggered_at)}</td>
+                <td class="small">${r.case_title ? `<a href="/cases?case=${r.case_id}">${escHtml(r.case_title)}</a>` : '<span class="text-muted">(deleted)</span>'}</td>
+                <td>${r.status === 'success' ? '<span class="badge bg-success">Success</span>' : '<span class="badge bg-warning text-dark">Partial</span>'}</td>
+                <td class="small">${escHtml(r.detail)}</td>
+            </tr>
+        `).join('');
+    }).catch(err => console.error('Error loading playbook runs:', err));
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    loadPlaybooks();
+});
+</script>
 {% endblock %}

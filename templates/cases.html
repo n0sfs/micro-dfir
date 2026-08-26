@@ -469,6 +469,7 @@ function caseEventLabel(e) {
         task_removed: `Task removed: "${escHtml(e.detail)}"`,
         template_applied: `Template applied: ${escHtml(e.detail)}`,
         note: escHtml(e.detail),
+        playbook_run: `<i class="fa-solid fa-robot me-1"></i>${escHtml(e.detail)}`,
         analysis: (e.detail || '').split('\n')[0] || 'Analysis',
     };
     return map[e.event_type] || escHtml(e.event_type);

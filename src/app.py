@@ -2539,6 +2539,10 @@ def api_cases():
                 [(cid, t, i, current_user.username) for i, t in enumerate(tasks)]
             )
             _log_case_event(db, cid, 'template_applied', tpl['name'])
+
+    _run_playbooks_for_case(db, cid, 'case_created', queue_id, tlp, 'open')
+    if queue_id:
+        _run_playbooks_for_case(db, cid, 'queue_changed', queue_id, tlp, 'open')
     db.commit()
     return jsonify({"status": "success", "id": cid})
 
@@ -2625,21 +2629,30 @@ def api_case_detail(cid):
             closed_at = None
         # Timeline entries only for what actually CHANGED -- a save that only edits the
         # description shouldn't manufacture a spurious "status changed to open" event.
-        if status != case['status']:
+        status_changed = status != case['status']
+        assignee_changed = assignee != (case['assignee'] or '')
+        queue_changed = queue_id != case['queue_id']
+        if status_changed:
             _log_case_event(db, cid, 'status_change', status)
-        if assignee != (case['assignee'] or ''):
+        if assignee_changed:
             _log_case_event(db, cid, 'assignee_change', assignee or '(unassigned)')
         if tlp != case['tlp']:
             _log_case_event(db, cid, 'tlp_change', tlp)
         if pap != case['pap']:
             _log_case_event(db, cid, 'pap_change', pap)
-        if queue_id != case['queue_id']:
+        if queue_changed:
             queue_name = db.execute("SELECT name FROM case_queues WHERE id = ?", (queue_id,)).fetchone()['name'] if queue_id else '(none)'
             _log_case_event(db, cid, 'queue_change', queue_name)
         db.execute(
             "UPDATE cases SET title = ?, status = ?, assignee = ?, description = ?, closed_at = ?, tlp = ?, pap = ?, queue_id = ? WHERE id = ?",
             (title, status, assignee, description, closed_at, tlp, pap, queue_id, cid)
         )
+        if status_changed:
+            _run_playbooks_for_case(db, cid, 'status_changed', queue_id, tlp, status)
+        if queue_changed:
+            _run_playbooks_for_case(db, cid, 'queue_changed', queue_id, tlp, status)
+        if assignee_changed:
+            _run_playbooks_for_case(db, cid, 'assignee_changed', queue_id, tlp, status)
         db.commit()
         return jsonify({"status": "success"})
 
@@ -2759,20 +2772,10 @@ def api_case_add_note(cid):
 # that table, so a user analysis skips that section rather than guessing at a join.
 MAX_ANALYZE_ENRICH_IPS = 5
 
-@app.route('/api/cases/<int:cid>/analyze', methods=['POST'])
-@login_required
-def api_case_analyze(cid):
-    db = get_db()
-    if not db.execute("SELECT 1 FROM cases WHERE id = ?", (cid,)).fetchone():
-        return jsonify({"error": "Case not found"}), 404
-    d = request.get_json() or {}
-    entity_type = (d.get('entity_type') or '').strip()
-    entity_id = (d.get('entity_id') or '').strip()
-    if entity_type not in ('host', 'user'):
-        return jsonify({"error": "entity_type must be 'host' or 'user'"}), 400
-    if not entity_id:
-        return jsonify({"error": "entity_id is required"}), 400
-
+# Split out from the /analyze route so the playbook engine's 'analyze_entity' action
+# (see _run_playbook_action below) can run the exact same rollup a human triggers from
+# the case detail view, instead of a second copy that could quietly drift from it.
+def _run_case_analysis(db, cid, entity_type, entity_id):
     risk_cfg = get_risk_score_config(db)
     window = f"-{risk_cfg['window_days']} days"
     host_or_user_col = 'host' if entity_type == 'host' else 'username'
@@ -2876,8 +2879,311 @@ def api_case_analyze(cid):
 
     summary = '\n'.join(lines)
     _log_case_event(db, cid, 'analysis', summary)
+    return summary
+
+@app.route('/api/cases/<int:cid>/analyze', methods=['POST'])
+@login_required
+def api_case_analyze(cid):
+    db = get_db()
+    if not db.execute("SELECT 1 FROM cases WHERE id = ?", (cid,)).fetchone():
+        return jsonify({"error": "Case not found"}), 404
+    d = request.get_json() or {}
+    entity_type = (d.get('entity_type') or '').strip()
+    entity_id = (d.get('entity_id') or '').strip()
+    if entity_type not in ('host', 'user'):
+        return jsonify({"error": "entity_type must be 'host' or 'user'"}), 400
+    if not entity_id:
+        return jsonify({"error": "entity_id is required"}), 400
+    summary = _run_case_analysis(db, cid, entity_type, entity_id)
     db.commit()
     return jsonify({'status': 'success', 'summary': summary})
+
+# ---- Playbooks (SOAR) ----
+PLAYBOOK_TRIGGERS = ('case_created', 'status_changed', 'queue_changed', 'assignee_changed')
+PLAYBOOK_ACTION_TYPES = ('apply_template', 'add_task', 'add_note', 'set_queue', 'analyze_entity', 'send_webhook', 'send_slack')
+
+def _fill_playbook_template(text, cid, case_row):
+    # Deliberately plain string substitution, not a real template engine -- the
+    # placeholder set is small and fixed (unlike Jinja in the case-report generator),
+    # and this runs against admin-authored config, not untrusted input.
+    if not text:
+        return text
+    values = {
+        '{{case_id}}': str(cid),
+        '{{case_title}}': (case_row['title'] if case_row else '') or '',
+        '{{status}}': (case_row['status'] if case_row else '') or '',
+        '{{tlp}}': (case_row['tlp'] if case_row else '') or '',
+        '{{pap}}': (case_row['pap'] if case_row else '') or '',
+    }
+    for k, v in values.items():
+        text = text.replace(k, v)
+    return text
+
+# One action's execution. Returns a short human-readable result string on success;
+# raises on a genuine failure so the caller (_run_playbooks_for_case) can record it in
+# that run's detail without aborting the rest of the playbook's actions.
+def _run_playbook_action(db, cid, action_type, params):
+    params = params or {}
+
+    if action_type == 'apply_template':
+        tpl = db.execute("SELECT name, tasks FROM case_templates WHERE id = ?", (params.get('template_id'),)).fetchone()
+        if not tpl:
+            return "template not found, skipped"
+        tasks = json.loads(tpl['tasks'])
+        max_pos = db.execute("SELECT COALESCE(MAX(position), -1) FROM case_tasks WHERE case_id = ?", (cid,)).fetchone()[0]
+        db.executemany(
+            "INSERT INTO case_tasks (case_id, title, position, created_by) VALUES (?, ?, ?, 'playbook')",
+            [(cid, t, max_pos + 1 + i) for i, t in enumerate(tasks)]
+        )
+        _log_case_event(db, cid, 'template_applied', tpl['name'])
+        return f"applied template '{tpl['name']}' ({len(tasks)} tasks)"
+
+    if action_type == 'add_task':
+        title = (params.get('title') or '').strip()
+        if not title:
+            return "no task title configured, skipped"
+        max_pos = db.execute("SELECT COALESCE(MAX(position), -1) FROM case_tasks WHERE case_id = ?", (cid,)).fetchone()[0]
+        db.execute("INSERT INTO case_tasks (case_id, title, position, created_by) VALUES (?, ?, ?, 'playbook')", (cid, title, max_pos + 1))
+        _log_case_event(db, cid, 'task_added', title)
+        return f"added task '{title}'"
+
+    if action_type == 'add_note':
+        text = (params.get('text') or '').strip()
+        if not text:
+            return "no note text configured, skipped"
+        _log_case_event(db, cid, 'note', text)
+        return "added a note"
+
+    if action_type == 'set_queue':
+        queue_id = params.get('queue_id') or None
+        if queue_id:
+            row = db.execute("SELECT name FROM case_queues WHERE id = ?", (queue_id,)).fetchone()
+            if not row:
+                return "queue not found, skipped"
+            queue_name = row['name']
+        else:
+            queue_name = '(none)'
+        db.execute("UPDATE cases SET queue_id = ? WHERE id = ?", (queue_id, cid))
+        _log_case_event(db, cid, 'queue_change', queue_name)
+        return f"set queue to {queue_name}"
+
+    if action_type == 'analyze_entity':
+        entity_type = params.get('entity_type') if params.get('entity_type') in ('host', 'user') else 'host'
+        # A playbook is authored ahead of time and can't know a specific hostname/
+        # username -- only which KIND of entity to analyze. Resolved at run time from
+        # the case's own linked items: the first one (alert, or a host-type UEBA event)
+        # that actually carries a value in that column.
+        col = 'host' if entity_type == 'host' else 'username'
+        item_rows = db.execute("SELECT item_type, item_id FROM case_items WHERE case_id = ? ORDER BY added_at", (cid,)).fetchall()
+        entity_id = None
+        for it in item_rows:
+            if it['item_type'] == 'alert':
+                r = db.execute(f"SELECT {col} as v FROM alerts WHERE id = ?", (it['item_id'],)).fetchone()
+            elif it['item_type'] == 'ueba_event' and entity_type == 'host':
+                r = db.execute("SELECT hostname as v FROM events WHERE id = ?", (it['item_id'],)).fetchone()
+            else:
+                continue
+            if r and r['v']:
+                entity_id = r['v']
+                break
+        if not entity_id:
+            return f"no linked item has a {entity_type}, skipped"
+        _run_case_analysis(db, cid, entity_type, entity_id)
+        return f"analyzed {entity_type} '{entity_id}'"
+
+    if action_type == 'send_webhook':
+        url = (params.get('url') or '').strip()
+        if not url:
+            return "no URL configured, skipped"
+        case = db.execute("SELECT title, status, tlp, pap FROM cases WHERE id = ?", (cid,)).fetchone()
+        body_text = _fill_playbook_template(params.get('body') or '{"case_id": "{{case_id}}", "title": "{{case_title}}", "status": "{{status}}"}', cid, case)
+        try:
+            payload = json.loads(body_text)
+        except (ValueError, TypeError):
+            payload = {"case_id": cid, "raw": body_text}
+        import requests
+        requests.post(url, json=payload, timeout=8)
+        return f"posted webhook to {url}"
+
+    if action_type == 'send_slack':
+        webhook_url = (params.get('webhook_url') or '').strip()
+        if not webhook_url:
+            return "no Slack webhook URL configured, skipped"
+        case = db.execute("SELECT title, status, tlp, pap FROM cases WHERE id = ?", (cid,)).fetchone()
+        message = _fill_playbook_template(params.get('message') or 'Case #{{case_id}}: {{case_title}} ({{status}})', cid, case)
+        import requests
+        requests.post(webhook_url, json={'text': message}, timeout=8)
+        return "sent Slack message"
+
+    return f"unknown action type '{action_type}', skipped"
+
+# The one call site every trigger point (case create, status/queue/assignee change)
+# routes through. queue_id/tlp/status are the case's state AFTER whatever change just
+# happened -- passed in directly rather than re-queried, since every call site already
+# has them as local variables from computing what to write. Matches ANY enabled playbook
+# for this trigger whose optional condition filters are unset or satisfied; one
+# playbook's action failing doesn't stop another matching playbook from running, and
+# doesn't stop the rest of ITS OWN actions either (see _run_playbook_action's per-action
+# try/except below).
+def _run_playbooks_for_case(db, cid, trigger_event, queue_id, tlp, status):
+    playbooks = db.execute(
+        "SELECT * FROM playbooks WHERE enabled = 1 AND trigger_event = ? "
+        "AND (condition_queue_id IS NULL OR condition_queue_id = ?) "
+        "AND (condition_tlp IS NULL OR condition_tlp = ?) "
+        "AND (condition_status IS NULL OR condition_status = ?)",
+        (trigger_event, queue_id, tlp, status)
+    ).fetchall()
+    for pb in playbooks:
+        actions = db.execute("SELECT action_type, params FROM playbook_actions WHERE playbook_id = ? ORDER BY position", (pb['id'],)).fetchall()
+        results = []
+        overall_status = 'success'
+        for a in actions:
+            try:
+                action_params = json.loads(a['params']) if a['params'] else {}
+                result = _run_playbook_action(db, cid, a['action_type'], action_params)
+                results.append(f"{a['action_type']}: {result}")
+            except Exception as e:
+                results.append(f"{a['action_type']}: FAILED ({e})")
+                overall_status = 'partial'
+        detail = '; '.join(results) if results else 'no actions configured'
+        db.execute(
+            "INSERT INTO playbook_runs (playbook_id, case_id, status, detail) VALUES (?, ?, ?, ?)",
+            (pb['id'], cid, overall_status, detail)
+        )
+        _log_case_event(db, cid, 'playbook_run', f"{pb['name']}: {detail}")
+
+@app.route('/api/playbooks', methods=['GET', 'POST'])
+@login_required
+def api_playbooks():
+    db = get_db()
+    if request.method == 'GET':
+        rows = db.execute(
+            "SELECT p.*, q.name as condition_queue_name, "
+            "(SELECT COUNT(*) FROM playbook_runs WHERE playbook_id = p.id) as run_count "
+            "FROM playbooks p LEFT JOIN case_queues q ON q.id = p.condition_queue_id ORDER BY p.name"
+        ).fetchall()
+        out = []
+        for r in rows:
+            actions = [dict(a) for a in db.execute(
+                "SELECT id, action_type, params, position FROM playbook_actions WHERE playbook_id = ? ORDER BY position", (r['id'],)
+            ).fetchall()]
+            for a in actions:
+                a['params'] = json.loads(a['params']) if a['params'] else {}
+            out.append({**dict(r), 'actions': actions})
+        return jsonify(out)
+
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    d = request.json or {}
+    name = (d.get('name') or '').strip()
+    trigger_event = d.get('trigger_event')
+    actions = d.get('actions') or []
+    if not name:
+        return jsonify({'error': 'name is required'}), 400
+    if trigger_event not in PLAYBOOK_TRIGGERS:
+        return jsonify({'error': f"trigger_event must be one of {', '.join(PLAYBOOK_TRIGGERS)}"}), 400
+    if not actions:
+        return jsonify({'error': 'At least one action is required'}), 400
+    for a in actions:
+        if a.get('action_type') not in PLAYBOOK_ACTION_TYPES:
+            return jsonify({'error': f"invalid action_type: {a.get('action_type')}"}), 400
+    if db.execute("SELECT 1 FROM playbooks WHERE name = ?", (name,)).fetchone():
+        return jsonify({'error': f'A playbook named "{name}" already exists'}), 400
+    condition_queue_id = d.get('condition_queue_id') or None
+    if condition_queue_id and not db.execute("SELECT 1 FROM case_queues WHERE id = ?", (condition_queue_id,)).fetchone():
+        return jsonify({'error': 'Condition queue not found'}), 400
+    condition_tlp = (d.get('condition_tlp') or '').strip() or None
+    condition_status = (d.get('condition_status') or '').strip() or None
+    cur = db.execute(
+        "INSERT INTO playbooks (name, description, trigger_event, enabled, condition_queue_id, condition_tlp, condition_status, created_by) "
+        "VALUES (?, ?, ?, 1, ?, ?, ?, ?)",
+        (name, (d.get('description') or '').strip(), trigger_event, condition_queue_id, condition_tlp, condition_status, current_user.username)
+    )
+    pid = cur.lastrowid
+    for i, a in enumerate(actions):
+        db.execute("INSERT INTO playbook_actions (playbook_id, position, action_type, params) VALUES (?, ?, ?, ?)",
+                   (pid, i, a['action_type'], json.dumps(a.get('params') or {})))
+    db.commit()
+    log_audit('playbook_create', 'playbook', name)
+    return jsonify({'status': 'success', 'id': pid})
+
+@app.route('/api/playbooks/<int:pid>', methods=['PUT', 'DELETE'])
+@login_required
+def api_playbook_detail(pid):
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    db = get_db()
+    existing = db.execute("SELECT name FROM playbooks WHERE id = ?", (pid,)).fetchone()
+    if not existing:
+        return jsonify({'error': 'Playbook not found'}), 404
+
+    if request.method == 'DELETE':
+        db.execute("DELETE FROM playbook_actions WHERE playbook_id = ?", (pid,))
+        db.execute("DELETE FROM playbook_runs WHERE playbook_id = ?", (pid,))
+        db.execute("DELETE FROM playbooks WHERE id = ?", (pid,))
+        db.commit()
+        log_audit('playbook_delete', 'playbook', existing['name'])
+        return jsonify({'ok': 1})
+
+    d = request.json or {}
+    # Full replace of the action list (delete-and-reinsert) -- simplest correct
+    # semantics for an ordered list with no partial-edit route, same choice
+    # case_templates made for its own JSON task-list column.
+    name = (d.get('name') or '').strip()
+    trigger_event = d.get('trigger_event')
+    actions = d.get('actions') or []
+    if not name:
+        return jsonify({'error': 'name is required'}), 400
+    if trigger_event not in PLAYBOOK_TRIGGERS:
+        return jsonify({'error': f"trigger_event must be one of {', '.join(PLAYBOOK_TRIGGERS)}"}), 400
+    if not actions:
+        return jsonify({'error': 'At least one action is required'}), 400
+    for a in actions:
+        if a.get('action_type') not in PLAYBOOK_ACTION_TYPES:
+            return jsonify({'error': f"invalid action_type: {a.get('action_type')}"}), 400
+    if db.execute("SELECT 1 FROM playbooks WHERE name = ? AND id != ?", (name, pid)).fetchone():
+        return jsonify({'error': f'A playbook named "{name}" already exists'}), 400
+    condition_queue_id = d.get('condition_queue_id') or None
+    if condition_queue_id and not db.execute("SELECT 1 FROM case_queues WHERE id = ?", (condition_queue_id,)).fetchone():
+        return jsonify({'error': 'Condition queue not found'}), 400
+    condition_tlp = (d.get('condition_tlp') or '').strip() or None
+    condition_status = (d.get('condition_status') or '').strip() or None
+    db.execute(
+        "UPDATE playbooks SET name = ?, description = ?, trigger_event = ?, condition_queue_id = ?, condition_tlp = ?, condition_status = ? WHERE id = ?",
+        (name, (d.get('description') or '').strip(), trigger_event, condition_queue_id, condition_tlp, condition_status, pid)
+    )
+    db.execute("DELETE FROM playbook_actions WHERE playbook_id = ?", (pid,))
+    for i, a in enumerate(actions):
+        db.execute("INSERT INTO playbook_actions (playbook_id, position, action_type, params) VALUES (?, ?, ?, ?)",
+                   (pid, i, a['action_type'], json.dumps(a.get('params') or {})))
+    db.commit()
+    log_audit('playbook_update', 'playbook', name)
+    return jsonify({'status': 'success'})
+
+@app.route('/api/playbooks/<int:pid>/toggle', methods=['PUT'])
+@login_required
+def api_playbook_toggle(pid):
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    db = get_db()
+    if not db.execute("SELECT 1 FROM playbooks WHERE id = ?", (pid,)).fetchone():
+        return jsonify({'error': 'Playbook not found'}), 404
+    enabled = 1 if (request.json or {}).get('enabled') else 0
+    db.execute("UPDATE playbooks SET enabled = ? WHERE id = ?", (enabled, pid))
+    db.commit()
+    log_audit('playbook_toggle', 'playbook', pid, 'enabled' if enabled else 'disabled')
+    return jsonify({'status': 'success'})
+
+@app.route('/api/playbooks/<int:pid>/runs', methods=['GET'])
+@login_required
+def api_playbook_runs(pid):
+    db = get_db()
+    rows = db.execute(
+        "SELECT pr.id, pr.case_id, c.title as case_title, pr.triggered_at, pr.status, pr.detail "
+        "FROM playbook_runs pr LEFT JOIN cases c ON c.id = pr.case_id WHERE pr.playbook_id = ? ORDER BY pr.triggered_at DESC LIMIT 50",
+        (pid,)
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
 
 @app.route('/api/case-templates', methods=['GET'])
 @login_required
@@ -4060,6 +4366,52 @@ def migrate_case_queues():
             conn.execute("ALTER TABLE cases ADD COLUMN queue_id INTEGER")
         for name, desc in QUEUE_SEED:
             conn.execute("INSERT OR IGNORE INTO case_queues (name, description, created_by) VALUES (?, ?, 'system')", (name, desc))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# The SOAR module's real content (mirrors Exabeam Incident Responder's playbook concept,
+# scoped way down): a trigger event, optional condition filters (queue/TLP/status), and
+# an ordered list of actions run against the case that fired it. Deliberately not a
+# visual builder with 40+ third-party integrations -- every action type reuses machinery
+# this app already has (case templates, tasks, notes, queue routing, the host/user
+# analysis above) plus two generic outbound-HTTP actions (webhook, Slack) for the one
+# genuinely new "integration" surface. Runs synchronously inside the request that fired
+# the trigger (case create/update) -- this appliance has no task queue anywhere else
+# either, and action volume here is low (a handful of playbooks, a few actions each).
+def migrate_playbooks():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS playbooks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            trigger_event TEXT NOT NULL,
+            enabled BOOLEAN DEFAULT 1,
+            condition_queue_id INTEGER,
+            condition_tlp TEXT,
+            condition_status TEXT,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS playbook_actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            playbook_id INTEGER NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0,
+            action_type TEXT NOT NULL,
+            params TEXT
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_playbook_actions_playbook ON playbook_actions(playbook_id)')
+        conn.execute('''CREATE TABLE IF NOT EXISTS playbook_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            playbook_id INTEGER NOT NULL,
+            case_id INTEGER NOT NULL,
+            triggered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            status TEXT NOT NULL DEFAULT 'success',
+            detail TEXT
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_playbook_runs_case ON playbook_runs(case_id)')
         conn.commit()
         conn.close()
     except Exception:
@@ -6646,6 +6998,7 @@ migrate_assets_identities()
 migrate_cases()
 migrate_case_upgrade()
 migrate_case_queues()
+migrate_playbooks()
 migrate_live_logs_archive()
 migrate_fim_paths()
 migrate_ueba_priority_scores()
