@@ -177,6 +177,7 @@
                             <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="windows" onclick="consoleRun('collect_browser_artifacts')"><i class="fa-solid fa-globe me-2"></i>Browser Artifacts</button>
                             <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="windows" onclick="consoleRun('collect_forensic_timestamps')"><i class="fa-solid fa-stopwatch me-2"></i>Forensic Timestamps</button>
                             <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="windows" onclick="consoleRun('collect_recent_file_changes')"><i class="fa-solid fa-clock-rotate-left me-2"></i>Recent File Changes</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="windows" onclick="consoleRun('collect_live_forensics')"><i class="fa-solid fa-magnifying-glass-chart me-2"></i>Live Forensic Triage</button>
                             <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="linux" onclick="consoleRun('collect_ssh_artifacts')"><i class="fa-solid fa-key me-2"></i>SSH Artifacts</button>
                             <button type="button" class="btn btn-sm btn-outline-warning console-action-btn" onclick="consoleRun('isolate_host', {}, 'Isolate this host from the network? Only traffic to/from this SOC server will be allowed.')"><i class="fa-solid fa-network-wired me-2"></i>Isolate Host</button>
                             <button type="button" class="btn btn-sm btn-outline-success console-action-btn" onclick="consoleRun('restore_network', {}, 'Restore normal network connectivity on this host?')"><i class="fa-solid fa-wifi me-2"></i>Restore Network</button>
@@ -846,6 +847,7 @@ const CONSOLE_ACTION_DISPLAY = {
         collect_browser_artifacts: 'Collect-Browser-Artifacts (Chrome/Edge/Firefox history file metadata + recent downloads, all user profiles)',
         collect_forensic_timestamps: 'Collect-Forensic-Timestamps (Prefetch listing, Amcache/Shimcache metadata)',
         collect_recent_file_changes: 'Collect-Recent-File-Changes (files modified in the last 24h across common drop locations)',
+        collect_live_forensics: 'Collect-Live-Forensics (USB device history, PowerShell console history, targeted Security-log events, BitLocker recovery keys, Recent-Items LNK shortcuts)',
         isolate_host: 'Isolate-Host (block all traffic except this SOC server)',
         restore_network: 'Restore-Network',
         upgrade: 'Upgrade-Agent (fetch latest agent, restart)'
