@@ -440,14 +440,23 @@ $result.ps_console_history = @(Get-ChildItem 'C:\Users\*\AppData\Roaming\Microso
     [PSCustomObject]@{
         user = $_.FullName.Split('\')[2]
         last_write = $_.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')
-        recent_lines = @(Get-Content $_.FullName -ErrorAction SilentlyContinue -Tail 100)
+        recent_lines = @(Get-Content $_.FullName -ErrorAction SilentlyContinue -Tail 40)
     }
 })
 
+# Capped well below string_sweep's own hard-won 60-event/200-char limits (see that
+# function's comment above on the server's 60000-char stdout storage cap silently
+# truncating mid-string into invalid JSON) -- a busy Security log across 5 event IDs
+# over 24h can otherwise produce a payload several times that cap on its own.
+# security_events_truncated flags when the cap itself (not just the 24h window) is
+# the reason some events are missing, the same explicit-rather-than-silent discipline
+# string_sweep's hits_truncated/matches_truncated flags already established.
+$maxSecurityEvents = 60
 $result.security_events = @(try {
-    Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4624,4625,4648,4672,4688; StartTime=(Get-Date).AddHours(-24)} -MaxEvents 300 -ErrorAction Stop |
-        Select-Object TimeCreated,Id,@{N='Message';E={($_.Message -replace '\s+',' ').Substring(0, [Math]::Min(300, ($_.Message -replace '\s+',' ').Length))}}
+    Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4624,4625,4648,4672,4688; StartTime=(Get-Date).AddHours(-24)} -MaxEvents $maxSecurityEvents -ErrorAction Stop |
+        Select-Object TimeCreated,Id,@{N='Message';E={($_.Message -replace '\s+',' ').Substring(0, [Math]::Min(200, ($_.Message -replace '\s+',' ').Length))}}
 } catch { @() })
+$result.security_events_truncated = ($result.security_events.Count -ge $maxSecurityEvents)
 
 $result.bitlocker = @(try {
     Get-BitLockerVolume -ErrorAction Stop | ForEach-Object {
