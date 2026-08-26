@@ -221,6 +221,33 @@ def _record_ioc_sightings(cursor, rule_id, host, source_ip, destination_ip, file
                 (row['stix_id'], f"alert:{rule_title}", f"alert_id={alert_id}, host={host}")
             )
 
+# Only called for a genuinely NEW alert row (the caller's `existing` branch above skips
+# this on a re-occurrence bump within the 15-minute dedup window) -- that's the only
+# dedup guard this needs. A rule that keeps re-triggering on the same host/user just
+# keeps bumping occurrence_count on the one alert already linked into the one case
+# already created, rather than spawning a new case every cycle.
+def _auto_create_case(cursor, rule_title, host, username, alert_id, template_id):
+    title = f"{rule_title} — {host}"
+    detail = f"Auto-created because rule '{rule_title}' fired on {host}" + (f" (user: {username})" if username else "") + "."
+    cursor.execute(
+        "INSERT INTO cases (title, status, description, created_by, tlp, pap) VALUES (?, 'open', ?, 'system:auto-case', 'amber', 'amber')",
+        (title, detail)
+    )
+    cid = cursor.lastrowid
+    cursor.execute("INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'system', 'created', ?)", (cid, title))
+    cursor.execute("INSERT INTO case_items (case_id, item_type, item_id, added_by) VALUES (?, 'alert', ?, 'system')", (cid, str(alert_id)))
+    cursor.execute("INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'system', 'item_added', ?)", (cid, f"alert:{alert_id}"))
+    if template_id:
+        tpl = cursor.execute("SELECT name, tasks FROM case_templates WHERE id = ?", (template_id,)).fetchone()
+        if tpl:
+            tasks = json.loads(tpl['tasks'])
+            cursor.executemany(
+                "INSERT INTO case_tasks (case_id, title, position, created_by) VALUES (?, ?, ?, 'system')",
+                [(cid, t, i) for i, t in enumerate(tasks)]
+            )
+            cursor.execute("INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'system', 'template_applied', ?)", (cid, tpl['name']))
+    return cid
+
 _IOC_PLACEHOLDER_KINDS = (('ip', IOC_IP_PLACEHOLDER), ('hash', IOC_HASH_PLACEHOLDER), ('domain', IOC_DOMAIN_PLACEHOLDER))
 _IOC_LIST_BUILDERS = {'ip': _get_ioc_ip_list_yaml, 'hash': _get_ioc_hash_list_yaml, 'domain': _get_ioc_domain_list_yaml}
 
@@ -251,8 +278,9 @@ def run_detection_cycle():
     if current_max <= last_id: return
 
     cursor.execute(f"CREATE TEMP VIEW recent_events AS SELECT * FROM live_logs WHERE id > {last_id} AND id <= {current_max}")
-    rules = cursor.execute("SELECT id, title, rule_yaml, severity_override FROM sigma_rules WHERE enabled = 1").fetchall()
+    rules = cursor.execute("SELECT id, title, rule_yaml, severity_override, auto_case, auto_case_template_id FROM sigma_rules WHERE enabled = 1").fetchall()
     rule_titles = {r['id']: r['title'] for r in rules}
+    rule_autocase = {r['id']: r['auto_case_template_id'] for r in rules if r['auto_case']}
     rule_uses_ioc_placeholder = {
         r['id']: {kind: placeholder in r['rule_yaml'] for kind, placeholder in _IOC_PLACEHOLDER_KINDS}
         for r in rules
@@ -352,8 +380,15 @@ def run_detection_cycle():
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
                     (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app, g['count'])
                 )
+                new_alert_id = cursor.lastrowid
                 _record_ioc_sightings(cursor, rule_id, host, source_ip, destination_ip, file_hash, query_name,
-                                       cursor.lastrowid, rule_titles.get(rule_id, 'Custom/YARA Rule'), rule_uses_ioc_placeholder)
+                                       new_alert_id, rule_titles.get(rule_id, 'Custom/YARA Rule'), rule_uses_ioc_placeholder)
+                if rule_id in rule_autocase:
+                    try:
+                        _auto_create_case(cursor, rule_titles.get(rule_id, 'Custom/YARA Rule'), host, username,
+                                           new_alert_id, rule_autocase[rule_id])
+                    except Exception as e:
+                        print(f"[-] Auto-case creation failed for rule '{rule_titles.get(rule_id)}': {e}")
                 # Only a brand-new alert notifies, not a re-occurrence within the same
                 # 15-minute dedup window (the `existing` branch above) -- otherwise a noisy
                 # rule would re-notify every cycle it keeps matching instead of once per burst.

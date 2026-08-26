@@ -1832,6 +1832,7 @@ def api_rules_tuning():
     db = get_db()
     rows = db.execute("""
         SELECT sr.id, sr.title, sr.source, sr.enabled, sr.rule_yaml, sr.severity_override,
+               sr.auto_case, sr.auto_case_template_id,
                COALESCE(c7.cnt, 0) as alerts_7d,
                COALESCE(c30.cnt, 0) as alerts_30d,
                COALESCE(ctot.cnt, 0) as alerts_total,
@@ -1853,6 +1854,7 @@ def api_rules_tuning():
         out.append({
             "id": r['id'], "title": r['title'], "source": r['source'] or 'sigma',
             "enabled": r['enabled'], "level": level, "severity_override": r['severity_override'],
+            "auto_case": r['auto_case'], "auto_case_template_id": r['auto_case_template_id'],
             "alerts_7d": r['alerts_7d'], "alerts_30d": r['alerts_30d'], "alerts_total": r['alerts_total'],
             "last_triggered": r['last_triggered'], "exclusion_count": r['exclusion_count']
         })
@@ -1874,6 +1876,25 @@ def api_rule_severity(rid):
     db.execute("UPDATE sigma_rules SET severity_override = ? WHERE id = ?", (sev, rid))
     db.commit()
     invalidate_rules_cache()
+    return jsonify({"status": "success"})
+
+@app.route('/api/rules/<int:rid>/autocase', methods=['PUT'])
+@login_required
+def api_rule_autocase(rid):
+    if current_user.role != 'admin':
+        return jsonify({"error": "Admin required"}), 403
+    d = request.get_json() or {}
+    enabled = 1 if d.get('auto_case') else 0
+    template_id = d.get('auto_case_template_id') or None
+    db = get_db()
+    if not db.execute("SELECT 1 FROM sigma_rules WHERE id = ?", (rid,)).fetchone():
+        return jsonify({"error": "Rule not found"}), 404
+    if template_id and not db.execute("SELECT 1 FROM case_templates WHERE id = ?", (template_id,)).fetchone():
+        return jsonify({"error": "Template not found"}), 400
+    db.execute("UPDATE sigma_rules SET auto_case = ?, auto_case_template_id = ? WHERE id = ?", (enabled, template_id, rid))
+    db.commit()
+    invalidate_rules_cache()
+    log_audit('rule_autocase_update', 'rule', rid, f"auto_case={enabled} template_id={template_id}")
     return jsonify({"status": "success"})
 
 @app.route('/api/rules/<int:rid>/exclusions', methods=['GET', 'POST'])
@@ -3597,6 +3618,23 @@ def migrate_rule_tuning():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )''')
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rule_exclusions_rule ON rule_exclusions(rule_id)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_rule_autocase():
+    # Lets an admin flag a rule so a genuinely NEW alert from it (not a re-occurrence
+    # bump within sigma_engine.py's existing 15-minute dedup window) auto-creates a
+    # Case, optionally seeded from a case_templates task list -- same ALTER-TABLE-catch-
+    # up pattern as migrate_rule_tuning()'s severity_override column above.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(sigma_rules)").fetchall()}
+        if 'auto_case' not in cols:
+            conn.execute("ALTER TABLE sigma_rules ADD COLUMN auto_case BOOLEAN DEFAULT 0")
+        if 'auto_case_template_id' not in cols:
+            conn.execute("ALTER TABLE sigma_rules ADD COLUMN auto_case_template_id INTEGER")
         conn.commit()
         conn.close()
     except Exception:
@@ -6298,6 +6336,7 @@ migrate_alerts_enrichment()
 migrate_alerts_dedup_columns()
 migrate_sigma_rules_columns()
 migrate_rule_tuning()
+migrate_rule_autocase()
 migrate_compliance_tags()
 migrate_ueba_entities()
 migrate_ueba_math_v2()
