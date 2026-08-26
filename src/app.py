@@ -2654,6 +2654,137 @@ def api_case_add_note(cid):
     db.commit()
     return jsonify({"status": "success"})
 
+# Batch C of the alert/UEBA -> case automation workflow: a deterministic (not LLM-
+# generated -- see the session's explicit choice for this) rollup of what's known about
+# a host/user, run on demand from the case detail view and posted straight to the
+# timeline. Reuses the exact same weighted risk-score SQL as /api/ueba/risk-scores and
+# ueba_engine.py's run_autocase_check() (so "the score" means the same number everywhere
+# in the app), and the same enrichment cache-then-run pattern as /api/ti/enrich (so a
+# host analyzed twice in the same day doesn't re-hit AbuseIPDB's free-tier rate limit).
+# UEBA anomalies (the `events` table) are host-only -- there is no username column on
+# that table, so a user analysis skips that section rather than guessing at a join.
+MAX_ANALYZE_ENRICH_IPS = 5
+
+@app.route('/api/cases/<int:cid>/analyze', methods=['POST'])
+@login_required
+def api_case_analyze(cid):
+    db = get_db()
+    if not db.execute("SELECT 1 FROM cases WHERE id = ?", (cid,)).fetchone():
+        return jsonify({"error": "Case not found"}), 404
+    d = request.get_json() or {}
+    entity_type = (d.get('entity_type') or '').strip()
+    entity_id = (d.get('entity_id') or '').strip()
+    if entity_type not in ('host', 'user'):
+        return jsonify({"error": "entity_type must be 'host' or 'user'"}), 400
+    if not entity_id:
+        return jsonify({"error": "entity_id is required"}), 400
+
+    risk_cfg = get_risk_score_config(db)
+    window = f"-{risk_cfg['window_days']} days"
+    host_or_user_col = 'host' if entity_type == 'host' else 'username'
+
+    alert_rows = db.execute(
+        f"SELECT a.severity, COALESCE(s.title, a.rule_name, 'Custom/YARA Rule') as rule_title, a.source_ip, "
+        f"a.timestamp, a.last_seen, a.occurrence_count "
+        f"FROM alerts a LEFT JOIN sigma_rules s ON a.rule_id = s.id "
+        f"WHERE a.{host_or_user_col} = ? AND COALESCE(a.last_seen, a.timestamp) >= datetime('now', ?) "
+        f"ORDER BY a.timestamp DESC",
+        (entity_id, window)
+    ).fetchall()
+
+    severity_counts, rule_counts, source_ips = {}, {}, []
+    seen_ips = set()
+    first_seen = last_seen = None
+    total_occurrences = 0
+    for r in alert_rows:
+        sev = (r['severity'] or 'unknown').lower()
+        severity_counts[sev] = severity_counts.get(sev, 0) + 1
+        rule_counts[r['rule_title']] = rule_counts.get(r['rule_title'], 0) + 1
+        if r['source_ip'] and r['source_ip'] not in seen_ips:
+            seen_ips.add(r['source_ip'])
+            source_ips.append(r['source_ip'])
+        total_occurrences += r['occurrence_count'] or 1
+        ts = r['timestamp']
+        if ts and (first_seen is None or ts < first_seen): first_seen = ts
+        ls = r['last_seen'] or ts
+        if ls and (last_seen is None or ls > last_seen): last_seen = ls
+
+    ueba_count = 0
+    if entity_type == 'host':
+        ueba_count = db.execute(
+            "SELECT COUNT(*) FROM events WHERE hostname = ? AND timestamp >= datetime('now', ?)",
+            (entity_id, window)
+        ).fetchone()[0]
+
+    if entity_type == 'host':
+        score_row = db.execute(
+            "SELECT ROUND(SUM(rse.points) * COALESCE(CASE a.criticality WHEN 'critical' THEN 2.0 WHEN 'important' THEN 1.5 ELSE 1.0 END, 1.0), 1) as score "
+            "FROM risk_score_events rse LEFT JOIN assets a ON rse.entity_id = a.host "
+            "WHERE rse.entity_type = 'host' AND rse.entity_id = ? AND rse.computed_at >= datetime('now', ?)",
+            (entity_id, window)
+        ).fetchone()
+    else:
+        score_row = db.execute(
+            "SELECT ROUND(SUM(rse.points) * COALESCE(CASE WHEN i.privileged = 1 THEN 1.5 ELSE 1.0 END, 1.0), 1) as score "
+            "FROM risk_score_events rse LEFT JOIN identities i ON rse.entity_id = i.username "
+            "WHERE rse.entity_type = 'user' AND rse.entity_id = ? AND rse.computed_at >= datetime('now', ?)",
+            (entity_id, window)
+        ).fetchone()
+    score = score_row['score'] if score_row and score_row['score'] is not None else 0
+    tier = _risk_tier(score, risk_cfg['tiers'])
+
+    from analyzers import applicable_analyzers, ENRICHMENT_CACHE_TTL_HOURS
+    key_row = db.execute("SELECT value FROM settings WHERE key = 'enrichment_api_keys'").fetchone()
+    api_keys = json.loads(key_row['value']) if key_row and key_row['value'] else {}
+    ip_analyzers = applicable_analyzers('ip')
+    enrichment_lines = []
+    for ip in source_ips[:MAX_ANALYZE_ENRICH_IPS]:
+        parts = []
+        for a in ip_analyzers:
+            cached = db.execute(
+                "SELECT verdict, summary FROM enrichment_results WHERE value = ? AND source = ? AND fetched_at >= datetime('now', ?)",
+                (ip, a['key'], f'-{ENRICHMENT_CACHE_TTL_HOURS} hours')
+            ).fetchone()
+            if cached:
+                parts.append(f"{a['label']}: {cached['summary']}")
+                continue
+            api_key = api_keys.get(a['settings_key']) if a.get('requires_key') else None
+            out = a['run'](ip, api_key)
+            db.execute(
+                "INSERT INTO enrichment_results (value, source, verdict, summary, raw_json, fetched_at) VALUES (?, ?, ?, ?, ?, datetime('now')) "
+                "ON CONFLICT(value, source) DO UPDATE SET verdict=excluded.verdict, summary=excluded.summary, raw_json=excluded.raw_json, fetched_at=excluded.fetched_at",
+                (ip, a['key'], out['verdict'], out['summary'], json.dumps(out.get('raw') or {}))
+            )
+            parts.append(f"{a['label']}: {out['summary']}")
+        enrichment_lines.append(f"{ip} — {'; '.join(parts) if parts else 'no analyzers applicable'}")
+
+    label = 'Host' if entity_type == 'host' else 'User'
+    lines = [f"{label} Analysis: {entity_id} (last {risk_cfg['window_days']} days)", '']
+    lines.append(f"Risk Score: {score} ({tier} tier)")
+    lines.append('')
+    if alert_rows:
+        sev_str = ', '.join(f"{c} {s}" for s, c in sorted(severity_counts.items(), key=lambda x: -x[1]))
+        lines.append(f"Alerts: {len(alert_rows)} distinct ({total_occurrences} occurrence(s) total) — {sev_str}")
+        top_rules = sorted(rule_counts.items(), key=lambda x: -x[1])[:5]
+        lines.append("Top rules: " + ', '.join(f"{t} ({c})" for t, c in top_rules))
+        lines.append(f"First seen: {first_seen}   Last seen: {last_seen}")
+    else:
+        lines.append("Alerts: none in this window.")
+    if entity_type == 'host':
+        lines.append('')
+        lines.append(f"UEBA Anomalies: {ueba_count} in this window.")
+    lines.append('')
+    if source_ips:
+        lines.append(f"IOC Enrichment ({len(enrichment_lines)} of {len(source_ips)} distinct source IP(s) checked):")
+        lines.extend(f"- {l}" for l in enrichment_lines)
+    else:
+        lines.append("IOC Enrichment: no source IPs found on this entity's alerts in this window.")
+
+    summary = '\n'.join(lines)
+    _log_case_event(db, cid, 'analysis', summary)
+    db.commit()
+    return jsonify({'status': 'success', 'summary': summary})
+
 @app.route('/api/case-templates', methods=['GET'])
 @login_required
 def api_case_templates():
