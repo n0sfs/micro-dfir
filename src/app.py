@@ -1303,6 +1303,51 @@ def api_ti_entity_full_detail(eid):
 
     return jsonify({**entity, 'techniques': techniques, 'matched_iocs': matched_iocs, 'relationships': relationships})
 
+# A3: manual entity<->target links -- lets an analyst tie a specific alert/UEBA
+# event/case/IOC to an entity when the automatic name/alias regex match (used by
+# matched_iocs above and the actor-summary widget) doesn't catch it. Open to any
+# logged-in user, not admin-gated -- same collaborative-annotation posture as case
+# items/tasks/notes, distinct from entity CRUD which edits the canonical library.
+TI_RELATIONSHIP_TARGET_TYPES = {'alert', 'ueba_event', 'case', 'ioc'}
+
+@app.route('/api/ti/entities/<int:eid>/relationships', methods=['POST'])
+@login_required
+def api_ti_entity_relationship_add(eid):
+    db = get_db()
+    if not db.execute("SELECT 1 FROM ti_entities WHERE id = ?", (eid,)).fetchone():
+        return jsonify({'error': 'Entity not found'}), 404
+    d = request.json or {}
+    target_type = (d.get('target_type') or '').strip()
+    target_id = str(d.get('target_id') or '').strip()
+    relationship_type = (d.get('relationship_type') or 'indicates').strip()
+    if target_type not in TI_RELATIONSHIP_TARGET_TYPES:
+        return jsonify({'error': f"target_type must be one of {', '.join(sorted(TI_RELATIONSHIP_TARGET_TYPES))}"}), 400
+    if not target_id:
+        return jsonify({'error': 'target_id is required'}), 400
+    if db.execute(
+        "SELECT 1 FROM ti_relationships WHERE entity_id = ? AND target_type = ? AND target_id = ?",
+        (eid, target_type, target_id)
+    ).fetchone():
+        return jsonify({'error': 'That link already exists'}), 400
+    db.execute(
+        "INSERT INTO ti_relationships (entity_id, target_type, target_id, relationship_type, created_by) VALUES (?, ?, ?, ?, ?)",
+        (eid, target_type, target_id, relationship_type, current_user.username)
+    )
+    db.commit()
+    log_audit('ti_relationship_create', 'ti_entity', eid, f'{target_type}:{target_id}')
+    return jsonify({'status': 'success'})
+
+@app.route('/api/ti/entities/<int:eid>/relationships/<int:rid>', methods=['DELETE'])
+@login_required
+def api_ti_entity_relationship_delete(eid, rid):
+    db = get_db()
+    if not db.execute("SELECT 1 FROM ti_relationships WHERE id = ? AND entity_id = ?", (rid, eid)).fetchone():
+        return jsonify({'error': 'Relationship not found'}), 404
+    db.execute("DELETE FROM ti_relationships WHERE id = ?", (rid,))
+    db.commit()
+    log_audit('ti_relationship_delete', 'ti_entity', eid, str(rid))
+    return jsonify({'ok': 1})
+
 @app.route('/api/ti/warninglists', methods=['GET'])
 @login_required
 def api_ti_warninglists():

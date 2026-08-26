@@ -185,10 +185,11 @@
                                         </div>
                                     </th>
                                     <th title="How many times this indicator has actually matched our own environment (via the IOC-IP correlation), not just how many times it's been seen in the feed">Sightings</th>
+                                    <th></th>
                                 </tr>
                             </thead>
                             <tbody id="iocTableBody">
-                                <tr><td colspan="8" class="text-center text-muted py-4">Loading indicators...</td></tr>
+                                <tr><td colspan="9" class="text-center text-muted py-4">Loading indicators...</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -369,6 +370,40 @@
         <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body" id="entityDetailBody"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Link IOC to Entity Modal (A3) -->
+<div class="modal fade" id="linkIocModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title">Link Indicator to Entity</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-2">
+            <label class="form-label small text-muted mb-1">Indicator</label>
+            <div class="font-monospace small" id="linkIocPattern"></div>
+        </div>
+        <div class="mb-2">
+            <label class="form-label small text-muted mb-1">Entity</label>
+            <select id="linkIocEntitySelect" class="form-select bg-dark text-light border-secondary"></select>
+        </div>
+        <div class="mb-2">
+            <label class="form-label small text-muted mb-1">Relationship</label>
+            <select id="linkIocRelationshipType" class="form-select bg-dark text-light border-secondary">
+                <option value="indicates">indicates</option>
+                <option value="attributed-to">attributed-to</option>
+                <option value="related-to">related-to</option>
+                <option value="mitigates">mitigates</option>
+                <option value="communicates-with">communicates-with</option>
+            </select>
+        </div>
+        <button type="button" class="btn btn-sm btn-outline-primary" onclick="submitLinkIoc()"><i class="fa-solid fa-link me-1"></i>Link</button>
+        <div id="linkIocMsg" class="small mt-2" style="display:none;"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -1170,8 +1205,9 @@ function loadEnrichmentSettings() {
 }
 
 // ---- Entities (Tier 3 Track A) ----
-let entityModal = null, entityDetailModal = null, editingEntityId = null;
+let entityModal = null, entityDetailModal = null, editingEntityId = null, activeEntityDetailId = null;
 let allEntities = [];
+let currentIocs = [], linkIocModal = null;
 
 function initEntityModal() { if (!entityModal) entityModal = new bootstrap.Modal(document.getElementById('entityModal')); }
 
@@ -1249,11 +1285,85 @@ async function deleteEntity(id, name) {
     loadEntities();
 }
 
-function relationshipRow(rel) {
-    return `<tr><td class="small">${escHtml(rel.target_type)}</td><td class="small font-monospace">${escHtml(rel.target_id)}</td><td class="small text-muted">${escHtml(rel.relationship_type)}</td><td class="small text-muted">${escHtml(rel.created_by || '')}</td></tr>`;
+function relationshipRow(rel, eid) {
+    return `<tr>
+        <td class="small">${escHtml(rel.target_type)}</td>
+        <td class="small font-monospace">${escHtml(rel.target_id)}</td>
+        <td class="small text-muted">${escHtml(rel.relationship_type)}</td>
+        <td class="small text-muted">${escHtml(rel.created_by || '')}</td>
+        <td class="text-end"><button type="button" class="btn btn-sm btn-outline-danger py-0 px-1" title="Remove" onclick="deleteRelationship(${eid}, ${rel.id})"><i class="fa-solid fa-xmark"></i></button></td>
+    </tr>`;
+}
+
+async function addRelationship() {
+    const msg = document.getElementById('addRelMsg');
+    const target_type = document.getElementById('relTargetType').value;
+    const target_id = document.getElementById('relTargetId').value.trim();
+    const relationship_type = document.getElementById('relRelationshipType').value;
+    if (!target_id) {
+        msg.className = 'small mt-1 text-danger'; msg.innerText = 'Target ID is required.'; msg.style.display = 'block';
+        return;
+    }
+    try {
+        const res = await fetch(`/api/ti/entities/${activeEntityDetailId}/relationships`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({target_type, target_id, relationship_type})
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            msg.className = 'small mt-1 text-danger'; msg.innerText = data.error || 'Failed to link.'; msg.style.display = 'block';
+            return;
+        }
+        openEntityDetail(activeEntityDetailId);
+    } catch (err) {
+        msg.className = 'small mt-1 text-danger'; msg.innerText = 'Error: ' + err; msg.style.display = 'block';
+    }
+}
+
+async function deleteRelationship(eid, rid) {
+    if (!(await confirmDialog('Remove this relationship?', {title: 'Remove relationship', danger: true, confirmLabel: 'Remove'}))) return;
+    const res = await fetch(`/api/ti/entities/${eid}/relationships/${rid}`, {method: 'DELETE'});
+    if (!res.ok) { const err = await res.json().catch(() => ({})); toast(err.error || 'Failed to remove.', 'danger'); return; }
+    openEntityDetail(eid);
+}
+
+let linkIocStixId = null;
+
+function openLinkIocModal(idx) {
+    const ioc = currentIocs[idx];
+    if (!ioc) return;
+    linkIocStixId = ioc.stix_id;
+    document.getElementById('linkIocPattern').innerText = ioc.pattern;
+    const select = document.getElementById('linkIocEntitySelect');
+    select.innerHTML = '<option value="">Choose an entity…</option>' + allEntities.map(e => `<option value="${e.id}">${escHtml(e.name)}</option>`).join('');
+    document.getElementById('linkIocMsg').style.display = 'none';
+    if (!linkIocModal) linkIocModal = new bootstrap.Modal(document.getElementById('linkIocModal'));
+    linkIocModal.show();
+}
+
+async function submitLinkIoc() {
+    const msg = document.getElementById('linkIocMsg');
+    const entityId = document.getElementById('linkIocEntitySelect').value;
+    const relationship_type = document.getElementById('linkIocRelationshipType').value;
+    if (!entityId) {
+        msg.className = 'small mt-2 text-danger'; msg.innerText = 'Pick an entity first.'; msg.style.display = 'block'; return;
+    }
+    try {
+        const res = await fetch(`/api/ti/entities/${entityId}/relationships`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({target_type: 'ioc', target_id: linkIocStixId, relationship_type})
+        });
+        const data = await res.json();
+        msg.className = 'small mt-2 ' + (res.ok ? 'text-success' : 'text-danger');
+        msg.innerText = res.ok ? 'Linked to entity.' : (data.error || 'Failed to link.');
+        msg.style.display = 'block';
+    } catch (err) {
+        msg.className = 'small mt-2 text-danger'; msg.innerText = 'Error: ' + err; msg.style.display = 'block';
+    }
 }
 
 async function openEntityDetail(id) {
+    activeEntityDetailId = id;
     initEntityDetailModalRef();
     document.getElementById('entityDetailTitle').innerText = 'Loading...';
     document.getElementById('entityDetailBody').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
@@ -1270,7 +1380,7 @@ async function openEntityDetail(id) {
                 <td class="small text-muted">${escHtml(i.source_name || 'Unknown')}${i.corroboration_count > 1 ? ` <span class="badge bg-info text-dark">+${i.corroboration_count - 1} more</span>` : ''}</td>
                 <td class="small">${i.sighting_count > 0 ? `<span class="badge bg-warning text-dark">${i.sighting_count}</span>` : '<span class="text-muted">—</span>'}</td>
             </tr>`).join('');
-        const relRows = (e.relationships || []).map(relationshipRow).join('');
+        const relRows = (e.relationships || []).map(r => relationshipRow(r, e.id)).join('');
         document.getElementById('entityDetailBody').innerHTML = `
             ${(e.aliases || []).length ? `<div class="text-muted small mb-2">aka ${escHtml(e.aliases.join(', '))}</div>` : ''}
             <p class="small">${escHtml(e.description || '')}</p>
@@ -1285,12 +1395,39 @@ async function openEntityDetail(id) {
                 </table>
             </div>
             <h6 class="small text-uppercase text-muted">Manual Relationships (${(e.relationships || []).length})</h6>
-            <div class="table-responsive">
+            <div class="table-responsive mb-2">
                 <table class="table table-dark table-sm mb-0">
-                    <thead><tr><th>Target Type</th><th>Target ID</th><th>Relationship</th><th>Added By</th></tr></thead>
-                    <tbody>${relRows || '<tr><td colspan="4" class="text-center text-muted small py-2">None yet.</td></tr>'}</tbody>
+                    <thead><tr><th>Target Type</th><th>Target ID</th><th>Relationship</th><th>Added By</th><th></th></tr></thead>
+                    <tbody>${relRows || '<tr><td colspan="5" class="text-center text-muted small py-2">None yet.</td></tr>'}</tbody>
                 </table>
             </div>
+            <div class="d-flex flex-wrap gap-2 align-items-end">
+                <div>
+                    <label class="form-label small text-muted mb-1">Target Type</label>
+                    <select id="relTargetType" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:130px;">
+                        <option value="alert">Alert</option>
+                        <option value="ueba_event">UEBA Event</option>
+                        <option value="case">Case</option>
+                        <option value="ioc">IOC (STIX ID)</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="form-label small text-muted mb-1">Target ID</label>
+                    <input type="text" id="relTargetId" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:170px;" placeholder="e.g. 42" onkeyup="if(event.key === 'Enter') addRelationship()">
+                </div>
+                <div>
+                    <label class="form-label small text-muted mb-1">Relationship</label>
+                    <select id="relRelationshipType" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:160px;">
+                        <option value="indicates">indicates</option>
+                        <option value="attributed-to">attributed-to</option>
+                        <option value="related-to">related-to</option>
+                        <option value="mitigates">mitigates</option>
+                        <option value="communicates-with">communicates-with</option>
+                    </select>
+                </div>
+                <button type="button" class="btn btn-sm btn-outline-primary" onclick="addRelationship()"><i class="fa-solid fa-link me-1"></i>Link</button>
+            </div>
+            <div id="addRelMsg" class="small mt-1" style="display:none;"></div>
         `;
     } catch (err) {
         document.getElementById('entityDetailBody').innerHTML = `<span class="text-danger">Error: ${escHtml(String(err))}</span>`;
@@ -1442,11 +1579,12 @@ function loadIocs() {
                 ? `Showing ${data.iocs.length} of ${data.total} matching indicators`
                 : `Showing ${data.iocs.length} of ${data.total} indicators`;
             const tbody = document.getElementById('iocTableBody');
-            if (!data.iocs || data.iocs.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="8" class="text-center text-muted py-4">${filtered ? 'No indicators match your filters.' : 'No indicators ingested yet. Add or sync a feed above.'}</td></tr>`;
+            currentIocs = data.iocs || [];
+            if (!currentIocs.length) {
+                tbody.innerHTML = `<tr><td colspan="9" class="text-center text-muted py-4">${filtered ? 'No indicators match your filters.' : 'No indicators ingested yet. Add or sync a feed above.'}</td></tr>`;
                 return;
             }
-            tbody.innerHTML = data.iocs.map(i => `
+            tbody.innerHTML = currentIocs.map((i, idx) => `
                 <tr>
                     <td class="font-monospace small">${escHtml(i.pattern)}</td>
                     <td>${escHtml(i.name || '')}</td>
@@ -1460,6 +1598,7 @@ function loadIocs() {
                     <td>${i.sighting_count > 0
                         ? `<span class="badge bg-warning text-dark" title="Last observed here: ${escHtml(i.last_sighted || '')}">${i.sighting_count}</span>`
                         : '<span class="text-muted small">—</span>'}</td>
+                    <td class="text-end"><button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1" title="Link to entity" onclick="openLinkIocModal(${idx})"><i class="fa-solid fa-link"></i></button></td>
                 </tr>
             `).join('');
         })
