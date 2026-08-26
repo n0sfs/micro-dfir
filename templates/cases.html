@@ -1,41 +1,58 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-header d-flex justify-content-between align-items-start flex-wrap gap-2">
-    <div>
-        <h2><i class="fa-solid fa-folder-open me-2"></i>Cases</h2>
-        <p>Group related alerts and UEBA anomalies together while you work an incident.</p>
+<div id="casesListView">
+    <div class="page-header d-flex justify-content-between align-items-start flex-wrap gap-2">
+        <div>
+            <h2><i class="fa-solid fa-folder-open me-2"></i>Cases</h2>
+            <p>Group related alerts and UEBA anomalies together while you work an incident.</p>
+        </div>
+        <button type="button" class="btn btn-outline-primary" onclick="showNewCaseModal()"><i class="fa-solid fa-plus me-1"></i>New Case</button>
     </div>
-    <button type="button" class="btn btn-outline-primary" onclick="showNewCaseModal()"><i class="fa-solid fa-plus me-1"></i>New Case</button>
-</div>
 
-<div class="card bg-dark border-secondary">
-    <div class="card-header border-secondary d-flex justify-content-between align-items-center">
-        <span><i class="fa-solid fa-list me-2"></i>All Cases</span>
-        <div class="btn-group btn-group-sm" role="group">
-            <button type="button" class="btn btn-outline-secondary active" id="caseFilterAll" onclick="setCaseFilter('all')">All</button>
-            <button type="button" class="btn btn-outline-secondary" id="caseFilterOpen" onclick="setCaseFilter('open')">Open</button>
-            <button type="button" class="btn btn-outline-secondary" id="caseFilterClosed" onclick="setCaseFilter('closed')">Closed</button>
+    <div class="card bg-dark border-secondary">
+        <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+            <span><i class="fa-solid fa-list me-2"></i>All Cases</span>
+            <div class="btn-group btn-group-sm" role="group">
+                <button type="button" class="btn btn-outline-secondary active" id="caseFilterAll" onclick="setCaseFilter('all')">All</button>
+                <button type="button" class="btn btn-outline-secondary" id="caseFilterOpen" onclick="setCaseFilter('open')">Open</button>
+                <button type="button" class="btn btn-outline-secondary" id="caseFilterClosed" onclick="setCaseFilter('closed')">Closed</button>
+            </div>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-dark table-hover mb-0 align-middle">
+                <thead>
+                    <tr>
+                        <th class="ps-3">Title</th>
+                        <th>Status</th>
+                        <th>TLP</th>
+                        <th>Assignee</th>
+                        <th>Items</th>
+                        <th>Tasks</th>
+                        <th>Created</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="casesTableBody">
+                    <tr><td colspan="8" class="text-center text-muted py-4">Loading…</td></tr>
+                </tbody>
+            </table>
         </div>
     </div>
-    <div class="table-responsive">
-        <table class="table table-dark table-hover mb-0 align-middle">
-            <thead>
-                <tr>
-                    <th class="ps-3">Title</th>
-                    <th>Status</th>
-                    <th>TLP</th>
-                    <th>Assignee</th>
-                    <th>Items</th>
-                    <th>Tasks</th>
-                    <th>Created</th>
-                    <th></th>
-                </tr>
-            </thead>
-            <tbody id="casesTableBody">
-                <tr><td colspan="8" class="text-center text-muted py-4">Loading…</td></tr>
-            </tbody>
-        </table>
+</div>
+
+<!-- Case Detail view -- a real page section (not a modal) so an analyst has the full
+     page to work a case in: edit fields, tasks, items, entity links, and timeline all
+     visible/scrollable together, and the URL (/cases?case=<id>) is bookmarkable/
+     shareable and plays nicely with the browser back/forward buttons. -->
+<div id="caseDetailView" style="display:none;">
+    <div class="page-header d-flex justify-content-between align-items-start flex-wrap gap-2">
+        <div>
+            <button type="button" class="btn btn-sm btn-outline-secondary mb-2" onclick="backToList()"><i class="fa-solid fa-arrow-left me-1"></i>Back to Cases</button>
+            <h2 id="caseDetailTitleHeading"><i class="fa-solid fa-folder-open me-2"></i>Case Detail</h2>
+        </div>
+        <button type="button" class="btn btn-outline-danger" onclick="deleteCase(activeCaseId)"><i class="fa-solid fa-trash me-1"></i>Delete Case</button>
     </div>
+    <div id="caseDetailBody"></div>
 </div>
 
 <!-- New Case modal -->
@@ -86,19 +103,6 @@
     </div>
 </div>
 
-<!-- Case Detail modal -->
-<div class="modal fade" id="caseDetailModal" tabindex="-1">
-    <div class="modal-dialog modal-lg modal-dialog-scrollable">
-        <div class="modal-content bg-dark text-light border-secondary">
-            <div class="modal-header border-secondary">
-                <h5 class="modal-title"><i class="fa-solid fa-folder-open me-2"></i>Case Detail</h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body" id="caseDetailBody"></div>
-        </div>
-    </div>
-</div>
-
 <!-- Command Result Detail modal (for command_result case items) -->
 <div class="modal fade" id="caseCmdResultModal" tabindex="-1">
     <div class="modal-dialog modal-lg modal-dialog-scrollable">
@@ -118,7 +122,7 @@
 let allCases = [];
 let caseFilter = 'all';
 let activeCaseId = null;
-let newCaseModal, caseDetailModal;
+let newCaseModal;
 
 function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -241,7 +245,7 @@ function createCase() {
 async function deleteCase(cid) {
     if (!(await confirmDialog('Delete this case? Its item links will also be removed (the underlying alerts/anomalies are not affected).', {title: 'Delete case', danger: true, confirmLabel: 'Delete'}))) return;
     fetch(`/api/cases/${cid}`, {method: 'DELETE'})
-        .then(() => loadCases())
+        .then(() => { if (cid === activeCaseId) { backToList(); } else { loadCases(); } })
         .catch(err => toast('Error deleting case: ' + err, 'danger'));
 }
 
@@ -303,79 +307,138 @@ function eventRow(e) {
         </div>`;
 }
 
-function openCaseDetail(cid) {
-    activeCaseId = cid;
+function showListView() {
+    document.getElementById('caseDetailView').style.display = 'none';
+    document.getElementById('casesListView').style.display = '';
+}
+
+function showDetailView() {
+    document.getElementById('casesListView').style.display = 'none';
+    document.getElementById('caseDetailView').style.display = '';
+}
+
+function backToList() {
+    activeCaseId = null;
+    showListView();
+    loadCases();
+    if (window.location.search) history.pushState({}, '', '/cases');
+}
+
+window.addEventListener('popstate', () => {
+    const cidParam = new URLSearchParams(window.location.search).get('case');
+    if (cidParam) {
+        activeCaseId = parseInt(cidParam, 10);
+        loadAndRenderCaseDetail(activeCaseId);
+    } else {
+        activeCaseId = null;
+        showListView();
+        loadCases();
+    }
+});
+
+// Fetches + renders the case into #caseDetailBody and shows the detail view, without
+// touching browser history -- used for the initial navigation (via openCaseDetail,
+// which pushes history separately), every in-place refresh after a mutation (add task,
+// toggle task, add note, etc. all call openCaseDetail(activeCaseId) again, which is a
+// no-op on history since the URL hasn't changed), and popstate-driven back/forward nav.
+function loadAndRenderCaseDetail(cid) {
     fetch(`/api/cases/${cid}`).then(r => r.json()).then(c => {
+        if (!c || c.error) { toast((c && c.error) || 'Case not found.', 'danger'); backToList(); return; }
+        document.getElementById('caseDetailTitleHeading').innerHTML = `<i class="fa-solid fa-folder-open me-2"></i>${escHtml(c.title)}`;
         document.getElementById('caseDetailBody').innerHTML = `
-            <div class="row g-2 mb-3">
-                <div class="col-md-8">
-                    <label class="form-label small text-muted mb-1">Title</label>
-                    <input type="text" id="editCaseTitle" class="form-control bg-dark text-light border-secondary" value="${escHtml(c.title)}">
+            <div class="row g-3">
+                <div class="col-lg-7">
+                    <div class="card bg-dark border-secondary mb-3">
+                        <div class="card-body">
+                            <div class="row g-2 mb-2">
+                                <div class="col-md-8">
+                                    <label class="form-label small text-muted mb-1">Title</label>
+                                    <input type="text" id="editCaseTitle" class="form-control bg-dark text-light border-secondary" value="${escHtml(c.title)}">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small text-muted mb-1">Status</label>
+                                    <select id="editCaseStatus" class="form-select bg-dark text-light border-secondary">
+                                        <option value="open" ${c.status === 'open' ? 'selected' : ''}>Open</option>
+                                        <option value="closed" ${c.status === 'closed' ? 'selected' : ''}>Closed</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small text-muted mb-1">Assignee</label>
+                                    <input type="text" id="editCaseAssignee" class="form-control bg-dark text-light border-secondary" value="${escHtml(c.assignee || '')}">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small text-muted mb-1">TLP</label>
+                                    <select id="editCaseTlp" class="form-select bg-dark text-light border-secondary"></select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small text-muted mb-1">PAP</label>
+                                    <select id="editCasePap" class="form-select bg-dark text-light border-secondary"></select>
+                                </div>
+                                <div class="col-12">
+                                    <label class="form-label small text-muted mb-1">Description</label>
+                                    <textarea id="editCaseDescription" class="form-control bg-dark text-light border-secondary" rows="3">${escHtml(c.description || '')}</textarea>
+                                </div>
+                            </div>
+                            <button type="button" class="btn btn-sm btn-outline-primary" onclick="saveCaseDetail()"><i class="fa-solid fa-floppy-disk me-1"></i>Save</button>
+                            <span id="caseSaveMsg" class="small text-success ms-2" style="display:none;">Saved.</span>
+                        </div>
+                    </div>
+                    <div class="card bg-dark border-secondary mb-3">
+                        <div class="card-header border-secondary">Tasks (${c.tasks.filter(t => t.status === 'done').length}/${c.tasks.length})</div>
+                        <div class="card-body">
+                            <div id="caseTasksList">${c.tasks.length ? c.tasks.map(taskRow).join('') : '<p class="text-muted small mb-2">No tasks yet.</p>'}</div>
+                            <div class="d-flex gap-2 mt-2">
+                                <input type="text" id="newCaseTaskInput" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Add a task..." onkeyup="if(event.key === 'Enter') addCaseTask()">
+                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addCaseTask()"><i class="fa-solid fa-plus"></i></button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
-                <div class="col-md-4">
-                    <label class="form-label small text-muted mb-1">Status</label>
-                    <select id="editCaseStatus" class="form-select bg-dark text-light border-secondary">
-                        <option value="open" ${c.status === 'open' ? 'selected' : ''}>Open</option>
-                        <option value="closed" ${c.status === 'closed' ? 'selected' : ''}>Closed</option>
-                    </select>
+                <div class="col-lg-5">
+                    <div class="card bg-dark border-secondary mb-3">
+                        <div class="card-header border-secondary">Items (${c.items.length}) <span class="text-muted small">— added from Log Search's detail view</span></div>
+                        <div class="card-body">
+                            ${c.items.length ? c.items.map(it => `
+                                <div class="d-flex justify-content-between align-items-start border border-secondary rounded p-2 mb-2">
+                                    <div>${itemSummaryLine(it)}</div>
+                                    <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2 ms-2" title="Remove from case" onclick="removeCaseItem(${it.id})"><i class="fa-solid fa-xmark"></i></button>
+                                </div>
+                            `).join('') : '<p class="text-muted small mb-0">No items added yet.</p>'}
+                        </div>
+                    </div>
+                    <div class="card bg-dark border-secondary mb-3">
+                        <div class="card-header border-secondary">Threat Intel Entities</div>
+                        <div class="card-body"><div id="linkToEntityWrap"></div></div>
+                    </div>
+                    <div class="card bg-dark border-secondary mb-3">
+                        <div class="card-header border-secondary">Timeline</div>
+                        <div class="card-body">
+                            <div class="d-flex gap-2 mb-3">
+                                <input type="text" id="newCaseNoteInput" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Add a note..." onkeyup="if(event.key === 'Enter') addCaseNote()">
+                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addCaseNote()"><i class="fa-solid fa-plus"></i></button>
+                            </div>
+                            <div style="max-height:400px; overflow-y:auto;">
+                                ${c.events.length ? c.events.map(eventRow).join('') : '<p class="text-muted small">No timeline events yet.</p>'}
+                            </div>
+                        </div>
+                    </div>
                 </div>
-                <div class="col-md-4">
-                    <label class="form-label small text-muted mb-1">Assignee</label>
-                    <input type="text" id="editCaseAssignee" class="form-control bg-dark text-light border-secondary" value="${escHtml(c.assignee || '')}">
-                </div>
-                <div class="col-md-4">
-                    <label class="form-label small text-muted mb-1">TLP</label>
-                    <select id="editCaseTlp" class="form-select bg-dark text-light border-secondary"></select>
-                </div>
-                <div class="col-md-4">
-                    <label class="form-label small text-muted mb-1">PAP</label>
-                    <select id="editCasePap" class="form-select bg-dark text-light border-secondary"></select>
-                </div>
-                <div class="col-12">
-                    <label class="form-label small text-muted mb-1">Description</label>
-                    <textarea id="editCaseDescription" class="form-control bg-dark text-light border-secondary" rows="2">${escHtml(c.description || '')}</textarea>
-                </div>
-            </div>
-            <button type="button" class="btn btn-sm btn-outline-primary mb-3" onclick="saveCaseDetail()"><i class="fa-solid fa-floppy-disk me-1"></i>Save</button>
-            <span id="caseSaveMsg" class="small text-success ms-2" style="display:none;">Saved.</span>
-            <hr class="border-secondary">
-
-            <label class="form-label small text-muted mb-2">Tasks (${c.tasks.filter(t => t.status === 'done').length}/${c.tasks.length})</label>
-            <div id="caseTasksList">${c.tasks.length ? c.tasks.map(taskRow).join('') : '<p class="text-muted small">No tasks yet.</p>'}</div>
-            <div class="d-flex gap-2 mb-3">
-                <input type="text" id="newCaseTaskInput" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Add a task..." onkeyup="if(event.key === 'Enter') addCaseTask()">
-                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addCaseTask()"><i class="fa-solid fa-plus"></i></button>
-            </div>
-            <hr class="border-secondary">
-
-            <label class="form-label small text-muted mb-2">Items (${c.items.length}) <span class="text-muted">— added from Log Search's detail view</span></label>
-            ${c.items.length ? c.items.map(it => `
-                <div class="d-flex justify-content-between align-items-start border border-secondary rounded p-2 mb-2">
-                    <div>${itemSummaryLine(it)}</div>
-                    <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2 ms-2" title="Remove from case" onclick="removeCaseItem(${it.id})"><i class="fa-solid fa-xmark"></i></button>
-                </div>
-            `).join('') : '<p class="text-muted small">No items added yet.</p>'}
-            <hr class="border-secondary">
-
-            <label class="form-label small text-muted mb-2">Threat Intel Entities</label>
-            <div id="linkToEntityWrap" class="mb-3"></div>
-            <hr class="border-secondary">
-
-            <label class="form-label small text-muted mb-2">Timeline</label>
-            <div class="d-flex gap-2 mb-3">
-                <input type="text" id="newCaseNoteInput" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Add a note..." onkeyup="if(event.key === 'Enter') addCaseNote()">
-                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addCaseNote()"><i class="fa-solid fa-plus"></i></button>
-            </div>
-            <div style="max-height:260px; overflow-y:auto;">
-                ${c.events.length ? c.events.map(eventRow).join('') : '<p class="text-muted small">No timeline events yet.</p>'}
             </div>
         `;
         populateTlpPapSelect('editCaseTlp', TLP_VALUES, c.tlp);
         populateTlpPapSelect('editCasePap', PAP_VALUES, c.pap);
         renderLinkToEntityControl();
-        if (!caseDetailModal) caseDetailModal = new bootstrap.Modal(document.getElementById('caseDetailModal'));
-        caseDetailModal.show();
+        showDetailView();
     }).catch(err => toast('Error loading case: ' + err, 'danger'));
+}
+
+function openCaseDetail(cid) {
+    activeCaseId = cid;
+    loadAndRenderCaseDetail(cid);
+    const url = `/cases?case=${cid}`;
+    if (window.location.pathname + window.location.search !== url) {
+        history.pushState({caseId: cid}, '', url);
+    }
 }
 
 function saveCaseDetail() {
@@ -572,6 +635,8 @@ async function viewCaseCommandResult(commandId) {
 
 document.addEventListener("DOMContentLoaded", function() {
     loadCases();
+    const cidParam = new URLSearchParams(window.location.search).get('case');
+    if (cidParam) openCaseDetail(parseInt(cidParam, 10));
 });
 </script>
 {% endblock %}
