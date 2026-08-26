@@ -364,7 +364,7 @@ function loadActorSummary() {
                     </div>
                     ${a.aliases.length ? `<div class="text-muted small mb-1">aka ${escHtml(a.aliases.join(', '))}</div>` : ''}
                     <div class="small text-secondary mb-2">${escHtml(a.description)}</div>
-                    <div class="small mb-1"><span class="badge bg-dark border border-secondary">${a.ioc_count} matching IOC${a.ioc_count === 1 ? '' : 's'}</span></div>
+                    <div class="small mb-1"><span class="badge bg-secondary">${a.ioc_count} matching IOC${a.ioc_count === 1 ? '' : 's'}</span></div>
                     <div class="small">
                         ${a.techniques.map(t => `<span class="badge bg-secondary me-1 mb-1" title="${escHtml(t.tactic_label)}">T${escHtml(t.id)}</span>`).join('')}
                     </div>
