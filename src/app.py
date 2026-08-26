@@ -2407,6 +2407,85 @@ def _log_case_event(db, cid, event_type, detail=None):
         (cid, current_user.username, event_type, detail)
     )
 
+@app.route('/api/case-queues', methods=['GET', 'POST'])
+@login_required
+def api_case_queues():
+    db = get_db()
+    if request.method == 'GET':
+        rows = db.execute(
+            "SELECT q.id, q.name, q.description, q.created_by, q.created_at, "
+            "(SELECT COUNT(*) FROM cases WHERE queue_id = q.id AND status = 'open') as open_case_count, "
+            "(SELECT COUNT(*) FROM cases WHERE queue_id = q.id) as total_case_count "
+            "FROM case_queues q ORDER BY q.name"
+        ).fetchall()
+        out = []
+        for r in rows:
+            members = [m['username'] for m in db.execute("SELECT username FROM queue_members WHERE queue_id = ? ORDER BY username", (r['id'],)).fetchall()]
+            out.append({**dict(r), 'members': members})
+        return jsonify(out)
+
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    d = request.json or {}
+    name = (d.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'name is required'}), 400
+    if db.execute("SELECT 1 FROM case_queues WHERE name = ?", (name,)).fetchone():
+        return jsonify({'error': f'A queue named "{name}" already exists'}), 400
+    db.execute("INSERT INTO case_queues (name, description, created_by) VALUES (?, ?, ?)", (name, (d.get('description') or '').strip(), current_user.username))
+    db.commit()
+    log_audit('queue_create', 'case_queue', name)
+    return jsonify({'status': 'success'})
+
+@app.route('/api/case-queues/<int:qid>', methods=['PUT', 'DELETE'])
+@login_required
+def api_case_queue_detail(qid):
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    db = get_db()
+    existing = db.execute("SELECT name FROM case_queues WHERE id = ?", (qid,)).fetchone()
+    if not existing:
+        return jsonify({'error': 'Queue not found'}), 404
+
+    if request.method == 'DELETE':
+        db.execute("UPDATE cases SET queue_id = NULL WHERE queue_id = ?", (qid,))
+        db.execute("DELETE FROM queue_members WHERE queue_id = ?", (qid,))
+        db.execute("DELETE FROM case_queues WHERE id = ?", (qid,))
+        db.commit()
+        log_audit('queue_delete', 'case_queue', existing['name'])
+        return jsonify({'ok': 1})
+
+    d = request.json or {}
+    name = (d.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'name is required'}), 400
+    if db.execute("SELECT 1 FROM case_queues WHERE name = ? AND id != ?", (name, qid)).fetchone():
+        return jsonify({'error': f'A queue named "{name}" already exists'}), 400
+    db.execute("UPDATE case_queues SET name = ?, description = ? WHERE id = ?", (name, (d.get('description') or '').strip(), qid))
+    db.commit()
+    log_audit('queue_update', 'case_queue', name)
+    return jsonify({'status': 'success'})
+
+@app.route('/api/case-queues/<int:qid>/members', methods=['POST', 'DELETE'])
+@login_required
+def api_case_queue_members(qid):
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    db = get_db()
+    if not db.execute("SELECT 1 FROM case_queues WHERE id = ?", (qid,)).fetchone():
+        return jsonify({'error': 'Queue not found'}), 404
+    username = ((request.json or {}).get('username') or '').strip()
+    if not username:
+        return jsonify({'error': 'username is required'}), 400
+    if request.method == 'POST':
+        if not db.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
+            return jsonify({'error': 'User not found'}), 400
+        db.execute("INSERT OR IGNORE INTO queue_members (queue_id, username) VALUES (?, ?)", (qid, username))
+    else:
+        db.execute("DELETE FROM queue_members WHERE queue_id = ? AND username = ?", (qid, username))
+    db.commit()
+    return jsonify({'status': 'success'})
+
 @app.route('/api/cases', methods=['GET', 'POST'])
 @login_required
 def api_cases():
@@ -2414,10 +2493,12 @@ def api_cases():
     if request.method == 'GET':
         rows = db.execute(
             "SELECT c.id, c.title, c.status, c.assignee, c.description, c.created_by, c.created_at, c.closed_at, c.tlp, c.pap, "
+            "c.queue_id, q.name as queue_name, "
             "COUNT(DISTINCT ci.id) as item_count, "
             "COUNT(DISTINCT ct.id) as task_count, "
             "COUNT(DISTINCT CASE WHEN ct.status = 'done' THEN ct.id END) as task_done_count "
             "FROM cases c LEFT JOIN case_items ci ON ci.case_id = c.id LEFT JOIN case_tasks ct ON ct.case_id = c.id "
+            "LEFT JOIN case_queues q ON q.id = c.queue_id "
             "GROUP BY c.id ORDER BY CASE WHEN c.status = 'open' THEN 0 ELSE 1 END, c.created_at DESC"
         ).fetchall()
         return jsonify([dict(r) for r in rows])
@@ -2430,16 +2511,22 @@ def api_cases():
     description = (data.get('description') or '').strip()
     tlp = (data.get('tlp') or 'clear').strip()
     pap = (data.get('pap') or 'clear').strip()
+    queue_id = data.get('queue_id') or None
     if tlp not in CASE_TLP_VALUES:
         return jsonify({"error": f"tlp must be one of {', '.join(CASE_TLP_VALUES)}"}), 400
     if pap not in CASE_PAP_VALUES:
         return jsonify({"error": f"pap must be one of {', '.join(CASE_PAP_VALUES)}"}), 400
+    if queue_id and not db.execute("SELECT 1 FROM case_queues WHERE id = ?", (queue_id,)).fetchone():
+        return jsonify({"error": "Queue not found"}), 400
     cur = db.execute(
-        "INSERT INTO cases (title, assignee, description, created_by, tlp, pap) VALUES (?, ?, ?, ?, ?, ?)",
-        (title, assignee, description, current_user.username, tlp, pap)
+        "INSERT INTO cases (title, assignee, description, created_by, tlp, pap, queue_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (title, assignee, description, current_user.username, tlp, pap, queue_id)
     )
     cid = cur.lastrowid
     _log_case_event(db, cid, 'created', title)
+    if queue_id:
+        queue_name = db.execute("SELECT name FROM case_queues WHERE id = ?", (queue_id,)).fetchone()['name']
+        _log_case_event(db, cid, 'queue_change', queue_name)
 
     # Optional template: bulk-create its task list on the new case.
     template_id = data.get('template_id')
@@ -2521,12 +2608,16 @@ def api_case_detail(cid):
         description = data['description'].strip() if 'description' in data else (case['description'] or '')
         tlp = data['tlp'].strip() if 'tlp' in data and data['tlp'] else case['tlp']
         pap = data['pap'].strip() if 'pap' in data and data['pap'] else case['pap']
+        queue_id = data['queue_id'] if 'queue_id' in data else case['queue_id']
+        queue_id = queue_id or None
         if status not in ('open', 'closed'):
             return jsonify({"error": "status must be 'open' or 'closed'"}), 400
         if tlp not in CASE_TLP_VALUES:
             return jsonify({"error": f"tlp must be one of {', '.join(CASE_TLP_VALUES)}"}), 400
         if pap not in CASE_PAP_VALUES:
             return jsonify({"error": f"pap must be one of {', '.join(CASE_PAP_VALUES)}"}), 400
+        if queue_id and not db.execute("SELECT 1 FROM case_queues WHERE id = ?", (queue_id,)).fetchone():
+            return jsonify({"error": "Queue not found"}), 400
         closed_at = case['closed_at']
         if status == 'closed' and case['status'] != 'closed':
             closed_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -2542,9 +2633,12 @@ def api_case_detail(cid):
             _log_case_event(db, cid, 'tlp_change', tlp)
         if pap != case['pap']:
             _log_case_event(db, cid, 'pap_change', pap)
+        if queue_id != case['queue_id']:
+            queue_name = db.execute("SELECT name FROM case_queues WHERE id = ?", (queue_id,)).fetchone()['name'] if queue_id else '(none)'
+            _log_case_event(db, cid, 'queue_change', queue_name)
         db.execute(
-            "UPDATE cases SET title = ?, status = ?, assignee = ?, description = ?, closed_at = ?, tlp = ?, pap = ? WHERE id = ?",
-            (title, status, assignee, description, closed_at, tlp, pap, cid)
+            "UPDATE cases SET title = ?, status = ?, assignee = ?, description = ?, closed_at = ?, tlp = ?, pap = ?, queue_id = ? WHERE id = ?",
+            (title, status, assignee, description, closed_at, tlp, pap, queue_id, cid)
         )
         db.commit()
         return jsonify({"status": "success"})
@@ -3863,6 +3957,13 @@ def migrate_cases():
     except Exception:
         pass
 
+QUEUE_SEED = [
+    ('Insider Threat', 'Suspected malicious or negligent insider activity.'),
+    ('SOC Tier 1', 'Initial triage -- first responders.'),
+    ('SOC Tier 2', 'Escalated cases requiring deeper investigation.'),
+    ('SOC Tier 3', 'Advanced/specialist escalation -- threat hunting, forensics, incident command.'),
+]
+
 CASE_TEMPLATES_SEED = [
     {'name': 'Phishing Investigation', 'description': 'Standard checklist for a reported phishing email.',
      'tasks': ['Identify sender/return-path and originating IP', 'Check for other recipients of the same message',
@@ -3928,6 +4029,37 @@ def migrate_case_upgrade():
                 "INSERT OR IGNORE INTO case_templates (name, description, tasks, created_by) VALUES (?, ?, ?, 'system')",
                 (t['name'], t['description'], json.dumps(t['tasks']))
             )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# Mirrors Exabeam Case Manager's queue model (per the session's own research pass):
+# a queue is just a named group cases get manually routed into/between, with a
+# membership list -- no rule-based auto-routing exists there either, so this doesn't
+# either. Same growable-seed pattern as case_templates above (INSERT OR IGNORE keyed
+# on UNIQUE(name)) so the 4 starter queues reappear if deleted but an admin's rename/
+# edit of one survives a re-run.
+def migrate_case_queues():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS case_queues (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS queue_members (
+            queue_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            PRIMARY KEY (queue_id, username)
+        )''')
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(cases)").fetchall()}
+        if 'queue_id' not in cols:
+            conn.execute("ALTER TABLE cases ADD COLUMN queue_id INTEGER")
+        for name, desc in QUEUE_SEED:
+            conn.execute("INSERT OR IGNORE INTO case_queues (name, description, created_by) VALUES (?, ?, 'system')", (name, desc))
         conn.commit()
         conn.close()
     except Exception:
@@ -6513,6 +6645,7 @@ migrate_ueba_math_v2()
 migrate_assets_identities()
 migrate_cases()
 migrate_case_upgrade()
+migrate_case_queues()
 migrate_live_logs_archive()
 migrate_fim_paths()
 migrate_ueba_priority_scores()

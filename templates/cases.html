@@ -6,16 +6,28 @@
             <h2><i class="fa-solid fa-folder-open me-2"></i>Cases</h2>
             <p>Group related alerts and UEBA anomalies together while you work an incident.</p>
         </div>
-        <button type="button" class="btn btn-outline-primary" onclick="showNewCaseModal()"><i class="fa-solid fa-plus me-1"></i>New Case</button>
+        <div class="d-flex gap-2">
+            <button type="button" class="btn btn-outline-secondary" onclick="showManageQueuesModal()"><i class="fa-solid fa-inbox me-1"></i>Manage Queues</button>
+            <button type="button" class="btn btn-outline-primary" onclick="showNewCaseModal()"><i class="fa-solid fa-plus me-1"></i>New Case</button>
+        </div>
     </div>
 
     <div class="card bg-dark border-secondary">
-        <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+        <div class="card-header border-secondary d-flex justify-content-between align-items-center flex-wrap gap-2">
             <span><i class="fa-solid fa-list me-2"></i>All Cases</span>
-            <div class="btn-group btn-group-sm" role="group">
-                <button type="button" class="btn btn-outline-secondary active" id="caseFilterAll" onclick="setCaseFilter('all')">All</button>
-                <button type="button" class="btn btn-outline-secondary" id="caseFilterOpen" onclick="setCaseFilter('open')">Open</button>
-                <button type="button" class="btn btn-outline-secondary" id="caseFilterClosed" onclick="setCaseFilter('closed')">Closed</button>
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+                <div class="form-check form-switch mb-0">
+                    <input class="form-check-input" type="checkbox" id="myQueuesOnlyToggle" onchange="renderCases()">
+                    <label class="form-check-label small" for="myQueuesOnlyToggle">My queues only</label>
+                </div>
+                <select id="queueFilterSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:180px;" onchange="renderCases()">
+                    <option value="">All queues</option>
+                </select>
+                <div class="btn-group btn-group-sm" role="group">
+                    <button type="button" class="btn btn-outline-secondary active" id="caseFilterAll" onclick="setCaseFilter('all')">All</button>
+                    <button type="button" class="btn btn-outline-secondary" id="caseFilterOpen" onclick="setCaseFilter('open')">Open</button>
+                    <button type="button" class="btn btn-outline-secondary" id="caseFilterClosed" onclick="setCaseFilter('closed')">Closed</button>
+                </div>
             </div>
         </div>
         <div class="table-responsive">
@@ -24,6 +36,7 @@
                     <tr>
                         <th class="ps-3">Title</th>
                         <th>Status</th>
+                        <th>Queue</th>
                         <th>TLP</th>
                         <th>Assignee</th>
                         <th>Items</th>
@@ -33,7 +46,7 @@
                     </tr>
                 </thead>
                 <tbody id="casesTableBody">
-                    <tr><td colspan="8" class="text-center text-muted py-4">Loading…</td></tr>
+                    <tr><td colspan="9" class="text-center text-muted py-4">Loading…</td></tr>
                 </tbody>
             </table>
         </div>
@@ -75,6 +88,12 @@
                     </select>
                     <div class="form-text text-muted">Applies that template's task checklist to the new case.</div>
                 </div>
+                <div class="mb-2">
+                    <label class="form-label small text-muted mb-1">Queue (optional)</label>
+                    <select id="newCaseQueue" class="form-select bg-dark text-light border-secondary">
+                        <option value="">Unassigned</option>
+                    </select>
+                </div>
                 <div class="row g-2 mb-2">
                     <div class="col-6">
                         <label class="form-label small text-muted mb-1">Assignee (optional)</label>
@@ -103,6 +122,44 @@
     </div>
 </div>
 
+<!-- Manage Queues modal -->
+<div class="modal fade" id="manageQueuesModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content bg-dark text-light border-secondary">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title"><i class="fa-solid fa-inbox me-2"></i>Case Queues</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="table-responsive mb-3">
+                    <table class="table table-dark table-sm align-middle mb-0">
+                        <thead><tr><th>Name</th><th>Description</th><th>Members</th><th>Cases</th><th></th></tr></thead>
+                        <tbody id="queuesTableBody"><tr><td colspan="5" class="text-center text-muted small py-3">Loading…</td></tr></tbody>
+                    </table>
+                </div>
+                {% if current_user.role == 'admin' %}
+                <div class="row g-2 align-items-end bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted mb-1">New Queue Name</label>
+                        <input type="text" id="newQueueName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Fraud Investigations">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small text-muted mb-1">Description (optional)</label>
+                        <input type="text" id="newQueueDescription" class="form-control form-control-sm bg-dark text-light border-secondary">
+                    </div>
+                    <div class="col-md-2">
+                        <button type="button" class="btn btn-sm btn-outline-primary w-100" onclick="addQueue()"><i class="fa-solid fa-plus me-1"></i>Add</button>
+                    </div>
+                </div>
+                <div id="newQueueError" class="text-danger small mt-1" style="display:none;"></div>
+                {% else %}
+                <p class="text-muted small mb-0"><i class="fa-solid fa-lock me-1"></i>Admin role required to create or edit queues.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Command Result Detail modal (for command_result case items) -->
 <div class="modal fade" id="caseCmdResultModal" tabindex="-1">
     <div class="modal-dialog modal-lg modal-dialog-scrollable">
@@ -119,10 +176,13 @@
 </div>
 
 <script>
+const IS_ADMIN = {{ 'true' if current_user.role == 'admin' else 'false' }};
+const CURRENT_USERNAME = {{ current_user.username|tojson }};
 let allCases = [];
+let allQueues = [];
 let caseFilter = 'all';
 let activeCaseId = null;
-let newCaseModal;
+let newCaseModal, manageQueuesModal;
 
 function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -180,17 +240,44 @@ function loadCases() {
     }).catch(err => console.error('Error loading cases:', err));
 }
 
+// Loaded once at page init and re-fetched after any queue create/edit/delete/membership
+// change -- feeds the list view's queue filter/"My queues only" toggle, the New Case
+// modal's queue picker, the case detail view's queue picker, and the Manage Queues table.
+function loadCaseQueues() {
+    return fetch('/api/case-queues').then(r => r.json()).then(queues => {
+        allQueues = queues || [];
+        const filterSel = document.getElementById('queueFilterSelect');
+        const prevFilter = filterSel.value;
+        filterSel.innerHTML = '<option value="">All queues</option>' + allQueues.map(q => `<option value="${q.id}">${escHtml(q.name)}</option>`).join('');
+        filterSel.value = prevFilter;
+        renderCases();
+    }).catch(err => console.error('Error loading case queues:', err));
+}
+
+function populateQueueSelect(elId, current) {
+    const el = document.getElementById(elId);
+    el.innerHTML = '<option value="">Unassigned</option>' + allQueues.map(q => `<option value="${q.id}">${escHtml(q.name)}</option>`).join('');
+    el.value = current ? String(current) : '';
+}
+
 function renderCases() {
     const tbody = document.getElementById('casesTableBody');
-    const rows = caseFilter === 'all' ? allCases : allCases.filter(c => c.status === caseFilter);
+    let rows = caseFilter === 'all' ? allCases : allCases.filter(c => c.status === caseFilter);
+    const queueFilterId = document.getElementById('queueFilterSelect').value;
+    if (queueFilterId) rows = rows.filter(c => String(c.queue_id) === queueFilterId);
+    if (document.getElementById('myQueuesOnlyToggle').checked) {
+        const myQueueIds = new Set(allQueues.filter(q => (q.members || []).includes(CURRENT_USERNAME)).map(q => q.id));
+        rows = rows.filter(c => myQueueIds.has(c.queue_id));
+    }
     if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-4">No cases yet. Click "New Case" to start one, or add an alert/anomaly to a case from Log Search.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-4">No cases match these filters.</td></tr>';
         return;
     }
     tbody.innerHTML = rows.map(c => `
         <tr style="cursor:pointer;" onclick="openCaseDetail(${c.id})">
             <td class="ps-3 fw-bold">${escHtml(c.title)}</td>
             <td>${caseStatusBadge(c.status)}</td>
+            <td class="small">${c.queue_name ? `<span class="badge bg-secondary">${escHtml(c.queue_name)}</span>` : '<span class="text-muted">—</span>'}</td>
             <td>${tlpBadge(c.tlp)}</td>
             <td class="text-muted small">${escHtml(c.assignee || '-')}</td>
             <td class="text-muted small">${c.item_count}</td>
@@ -203,6 +290,93 @@ function renderCases() {
     `).join('');
 }
 
+function showManageQueuesModal() {
+    const proceed = () => {
+        renderQueuesTable();
+        if (!manageQueuesModal) manageQueuesModal = new bootstrap.Modal(document.getElementById('manageQueuesModal'));
+        manageQueuesModal.show();
+    };
+    if (IS_ADMIN && !window.allUsersForQueues) {
+        fetch('/api/settings/users').then(r => r.json()).then(data => {
+            window.allUsersForQueues = (data.users || []).map(u => u.username);
+            proceed();
+        }).catch(() => { window.allUsersForQueues = []; proceed(); });
+    } else {
+        proceed();
+    }
+}
+
+function renderQueuesTable() {
+    const tbody = document.getElementById('queuesTableBody');
+    if (!allQueues.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted small py-3">No queues yet.</td></tr>';
+        return;
+    }
+    const userOptions = (window.allUsersForQueues || []).map(u => `<option value="${escHtml(u)}">${escHtml(u)}</option>`).join('');
+    tbody.innerHTML = allQueues.map(q => `
+        <tr>
+            <td class="small">${escHtml(q.name)}</td>
+            <td class="text-muted small">${escHtml(q.description || '')}</td>
+            <td class="small">
+                ${(q.members || []).map(m => `<span class="badge bg-secondary me-1 mb-1">${escHtml(m)}${IS_ADMIN ? ` <a href="#" class="text-light" onclick="removeQueueMember(${q.id}, '${escJs(m)}'); return false;">&times;</a>` : ''}</span>`).join('') || '<span class="text-muted">none</span>'}
+                ${IS_ADMIN ? `
+                <div class="d-flex gap-1 mt-1">
+                    <select class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:140px;" id="addMemberSelect${q.id}">
+                        <option value="">Add member…</option>
+                        ${userOptions}
+                    </select>
+                    <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="addQueueMember(${q.id})"><i class="fa-solid fa-plus"></i></button>
+                </div>` : ''}
+            </td>
+            <td class="text-muted small text-nowrap">${q.open_case_count}/${q.total_case_count}</td>
+            <td class="text-end">${IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete queue" onclick="deleteQueue(${q.id}, '${escJs(q.name)}')"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
+        </tr>
+    `).join('');
+}
+
+function escJs(s) {
+    return String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+async function addQueue() {
+    const nameEl = document.getElementById('newQueueName');
+    const descEl = document.getElementById('newQueueDescription');
+    const errBox = document.getElementById('newQueueError');
+    errBox.style.display = 'none';
+    const name = nameEl.value.trim();
+    if (!name) { errBox.innerText = 'Name is required.'; errBox.style.display = 'block'; return; }
+    const res = await fetch('/api/case-queues', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name, description: descEl.value.trim()})
+    });
+    const data = await res.json();
+    if (!res.ok) { errBox.innerText = data.error || 'Failed to create queue.'; errBox.style.display = 'block'; return; }
+    nameEl.value = ''; descEl.value = '';
+    await loadCaseQueues();
+    renderQueuesTable();
+}
+
+async function deleteQueue(qid, name) {
+    if (!(await confirmDialog(`Delete the "${name}" queue? Cases in it will be unassigned, not deleted.`, {title: 'Delete queue', danger: true, confirmLabel: 'Delete'}))) return;
+    await fetch(`/api/case-queues/${qid}`, {method: 'DELETE'});
+    await loadCaseQueues();
+    renderQueuesTable();
+}
+
+async function addQueueMember(qid) {
+    const sel = document.getElementById(`addMemberSelect${qid}`);
+    const username = sel.value;
+    if (!username) return;
+    await fetch(`/api/case-queues/${qid}/members`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username})});
+    await loadCaseQueues();
+    renderQueuesTable();
+}
+
+async function removeQueueMember(qid, username) {
+    await fetch(`/api/case-queues/${qid}/members`, {method: 'DELETE', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username})});
+    await loadCaseQueues();
+    renderQueuesTable();
+}
+
 function showNewCaseModal() {
     document.getElementById('newCaseTitle').value = '';
     document.getElementById('newCaseAssignee').value = '';
@@ -210,6 +384,7 @@ function showNewCaseModal() {
     document.getElementById('newCaseError').style.display = 'none';
     populateTlpPapSelect('newCaseTlp', TLP_VALUES, 'clear');
     populateTlpPapSelect('newCasePap', PAP_VALUES, 'clear');
+    populateQueueSelect('newCaseQueue', '');
     if (!caseTemplates.length) loadCaseTemplates();
     if (!newCaseModal) newCaseModal = new bootstrap.Modal(document.getElementById('newCaseModal'));
     newCaseModal.show();
@@ -217,13 +392,15 @@ function showNewCaseModal() {
 
 function createCase() {
     const templateId = document.getElementById('newCaseTemplate').value;
+    const queueId = document.getElementById('newCaseQueue').value;
     const payload = {
         title: document.getElementById('newCaseTitle').value.trim(),
         assignee: document.getElementById('newCaseAssignee').value.trim(),
         description: document.getElementById('newCaseDescription').value.trim(),
         tlp: document.getElementById('newCaseTlp').value,
         pap: document.getElementById('newCasePap').value,
-        template_id: templateId ? parseInt(templateId, 10) : null
+        template_id: templateId ? parseInt(templateId, 10) : null,
+        queue_id: queueId ? parseInt(queueId, 10) : null
     };
     const errBox = document.getElementById('newCaseError');
     errBox.style.display = 'none';
@@ -283,6 +460,7 @@ function caseEventLabel(e) {
         assignee_change: `Assignee changed to <strong>${escHtml(e.detail)}</strong>`,
         tlp_change: `TLP changed to <strong>${escHtml((e.detail || '').toUpperCase())}</strong>`,
         pap_change: `PAP changed to <strong>${escHtml((e.detail || '').toUpperCase())}</strong>`,
+        queue_change: `Queue changed to <strong>${escHtml(e.detail)}</strong>`,
         item_added: `Item added: ${escHtml(e.detail)}`,
         item_removed: `Item removed: ${escHtml(e.detail)}`,
         task_added: `Task added: "${escHtml(e.detail)}"`,
@@ -374,6 +552,10 @@ function loadAndRenderCaseDetail(cid) {
                                     <input type="text" id="editCaseAssignee" class="form-control bg-dark text-light border-secondary" value="${escHtml(c.assignee || '')}">
                                 </div>
                                 <div class="col-md-4">
+                                    <label class="form-label small text-muted mb-1">Queue</label>
+                                    <select id="editCaseQueue" class="form-select bg-dark text-light border-secondary"></select>
+                                </div>
+                                <div class="col-md-4">
                                     <label class="form-label small text-muted mb-1">TLP</label>
                                     <select id="editCaseTlp" class="form-select bg-dark text-light border-secondary"></select>
                                 </div>
@@ -448,6 +630,7 @@ function loadAndRenderCaseDetail(cid) {
         `;
         populateTlpPapSelect('editCaseTlp', TLP_VALUES, c.tlp);
         populateTlpPapSelect('editCasePap', PAP_VALUES, c.pap);
+        populateQueueSelect('editCaseQueue', c.queue_id);
         renderLinkToEntityControl();
         showDetailView();
     }).catch(err => toast('Error loading case: ' + err, 'danger'));
@@ -463,13 +646,15 @@ function openCaseDetail(cid) {
 }
 
 function saveCaseDetail() {
+    const queueVal = document.getElementById('editCaseQueue').value;
     const payload = {
         title: document.getElementById('editCaseTitle').value.trim(),
         status: document.getElementById('editCaseStatus').value,
         assignee: document.getElementById('editCaseAssignee').value.trim(),
         description: document.getElementById('editCaseDescription').value.trim(),
         tlp: document.getElementById('editCaseTlp').value,
-        pap: document.getElementById('editCasePap').value
+        pap: document.getElementById('editCasePap').value,
+        queue_id: queueVal ? parseInt(queueVal, 10) : null
     };
     fetch(`/api/cases/${activeCaseId}`, {
         method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
@@ -681,9 +866,14 @@ async function viewCaseCommandResult(commandId) {
 }
 
 document.addEventListener("DOMContentLoaded", function() {
-    loadCases();
-    const cidParam = new URLSearchParams(window.location.search).get('case');
-    if (cidParam) openCaseDetail(parseInt(cidParam, 10));
+    // Queues load first (and are awaited) since the case-detail queue picker needs
+    // allQueues populated before it can render -- relevant on a fresh page load that
+    // deep-links straight into a case via /cases?case=<id>.
+    loadCaseQueues().then(() => {
+        loadCases();
+        const cidParam = new URLSearchParams(window.location.search).get('case');
+        if (cidParam) openCaseDetail(parseInt(cidParam, 10));
+    });
 });
 </script>
 {% endblock %}
