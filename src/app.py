@@ -1090,34 +1090,50 @@ def api_ti_iocs():
     total = db.execute(f"SELECT COUNT(*) FROM stix_indicators si {where}", params).fetchone()[0]
     return jsonify({'iocs': [dict(r) for r in rows], 'total': total})
 
-def _build_actor_summary(rows):
-    """Cross-references IOC (name, description) rows against a curated threat-actor/
-    malware reference table (src/threat_actors.py) -- purely informational, surfaced
-    next to the MITRE coverage heatmap so an analyst can see which known actors the
-    currently-synced feed data implicates and which techniques they're commonly
-    associated with. `rows` is any iterable of objects with ['name']/['description']
-    keys (a sqlite3.Row list or plain dicts)."""
-    from threat_actors import find_actor_context
+def _entity_row_to_dict(r):
+    """ti_entities stores aliases/techniques comma-separated (same shape
+    compliance_tags already uses on sigma_rules) -- parse back to lists for every
+    in-Python consumer (matching index, JSON API, mitre_attack lookups)."""
+    d = dict(r)
+    d['aliases'] = [a for a in (d.get('aliases') or '').split(',') if a]
+    d['techniques'] = [t for t in (d.get('techniques') or '').split(',') if t]
+    return d
+
+def _get_ti_entities(db):
+    return [_entity_row_to_dict(r) for r in db.execute(
+        "SELECT id, entity_type, name, aliases, description, techniques, source FROM ti_entities ORDER BY name"
+    ).fetchall()]
+
+def _build_actor_summary(rows, entities):
+    """Cross-references IOC (name, description) rows against the DB-backed entity set
+    (ti_entities, seeded from src/threat_actors.py's curated ACTORS list but now
+    admin-editable) -- purely informational, surfaced next to the MITRE coverage
+    heatmap so an analyst can see which known actors the currently-synced feed data
+    implicates and which techniques they're commonly associated with. `rows` is any
+    iterable of objects with ['name']/['description'] keys (a sqlite3.Row list or
+    plain dicts); `entities` is the list _get_ti_entities() returns."""
+    from threat_actors import build_index, find_entity_context
     from mitre_attack import lookup as mitre_lookup, TACTIC_LABELS
 
-    matched = {}  # actor name -> {actor, ioc_count}
+    index = build_index(entities)
+    matched = {}  # entity name -> {entity, ioc_count}
     for r in rows:
-        actor = find_actor_context(r['name']) or find_actor_context(r['description'])
-        if not actor:
+        entity = find_entity_context(r['name'], index) or find_entity_context(r['description'], index)
+        if not entity:
             continue
-        entry = matched.setdefault(actor['name'], {'actor': actor, 'ioc_count': 0})
+        entry = matched.setdefault(entity['name'], {'entity': entity, 'ioc_count': 0})
         entry['ioc_count'] += 1
 
     out = []
     for name, entry in matched.items():
-        actor = entry['actor']
+        entity = entry['entity']
         techniques = []
-        for tid in actor['techniques']:
+        for tid in entity['techniques']:
             tname, tactic = mitre_lookup(tid)
             techniques.append({'id': tid, 'name': tname, 'tactic': tactic, 'tactic_label': TACTIC_LABELS.get(tactic, tactic)})
         out.append({
-            'name': name, 'aliases': actor['aliases'], 'type': actor['type'],
-            'description': actor['description'], 'ioc_count': entry['ioc_count'],
+            'id': entity.get('id'), 'name': name, 'aliases': entity['aliases'], 'type': entity['entity_type'],
+            'description': entity['description'], 'ioc_count': entry['ioc_count'],
             'techniques': techniques,
         })
     out.sort(key=lambda a: -a['ioc_count'])
@@ -1146,11 +1162,11 @@ def api_ti_actor_summary():
     if cached is not None and (now - _ACTOR_SUMMARY_CACHE.get('time', 0)) < _ACTOR_SUMMARY_CACHE_TTL:
         return jsonify({'actors': cached})
 
-    from threat_actors import ACTORS
-    names = {actor['name'] for actor in ACTORS} | {a for actor in ACTORS for a in actor.get('aliases', [])}
+    db = get_db()
+    entities = _get_ti_entities(db)
+    names = {e['name'] for e in entities} | {a for e in entities for a in e['aliases']}
     if not names:
         return jsonify({'actors': []})
-    db = get_db()
     conditions, cond_params = [], []
     for n in names:
         conditions.append("(LOWER(name) LIKE ? OR LOWER(description) LIKE ?)")
@@ -1162,10 +1178,130 @@ def api_ti_actor_summary():
         f"WHERE ({' OR '.join(conditions)})",
         [_ACTOR_SUMMARY_SCAN_LIMIT] + cond_params
     ).fetchall()
-    result = _build_actor_summary(rows)
+    result = _build_actor_summary(rows, entities)
     _ACTOR_SUMMARY_CACHE['data'] = result
     _ACTOR_SUMMARY_CACHE['time'] = now
     return jsonify({'actors': result})
+
+@app.route('/api/ti/entities', methods=['GET', 'POST'])
+@login_required
+def api_ti_entities():
+    db = get_db()
+    if request.method == 'GET':
+        return jsonify(_get_ti_entities(db))
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    d = request.json or {}
+    name = (d.get('name') or '').strip()
+    entity_type = (d.get('entity_type') or '').strip()
+    if not name or not entity_type:
+        return jsonify({'error': 'name and entity_type are required'}), 400
+    if db.execute("SELECT 1 FROM ti_entities WHERE name = ?", (name,)).fetchone():
+        return jsonify({'error': f'An entity named "{name}" already exists'}), 400
+    aliases = ','.join(a.strip() for a in (d.get('aliases') or '').split(',') if a.strip())
+    techniques = ','.join(t.strip() for t in (d.get('techniques') or '').split(',') if t.strip())
+    db.execute(
+        "INSERT INTO ti_entities (entity_type, name, aliases, description, techniques, source, created_by) "
+        "VALUES (?, ?, ?, ?, ?, 'admin', ?)",
+        (entity_type, name, aliases, (d.get('description') or '').strip(), techniques, current_user.username)
+    )
+    db.commit()
+    _ACTOR_SUMMARY_CACHE.clear()
+    log_audit('ti_entity_create', 'ti_entity', name)
+    return jsonify({'status': 'success'})
+
+@app.route('/api/ti/entities/<int:eid>', methods=['PUT', 'DELETE'])
+@login_required
+def api_ti_entity_detail_admin(eid):
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    db = get_db()
+    existing = db.execute("SELECT name FROM ti_entities WHERE id = ?", (eid,)).fetchone()
+    if not existing:
+        return jsonify({'error': 'Entity not found'}), 404
+    if request.method == 'DELETE':
+        db.execute("DELETE FROM ti_entities WHERE id = ?", (eid,))
+        db.execute("DELETE FROM ti_relationships WHERE entity_id = ?", (eid,))
+        db.commit()
+        _ACTOR_SUMMARY_CACHE.clear()
+        log_audit('ti_entity_delete', 'ti_entity', existing['name'])
+        return jsonify({'ok': 1})
+
+    d = request.json or {}
+    name = (d.get('name') or '').strip()
+    entity_type = (d.get('entity_type') or '').strip()
+    if not name or not entity_type:
+        return jsonify({'error': 'name and entity_type are required'}), 400
+    if db.execute("SELECT 1 FROM ti_entities WHERE name = ? AND id != ?", (name, eid)).fetchone():
+        return jsonify({'error': f'An entity named "{name}" already exists'}), 400
+    aliases = ','.join(a.strip() for a in (d.get('aliases') or '').split(',') if a.strip())
+    techniques = ','.join(t.strip() for t in (d.get('techniques') or '').split(',') if t.strip())
+    db.execute(
+        "UPDATE ti_entities SET entity_type = ?, name = ?, aliases = ?, description = ?, techniques = ? WHERE id = ?",
+        (entity_type, name, aliases, (d.get('description') or '').strip(), techniques, eid)
+    )
+    db.commit()
+    _ACTOR_SUMMARY_CACHE.clear()
+    log_audit('ti_entity_update', 'ti_entity', name)
+    return jsonify({'status': 'success'})
+
+@app.route('/api/ti/entities/<int:eid>/detail', methods=['GET'])
+@login_required
+def api_ti_entity_full_detail(eid):
+    # A2: the entity detail view -- reuses the exact same LIKE-based matching as the
+    # dashboard summary above, scoped to just this ONE entity's name/aliases instead
+    # of all of them, so it stays cheap even though it isn't cached/bounded the same
+    # way (a single entity's OR-clause is a small fraction of the full summary's cost).
+    from threat_actors import build_index, find_entity_context
+    from mitre_attack import lookup as mitre_lookup, TACTIC_LABELS
+
+    db = get_db()
+    row = db.execute(
+        "SELECT id, entity_type, name, aliases, description, techniques, source FROM ti_entities WHERE id = ?", (eid,)
+    ).fetchone()
+    if not row:
+        return jsonify({'error': 'Entity not found'}), 404
+    entity = _entity_row_to_dict(row)
+
+    names = {entity['name']} | set(entity['aliases'])
+    conditions, cond_params = [], []
+    for n in names:
+        conditions.append("(LOWER(si.name) LIKE ? OR LOWER(si.description) LIKE ?)")
+        like = f"%{n.lower()}%"
+        cond_params.extend([like, like])
+    matched_iocs = []
+    if conditions:
+        rows = db.execute(
+            f"SELECT si.stix_id, si.ioc_type, si.name, si.description, si.pattern, si.revoked, tf.name AS source_name, "
+            f"(SELECT COUNT(*) FROM ioc_sightings s WHERE s.stix_id = si.stix_id) AS sighting_count, "
+            f"(SELECT COUNT(DISTINCT feed_id) FROM stix_indicators si2 WHERE si2.pattern = si.pattern AND si2.revoked = 0) AS corroboration_count "
+            f"FROM stix_indicators si LEFT JOIN ti_feeds tf ON si.feed_id = tf.id "
+            f"WHERE si.revoked = 0 AND ({' OR '.join(conditions)}) "
+            f"ORDER BY si.inserted_at DESC LIMIT 200",
+            cond_params
+        ).fetchall()
+        # Confirm each SQL-prefiltered candidate with the same whole-word match the
+        # summary widget uses, so a substring false-positive (e.g. an unrelated IOC
+        # whose name happens to CONTAIN this entity's name as part of a longer word)
+        # doesn't show up on the detail page even though the LIKE pre-filter caught it.
+        index = build_index([entity])
+        for r in rows:
+            rd = dict(r)
+            if find_entity_context(rd['name'], index) or find_entity_context(rd.get('description', ''), index):
+                del rd['description']  # internal confirmation input only, not part of the API shape
+                matched_iocs.append(rd)
+
+    techniques = []
+    for tid in entity['techniques']:
+        tname, tactic = mitre_lookup(tid)
+        techniques.append({'id': tid, 'name': tname, 'tactic': tactic, 'tactic_label': TACTIC_LABELS.get(tactic, tactic)})
+
+    relationships = [dict(r) for r in db.execute(
+        "SELECT id, target_type, target_id, relationship_type, created_by, created_at FROM ti_relationships WHERE entity_id = ? ORDER BY created_at DESC",
+        (eid,)
+    ).fetchall()]
+
+    return jsonify({**entity, 'techniques': techniques, 'matched_iocs': matched_iocs, 'relationships': relationships})
 
 @app.route('/api/ti/warninglists', methods=['GET'])
 @login_required
@@ -3519,6 +3655,48 @@ def migrate_enrichment_results():
             fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(value, source)
         )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_ti_entities():
+    try:
+        from threat_actors import ACTORS
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS ti_entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL,
+            name TEXT NOT NULL UNIQUE,
+            aliases TEXT,
+            description TEXT,
+            techniques TEXT,
+            source TEXT DEFAULT 'curated',
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS ti_relationships (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_id INTEGER NOT NULL,
+            target_type TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            relationship_type TEXT NOT NULL DEFAULT 'indicates',
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(entity_id, target_type, target_id)
+        )''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ti_relationships_entity ON ti_relationships(entity_id)")
+        # INSERT OR IGNORE per-row (not gated on an empty table) rather than the
+        # seed-once-only pattern warninglists uses -- ACTORS is a growable reference
+        # list (new curated entries can ship in a later update), so every deploy
+        # should pick up anything new without re-touching rows an admin already
+        # edited/deleted. Matched on the UNIQUE(name) constraint.
+        for a in ACTORS:
+            conn.execute(
+                "INSERT OR IGNORE INTO ti_entities (entity_type, name, aliases, description, techniques, source) "
+                "VALUES (?, ?, ?, ?, ?, 'curated')",
+                (a['type'], a['name'], ','.join(a.get('aliases') or []), a['description'], ','.join(a.get('techniques') or []))
+            )
         conn.commit()
         conn.close()
     except Exception:
@@ -5879,6 +6057,7 @@ migrate_warninglists()
 migrate_ioc_sightings()
 migrate_seed_ioc_correlation_rule()
 migrate_enrichment_results()
+migrate_ti_entities()
 
 try:
     # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every

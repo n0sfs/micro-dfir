@@ -75,27 +75,44 @@ ACTORS = [
 _INDEX = None
 
 
+def build_index(entities):
+    """Builds a lowercased name/alias -> entity lookup dict from any iterable of
+    entity-shaped dicts (a 'name' string plus an 'aliases' list) -- used both for the
+    static ACTORS seed list (via _build_index below) and for a dynamic, DB-loaded
+    entity set (Tier 3's ti_entities table is now the live source of truth; ACTORS is
+    only ever read again as that table's one-time/growable seed data)."""
+    idx = {}
+    for entity in entities:
+        idx[entity['name'].lower()] = entity
+        for alias in entity.get('aliases') or []:
+            idx[alias.lower()] = entity
+    return idx
+
+
+def find_entity_context(text, index):
+    """Whole-word, case-insensitive scan of free text (an IOC name/description)
+    against a pre-built index (see build_index). Returns the matching entity dict,
+    or None."""
+    if not text or not index:
+        return None
+    lowered = text.lower()
+    for key, entity in index.items():
+        if re.search(r'\b' + re.escape(key) + r'\b', lowered):
+            return entity
+    return None
+
+
 def _build_index():
     global _INDEX
     if _INDEX is not None:
         return _INDEX
-    idx = {}
-    for actor in ACTORS:
-        idx[actor['name'].lower()] = actor
-        for alias in actor.get('aliases', []):
-            idx[alias.lower()] = actor
-    _INDEX = idx
-    return idx
+    _INDEX = build_index(ACTORS)
+    return _INDEX
 
 
 def find_actor_context(text):
-    """Whole-word, case-insensitive scan of free text (an IOC name/description) for
-    a known actor/malware/tool name or alias. Returns the matching ACTORS entry, or
-    None. O(known names) per call -- fine for a curated ~20-entry table."""
-    if not text:
-        return None
-    lowered = text.lower()
-    for key, actor in _build_index().items():
-        if re.search(r'\b' + re.escape(key) + r'\b', lowered):
-            return actor
-    return None
+    """Back-compat wrapper matching against the static ACTORS seed list only. Real
+    callers now load ti_entities from the DB and call find_entity_context(text,
+    build_index(db_entities)) directly, so a newly-admin-added entity or an edited
+    alias is reflected immediately instead of only after a process restart."""
+    return find_entity_context(text, _build_index())

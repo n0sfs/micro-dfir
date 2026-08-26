@@ -356,7 +356,8 @@ function loadActorSummary() {
         empty.style.display = 'none';
         grid.innerHTML = d.actors.map(a => `
             <div class="col-md-6 col-lg-4">
-                <div class="border border-secondary rounded p-2 h-100">
+                <a href="/threat-intel?entity=${a.id}" class="text-decoration-none text-reset d-block h-100" title="View entity detail">
+                <div class="border border-secondary rounded p-2 h-100" style="cursor:pointer;" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor=''">
                     <div class="d-flex justify-content-between align-items-start mb-1">
                         <strong>${escHtml(a.name)}</strong>
                         ${actorTypeBadge(a.type)}
@@ -368,6 +369,7 @@ function loadActorSummary() {
                         ${a.techniques.map(t => `<span class="badge bg-secondary me-1 mb-1" title="${escHtml(t.tactic_label)}">T${escHtml(t.id)}</span>`).join('')}
                     </div>
                 </div>
+                </a>
             </div>`).join('');
     }).catch(err => console.error('Error loading actor summary:', err));
 }

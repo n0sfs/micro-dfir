@@ -82,3 +82,12 @@ CREATE INDEX IF NOT EXISTS idx_ioc_sightings_stix_id ON ioc_sightings(stix_id);
 -- (value, source) pair, refreshed once the cache TTL (see ENRICHMENT_CACHE_TTL_HOURS)
 -- has passed, so a repeat lookup on the same IOC doesn't re-hit a free-tier rate limit.
 CREATE TABLE IF NOT EXISTS enrichment_results (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL, source TEXT NOT NULL, verdict TEXT, summary TEXT, raw_json TEXT, fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(value, source));
+-- Tier 3: DB-backed, admin-editable threat-actor/malware entities -- src/threat_actors.py's
+-- ACTORS list is now only this table's one-time (and growable) seed data, not the runtime
+-- source of truth. aliases/techniques are stored comma-separated, same shape compliance_tags
+-- already uses on sigma_rules.
+CREATE TABLE IF NOT EXISTS ti_entities (id INTEGER PRIMARY KEY AUTOINCREMENT, entity_type TEXT NOT NULL, name TEXT NOT NULL UNIQUE, aliases TEXT, description TEXT, techniques TEXT, source TEXT DEFAULT 'curated', created_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+-- Manual entity <-> IOC/alert/case links, for whatever the automatic name/alias match
+-- in _build_actor_summary() can't see -- same shape as case_items' proven manual-linking pattern.
+CREATE TABLE IF NOT EXISTS ti_relationships (id INTEGER PRIMARY KEY AUTOINCREMENT, entity_id INTEGER NOT NULL, target_type TEXT NOT NULL, target_id TEXT NOT NULL, relationship_type TEXT NOT NULL DEFAULT 'indicates', created_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(entity_id, target_type, target_id));
+CREATE INDEX IF NOT EXISTS idx_ti_relationships_entity ON ti_relationships(entity_id);

@@ -111,6 +111,34 @@
                 </div>
             </div>
 
+            <div class="card bg-dark border-secondary mb-4">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span><i class="fa-solid fa-user-ninja me-2"></i>Threat Actor / Malware Entities</span>
+                    {% if current_user.role == 'admin' %}
+                    <button class="btn btn-primary btn-sm" onclick="openEntityModal()"><i class="fa-solid fa-plus me-1"></i> Add Entity</button>
+                    {% endif %}
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-dark table-hover mb-0 align-middle">
+                            <thead>
+                                <tr>
+                                    <th class="ps-3">Name</th>
+                                    <th>Type</th>
+                                    <th>Aliases</th>
+                                    <th>Techniques</th>
+                                    <th>Source</th>
+                                    <th style="width:110px;">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="entitiesTableBody">
+                                <tr><td colspan="6" class="text-center text-muted py-3">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
             <div class="card bg-dark border-secondary">
                 <div class="card-header">
                     <i class="fa-solid fa-list-check me-2"></i>Indicator Browser
@@ -284,6 +312,63 @@
         <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body" id="sweepDetailModalBody"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Add/Edit Entity Modal -->
+<div class="modal fade" id="entityModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title">Add Entity</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label">Name</label>
+          <input type="text" id="entityName" class="form-control bg-dark text-light border-secondary" placeholder="e.g. Emotet">
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Type</label>
+          <select id="entityType" class="form-select bg-dark text-light border-secondary">
+            <option value="threat_actor">Threat Actor</option>
+            <option value="malware">Malware</option>
+            <option value="ransomware">Ransomware</option>
+            <option value="tool">Tool</option>
+          </select>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Aliases <span class="text-muted small">(comma-separated)</span></label>
+          <input type="text" id="entityAliases" class="form-control bg-dark text-light border-secondary" placeholder="e.g. Heodo">
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Description</label>
+          <textarea id="entityDescription" class="form-control bg-dark text-light border-secondary" rows="2"></textarea>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">MITRE ATT&amp;CK Technique IDs <span class="text-muted small">(comma-separated, e.g. 1566.001,1059.001)</span></label>
+          <input type="text" id="entityTechniques" class="form-control bg-dark text-light border-secondary" placeholder="1566.001, 1059.001">
+        </div>
+        <div id="entityModalError" class="text-danger small" style="display:none;"></div>
+      </div>
+      <div class="modal-footer border-secondary">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" onclick="saveEntity()"><i class="fa-solid fa-floppy-disk me-1"></i>Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Entity Detail Modal -->
+<div class="modal fade" id="entityDetailModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title" id="entityDetailTitle">Entity</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="entityDetailBody"></div>
     </div>
   </div>
 </div>
@@ -1084,6 +1169,145 @@ function loadEnrichmentSettings() {
     }).catch(err => console.error('Error loading enrichment settings:', err));
 }
 
+// ---- Entities (Tier 3 Track A) ----
+let entityModal = null, entityDetailModal = null, editingEntityId = null;
+let allEntities = [];
+
+function initEntityModal() { if (!entityModal) entityModal = new bootstrap.Modal(document.getElementById('entityModal')); }
+
+function entityTypeBadge(type) {
+    const map = {threat_actor: 'bg-danger', ransomware: 'bg-danger', malware: 'bg-warning text-dark', tool: 'bg-info text-dark'};
+    return `<span class="badge ${map[type] || 'bg-secondary'}">${escHtml(type || '')}</span>`;
+}
+
+function loadEntities() {
+    fetch('/api/ti/entities').then(r => r.json()).then(entities => {
+        allEntities = entities;
+        const tbody = document.getElementById('entitiesTableBody');
+        if (!entities.length) {
+            tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">No entities yet.</td></tr>';
+            return;
+        }
+        const isAdmin = {{ 'true' if current_user.role == 'admin' else 'false' }};
+        tbody.innerHTML = entities.map(e => `
+            <tr>
+                <td class="ps-3"><a href="#" onclick="openEntityDetail(${e.id}); return false;">${escHtml(e.name)}</a></td>
+                <td>${entityTypeBadge(e.entity_type)}</td>
+                <td class="text-muted small">${escHtml((e.aliases || []).join(', ')) || '—'}</td>
+                <td class="text-muted small">${(e.techniques || []).map(t => `<span class="badge bg-secondary me-1">T${escHtml(t)}</span>`).join('') || '—'}</td>
+                <td><span class="badge ${e.source === 'admin' ? 'bg-info text-dark' : 'bg-secondary'}">${escHtml(e.source)}</span></td>
+                <td class="text-nowrap">
+                    ${isAdmin ? `
+                    <button class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="Edit" onclick='openEntityModal(${JSON.stringify(e).replace(/'/g, "&#39;")})'><i class="fa-solid fa-pen"></i></button>
+                    <button class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete" onclick="deleteEntity(${e.id}, '${e.name.replace(/'/g, "\\'")}')"><i class="fa-solid fa-trash"></i></button>
+                    ` : ''}
+                </td>
+            </tr>
+        `).join('');
+    }).catch(err => console.error('Error loading entities:', err));
+}
+
+function openEntityModal(entity) {
+    initEntityModal();
+    document.getElementById('entityModalError').style.display = 'none';
+    editingEntityId = entity ? entity.id : null;
+    document.getElementById('entityName').value = entity ? entity.name : '';
+    document.getElementById('entityType').value = entity ? entity.entity_type : 'malware';
+    document.getElementById('entityAliases').value = entity ? (entity.aliases || []).join(', ') : '';
+    document.getElementById('entityDescription').value = entity ? (entity.description || '') : '';
+    document.getElementById('entityTechniques').value = entity ? (entity.techniques || []).join(', ') : '';
+    document.querySelector('#entityModal .modal-title').innerText = entity ? 'Edit Entity' : 'Add Entity';
+    entityModal.show();
+}
+
+async function saveEntity() {
+    const errBox = document.getElementById('entityModalError');
+    const payload = {
+        name: document.getElementById('entityName').value.trim(),
+        entity_type: document.getElementById('entityType').value,
+        aliases: document.getElementById('entityAliases').value.trim(),
+        description: document.getElementById('entityDescription').value.trim(),
+        techniques: document.getElementById('entityTechniques').value.trim(),
+    };
+    const url = editingEntityId ? `/api/ti/entities/${editingEntityId}` : '/api/ti/entities';
+    const method = editingEntityId ? 'PUT' : 'POST';
+    try {
+        const res = await fetch(url, {method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+        const data = await res.json();
+        if (!res.ok) { errBox.innerText = data.error || 'Failed to save entity.'; errBox.style.display = 'block'; return; }
+        entityModal.hide();
+        loadEntities();
+    } catch (e) {
+        errBox.innerText = 'Error: ' + e; errBox.style.display = 'block';
+    }
+}
+
+async function deleteEntity(id, name) {
+    if (!(await confirmDialog(`Delete entity "${name}"? This also removes any manual relationships linked to it. Note: if it's still in the curated seed list, it may reappear on the next update.`, {title: 'Delete entity', danger: true, confirmLabel: 'Delete'}))) return;
+    const res = await fetch(`/api/ti/entities/${id}`, {method: 'DELETE'});
+    if (!res.ok) { const err = await res.json().catch(() => ({})); toast(err.error || 'Failed to delete entity.', 'danger'); }
+    loadEntities();
+}
+
+function relationshipRow(rel) {
+    return `<tr><td class="small">${escHtml(rel.target_type)}</td><td class="small font-monospace">${escHtml(rel.target_id)}</td><td class="small text-muted">${escHtml(rel.relationship_type)}</td><td class="small text-muted">${escHtml(rel.created_by || '')}</td></tr>`;
+}
+
+async function openEntityDetail(id) {
+    initEntityDetailModalRef();
+    document.getElementById('entityDetailTitle').innerText = 'Loading...';
+    document.getElementById('entityDetailBody').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+    entityDetailModal.show();
+    try {
+        const res = await fetch(`/api/ti/entities/${id}/detail`);
+        const e = await res.json();
+        if (!res.ok) { document.getElementById('entityDetailBody').innerHTML = `<span class="text-danger">${escHtml(e.error || 'Failed to load entity.')}</span>`; return; }
+        document.getElementById('entityDetailTitle').innerHTML = `${escHtml(e.name)} ${entityTypeBadge(e.entity_type)}`;
+        const iocRows = (e.matched_iocs || []).map(i => `
+            <tr>
+                <td class="font-monospace small">${escHtml(i.pattern)}</td>
+                <td class="small">${escHtml(i.name || '')}</td>
+                <td class="small text-muted">${escHtml(i.source_name || 'Unknown')}${i.corroboration_count > 1 ? ` <span class="badge bg-info text-dark">+${i.corroboration_count - 1} more</span>` : ''}</td>
+                <td class="small">${i.sighting_count > 0 ? `<span class="badge bg-warning text-dark">${i.sighting_count}</span>` : '<span class="text-muted">—</span>'}</td>
+            </tr>`).join('');
+        const relRows = (e.relationships || []).map(relationshipRow).join('');
+        document.getElementById('entityDetailBody').innerHTML = `
+            ${(e.aliases || []).length ? `<div class="text-muted small mb-2">aka ${escHtml(e.aliases.join(', '))}</div>` : ''}
+            <p class="small">${escHtml(e.description || '')}</p>
+            <div class="mb-3">
+                ${(e.techniques || []).map(t => `<span class="badge bg-secondary me-1 mb-1" title="${escHtml(t.tactic_label)}">T${escHtml(t.id)}${t.name ? ' — ' + escHtml(t.name) : ''}</span>`).join('') || '<span class="text-muted small">No techniques listed.</span>'}
+            </div>
+            <h6 class="small text-uppercase text-muted">Matching IOCs (${(e.matched_iocs || []).length})</h6>
+            <div class="table-responsive mb-3" style="max-height:220px; overflow-y:auto;">
+                <table class="table table-dark table-sm mb-0">
+                    <thead><tr><th>Indicator</th><th>Name</th><th>Source</th><th>Sightings</th></tr></thead>
+                    <tbody>${iocRows || '<tr><td colspan="4" class="text-center text-muted small py-2">No matching IOCs in the currently-synced set.</td></tr>'}</tbody>
+                </table>
+            </div>
+            <h6 class="small text-uppercase text-muted">Manual Relationships (${(e.relationships || []).length})</h6>
+            <div class="table-responsive">
+                <table class="table table-dark table-sm mb-0">
+                    <thead><tr><th>Target Type</th><th>Target ID</th><th>Relationship</th><th>Added By</th></tr></thead>
+                    <tbody>${relRows || '<tr><td colspan="4" class="text-center text-muted small py-2">None yet.</td></tr>'}</tbody>
+                </table>
+            </div>
+        `;
+    } catch (err) {
+        document.getElementById('entityDetailBody').innerHTML = `<span class="text-danger">Error: ${escHtml(String(err))}</span>`;
+    }
+}
+
+function initEntityDetailModalRef() { if (!entityDetailModal) entityDetailModal = new bootstrap.Modal(document.getElementById('entityDetailModal')); }
+
+// Deep-link support: /threat-intel?entity=<id> (used by the Dashboards actor-summary
+// widget's cards, which live on a different page/template) auto-opens that entity's
+// detail modal once entities have loaded.
+function checkEntityDeepLink() {
+    const params = new URLSearchParams(window.location.search);
+    const eid = params.get('entity');
+    if (eid) openEntityDetail(parseInt(eid, 10));
+}
+
 function loadWarninglists() {
     fetch('/api/ti/warninglists')
         .then(r => r.json())
@@ -1244,10 +1468,12 @@ function loadIocs() {
 
 updateHuntStats();
 loadFeeds();
+loadEntities();
 loadWarninglists();
 loadEnrichmentSettings();
 loadIocs();
 loadIocFacets();
 initIocFilterDropdowns();
+checkEntityDeepLink();
 </script>
 {% endblock %}
