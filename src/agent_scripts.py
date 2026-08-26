@@ -403,6 +403,80 @@ $result.note = "A recently-modified-files scan (last 24h) across common drop/per
 $result | ConvertTo-Json -Depth 4 -Compress
 """
 
+# A focused incident-triage bundle -- distinct from collect_triage()'s lighter
+# always-useful snapshot (processes/connections/autoruns/users/startup) and from
+# persistence_sweep()'s persistence-only deep dive. This is the artifact set an
+# analyst actually reaches for once an alert has fired and the host is a real
+# suspect: USB device history, PowerShell command-line history, targeted
+# high-value Security-log events, BitLocker recovery keys (in case the disk needs
+# offline imaging later), and each user's "Recent Items" LNK shortcuts (far more
+# targeted than a blind recursive C:\Users scan, and a canonical execution/
+# file-access artifact -- Windows auto-generates one there every time a user opens
+# a file). Every sub-collection is independently try/caught and bounded (Select
+# -Object -First N / -MaxEvents), so one missing feature (e.g. BitLocker module
+# absent on this SKU) degrades that one section to null/empty rather than failing
+# the whole run -- same resilience discipline as collect_forensic_timestamps above.
+#
+# Deliberately NOT attempted here (would need real binary/journal parsing, not a
+# safely-boundable one-shot PowerShell script -- same reasoning as
+# collect_recent_file_changes' USN-journal note above): raw memory/disk imaging,
+# Amcache/Shimcache *parsing* (their existence/metadata is already covered by
+# collect_forensic_timestamps), and Sigma/IOC matching against any of this (that's
+# what ioc_sweep/string_sweep and the server-side detection engine already do).
+def collect_live_forensics():
+    return r"""$result = @{}
+
+$result.usb_history = @(try {
+    Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Enum\USBSTOR' -ErrorAction Stop | ForEach-Object {
+        $deviceKey = $_
+        Get-ChildItem $deviceKey.PSPath -ErrorAction SilentlyContinue | ForEach-Object {
+            $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+            [PSCustomObject]@{ device = $deviceKey.PSChildName; serial = $_.PSChildName; friendly_name = $props.FriendlyName; mfg = $props.Mfg }
+        }
+    }
+} catch { @() })
+
+$result.ps_console_history = @(Get-ChildItem 'C:\Users\*\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt' -ErrorAction SilentlyContinue | ForEach-Object {
+    [PSCustomObject]@{
+        user = $_.FullName.Split('\')[2]
+        last_write = $_.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')
+        recent_lines = @(Get-Content $_.FullName -ErrorAction SilentlyContinue -Tail 100)
+    }
+})
+
+$result.security_events = @(try {
+    Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4624,4625,4648,4672,4688; StartTime=(Get-Date).AddHours(-24)} -MaxEvents 300 -ErrorAction Stop |
+        Select-Object TimeCreated,Id,@{N='Message';E={($_.Message -replace '\s+',' ').Substring(0, [Math]::Min(300, ($_.Message -replace '\s+',' ').Length))}}
+} catch { @() })
+
+$result.bitlocker = @(try {
+    Get-BitLockerVolume -ErrorAction Stop | ForEach-Object {
+        $vol = $_
+        [PSCustomObject]@{
+            mount_point = $vol.MountPoint
+            protection_status = $vol.ProtectionStatus.ToString()
+            volume_status = $vol.VolumeStatus.ToString()
+            recovery_keys = @($vol.KeyProtector | Where-Object { $_.KeyProtectorType -eq 'RecoveryPassword' } | ForEach-Object { [PSCustomObject]@{ id = $_.KeyProtectorId; recovery_password = $_.RecoveryPassword } })
+        }
+    }
+} catch { @() })
+
+$lnkHits = New-Object System.Collections.ArrayList
+Get-ChildItem 'C:\Users' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+    $uname = $_.Name
+    $recentDir = Join-Path $_.FullName 'AppData\Roaming\Microsoft\Windows\Recent'
+    if (Test-Path $recentDir) {
+        Get-ChildItem $recentDir -Filter '*.lnk' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 40 | ForEach-Object {
+            [void]$lnkHits.Add([PSCustomObject]@{ user = $uname; name = $_.Name; last_write = $_.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss') })
+        }
+    }
+}
+$result.recent_lnk_files = $lnkHits
+
+$result.note = "BitLocker recovery keys and USB/PowerShell/LNK history are metadata/secrets, not raw disk or memory images -- collect a specific file via 'Collect File' for anything needing deeper offline analysis."
+$result | ConvertTo-Json -Depth 5 -Compress
+"""
+
 # label -> (builder, required param names)
 WINDOWS_TEMPLATES = {
     'list_processes': (lambda params: _PROGRESS_SILENT + list_processes(), []),
@@ -415,6 +489,7 @@ WINDOWS_TEMPLATES = {
     'collect_browser_artifacts': (lambda params: _PROGRESS_SILENT + collect_browser_artifacts(), []),
     'collect_forensic_timestamps': (lambda params: _PROGRESS_SILENT + collect_forensic_timestamps(), []),
     'collect_recent_file_changes': (lambda params: _PROGRESS_SILENT + collect_recent_file_changes(), []),
+    'collect_live_forensics': (lambda params: _PROGRESS_SILENT + collect_live_forensics(), []),
     # 'hashes'/'md5_hashes'/'sha1_hashes' and 'patterns' are always server-populated
     # from the live IOC list / imported YARA rules right before dispatch (see app.py's
     # api_agent_commands()), never client-supplied — deliberately not in the required
