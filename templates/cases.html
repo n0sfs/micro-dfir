@@ -291,17 +291,24 @@ function caseEventLabel(e) {
         task_removed: `Task removed: "${escHtml(e.detail)}"`,
         template_applied: `Template applied: ${escHtml(e.detail)}`,
         note: escHtml(e.detail),
+        analysis: (e.detail || '').split('\n')[0] || 'Analysis',
     };
     return map[e.event_type] || escHtml(e.event_type);
 }
 
 function eventRow(e) {
-    const icon = e.event_type === 'note' ? 'fa-note-sticky text-info' : 'fa-circle text-muted';
+    const icon = e.event_type === 'note' ? 'fa-note-sticky text-info' : (e.event_type === 'analysis' ? 'fa-magnifying-glass-chart text-info' : 'fa-circle text-muted');
+    // A deterministic host/user analysis (see analyzeCaseEntity()) is multi-line and
+    // meant to be read as a block, not squeezed into the same single-line label every
+    // other event type uses -- rendered as a collapsible <pre> instead.
+    const body = e.event_type === 'analysis'
+        ? `<details><summary style="cursor:pointer;">${escHtml(caseEventLabel(e))}</summary><pre class="small mt-2 mb-0 bg-black border border-secondary rounded p-2" style="white-space:pre-wrap;">${escHtml(e.detail)}</pre></details>`
+        : caseEventLabel(e);
     return `
         <div class="d-flex gap-2 small mb-2">
             <i class="fa-solid ${icon} mt-1" style="font-size:.5rem;"></i>
             <div class="flex-grow-1">
-                <div>${caseEventLabel(e)}</div>
+                <div>${body}</div>
                 <div class="text-muted">${escHtml(e.actor || '')} · ${escHtml(e.ts)}</div>
             </div>
         </div>`;
@@ -409,6 +416,20 @@ function loadAndRenderCaseDetail(cid) {
                     <div class="card bg-dark border-secondary mb-3">
                         <div class="card-header border-secondary">Threat Intel Entities</div>
                         <div class="card-body"><div id="linkToEntityWrap"></div></div>
+                    </div>
+                    <div class="card bg-dark border-secondary mb-3">
+                        <div class="card-header border-secondary">Analyze Host / User <span class="text-muted small">— alerts, UEBA activity, risk score, and IOC enrichment over the Risk Scoring window, posted to the timeline</span></div>
+                        <div class="card-body">
+                            <div class="d-flex gap-2 flex-wrap">
+                                <select id="analyzeEntityType" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:110px;">
+                                    <option value="host">Host</option>
+                                    <option value="user">User</option>
+                                </select>
+                                <input type="text" id="analyzeEntityId" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:180px;" placeholder="e.g. WKS-04">
+                                <button type="button" class="btn btn-sm btn-outline-primary" id="analyzeBtn" onclick="analyzeCaseEntity()"><i class="fa-solid fa-magnifying-glass-chart me-1"></i>Analyze</button>
+                            </div>
+                            <div id="analyzeMsg" class="small mt-2" style="display:none;"></div>
+                        </div>
                     </div>
                     <div class="card bg-dark border-secondary mb-3">
                         <div class="card-header border-secondary">Timeline</div>
@@ -539,6 +560,32 @@ function linkToEntity() {
         msg.innerText = ok ? 'Linked to entity.' : (data.error || 'Failed to link.');
         msg.style.display = 'block';
     }).catch(err => { msg.className = 'small mt-1 text-danger'; msg.innerText = 'Error: ' + err; msg.style.display = 'block'; });
+}
+
+// Batch C of the alert/UEBA -> case automation workflow: a deterministic host/user
+// rollup (alerts, UEBA count, risk score, IOC enrichment), posted straight to the
+// timeline as an 'analysis' event -- see eventRow()'s special-cased rendering for it.
+function analyzeCaseEntity() {
+    const entityType = document.getElementById('analyzeEntityType').value;
+    const entityId = document.getElementById('analyzeEntityId').value.trim();
+    const msg = document.getElementById('analyzeMsg');
+    const btn = document.getElementById('analyzeBtn');
+    if (!entityId) {
+        msg.className = 'small mt-2 text-danger'; msg.innerText = 'Enter a host or username first.'; msg.style.display = 'block'; return;
+    }
+    btn.disabled = true;
+    msg.className = 'small mt-2 text-muted'; msg.innerText = 'Analyzing…'; msg.style.display = 'block';
+    fetch(`/api/cases/${activeCaseId}/analyze`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({entity_type: entityType, entity_id: entityId})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        btn.disabled = false;
+        if (ok) {
+            msg.className = 'small mt-2 text-success'; msg.innerText = 'Analysis added to the timeline.';
+            openCaseDetail(activeCaseId);
+        } else {
+            msg.className = 'small mt-2 text-danger'; msg.innerText = data.error || 'Analysis failed.';
+        }
+    }).catch(err => { btn.disabled = false; msg.className = 'small mt-2 text-danger'; msg.innerText = 'Error: ' + err; });
 }
 
 // Same generic collect_*/persistence_sweep JSON-to-sections renderer as agents.html's
