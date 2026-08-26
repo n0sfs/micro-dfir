@@ -2330,6 +2330,16 @@ def api_identity_detail(iid):
 # UNIFIED_LOGS_SQL's log_type for these rows is 'anomaly', but that's a display label,
 # not the underlying table name, so the two are kept intentionally distinct here.
 CASE_ITEM_TYPES = {'alert': 'alerts', 'ueba_event': 'events'}
+CASE_TLP_VALUES = ('clear', 'green', 'amber', 'amber-strict', 'red')
+CASE_PAP_VALUES = ('clear', 'green', 'amber', 'red')
+
+def _log_case_event(db, cid, event_type, detail=None):
+    # Append-only -- never UPDATEd/DELETEd (except cascade-deleted alongside the case
+    # itself), so this is always a truthful record of what actually happened, in order.
+    db.execute(
+        "INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, ?, ?, ?)",
+        (cid, current_user.username, event_type, detail)
+    )
 
 @app.route('/api/cases', methods=['GET', 'POST'])
 @login_required
@@ -2337,9 +2347,11 @@ def api_cases():
     db = get_db()
     if request.method == 'GET':
         rows = db.execute(
-            "SELECT c.id, c.title, c.status, c.assignee, c.description, c.created_by, c.created_at, c.closed_at, "
-            "COUNT(ci.id) as item_count "
-            "FROM cases c LEFT JOIN case_items ci ON ci.case_id = c.id "
+            "SELECT c.id, c.title, c.status, c.assignee, c.description, c.created_by, c.created_at, c.closed_at, c.tlp, c.pap, "
+            "COUNT(DISTINCT ci.id) as item_count, "
+            "COUNT(DISTINCT ct.id) as task_count, "
+            "COUNT(DISTINCT CASE WHEN ct.status = 'done' THEN ct.id END) as task_done_count "
+            "FROM cases c LEFT JOIN case_items ci ON ci.case_id = c.id LEFT JOIN case_tasks ct ON ct.case_id = c.id "
             "GROUP BY c.id ORDER BY CASE WHEN c.status = 'open' THEN 0 ELSE 1 END, c.created_at DESC"
         ).fetchall()
         return jsonify([dict(r) for r in rows])
@@ -2350,12 +2362,32 @@ def api_cases():
         return jsonify({"error": "Title is required"}), 400
     assignee = (data.get('assignee') or '').strip()
     description = (data.get('description') or '').strip()
+    tlp = (data.get('tlp') or 'clear').strip()
+    pap = (data.get('pap') or 'clear').strip()
+    if tlp not in CASE_TLP_VALUES:
+        return jsonify({"error": f"tlp must be one of {', '.join(CASE_TLP_VALUES)}"}), 400
+    if pap not in CASE_PAP_VALUES:
+        return jsonify({"error": f"pap must be one of {', '.join(CASE_PAP_VALUES)}"}), 400
     cur = db.execute(
-        "INSERT INTO cases (title, assignee, description, created_by) VALUES (?, ?, ?, ?)",
-        (title, assignee, description, current_user.username)
+        "INSERT INTO cases (title, assignee, description, created_by, tlp, pap) VALUES (?, ?, ?, ?, ?, ?)",
+        (title, assignee, description, current_user.username, tlp, pap)
     )
+    cid = cur.lastrowid
+    _log_case_event(db, cid, 'created', title)
+
+    # Optional template: bulk-create its task list on the new case.
+    template_id = data.get('template_id')
+    if template_id:
+        tpl = db.execute("SELECT name, tasks FROM case_templates WHERE id = ?", (template_id,)).fetchone()
+        if tpl:
+            tasks = json.loads(tpl['tasks'])
+            db.executemany(
+                "INSERT INTO case_tasks (case_id, title, position, created_by) VALUES (?, ?, ?, ?)",
+                [(cid, t, i, current_user.username) for i, t in enumerate(tasks)]
+            )
+            _log_case_event(db, cid, 'template_applied', tpl['name'])
     db.commit()
-    return jsonify({"status": "success", "id": cur.lastrowid})
+    return jsonify({"status": "success", "id": cid})
 
 def _case_item_summary(db, item_type, item_id):
     if item_type == 'alert':
@@ -2387,6 +2419,8 @@ def api_case_detail(cid):
 
     if request.method == 'DELETE':
         db.execute("DELETE FROM case_items WHERE case_id = ?", (cid,))
+        db.execute("DELETE FROM case_tasks WHERE case_id = ?", (cid,))
+        db.execute("DELETE FROM case_events WHERE case_id = ?", (cid,))
         db.execute("DELETE FROM cases WHERE id = ?", (cid,))
         db.commit()
         return jsonify({"ok": 1})
@@ -2397,16 +2431,32 @@ def api_case_detail(cid):
         status = data['status'].strip() if 'status' in data and data['status'] else case['status']
         assignee = data['assignee'].strip() if 'assignee' in data else (case['assignee'] or '')
         description = data['description'].strip() if 'description' in data else (case['description'] or '')
+        tlp = data['tlp'].strip() if 'tlp' in data and data['tlp'] else case['tlp']
+        pap = data['pap'].strip() if 'pap' in data and data['pap'] else case['pap']
         if status not in ('open', 'closed'):
             return jsonify({"error": "status must be 'open' or 'closed'"}), 400
+        if tlp not in CASE_TLP_VALUES:
+            return jsonify({"error": f"tlp must be one of {', '.join(CASE_TLP_VALUES)}"}), 400
+        if pap not in CASE_PAP_VALUES:
+            return jsonify({"error": f"pap must be one of {', '.join(CASE_PAP_VALUES)}"}), 400
         closed_at = case['closed_at']
         if status == 'closed' and case['status'] != 'closed':
             closed_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         elif status == 'open':
             closed_at = None
+        # Timeline entries only for what actually CHANGED -- a save that only edits the
+        # description shouldn't manufacture a spurious "status changed to open" event.
+        if status != case['status']:
+            _log_case_event(db, cid, 'status_change', status)
+        if assignee != (case['assignee'] or ''):
+            _log_case_event(db, cid, 'assignee_change', assignee or '(unassigned)')
+        if tlp != case['tlp']:
+            _log_case_event(db, cid, 'tlp_change', tlp)
+        if pap != case['pap']:
+            _log_case_event(db, cid, 'pap_change', pap)
         db.execute(
-            "UPDATE cases SET title = ?, status = ?, assignee = ?, description = ?, closed_at = ? WHERE id = ?",
-            (title, status, assignee, description, closed_at, cid)
+            "UPDATE cases SET title = ?, status = ?, assignee = ?, description = ?, closed_at = ?, tlp = ?, pap = ? WHERE id = ?",
+            (title, status, assignee, description, closed_at, tlp, pap, cid)
         )
         db.commit()
         return jsonify({"status": "success"})
@@ -2416,7 +2466,13 @@ def api_case_detail(cid):
     for it in items:
         summary = _case_item_summary(db, it['item_type'], it['item_id'])
         items_out.append({**dict(it), 'summary': summary})
-    return jsonify({**dict(case), 'items': items_out})
+    tasks = [dict(t) for t in db.execute(
+        "SELECT id, title, status, assignee, position, created_by, created_at FROM case_tasks WHERE case_id = ? ORDER BY position, id", (cid,)
+    ).fetchall()]
+    events = [dict(e) for e in db.execute(
+        "SELECT id, ts, actor, event_type, detail FROM case_events WHERE case_id = ? ORDER BY ts DESC, id DESC", (cid,)
+    ).fetchall()]
+    return jsonify({**dict(case), 'items': items_out, 'tasks': tasks, 'events': events})
 
 @app.route('/api/cases/<int:cid>/items', methods=['POST'])
 @login_required
@@ -2437,6 +2493,7 @@ def api_case_add_item(cid):
         "INSERT INTO case_items (case_id, item_type, item_id, added_by) VALUES (?, ?, ?, ?)",
         (cid, item_type, str(item_id), current_user.username)
     )
+    _log_case_event(db, cid, 'item_added', f"{item_type}:{item_id}")
     db.commit()
     return jsonify({"status": "success"})
 
@@ -2444,11 +2501,82 @@ def api_case_add_item(cid):
 @login_required
 def api_case_remove_item(cid, item_row_id):
     db = get_db()
-    if not db.execute("SELECT 1 FROM case_items WHERE id = ? AND case_id = ?", (item_row_id, cid)).fetchone():
+    item = db.execute("SELECT item_type, item_id FROM case_items WHERE id = ? AND case_id = ?", (item_row_id, cid)).fetchone()
+    if not item:
         return jsonify({"error": "Case item not found"}), 404
     db.execute("DELETE FROM case_items WHERE id = ?", (item_row_id,))
+    _log_case_event(db, cid, 'item_removed', f"{item['item_type']}:{item['item_id']}")
     db.commit()
     return jsonify({"ok": 1})
+
+@app.route('/api/cases/<int:cid>/tasks', methods=['POST'])
+@login_required
+def api_case_add_task(cid):
+    db = get_db()
+    if not db.execute("SELECT 1 FROM cases WHERE id = ?", (cid,)).fetchone():
+        return jsonify({"error": "Case not found"}), 404
+    title = ((request.get_json() or {}).get('title') or '').strip()
+    if not title:
+        return jsonify({"error": "Task title is required"}), 400
+    max_pos = db.execute("SELECT COALESCE(MAX(position), -1) FROM case_tasks WHERE case_id = ?", (cid,)).fetchone()[0]
+    db.execute(
+        "INSERT INTO case_tasks (case_id, title, position, created_by) VALUES (?, ?, ?, ?)",
+        (cid, title, max_pos + 1, current_user.username)
+    )
+    _log_case_event(db, cid, 'task_added', title)
+    db.commit()
+    return jsonify({"status": "success"})
+
+@app.route('/api/cases/<int:cid>/tasks/<int:tid>', methods=['PUT', 'DELETE'])
+@login_required
+def api_case_task_detail(cid, tid):
+    db = get_db()
+    task = db.execute("SELECT * FROM case_tasks WHERE id = ? AND case_id = ?", (tid, cid)).fetchone()
+    if not task:
+        return jsonify({"error": "Task not found"}), 404
+
+    if request.method == 'DELETE':
+        db.execute("DELETE FROM case_tasks WHERE id = ?", (tid,))
+        _log_case_event(db, cid, 'task_removed', task['title'])
+        db.commit()
+        return jsonify({"ok": 1})
+
+    data = request.get_json() or {}
+    title = data['title'].strip() if 'title' in data and data['title'] else task['title']
+    status = data['status'].strip() if 'status' in data and data['status'] else task['status']
+    assignee = data['assignee'].strip() if 'assignee' in data else (task['assignee'] or '')
+    if status not in ('open', 'done'):
+        return jsonify({"error": "status must be 'open' or 'done'"}), 400
+    if status != task['status']:
+        _log_case_event(db, cid, 'task_done' if status == 'done' else 'task_reopened', title)
+    db.execute("UPDATE case_tasks SET title = ?, status = ?, assignee = ? WHERE id = ?", (title, status, assignee, tid))
+    db.commit()
+    return jsonify({"status": "success"})
+
+@app.route('/api/cases/<int:cid>/notes', methods=['POST'])
+@login_required
+def api_case_add_note(cid):
+    db = get_db()
+    if not db.execute("SELECT 1 FROM cases WHERE id = ?", (cid,)).fetchone():
+        return jsonify({"error": "Case not found"}), 404
+    text = ((request.get_json() or {}).get('text') or '').strip()
+    if not text:
+        return jsonify({"error": "Note text is required"}), 400
+    _log_case_event(db, cid, 'note', text)
+    db.commit()
+    return jsonify({"status": "success"})
+
+@app.route('/api/case-templates', methods=['GET'])
+@login_required
+def api_case_templates():
+    db = get_db()
+    rows = db.execute("SELECT id, name, description, tasks FROM case_templates ORDER BY name").fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d['tasks'] = json.loads(d['tasks'])
+        out.append(d)
+    return jsonify(out)
 
 UEBA_CONFIG_DEFAULTS = {
     'ueba_lookback_days': '30', 'ueba_stddev_multiplier': '3', 'ueba_min_baseline': '50',
@@ -3474,6 +3602,76 @@ def migrate_cases():
             added_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )''')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_case_items_case ON case_items(case_id)')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+CASE_TEMPLATES_SEED = [
+    {'name': 'Phishing Investigation', 'description': 'Standard checklist for a reported phishing email.',
+     'tasks': ['Identify sender/return-path and originating IP', 'Check for other recipients of the same message',
+               'Extract and detonate/analyze attachments or links', 'Check if any recipient clicked/entered credentials',
+               'Block sender domain/URL at the mail gateway', 'Force password reset if credentials were entered',
+               'Notify affected users']},
+    {'name': 'Malware Incident', 'description': 'Standard checklist for a confirmed malware detection on an endpoint.',
+     'tasks': ['Isolate the affected host', 'Identify the malware family and initial access vector',
+               'Collect and hash the malicious file(s)', 'Check for lateral movement / other affected hosts',
+               'Sweep environment for the same IOC (hash/domain/IP)', 'Remove/reimage the affected host',
+               'Document root cause and update detections']},
+    {'name': 'Compromised Account', 'description': 'Standard checklist for a suspected or confirmed account compromise.',
+     'tasks': ['Force password reset and revoke active sessions', 'Review sign-in logs for anomalous locations/times',
+               'Check for mailbox rules, forwarding, or OAuth grants added by the attacker',
+               'Check for lateral use of the account (other systems accessed)', 'Notify the account owner',
+               'Enable/verify MFA on the account']},
+    {'name': 'Generic Investigation', 'description': 'A minimal starting checklist for anything else.',
+     'tasks': ['Scope what triggered this case', 'Determine affected hosts/users', 'Contain if needed',
+               'Document findings', 'Close out or escalate']},
+]
+
+def migrate_case_upgrade():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(cases)").fetchall()}
+        if 'tlp' not in cols:
+            conn.execute("ALTER TABLE cases ADD COLUMN tlp TEXT NOT NULL DEFAULT 'clear'")
+        if 'pap' not in cols:
+            conn.execute("ALTER TABLE cases ADD COLUMN pap TEXT NOT NULL DEFAULT 'clear'")
+        conn.execute('''CREATE TABLE IF NOT EXISTS case_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            assignee TEXT,
+            position INTEGER NOT NULL DEFAULT 0,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_case_tasks_case ON case_tasks(case_id)')
+        conn.execute('''CREATE TABLE IF NOT EXISTS case_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id INTEGER NOT NULL,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+            actor TEXT,
+            event_type TEXT NOT NULL,
+            detail TEXT
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_case_events_case ON case_events(case_id)')
+        conn.execute('''CREATE TABLE IF NOT EXISTS case_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            tasks TEXT NOT NULL,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        # Same growable-seed pattern as ti_entities: INSERT OR IGNORE per-row, keyed on
+        # UNIQUE(name), so a future built-in template ships automatically without
+        # touching a template an admin has already edited.
+        for t in CASE_TEMPLATES_SEED:
+            conn.execute(
+                "INSERT OR IGNORE INTO case_templates (name, description, tasks, created_by) VALUES (?, ?, ?, 'system')",
+                (t['name'], t['description'], json.dumps(t['tasks']))
+            )
         conn.commit()
         conn.close()
     except Exception:
@@ -6034,6 +6232,7 @@ migrate_ueba_entities()
 migrate_ueba_math_v2()
 migrate_assets_identities()
 migrate_cases()
+migrate_case_upgrade()
 migrate_live_logs_archive()
 migrate_fim_paths()
 migrate_ueba_priority_scores()
