@@ -99,6 +99,21 @@
     </div>
 </div>
 
+<!-- Command Result Detail modal (for command_result case items) -->
+<div class="modal fade" id="caseCmdResultModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content bg-dark text-light border-secondary">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title">Response Action Result</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <pre id="caseCmdResultBody" class="bg-black p-3 rounded border border-secondary small font-monospace mb-0" style="white-space:pre-wrap;"></pre>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
 let allCases = [];
 let caseFilter = 'all';
@@ -230,13 +245,18 @@ async function deleteCase(cid) {
         .catch(err => toast('Error deleting case: ' + err, 'danger'));
 }
 
+const ITEM_KIND_LABELS = { alert: 'Alert', ueba_event: 'UEBA Anomaly', command_result: 'Response Action' };
+
 function itemSummaryLine(item) {
     if (!item.summary) return '<span class="text-muted small">(underlying record no longer exists)</span>';
     const s = item.summary;
-    const kind = item.item_type === 'alert' ? 'Alert' : 'UEBA Anomaly';
+    const kind = ITEM_KIND_LABELS[item.item_type] || item.item_type;
     const countryBadge = s.country_name ? ` <span class="badge bg-secondary" title="${escHtml(s.country_code)}">${escHtml(s.country_name)}</span>` : '';
+    const viewResultBtn = item.item_type === 'command_result'
+        ? ` <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 ms-2" onclick="viewCaseCommandResult(${item.item_id})"><i class="fa-solid fa-magnifying-glass me-1"></i>View Full Result</button>`
+        : '';
     return `<span class="badge ${severityBadgeClass(s.severity)} me-2">${escHtml((s.severity || '').toUpperCase())}</span>` +
-           `<strong>${escHtml(s.label)}</strong> <span class="text-muted small">(${kind})</span><br>` +
+           `<strong>${escHtml(s.label)}</strong> <span class="text-muted small">(${kind})</span>${viewResultBtn}<br>` +
            `<span class="text-muted small">${escHtml(s.host || '')}${s.username ? ' · ' + escHtml(s.username) : ''} · ${escHtml(s.timestamp)}${countryBadge}</span><br>` +
            `<span class="small">${escHtml((s.message || '').slice(0, 200))}</span>`;
 }
@@ -456,6 +476,98 @@ function linkToEntity() {
         msg.innerText = ok ? 'Linked to entity.' : (data.error || 'Failed to link.');
         msg.style.display = 'block';
     }).catch(err => { msg.className = 'small mt-1 text-danger'; msg.innerText = 'Error: ' + err; msg.style.display = 'block'; });
+}
+
+// Same generic collect_*/persistence_sweep JSON-to-sections renderer as agents.html's
+// Response Actions pane (each template is self-contained in this codebase, no shared
+// JS module to import from) -- see that file's comment above collectResultCellHtml for
+// why a generic walk beats a bespoke renderer per action.
+function titleCaseKey(key) {
+    return key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function collectResultCellHtml(v) {
+    if (v === null || v === undefined || v === '') return '<span class="text-muted">—</span>';
+    if (Array.isArray(v)) {
+        if (v.length === 0) return '<span class="text-muted">—</span>';
+        if (typeof v[0] === 'object') return `<span class="text-muted">${v.length} item(s)</span>`;
+        return `<details><summary class="small" style="cursor:pointer;">${v.length} line(s)</summary><pre class="small mb-0 mt-1" style="white-space:pre-wrap;">${escHtml(v.join('\n'))}</pre></details>`;
+    }
+    if (typeof v === 'object') return `<span class="small">${escHtml(JSON.stringify(v))}</span>`;
+    if (typeof v === 'boolean') return v ? '<span class="badge bg-warning text-dark">yes</span>' : '<span class="text-muted">no</span>';
+    return escHtml(String(v));
+}
+
+function collectResultTable(rows) {
+    const cols = [];
+    rows.forEach(r => Object.keys(r).forEach(k => { if (!cols.includes(k)) cols.push(k); }));
+    const head = cols.map(c => `<th>${titleCaseKey(c)}</th>`).join('');
+    const body = rows.map(r => `<tr>${cols.map(c => `<td class="small">${collectResultCellHtml(r[c])}</td>`).join('')}</tr>`).join('');
+    return `<div class="table-responsive"><table class="table table-dark table-sm table-striped mb-0"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function collectResultSection(key, value) {
+    const label = titleCaseKey(key);
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'string') {
+        return `<div class="alert alert-secondary py-2 px-3 small mb-3"><i class="fa-solid fa-circle-info me-1"></i>${escHtml(value)}</div>`;
+    }
+    if (typeof value === 'boolean') {
+        return value ? `<div class="alert alert-warning py-2 px-3 small mb-3"><i class="fa-solid fa-triangle-exclamation me-1"></i>${label}: results were capped for size -- there may be more than shown.</div>` : '';
+    }
+    if (typeof value === 'number') {
+        return `<div class="small text-muted mt-3">${label}: <span class="text-light">${value}</span></div>`;
+    }
+    if (Array.isArray(value)) {
+        const header = `<h6 class="small text-uppercase text-muted mt-3 mb-2">${label} (${value.length})</h6>`;
+        if (value.length === 0) return header + '<p class="text-muted small">None found.</p>';
+        if (typeof value[0] !== 'object') {
+            return header + `<ul class="small mb-0">${value.map(v => `<li>${escHtml(String(v))}</li>`).join('')}</ul>`;
+        }
+        return header + collectResultTable(value);
+    }
+    if (typeof value === 'object') {
+        const entries = Object.entries(value);
+        if (entries.length === 0) return `<h6 class="small text-uppercase text-muted mt-3 mb-1">${label}</h6><p class="text-muted small">None.</p>`;
+        if (entries.length > 3) {
+            const rows = entries.map(([k, v]) => `<tr><td class="small font-monospace">${escHtml(k)}</td><td class="small">${collectResultCellHtml(v)}</td></tr>`).join('');
+            return `<h6 class="small text-uppercase text-muted mt-3 mb-2">${label} (${entries.length})</h6><div class="table-responsive"><table class="table table-dark table-sm table-striped mb-0"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+        }
+        return `<h6 class="small text-uppercase text-muted mt-3 mb-2">${label}</h6>` + entries.map(([k, v]) => collectResultSection(k, v)).join('');
+    }
+    return '';
+}
+
+function renderCollectResultHtml(c, parsed) {
+    const header = `<div class="mb-2 small"><strong>Host:</strong> ${escHtml(c.hostname)} &nbsp; <strong>Action:</strong> <code>${escHtml(c.label)}</code> &nbsp; <strong>Exit code:</strong> ${c.exit_code}</div>`;
+    const body = Array.isArray(parsed) ? collectResultTable(parsed) : Object.entries(parsed).map(([k, v]) => collectResultSection(k, v)).join('');
+    return `<div style="white-space:normal;">${header}${body}</div>`;
+}
+
+async function viewCaseCommandResult(commandId) {
+    const resultBody = document.getElementById('caseCmdResultBody');
+    resultBody.innerText = 'Loading…';
+    new bootstrap.Modal(document.getElementById('caseCmdResultModal')).show();
+    try {
+        const res = await fetch(`/api/agent/commands?id=${commandId}&limit=1`);
+        const rows = await res.json();
+        const c = rows && rows[0];
+        if (!c) { resultBody.innerText = 'This response action result no longer exists.'; return; }
+        if (c.stdout) {
+            try {
+                const parsed = JSON.parse(c.stdout);
+                if (parsed && typeof parsed === 'object') {
+                    resultBody.innerHTML = renderCollectResultHtml(c, parsed);
+                    return;
+                }
+            } catch (e) { /* not JSON -- fall through to the raw-text view below */ }
+        }
+        let body = `Host: ${c.hostname}\nAction: ${c.label}\nExit code: ${c.exit_code}\n\n--- STDOUT ---\n${c.stdout || '(empty)'}`;
+        if (c.stderr) body += `\n\n--- STDERR ---\n${c.stderr}`;
+        resultBody.innerText = body;
+    } catch (err) {
+        resultBody.innerText = 'Error loading result: ' + err;
+    }
 }
 
 document.addEventListener("DOMContentLoaded", function() {

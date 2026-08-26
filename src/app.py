@@ -2374,7 +2374,7 @@ def api_identity_detail(iid):
 # 'ueba_event' rather than 'anomaly' to match the events table this actually points at --
 # UNIFIED_LOGS_SQL's log_type for these rows is 'anomaly', but that's a display label,
 # not the underlying table name, so the two are kept intentionally distinct here.
-CASE_ITEM_TYPES = {'alert': 'alerts', 'ueba_event': 'events'}
+CASE_ITEM_TYPES = {'alert': 'alerts', 'ueba_event': 'events', 'command_result': 'agent_commands'}
 CASE_TLP_VALUES = ('clear', 'green', 'amber', 'amber-strict', 'red')
 CASE_PAP_VALUES = ('clear', 'green', 'amber', 'red')
 
@@ -2440,6 +2440,28 @@ def _case_item_summary(db, item_type, item_id):
             "SELECT a.timestamp, a.severity, a.host, a.username, a.source_ip, COALESCE(s.title, a.rule_name, 'Custom/YARA Rule') as label, a.message "
             "FROM alerts a LEFT JOIN sigma_rules s ON a.rule_id = s.id WHERE a.id = ?", (item_id,)
         ).fetchone()
+    elif item_type == 'command_result':
+        # Not the same shape as an alert/anomaly (no severity/username/source_ip of its
+        # own) -- synthesized from exit_code/status so the existing severity-badge
+        # rendering still has something sensible to color, rather than adding a whole
+        # separate item-kind rendering path in cases.html for just this one field.
+        r = db.execute(
+            "SELECT queued_at as timestamp, hostname as host, NULL as username, NULL as source_ip, label, status, exit_code FROM agent_commands WHERE id = ?",
+            (item_id,)
+        ).fetchone()
+        if not r:
+            return None
+        r = dict(r)
+        if r['status'] != 'done':
+            r['severity'] = 'INFO'
+            r['message'] = f"Status: {r['status']}"
+        elif r['exit_code'] not in (0, None):
+            r['severity'] = 'HIGH'
+            r['message'] = f"Completed with a non-zero exit code ({r['exit_code']})"
+        else:
+            r['severity'] = 'INFO'
+            r['message'] = "Completed successfully"
+        del r['status'], r['exit_code']
     else:
         r = db.execute(
             "SELECT timestamp, severity, hostname as host, NULL as username, NULL as source_ip, 'UEBA Anomaly' as label, message FROM events WHERE id = ?", (item_id,)
@@ -6118,6 +6140,7 @@ def api_agent_commands():
     if request.method == 'GET':
         hostname = request.args.get('hostname', '')
         label_filter = request.args.get('label', '')
+        cmd_id = request.args.get('id', type=int)
         limit = request.args.get('limit', 30, type=int)
         conditions, params = [], []
         if hostname:
@@ -6126,6 +6149,9 @@ def api_agent_commands():
         if label_filter:
             conditions.append("label = ?")
             params.append(label_filter)
+        if cmd_id is not None:
+            conditions.append("id = ?")
+            params.append(cmd_id)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         rows = db.execute(
             f"SELECT id, hostname, label, status, queued_by, queued_at, completed_at, exit_code, stdout, stderr FROM agent_commands {where} ORDER BY id DESC LIMIT ?",
