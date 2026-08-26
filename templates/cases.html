@@ -337,6 +337,10 @@ function openCaseDetail(cid) {
             `).join('') : '<p class="text-muted small">No items added yet.</p>'}
             <hr class="border-secondary">
 
+            <label class="form-label small text-muted mb-2">Threat Intel Entities</label>
+            <div id="linkToEntityWrap" class="mb-3"></div>
+            <hr class="border-secondary">
+
             <label class="form-label small text-muted mb-2">Timeline</label>
             <div class="d-flex gap-2 mb-3">
                 <input type="text" id="newCaseNoteInput" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Add a note..." onkeyup="if(event.key === 'Enter') addCaseNote()">
@@ -348,6 +352,7 @@ function openCaseDetail(cid) {
         `;
         populateTlpPapSelect('editCaseTlp', TLP_VALUES, c.tlp);
         populateTlpPapSelect('editCasePap', PAP_VALUES, c.pap);
+        renderLinkToEntityControl();
         if (!caseDetailModal) caseDetailModal = new bootstrap.Modal(document.getElementById('caseDetailModal'));
         caseDetailModal.show();
     }).catch(err => toast('Error loading case: ' + err, 'danger'));
@@ -414,6 +419,43 @@ function addCaseNote() {
         method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text})
     }).then(r => r.json()).then(() => { input.value = ''; openCaseDetail(activeCaseId); })
       .catch(err => toast('Error adding note: ' + err, 'danger'));
+}
+
+// A3: manually tie this case to a threat entity (actor/malware family) from Threat
+// Intel, e.g. when a case is opened for an incident later attributed to a known actor.
+function renderLinkToEntityControl() {
+    const wrap = document.getElementById('linkToEntityWrap');
+    if (!wrap) return;
+    wrap.innerHTML = `<span class="text-muted small">Loading entities…</span>`;
+    fetch('/api/ti/entities').then(r => r.json()).then(entities => {
+        const options = (entities || []).map(e => `<option value="${e.id}">${escHtml(e.name)}</option>`).join('');
+        wrap.innerHTML = `
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+                <select id="linkEntitySelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;">
+                    <option value="">Link to entity…</option>
+                    ${options}
+                </select>
+                <button type="button" class="btn btn-sm btn-outline-primary" onclick="linkToEntity()"><i class="fa-solid fa-link me-1"></i>Link</button>
+            </div>
+            <div id="linkToEntityMsg" class="small mt-1" style="display:none;"></div>
+        `;
+    }).catch(() => { wrap.innerHTML = '<span class="text-muted small">Could not load entities.</span>'; });
+}
+
+function linkToEntity() {
+    const select = document.getElementById('linkEntitySelect');
+    const msg = document.getElementById('linkToEntityMsg');
+    const entityId = select.value;
+    if (!entityId) {
+        msg.className = 'small mt-1 text-danger'; msg.innerText = 'Pick an entity first.'; msg.style.display = 'block'; return;
+    }
+    fetch(`/api/ti/entities/${entityId}/relationships`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({target_type: 'case', target_id: activeCaseId})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        msg.className = 'small mt-1 ' + (ok ? 'text-success' : 'text-danger');
+        msg.innerText = ok ? 'Linked to entity.' : (data.error || 'Failed to link.');
+        msg.style.display = 'block';
+    }).catch(err => { msg.className = 'small mt-1 text-danger'; msg.innerText = 'Error: ' + err; msg.style.display = 'block'; });
 }
 
 document.addEventListener("DOMContentLoaded", function() {

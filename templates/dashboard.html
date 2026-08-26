@@ -1161,6 +1161,7 @@ function showLogDetail(idx) {
 
     document.getElementById('logDetailBody').innerHTML = `
         ${canAddToCase ? `<div id="addToCaseWrap" class="mb-2"></div>` : ''}
+        ${canAddToCase ? `<div id="linkToEntityWrap" class="mb-2"></div>` : ''}
         <dl class="row mb-2 small">
             <dt class="col-3">Time</dt><dd class="col-9">${escHtml(log.time)}${isRecurring ? ` <span class="text-muted">(first seen)</span>` : ''}</dd>
             ${isRecurring ? `<dt class="col-3">Last Seen</dt><dd class="col-9">${escHtml(log.last_seen)} <span class="badge bg-secondary">&times;${log.occurrence_count} occurrences</span></dd>` : ''}
@@ -1218,7 +1219,7 @@ function showLogDetail(idx) {
             <pre class="bg-black border border-secondary rounded p-2 small mb-0 mt-1" style="white-space:pre-wrap; word-break:break-word; max-height:400px; overflow-y:auto;">${highlightText(log.raw_xml, termsFor('raw_xml'))}</pre>
         </details>` : ''}
     `;
-    if (canAddToCase) renderAddToCaseControl(log);
+    if (canAddToCase) { renderAddToCaseControl(log); renderLinkToEntityControl(log); }
     new bootstrap.Modal(document.getElementById('logDetailModal')).show();
 }
 
@@ -1290,6 +1291,44 @@ async function addToCase(itemType, itemId) {
     }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
         msg.className = 'small mt-1 ' + (ok ? 'text-success' : 'text-danger');
         msg.innerText = ok ? 'Added to case.' : (data.error || 'Failed to add.');
+        msg.style.display = 'block';
+    }).catch(err => { msg.className = 'small mt-1 text-danger'; msg.innerText = 'Error: ' + err; msg.style.display = 'block'; });
+}
+
+// A3: manually tie this alert/UEBA anomaly to a threat entity (actor/malware family)
+// when the automatic name/alias match on Threat Intel's side doesn't catch it.
+function renderLinkToEntityControl(log) {
+    const wrap = document.getElementById('linkToEntityWrap');
+    if (!wrap) return;
+    wrap.innerHTML = `<span class="text-muted small">Loading entities…</span>`;
+    fetch('/api/ti/entities').then(r => r.json()).then(entities => {
+        const targetType = log.type === 'alert' ? 'alert' : 'ueba_event';
+        const options = (entities || []).map(e => `<option value="${e.id}">${escHtml(e.name)}</option>`).join('');
+        wrap.innerHTML = `
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+                <select id="linkEntitySelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;">
+                    <option value="">Link to entity…</option>
+                    ${options}
+                </select>
+                <button type="button" class="btn btn-sm btn-outline-primary" onclick="linkToEntity('${targetType}', '${log.id}')"><i class="fa-solid fa-link me-1"></i>Link</button>
+            </div>
+            <div id="linkToEntityMsg" class="small mt-1" style="display:none;"></div>
+        `;
+    }).catch(() => { wrap.innerHTML = '<span class="text-muted small">Could not load entities.</span>'; });
+}
+
+function linkToEntity(targetType, targetId) {
+    const select = document.getElementById('linkEntitySelect');
+    const msg = document.getElementById('linkToEntityMsg');
+    const entityId = select.value;
+    if (!entityId) {
+        msg.className = 'small mt-1 text-danger'; msg.innerText = 'Pick an entity first.'; msg.style.display = 'block'; return;
+    }
+    fetch(`/api/ti/entities/${entityId}/relationships`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({target_type: targetType, target_id: targetId})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        msg.className = 'small mt-1 ' + (ok ? 'text-success' : 'text-danger');
+        msg.innerText = ok ? 'Linked to entity.' : (data.error || 'Failed to link.');
         msg.style.display = 'block';
     }).catch(err => { msg.className = 'small mt-1 text-danger'; msg.innerText = 'Error: ' + err; msg.style.display = 'block'; });
 }
