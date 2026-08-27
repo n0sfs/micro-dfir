@@ -2026,14 +2026,60 @@ def trigger_report():
 @app.route('/api/reports/history', methods=['GET'])
 @login_required
 def api_report_history():
+    # Case reports are scoped to their own case (see /api/cases/<id>/reports) and
+    # deliberately excluded here -- this fleet-wide list is compliance/security/audit
+    # reports, a different audience, and could otherwise be crowded out of its own
+    # 100-row cap by a busy caseload.
     rows = [dict(r) for r in get_db().execute(
         "SELECT id, report_type, filename, status, triggered_by, trigger_source, "
         "started_at, completed_at, file_size_bytes, error_message "
-        "FROM report_history ORDER BY id DESC LIMIT 100"
+        "FROM report_history WHERE case_id IS NULL ORDER BY id DESC LIMIT 100"
     ).fetchall()]
     for r in rows:
         r['file_exists'] = bool(r['filename']) and os.path.exists(os.path.join('/opt/micro-dfir/reports', r['filename']))
     return jsonify({'history': rows})
+
+@app.route('/api/cases/<int:cid>/reports', methods=['GET', 'POST'])
+@login_required
+def api_case_reports(cid):
+    db = get_db()
+    case = db.execute("SELECT title FROM cases WHERE id = ?", (cid,)).fetchone()
+    if not case:
+        return jsonify({"error": "Case not found"}), 404
+
+    if request.method == 'GET':
+        rows = [dict(r) for r in db.execute(
+            "SELECT id, filename, status, triggered_by, started_at, completed_at, file_size_bytes, error_message "
+            "FROM report_history WHERE case_id = ? ORDER BY id DESC LIMIT 20", (cid,)
+        ).fetchall()]
+        for r in rows:
+            r['file_exists'] = bool(r['filename']) and os.path.exists(os.path.join('/opt/micro-dfir/reports', r['filename']))
+        return jsonify(rows)
+
+    # Matches generate_report.py's own started_at = datetime.now().isoformat() exactly --
+    # the two scripts' clocks/formats have to agree for the >= lookup below to be reliable.
+    started_at = datetime.now().isoformat()
+    try:
+        subprocess.run(
+            ["/opt/micro-dfir/venv/bin/python3", "/opt/micro-dfir/src/generate_report.py",
+             "case", f"--case-id={cid}", f"--user={current_user.username}", "--source=manual"],
+            check=True, timeout=60
+        )
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Report generation timed out."}), 500
+    except subprocess.CalledProcessError:
+        return jsonify({"error": "Report generation failed. Check the server logs."}), 500
+    # generate_report.py records its own report_history row (case_id/started_at/etc. --
+    # same single-chokepoint pattern the fleet-wide reports use) -- read back whichever
+    # row it just wrote rather than duplicating that bookkeeping here.
+    row = db.execute(
+        "SELECT id, filename, status, error_message FROM report_history "
+        "WHERE case_id = ? AND started_at >= ? ORDER BY id DESC LIMIT 1", (cid, started_at)
+    ).fetchone()
+    if not row or row['status'] != 'success':
+        return jsonify({"error": (row['error_message'] if row else None) or "Report generation failed."}), 500
+    log_audit('case_report_generate', 'case', cid, case['title'])
+    return jsonify({"status": "success", "history_id": row['id'], "filename": row['filename']})
 
 @app.route('/api/settings/report-branding', methods=['GET', 'POST'])
 @login_required
@@ -5110,6 +5156,22 @@ def migrate_report_history():
     except Exception:
         pass
 
+def migrate_report_history_case_id():
+    # case_title is a snapshot at generation time, not a live join -- a report generated
+    # for a case that's later deleted should still show what it was a report OF.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(report_history)").fetchall()}
+        if 'case_id' not in cols:
+            conn.execute("ALTER TABLE report_history ADD COLUMN case_id INTEGER")
+        if 'case_title' not in cols:
+            conn.execute("ALTER TABLE report_history ADD COLUMN case_title TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_report_history_case ON report_history(case_id)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_log_search_indexes():
     # _build_log_filters() (Log Search / UEBA Timeline) filters on host/app/severity/
     # username/event_id constantly, but only `timestamp` was ever indexed on live_logs/
@@ -7016,6 +7078,7 @@ migrate_anomaly_rule_conditions_logic()
 migrate_seed_ueba_rules()
 migrate_risk_score_events_rule_id()
 migrate_report_history()
+migrate_report_history_case_id()
 migrate_log_search_indexes()
 migrate_alerts_triage()
 migrate_saved_searches()
