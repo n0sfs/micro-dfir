@@ -103,11 +103,95 @@
             </div>
         </div>
     </div>
+
+    <div class="col-12">
+        <hr class="border-secondary">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+            <h5 class="mb-0"><i class="fa-solid fa-folder-open me-2"></i>Case Metrics &amp; SLA</h5>
+            <div class="small text-muted" id="caseSlaLine">
+                SLA target: <span id="caseSlaHoursDisplay">&hellip;</span>h
+                <a href="#" id="editSlaLink" onclick="startEditCaseSla(); return false;" style="display:none;">Edit</a>
+                <span id="caseSlaEditWrap" style="display:none;">
+                    <input type="number" id="caseSlaHoursInput" min="1" max="8760" class="form-control form-control-sm bg-dark text-light border-secondary d-inline-block" style="width:70px;">
+                    <button type="button" class="btn btn-sm btn-outline-primary py-0 px-2" onclick="saveCaseSla()">Save</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="cancelEditCaseSla()">Cancel</button>
+                </span>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3 col-6">
+        <div class="card bg-dark border-secondary text-center h-100">
+            <div class="card-body py-3">
+                <div class="fs-3 fw-bold" id="caseStatOpen">&mdash;</div>
+                <div class="small text-muted">Open Cases</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3 col-6">
+        <div class="card bg-dark border-secondary text-center h-100">
+            <div class="card-body py-3">
+                <div class="fs-3 fw-bold text-danger" id="caseStatBreached">&mdash;</div>
+                <div class="small text-muted">SLA Breached</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3 col-6">
+        <div class="card bg-dark border-secondary text-center h-100">
+            <div class="card-body py-3">
+                <div class="fs-3 fw-bold" id="caseStatAvgClose">&mdash;</div>
+                <div class="small text-muted">Avg Time to Close</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3 col-6">
+        <div class="card bg-dark border-secondary text-center h-100">
+            <div class="card-body py-3">
+                <div class="fs-3 fw-bold" id="caseStatClosedRange">&mdash;</div>
+                <div class="small text-muted">Closed (range)</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-4">
+        <div class="card bg-dark border-secondary h-100">
+            <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+                <span><i class="fa-solid fa-hourglass-half me-2"></i>Case Aging</span>
+                <span class="badge bg-secondary" title="Reflects the current open caseload, not the selected time range above">Live</span>
+            </div>
+            <div class="card-body" style="height:240px;"><canvas id="caseAgingChart"></canvas></div>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="card bg-dark border-secondary h-100">
+            <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+                <span><i class="fa-solid fa-inbox me-2"></i>Open Cases by Queue</span>
+                <span class="badge bg-secondary" title="Reflects the current open caseload, not the selected time range above">Live</span>
+            </div>
+            <div class="card-body" style="height:240px;"><canvas id="caseQueueBacklogChart"></canvas></div>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="card bg-dark border-secondary h-100">
+            <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+                <span><i class="fa-solid fa-user-clock me-2"></i>Analyst Workload</span>
+                <span class="badge bg-secondary" title="Reflects the current open caseload, not the selected time range above">Live</span>
+            </div>
+            <div class="card-body" style="height:240px;"><canvas id="caseWorkloadChart"></canvas></div>
+        </div>
+    </div>
+    <div class="col-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-header border-secondary"><i class="fa-solid fa-chart-line me-2"></i>Cases Closed Trend</div>
+            <div class="card-body" style="height:220px;"><canvas id="caseCloseTrendChart"></canvas></div>
+        </div>
+    </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
+const IS_ADMIN = {{ 'true' if current_user.role == 'admin' else 'false' }};
+
 function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -374,6 +458,111 @@ function loadActorSummary() {
     }).catch(err => console.error('Error loading actor summary:', err));
 }
 
+// A concise, human-scale duration for a stat tile -- 45m / 3.2h / 2.1d, not a raw
+// hour count that reads fine at 6 but awkwardly at 340.
+function hoursLabel(h) {
+    if (h === null || h === undefined) return '—';
+    if (h < 1) return `${Math.round(h * 60)}m`;
+    if (h < 48) return `${h.toFixed(1)}h`;
+    return `${(h / 24).toFixed(1)}d`;
+}
+
+function loadCaseStats() {
+    fetch(`/api/dashboards/case-stats?range=${currentDashRange()}`).then(r => r.json()).then(d => {
+        document.getElementById('caseStatOpen').innerText = d.open_count;
+        document.getElementById('caseStatBreached').innerText = d.sla_breached_count;
+        document.getElementById('caseStatAvgClose').innerText = hoursLabel(d.avg_close_hours);
+        document.getElementById('caseStatClosedRange').innerText = d.closed_in_range_count;
+        document.getElementById('caseSlaHoursDisplay').innerText = d.sla_target_hours;
+        document.getElementById('caseSlaHoursInput').value = d.sla_target_hours;
+        if (IS_ADMIN) document.getElementById('editSlaLink').style.display = '';
+    }).catch(err => console.error('Error loading case stats:', err));
+}
+
+// Deliberately NOT range-parameterized -- like agent-status/mitre-coverage, this
+// reflects the CURRENT open caseload, not a trend over the selected range.
+function loadCaseAging() {
+    fetch('/api/dashboards/case-aging').then(r => r.json()).then(d => {
+        const c = chartTheme();
+        destroyChart('caseAging');
+        DASH_CHARTS.caseAging = new Chart(document.getElementById('caseAgingChart').getContext('2d'), {
+            type: 'bar',
+            data: { labels: d.buckets.map(b => b.label), datasets: [{
+                label: 'Open Cases', data: d.buckets.map(b => b.count),
+                backgroundColor: [c.success, c.info, c.warning, c.danger],
+            }] },
+            options: baseLineOptions(c),
+        });
+    }).catch(err => console.error('Error loading case aging:', err));
+}
+
+function loadCaseQueueBacklog() {
+    fetch('/api/dashboards/case-queue-backlog').then(r => r.json()).then(d => {
+        const c = chartTheme();
+        destroyChart('caseQueueBacklog');
+        DASH_CHARTS.caseQueueBacklog = new Chart(document.getElementById('caseQueueBacklogChart').getContext('2d'), {
+            type: 'bar',
+            data: { labels: d.queues.map(q => q.name), datasets: [{ label: 'Open Cases', data: d.queues.map(q => q.count), backgroundColor: c.accent }] },
+            options: baseHBarOptions(c),
+        });
+    }).catch(err => console.error('Error loading case queue backlog:', err));
+}
+
+function loadCaseWorkload() {
+    fetch('/api/dashboards/case-workload').then(r => r.json()).then(d => {
+        const c = chartTheme();
+        destroyChart('caseWorkload');
+        DASH_CHARTS.caseWorkload = new Chart(document.getElementById('caseWorkloadChart').getContext('2d'), {
+            type: 'bar',
+            data: { labels: d.assignees.map(a => a.assignee), datasets: [{ label: 'Open Cases', data: d.assignees.map(a => a.count), backgroundColor: c.info }] },
+            options: baseHBarOptions(c),
+        });
+    }).catch(err => console.error('Error loading case workload:', err));
+}
+
+function loadCaseCloseTrend() {
+    fetch(`/api/dashboards/case-close-trend?range=${currentDashRange()}`).then(r => r.json()).then(d => {
+        const c = chartTheme();
+        destroyChart('caseCloseTrend');
+        DASH_CHARTS.caseCloseTrend = new Chart(document.getElementById('caseCloseTrendChart').getContext('2d'), {
+            type: 'line',
+            data: { labels: d.trend.map(x => x.day), datasets: [{
+                label: 'Cases Closed', data: d.trend.map(x => x.count),
+                borderColor: c.success, backgroundColor: c.success + '26',
+                borderWidth: 2, fill: true, tension: 0.25, pointRadius: 2,
+            }] },
+            options: baseLineOptions(c),
+        });
+    }).catch(err => console.error('Error loading case close trend:', err));
+}
+
+function startEditCaseSla() {
+    document.getElementById('editSlaLink').style.display = 'none';
+    document.getElementById('caseSlaEditWrap').style.display = 'inline-block';
+}
+
+function cancelEditCaseSla() {
+    document.getElementById('caseSlaEditWrap').style.display = 'none';
+    document.getElementById('editSlaLink').style.display = '';
+    loadCaseStats();
+}
+
+function saveCaseSla() {
+    const hours = parseInt(document.getElementById('caseSlaHoursInput').value, 10);
+    if (!hours || hours < 1) { toast('Enter a whole number of hours (1 or more).', 'danger'); return; }
+    fetch('/api/settings/case-sla', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sla_hours: hours }) })
+        .then(r => r.json().then(data => ({ ok: r.ok, data })))
+        .then(({ ok, data }) => {
+            if (!ok) { toast(data.error || 'Failed to save.', 'danger'); return; }
+            document.getElementById('caseSlaEditWrap').style.display = 'none';
+            document.getElementById('editSlaLink').style.display = '';
+            toast('SLA target updated.', 'success');
+            loadCaseStats();
+            loadCaseAging(); // the SLA target changed -- refresh the breach-dependent widget too
+        })
+        .catch(err => toast('Error: ' + err, 'danger'));
+}
+
 function loadAllDashboards() {
     loadAlertTrend();
     loadSeverity();
@@ -384,6 +573,11 @@ function loadAllDashboards() {
     loadAgentStatus(); // deliberately not range-parameterized -- see the "Live" badge
     loadMitreCoverage(); // also not range-parameterized -- reflects currently enabled rules
     loadActorSummary(); // also not range-parameterized -- reflects the currently-synced IOC set
+    loadCaseStats();
+    loadCaseAging(); // also not range-parameterized -- reflects the current open caseload
+    loadCaseQueueBacklog(); // also not range-parameterized -- reflects the current open caseload
+    loadCaseWorkload(); // also not range-parameterized -- reflects the current open caseload
+    loadCaseCloseTrend();
 }
 
 document.addEventListener('DOMContentLoaded', loadAllDashboards);
