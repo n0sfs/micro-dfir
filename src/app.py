@@ -2670,7 +2670,10 @@ def api_case_detail(cid):
             return jsonify({"error": "Queue not found"}), 400
         closed_at = case['closed_at']
         if status == 'closed' and case['status'] != 'closed':
-            closed_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            # UTC, not local time -- must match created_at's SQLite CURRENT_TIMESTAMP
+            # default (also UTC) or every time-to-close calculation (case metrics/SLA
+            # dashboard) silently skews by the server's local UTC offset.
+            closed_at = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
         elif status == 'open':
             closed_at = None
         # Timeline entries only for what actually CHANGED -- a save that only edits the
@@ -4005,6 +4008,115 @@ def api_dashboard_agent_status():
             pass
         counts[status] += 1
     return jsonify({'status_counts': counts, 'total': len(rows)})
+
+# Case metrics/SLA -- a single global SLA target (case_sla_hours, default 24) applies
+# to every case; no per-queue/per-severity SLA tiers, matching the scope of every other
+# single-appliance simplification in this app (queues, playbooks) over a full policy
+# engine. julianday() diffs against created_at/closed_at require BOTH to be UTC (see
+# the fix in api_case_detail()'s PUT handler) -- created_at already is, via SQLite's
+# own CURRENT_TIMESTAMP default.
+DEFAULT_CASE_SLA_HOURS = 24
+
+def _case_sla_hours(db):
+    row = db.execute("SELECT value FROM settings WHERE key = 'case_sla_hours'").fetchone()
+    try:
+        return int(row['value']) if row and row['value'] else DEFAULT_CASE_SLA_HOURS
+    except (ValueError, TypeError):
+        return DEFAULT_CASE_SLA_HOURS
+
+@app.route('/api/dashboards/case-stats', methods=['GET'])
+@login_required
+def api_dashboard_case_stats():
+    days = _dashboard_window_days(request)
+    db = get_db()
+    sla_hours = _case_sla_hours(db)
+    open_count = db.execute("SELECT COUNT(*) FROM cases WHERE status = 'open'").fetchone()[0]
+    closed_in_range = db.execute(
+        "SELECT COUNT(*) FROM cases WHERE status = 'closed' AND closed_at >= datetime('now', ?)", (f'-{days} days',)
+    ).fetchone()[0]
+    avg_close_hours = db.execute(
+        "SELECT AVG((julianday(closed_at) - julianday(created_at)) * 24) FROM cases "
+        "WHERE status = 'closed' AND closed_at IS NOT NULL AND closed_at >= datetime('now', ?)", (f'-{days} days',)
+    ).fetchone()[0]
+    sla_breached = db.execute(
+        "SELECT COUNT(*) FROM cases WHERE status = 'open' AND (julianday('now') - julianday(created_at)) * 24 > ?", (sla_hours,)
+    ).fetchone()[0]
+    return jsonify({
+        'open_count': open_count,
+        'closed_in_range_count': closed_in_range,
+        'avg_close_hours': round(avg_close_hours, 1) if avg_close_hours is not None else None,
+        'sla_target_hours': sla_hours,
+        'sla_breached_count': sla_breached,
+    })
+
+@app.route('/api/dashboards/case-aging', methods=['GET'])
+@login_required
+def api_dashboard_case_aging():
+    # Deliberately NOT range-filtered -- like agent-status/mitre-coverage, this is a
+    # point-in-time snapshot of the CURRENT open caseload, not a trend over the range.
+    rows = get_db().execute(
+        "SELECT (julianday('now') - julianday(created_at)) * 24 as age_hours FROM cases WHERE status = 'open'"
+    ).fetchall()
+    buckets = [
+        {'label': '< 1 day', 'count': 0}, {'label': '1-3 days', 'count': 0},
+        {'label': '3-7 days', 'count': 0}, {'label': '7+ days', 'count': 0},
+    ]
+    for r in rows:
+        h = r['age_hours'] or 0
+        idx = 0 if h < 24 else (1 if h < 72 else (2 if h < 168 else 3))
+        buckets[idx]['count'] += 1
+    return jsonify({'buckets': buckets})
+
+@app.route('/api/dashboards/case-queue-backlog', methods=['GET'])
+@login_required
+def api_dashboard_case_queue_backlog():
+    rows = get_db().execute(
+        "SELECT COALESCE(q.name, 'Unassigned') as name, COUNT(*) as count FROM cases c "
+        "LEFT JOIN case_queues q ON q.id = c.queue_id WHERE c.status = 'open' "
+        "GROUP BY c.queue_id ORDER BY count DESC"
+    ).fetchall()
+    return jsonify({'queues': [dict(r) for r in rows]})
+
+@app.route('/api/dashboards/case-workload', methods=['GET'])
+@login_required
+def api_dashboard_case_workload():
+    # GROUP BY on the COALESCE/NULLIF expression itself, not the raw `assignee` column --
+    # grouping by the raw column would keep NULL and '' as two separate groups (both
+    # display as "Unassigned" but count separately), splitting one bucket into two.
+    rows = get_db().execute(
+        "SELECT COALESCE(NULLIF(assignee, ''), 'Unassigned') as assignee, COUNT(*) as count FROM cases "
+        "WHERE status = 'open' GROUP BY COALESCE(NULLIF(assignee, ''), 'Unassigned') ORDER BY count DESC"
+    ).fetchall()
+    return jsonify({'assignees': [dict(r) for r in rows]})
+
+@app.route('/api/dashboards/case-close-trend', methods=['GET'])
+@login_required
+def api_dashboard_case_close_trend():
+    days = _dashboard_window_days(request)
+    rows = get_db().execute(
+        "SELECT date(closed_at) as day, COUNT(*) as count FROM cases "
+        "WHERE status = 'closed' AND closed_at >= datetime('now', ?) GROUP BY day ORDER BY day ASC", (f'-{days} days',)
+    ).fetchall()
+    return jsonify({'trend': [dict(r) for r in rows]})
+
+@app.route('/api/settings/case-sla', methods=['GET', 'POST'])
+@login_required
+def api_case_sla_config():
+    db = get_db()
+    if request.method == 'GET':
+        return jsonify({'sla_hours': _case_sla_hours(db)})
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    try:
+        hours = int((request.json or {}).get('sla_hours'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'sla_hours must be a whole number'}), 400
+    if hours < 1 or hours > 8760:
+        return jsonify({'error': 'sla_hours must be between 1 and 8760 (1 year)'}), 400
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('case_sla_hours', ?)", (str(hours),))
+    db.commit()
+    log_audit('case_sla_update', 'settings', 'case_sla_hours', str(hours))
+    return jsonify({'status': 'success', 'sla_hours': hours})
 
 
 # ==========================================
