@@ -615,6 +615,16 @@ function loadAndRenderCaseDetail(cid) {
                         </div>
                     </div>
                     <div class="card bg-dark border-secondary mb-3">
+                        <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+                            <span>Case Report</span>
+                            <button type="button" class="btn btn-sm btn-outline-primary" id="generateReportBtn" onclick="generateCaseReport()"><i class="fa-solid fa-file-pdf me-1"></i>Generate Report</button>
+                        </div>
+                        <div class="card-body">
+                            <p class="text-muted small mb-2">A PDF summarizing this case's tasks, linked items, host/user analysis, and full timeline.</p>
+                            <div id="caseReportsList"><p class="text-muted small mb-0">Loading&hellip;</p></div>
+                        </div>
+                    </div>
+                    <div class="card bg-dark border-secondary mb-3">
                         <div class="card-header border-secondary">Timeline</div>
                         <div class="card-body">
                             <div class="d-flex gap-2 mb-3">
@@ -633,6 +643,7 @@ function loadAndRenderCaseDetail(cid) {
         populateTlpPapSelect('editCasePap', PAP_VALUES, c.pap);
         populateQueueSelect('editCaseQueue', c.queue_id);
         renderLinkToEntityControl();
+        loadCaseReports(c.id);
         showDetailView();
     }).catch(err => toast('Error loading case: ' + err, 'danger'));
 }
@@ -772,6 +783,44 @@ function analyzeCaseEntity() {
             msg.className = 'small mt-2 text-danger'; msg.innerText = data.error || 'Analysis failed.';
         }
     }).catch(err => { btn.disabled = false; msg.className = 'small mt-2 text-danger'; msg.innerText = 'Error: ' + err; });
+}
+
+// Case report export (PDF): shells out to generate_report.py server-side, which writes
+// into the same report_history table the fleet-wide Reports tab uses -- download links
+// go through the existing /reports/download/<id> route unchanged, keyed off case_id
+// rather than the fleet-wide report_type filter api_report_history() applies.
+function loadCaseReports(cid) {
+    fetch(`/api/cases/${cid}/reports`).then(r => r.json()).then(reports => {
+        const wrap = document.getElementById('caseReportsList');
+        if (!wrap) return;
+        if (!reports.length) { wrap.innerHTML = '<p class="text-muted small mb-0">No reports generated yet.</p>'; return; }
+        wrap.innerHTML = reports.map(r => `
+            <div class="d-flex justify-content-between align-items-center small border-bottom border-secondary py-1">
+                <span>${r.status === 'success' && r.file_exists
+                    ? `<a href="/reports/download/${r.id}" target="_blank"><i class="fa-solid fa-file-pdf me-1"></i>${escHtml(r.filename)}</a>`
+                    : `<span class="text-danger"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed${r.error_message ? ': ' + escHtml(r.error_message) : ''}</span>`}</span>
+                <span class="text-muted">${escHtml(r.completed_at || r.started_at || '')}</span>
+            </div>
+        `).join('');
+    }).catch(err => console.error('Error loading case reports:', err));
+}
+
+function generateCaseReport() {
+    if (!activeCaseId) return;
+    const btn = document.getElementById('generateReportBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i>Generating…';
+    fetch(`/api/cases/${activeCaseId}/reports`, { method: 'POST' })
+        .then(r => r.json().then(data => ({ ok: r.ok, data })))
+        .then(({ ok, data }) => {
+            if (ok) { toast('Report generated.', 'success'); loadCaseReports(activeCaseId); }
+            else { toast(data.error || 'Failed to generate report.', 'danger'); }
+        })
+        .catch(err => toast('Error generating report: ' + err, 'danger'))
+        .finally(() => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fa-solid fa-file-pdf me-1"></i>Generate Report';
+        });
 }
 
 // Same generic collect_*/persistence_sweep JSON-to-sections renderer as agents.html's

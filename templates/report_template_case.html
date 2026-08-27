@@ -1,0 +1,88 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8">{% include "_report_styles.html" %}</head><body>
+    {% include "_report_branding_header.html" %}
+
+    <table class="case-meta-table">
+        <tr>
+            <td class="label">Status</td>
+            <td><span class="badge" style="background:{{ '#198754' if case.status == 'open' else '#6c757d' }};">{{ case.status|upper }}</span></td>
+            <td class="label">TLP</td>
+            <td><span class="badge" style="background:{{ tlp_pap_colors.get(case.tlp, '#6c757d') }};">TLP:{{ (case.tlp or 'clear')|upper }}</span></td>
+            <td class="label">PAP</td>
+            <td><span class="badge" style="background:{{ tlp_pap_colors.get(case.pap, '#6c757d') }};">PAP:{{ (case.pap or 'clear')|upper }}</span></td>
+        </tr>
+        <tr>
+            <td class="label">Queue</td>
+            <td>{{ case.queue_name or '—' }}</td>
+            <td class="label">Assignee</td>
+            <td>{{ case.assignee or '—' }}</td>
+            <td class="label">Tasks</td>
+            <td>{{ tasks_done }}/{{ tasks|length }} complete</td>
+        </tr>
+        <tr>
+            <td class="label">Opened</td>
+            <td>{{ case.created_at }}</td>
+            <td class="label">Closed</td>
+            <td>{{ case.closed_at or '—' }}</td>
+            <td class="label">Created by</td>
+            <td>{{ case.created_by or '—' }}</td>
+        </tr>
+    </table>
+
+    {% if case.description %}
+    <h2 class="section-title">Description</h2>
+    <p>{{ case.description }}</p>
+    {% endif %}
+
+    <h2 class="section-title">Tasks</h2>
+    {% if tasks %}
+    <table>
+        <thead><tr><th style="width:70px;">Status</th><th>Task</th><th style="width:120px;">Assignee</th></tr></thead>
+        <tbody>
+        {% for t in tasks %}
+            <tr>
+                <td><span class="badge {{ '' if t.status == 'done' else 'badge-muted' }}" style="{{ 'background:#198754;' if t.status == 'done' else '' }}">{{ 'DONE' if t.status == 'done' else 'OPEN' }}</span></td>
+                <td>{{ t.title }}</td>
+                <td>{{ t.assignee or '—' }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<p>No tasks recorded.</p>{% endif %}
+
+    <h2 class="section-title">Linked Items ({{ items|length }})</h2>
+    {% if items %}
+    <table>
+        <thead><tr><th style="width:60px;">Severity</th><th>Item</th><th>Host / User</th><th style="width:140px;">Time</th></tr></thead>
+        <tbody>
+        {% for it in items %}
+            <tr>
+                <td><span class="badge" style="background:{{ severity_colors.get((it.severity or 'INFO')|upper, '#6c757d') }};">{{ (it.severity or 'INFO')|upper }}</span></td>
+                <td><strong>{{ it.label }}</strong><br><span style="color:#666; font-size:8.5pt;">{{ (it.message or '')[:200] }}</span></td>
+                <td>{{ it.host or '' }}{% if it.username %} / {{ it.username }}{% endif %}</td>
+                <td>{{ it.timestamp }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<p>No alerts, anomalies, or response actions linked to this case.</p>{% endif %}
+
+    {% if analyses %}
+    <h2 class="section-title">Host / User Analysis</h2>
+    {% for a in analyses %}
+        <p style="font-size:9pt; color:#666; margin-bottom:2px;">{{ a.ts }} — {{ a.actor or 'system' }}</p>
+        <div class="analysis-block">{{ a.text }}</div>
+    {% endfor %}
+    {% endif %}
+
+    <h2 class="section-title">Timeline</h2>
+    {% if timeline %}
+    {% for e in timeline %}
+        <div class="timeline-item">
+            <span class="timeline-ts">{{ e.ts }}{% if e.actor %} · {{ e.actor }}{% endif %}</span><br>
+            {{ e.label }}
+        </div>
+    {% endfor %}
+    {% else %}<p>No timeline events recorded.</p>{% endif %}
+
+    {% include "_report_branding_footer.html" %}
+</body></html>

@@ -154,6 +154,119 @@ def generate_audit_report():
     conn.close()
     return _render_and_write('report_template_audit.html', context, _report_filename('Audit'))
 
+CASE_TLP_PAP_COLORS = {
+    'clear': '#6c757d', 'green': '#198754', 'amber': '#e0a800',
+    'amber-strict': '#e0a800', 'red': '#dc3545',
+}
+CASE_SEVERITY_COLORS = {
+    'CRITICAL': '#dc3545', 'HIGH': '#dc3545', 'ALERT': '#dc3545',
+    'MEDIUM': '#e0a800', 'WARN': '#e0a800', 'LOW': '#6c757d', 'INFO': '#0dcaf0',
+}
+
+# Plain-text mirror of cases.html's caseEventLabel() JS function -- same event types,
+# same phrasing, minus the HTML markup (this renders into a PDF table cell, not a DOM
+# node). Keep the two in sync if a new case_event type is ever added.
+def _case_event_label(event_type, detail):
+    detail = detail or ''
+    labels = {
+        'created': 'Case created',
+        'status_change': f'Status changed to {detail}',
+        'assignee_change': f'Assignee changed to {detail}',
+        'tlp_change': f'TLP changed to {detail.upper()}',
+        'pap_change': f'PAP changed to {detail.upper()}',
+        'queue_change': f'Queue changed to {detail}',
+        'item_added': f'Item added: {detail}',
+        'item_removed': f'Item removed: {detail}',
+        'task_added': f'Task added: "{detail}"',
+        'task_done': f'Task completed: "{detail}"',
+        'task_reopened': f'Task reopened: "{detail}"',
+        'task_removed': f'Task removed: "{detail}"',
+        'template_applied': f'Template applied: {detail}',
+        'note': detail,
+        'analysis': (detail.split('\n')[0] if detail else 'Analysis'),
+        'playbook_run': detail,
+    }
+    return labels.get(event_type, event_type)
+
+# Same shape as app.py's _case_item_summary() -- duplicated rather than imported since
+# this script runs standalone with no Flask app context (see the module-level comment
+# on REPORT_BRANDING_DEFAULTS above for why that pattern is already established here).
+def _case_item_summary(conn, item_type, item_id):
+    if item_type == 'alert':
+        r = conn.execute(
+            "SELECT a.timestamp, a.severity, a.host, a.username, COALESCE(s.title, a.rule_name, 'Custom/YARA Rule') as label, a.message "
+            "FROM alerts a LEFT JOIN sigma_rules s ON a.rule_id = s.id WHERE a.id = ?", (item_id,)
+        ).fetchone()
+    elif item_type == 'command_result':
+        r = conn.execute(
+            "SELECT queued_at as timestamp, hostname as host, NULL as username, label, status, exit_code FROM agent_commands WHERE id = ?",
+            (item_id,)
+        ).fetchone()
+        if not r:
+            return None
+        r = dict(r)
+        if r['status'] != 'done':
+            r['severity'], r['message'] = 'INFO', f"Status: {r['status']}"
+        elif r['exit_code'] not in (0, None):
+            r['severity'], r['message'] = 'HIGH', f"Completed with a non-zero exit code ({r['exit_code']})"
+        else:
+            r['severity'], r['message'] = 'INFO', "Completed successfully"
+        del r['status'], r['exit_code']
+    else:
+        r = conn.execute(
+            "SELECT timestamp, severity, hostname as host, NULL as username, 'UEBA Anomaly' as label, message FROM events WHERE id = ?", (item_id,)
+        ).fetchone()
+    return dict(r) if r else None
+
+def generate_case_report(case_id):
+    conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row
+    case = conn.execute("SELECT c.*, q.name as queue_name FROM cases c LEFT JOIN case_queues q ON q.id = c.queue_id WHERE c.id = ?", (case_id,)).fetchone()
+    if not case:
+        conn.close()
+        raise ValueError(f"Case {case_id} not found")
+    case = dict(case)
+
+    tasks = [dict(t) for t in conn.execute(
+        "SELECT title, status, assignee FROM case_tasks WHERE case_id = ? ORDER BY position, id", (case_id,)
+    ).fetchall()]
+
+    items_rows = conn.execute(
+        "SELECT item_type, item_id FROM case_items WHERE case_id = ? ORDER BY added_at", (case_id,)
+    ).fetchall()
+    items = []
+    for it in items_rows:
+        summary = _case_item_summary(conn, it['item_type'], it['item_id'])
+        if summary:
+            summary['item_type'] = it['item_type']
+            items.append(summary)
+
+    events_rows = [dict(e) for e in conn.execute(
+        "SELECT ts, actor, event_type, detail FROM case_events WHERE case_id = ? ORDER BY ts, id", (case_id,)
+    ).fetchall()]
+    timeline, analyses = [], []
+    for e in events_rows:
+        if e['event_type'] == 'analysis':
+            analyses.append({'ts': e['ts'], 'actor': e['actor'], 'text': e['detail'] or ''})
+        timeline.append({'ts': e['ts'], 'actor': e['actor'] or '', 'label': _case_event_label(e['event_type'], e['detail'])})
+
+    context = {
+        "date_generated": datetime.now().strftime("%B %d, %Y"),
+        "report_title": "Case Report",
+        "report_subtitle": case['title'],
+        "branding": _branding_context(conn),
+        "case": case,
+        "tlp_pap_colors": CASE_TLP_PAP_COLORS,
+        "severity_colors": CASE_SEVERITY_COLORS,
+        "tasks": tasks,
+        "tasks_done": sum(1 for t in tasks if t['status'] == 'done'),
+        "items": items,
+        "timeline": timeline,
+        "analyses": analyses,
+    }
+    conn.close()
+    safe_title = ''.join(c if c.isalnum() or c in ' -_' else '' for c in case['title'])[:60].strip() or f"Case_{case_id}"
+    return _render_and_write('report_template_case.html', context, f"{safe_title.replace(' ', '_')}_{_report_filename('Case')}")
+
 REPORT_GENERATORS = {
     'security': generate_security_report,
     'compliance': generate_compliance_report,
@@ -161,7 +274,7 @@ REPORT_GENERATORS = {
 }
 
 def _record_history(conn, report_type, filename, status, started_at, completed_at,
-                     triggered_by, trigger_source, error_message=None):
+                     triggered_by, trigger_source, error_message=None, case_id=None, case_title=None):
     file_size = None
     if status == 'success' and filename:
         try:
@@ -170,8 +283,8 @@ def _record_history(conn, report_type, filename, status, started_at, completed_a
             pass
     conn.execute(
         "INSERT INTO report_history (report_type, filename, status, triggered_by, trigger_source, "
-        "started_at, completed_at, file_size_bytes, error_message) VALUES (?,?,?,?,?,?,?,?,?)",
-        (report_type, filename, status, triggered_by, trigger_source, started_at, completed_at, file_size, error_message)
+        "started_at, completed_at, file_size_bytes, error_message, case_id, case_title) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (report_type, filename, status, triggered_by, trigger_source, started_at, completed_at, file_size, error_message, case_id, case_title)
     )
     conn.commit()
 
@@ -179,26 +292,39 @@ def _record_history(conn, report_type, filename, status, started_at, completed_a
 # Flask context (trigger_source='scheduled', triggered_by=None), the Reports tab's
 # /reports/generate route shells out to it the same way with --user/--source=manual.
 # History recording lives here (not in app.py) so both paths get a row without either
-# duplicating the insert or a cron run silently having no record at all.
-def run_report(report_type, triggered_by=None, trigger_source='manual'):
+# duplicating the insert or a cron run silently having no record at all. A case report
+# (report_type == 'case') is the one path that needs case_id -- looked up here so a
+# failed generation still records which case it was for, not just that something failed.
+def run_report(report_type, triggered_by=None, trigger_source='manual', case_id=None):
     started_at = datetime.now().isoformat()
     conn = sqlite3.connect(DB_PATH, timeout=30)
+    case_title = None
     try:
         # Defensive create -- mirrors _get_or_create_secret_key()'s own pattern in
-        # app.py, in case this runs before migrate_report_history() has (e.g. cron
-        # fires between a code deploy and the next app restart that runs migrations).
+        # app.py, in case this runs before migrate_report_history()/
+        # migrate_report_history_case_id() have (e.g. cron fires between a code deploy
+        # and the next app restart that runs migrations).
         conn.execute('''CREATE TABLE IF NOT EXISTS report_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT, report_type TEXT NOT NULL, filename TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'success', triggered_by TEXT, trigger_source TEXT NOT NULL DEFAULT 'manual',
             started_at DATETIME, completed_at DATETIME, file_size_bytes INTEGER, error_message TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            case_id INTEGER, case_title TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )''')
-        filename = REPORT_GENERATORS.get(report_type, generate_security_report)()
+        if report_type == 'case':
+            if case_id is None:
+                raise ValueError("case report requires a case_id")
+            row = conn.execute("SELECT title FROM cases WHERE id = ?", (case_id,)).fetchone()
+            if not row:
+                raise ValueError(f"Case {case_id} not found")
+            case_title = row[0]
+            filename = generate_case_report(case_id)
+        else:
+            filename = REPORT_GENERATORS.get(report_type, generate_security_report)()
         _record_history(conn, report_type, filename, 'success', started_at,
-                         datetime.now().isoformat(), triggered_by, trigger_source)
+                         datetime.now().isoformat(), triggered_by, trigger_source, case_id=case_id, case_title=case_title)
     except Exception as e:
         _record_history(conn, report_type, '', 'failed', started_at,
-                         datetime.now().isoformat(), triggered_by, trigger_source, str(e))
+                         datetime.now().isoformat(), triggered_by, trigger_source, str(e), case_id=case_id, case_title=case_title)
         conn.close()
         raise
     conn.close()
@@ -209,5 +335,6 @@ if __name__ == "__main__":
     parser.add_argument('report_type', nargs='?', default='security')
     parser.add_argument('--user', default=None)
     parser.add_argument('--source', default='scheduled', choices=('manual', 'scheduled'))
+    parser.add_argument('--case-id', type=int, default=None)
     args = parser.parse_args()
-    run_report(args.report_type, triggered_by=args.user, trigger_source=args.source)
+    run_report(args.report_type, triggered_by=args.user, trigger_source=args.source, case_id=args.case_id)
