@@ -2968,7 +2968,14 @@ def _fill_playbook_template(text, cid, case_row):
 # One action's execution. Returns a short human-readable result string on success;
 # raises on a genuine failure so the caller (_run_playbooks_for_case) can record it in
 # that run's detail without aborting the rest of the playbook's actions.
-def _run_playbook_action(db, cid, action_type, params):
+#
+# dry_run=True runs every lookup/validation exactly as normal (so a "would skip" reason
+# is the real one, not a guess) but returns BEFORE the one mutating statement in each
+# branch -- no INSERT/UPDATE/executemany, no requests.post, no _log_case_event. This is
+# the single source of truth for what a playbook does; the alternative (a separate
+# _dry_run_playbook_action with its own copy of every lookup) would drift from this
+# function the next time either one gets edited.
+def _run_playbook_action(db, cid, action_type, params, dry_run=False):
     params = params or {}
 
     if action_type == 'apply_template':
@@ -2976,6 +2983,8 @@ def _run_playbook_action(db, cid, action_type, params):
         if not tpl:
             return "template not found, skipped"
         tasks = json.loads(tpl['tasks'])
+        if dry_run:
+            return f"would apply template '{tpl['name']}' ({len(tasks)} tasks)"
         max_pos = db.execute("SELECT COALESCE(MAX(position), -1) FROM case_tasks WHERE case_id = ?", (cid,)).fetchone()[0]
         db.executemany(
             "INSERT INTO case_tasks (case_id, title, position, created_by) VALUES (?, ?, ?, 'playbook')",
@@ -2988,6 +2997,8 @@ def _run_playbook_action(db, cid, action_type, params):
         title = (params.get('title') or '').strip()
         if not title:
             return "no task title configured, skipped"
+        if dry_run:
+            return f"would add task '{title}'"
         max_pos = db.execute("SELECT COALESCE(MAX(position), -1) FROM case_tasks WHERE case_id = ?", (cid,)).fetchone()[0]
         db.execute("INSERT INTO case_tasks (case_id, title, position, created_by) VALUES (?, ?, ?, 'playbook')", (cid, title, max_pos + 1))
         _log_case_event(db, cid, 'task_added', title)
@@ -2997,6 +3008,9 @@ def _run_playbook_action(db, cid, action_type, params):
         text = (params.get('text') or '').strip()
         if not text:
             return "no note text configured, skipped"
+        if dry_run:
+            preview = text if len(text) <= 80 else text[:80] + '…'
+            return f'would add a note: "{preview}"'
         _log_case_event(db, cid, 'note', text)
         return "added a note"
 
@@ -3009,6 +3023,8 @@ def _run_playbook_action(db, cid, action_type, params):
             queue_name = row['name']
         else:
             queue_name = '(none)'
+        if dry_run:
+            return f"would set queue to {queue_name}"
         db.execute("UPDATE cases SET queue_id = ? WHERE id = ?", (queue_id, cid))
         _log_case_event(db, cid, 'queue_change', queue_name)
         return f"set queue to {queue_name}"
@@ -3034,6 +3050,8 @@ def _run_playbook_action(db, cid, action_type, params):
                 break
         if not entity_id:
             return f"no linked item has a {entity_type}, skipped"
+        if dry_run:
+            return f"would analyze {entity_type} '{entity_id}'"
         _run_case_analysis(db, cid, entity_type, entity_id)
         return f"analyzed {entity_type} '{entity_id}'"
 
@@ -3043,6 +3061,8 @@ def _run_playbook_action(db, cid, action_type, params):
             return "no URL configured, skipped"
         case = db.execute("SELECT title, status, tlp, pap FROM cases WHERE id = ?", (cid,)).fetchone()
         body_text = _fill_playbook_template(params.get('body') or '{"case_id": "{{case_id}}", "title": "{{case_title}}", "status": "{{status}}"}', cid, case)
+        if dry_run:
+            return f"would POST to {url} with body: {body_text}"
         try:
             payload = json.loads(body_text)
         except (ValueError, TypeError):
@@ -3057,11 +3077,54 @@ def _run_playbook_action(db, cid, action_type, params):
             return "no Slack webhook URL configured, skipped"
         case = db.execute("SELECT title, status, tlp, pap FROM cases WHERE id = ?", (cid,)).fetchone()
         message = _fill_playbook_template(params.get('message') or 'Case #{{case_id}}: {{case_title}} ({{status}})', cid, case)
+        if dry_run:
+            return f'would send Slack message: "{message}"'
         import requests
         requests.post(webhook_url, json={'text': message}, timeout=8)
         return "sent Slack message"
 
     return f"unknown action type '{action_type}', skipped"
+
+# Companion to the /api/playbooks/<id>/dry-run route -- checks whether a playbook's OWN
+# configured trigger would currently match a given case's condition filters, then runs
+# every one of its actions in dry_run mode. No db.commit() needed anywhere in this path:
+# dry_run=True guarantees _run_playbook_action never executes a mutating statement.
+def _dry_run_playbook(db, playbook_id, cid):
+    pb = db.execute("SELECT * FROM playbooks WHERE id = ?", (playbook_id,)).fetchone()
+    if not pb:
+        return None
+    case = db.execute("SELECT * FROM cases WHERE id = ?", (cid,)).fetchone()
+    if not case:
+        return None
+
+    skip_reasons = []
+    if not pb['enabled']:
+        skip_reasons.append('the playbook is disabled')
+    if pb['condition_queue_id'] and pb['condition_queue_id'] != case['queue_id']:
+        skip_reasons.append("the case's queue doesn't match the condition")
+    if pb['condition_tlp'] and pb['condition_tlp'] != case['tlp']:
+        skip_reasons.append("the case's TLP doesn't match the condition")
+    if pb['condition_status'] and pb['condition_status'] != case['status']:
+        skip_reasons.append("the case's status doesn't match the condition")
+
+    actions = db.execute(
+        "SELECT action_type, params FROM playbook_actions WHERE playbook_id = ? ORDER BY position", (playbook_id,)
+    ).fetchall()
+    previews = []
+    for a in actions:
+        try:
+            action_params = json.loads(a['params']) if a['params'] else {}
+            result = _run_playbook_action(db, cid, a['action_type'], action_params, dry_run=True)
+        except Exception as e:
+            result = f"would fail: {e}"
+        previews.append({'action_type': a['action_type'], 'result': result})
+
+    return {
+        'trigger_event': pb['trigger_event'],
+        'would_fire': not skip_reasons,
+        'skip_reasons': skip_reasons,
+        'actions': previews,
+    }
 
 # The one call site every trigger point (case create, status/queue/assignee change)
 # routes through. queue_id/tlp/status are the case's state AFTER whatever change just
@@ -3230,6 +3293,18 @@ def api_playbook_runs(pid):
         (pid,)
     ).fetchall()
     return jsonify([dict(r) for r in rows])
+
+@app.route('/api/playbooks/<int:pid>/dry-run', methods=['POST'])
+@login_required
+def api_playbook_dry_run(pid):
+    db = get_db()
+    case_id = (request.json or {}).get('case_id')
+    if not case_id:
+        return jsonify({'error': 'case_id is required'}), 400
+    result = _dry_run_playbook(db, pid, case_id)
+    if result is None:
+        return jsonify({'error': 'Playbook or case not found'}), 404
+    return jsonify(result)
 
 @app.route('/api/case-templates', methods=['GET'])
 @login_required

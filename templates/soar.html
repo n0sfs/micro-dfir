@@ -116,6 +116,27 @@
     </div>
 </div>
 
+<!-- Test Playbook modal (dry run -- previews what the playbook would do against a real case, no changes made) -->
+<div class="modal fade" id="playbookTestModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content bg-dark text-light border-secondary">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title" id="playbookTestModalTitle">Test Playbook</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="testPbId">
+                <p class="text-muted small">Pick a real case to test this playbook against. Nothing is changed -- this only previews what each action would do.</p>
+                <div class="d-flex gap-2 mb-3">
+                    <select id="testPbCaseId" class="form-select form-select-sm bg-dark text-light border-secondary"><option value="">Select a case&hellip;</option></select>
+                    <button type="button" class="btn btn-sm btn-outline-primary text-nowrap" onclick="runPlaybookTest()"><i class="fa-solid fa-flask me-1"></i>Run Test</button>
+                </div>
+                <div id="playbookTestResult"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
 const IS_ADMIN = {{ 'true' if current_user.role == 'admin' else 'false' }};
 let allPlaybooks = [];
@@ -183,6 +204,7 @@ function renderPlaybooksTable() {
                     : (p.enabled ? '<span class="badge bg-success">On</span>' : '<span class="badge bg-secondary">Off</span>')}
             </td>
             <td class="text-end pe-3">
+                <button type="button" class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="Test against a real case (no changes made)" onclick="showPlaybookTestModal(${p.id}, '${escJs(p.name)}')"><i class="fa-solid fa-flask"></i></button>
                 ${IS_ADMIN ? `
                 <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 me-1" title="Edit" onclick="editPlaybook(${p.id})"><i class="fa-solid fa-pen"></i></button>
                 <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete" onclick="deletePlaybook(${p.id}, '${escJs(p.name)}')"><i class="fa-solid fa-trash"></i></button>` : ''}
@@ -366,6 +388,52 @@ function showPlaybookRuns(pid, name) {
             </tr>
         `).join('');
     }).catch(err => console.error('Error loading playbook runs:', err));
+}
+
+// Test Playbook (dry run) -- runs _dry_run_playbook() server-side against a real,
+// user-chosen case. Every lookup is real (template names, queue names, resolved
+// entities, templated webhook/Slack bodies); only the mutating statement in each
+// action is skipped, so what's shown here is exactly what a live run would have done.
+let playbookTestModal;
+let allCasesForPbTest = [];
+
+function loadCasesForPlaybookTest() {
+    return fetch('/api/cases').then(r => r.json()).then(cs => { allCasesForPbTest = cs || []; }).catch(() => { allCasesForPbTest = []; });
+}
+
+async function showPlaybookTestModal(pid, name) {
+    document.getElementById('playbookTestModalTitle').innerText = `Test Playbook — ${name}`;
+    document.getElementById('testPbId').value = pid;
+    document.getElementById('playbookTestResult').innerHTML = '';
+    if (!allCasesForPbTest.length) await loadCasesForPlaybookTest();
+    const sel = document.getElementById('testPbCaseId');
+    sel.innerHTML = '<option value="">Select a case&hellip;</option>' + allCasesForPbTest.map(c => `<option value="${c.id}">${escHtml(c.title)}</option>`).join('');
+    if (!playbookTestModal) playbookTestModal = new bootstrap.Modal(document.getElementById('playbookTestModal'));
+    playbookTestModal.show();
+}
+
+function runPlaybookTest() {
+    const pid = document.getElementById('testPbId').value;
+    const caseId = document.getElementById('testPbCaseId').value;
+    const resultEl = document.getElementById('playbookTestResult');
+    if (!caseId) { resultEl.innerHTML = '<p class="text-danger small mb-0">Select a case first.</p>'; return; }
+    resultEl.innerHTML = '<p class="text-muted small mb-0"><i class="fa-solid fa-spinner fa-spin me-1"></i>Running&hellip;</p>';
+    fetch(`/api/playbooks/${pid}/dry-run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ case_id: parseInt(caseId, 10) }) })
+        .then(r => r.json().then(data => ({ ok: r.ok, data })))
+        .then(({ ok, data }) => {
+            if (!ok) { resultEl.innerHTML = `<p class="text-danger small mb-0">${escHtml(data.error || 'Test failed.')}</p>`; return; }
+            const fireLine = data.would_fire
+                ? `<div class="alert alert-success py-2 px-3 mb-3 small"><i class="fa-solid fa-check me-1"></i>Would fire on trigger "<strong>${escHtml(TRIGGER_LABELS[data.trigger_event] || data.trigger_event)}</strong>"</div>`
+                : `<div class="alert alert-secondary py-2 px-3 mb-3 small"><i class="fa-solid fa-circle-xmark me-1"></i>Would NOT fire — ${data.skip_reasons.map(escHtml).join('; ')}</div>`;
+            const actionsHtml = data.actions.map(a => `
+                <div class="d-flex gap-2 border border-secondary rounded p-2 mb-2">
+                    <span class="badge bg-secondary text-nowrap">${escHtml(ACTION_LABELS[a.action_type] || a.action_type)}</span>
+                    <span class="small">${escHtml(a.result)}</span>
+                </div>
+            `).join('');
+            resultEl.innerHTML = fireLine + `<p class="text-muted small mb-1">Action preview (no changes made):</p>` + actionsHtml;
+        })
+        .catch(err => { resultEl.innerHTML = `<p class="text-danger small mb-0">Error: ${err}</p>`; });
 }
 
 document.addEventListener('DOMContentLoaded', () => {
