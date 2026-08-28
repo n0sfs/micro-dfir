@@ -1618,6 +1618,39 @@ def api_rules():
     invalidate_rules_cache()
     return jsonify({"status": "success"})
 
+SIGMA_DRY_RUN_SAMPLE_LIMIT = 20
+SIGMA_DRY_RUN_WINDOWS = {'1d': 1, '7d': 7, '30d': 30, '90d': 90}
+
+# Backtests a rule (new, draft, or an existing rule being edited) against recent
+# live_logs before it's ever enabled -- see sigma_engine.dry_run_rule() for how this
+# stays behaviorally identical to a real detection cycle without any of its side
+# effects. rule_id is optional: a brand-new, not-yet-saved rule has no exclusions to
+# apply yet, but an existing rule being tested picks up whatever's already configured
+# for it on the Tuning page, so the preview matches what re-enabling it would actually do.
+@app.route('/api/rules/dry-run', methods=['POST'])
+@login_required
+def api_rules_dry_run():
+    d = request.get_json() or {}
+    rule_yaml = (d.get('rule_yaml') or '').strip()
+    if not rule_yaml:
+        return jsonify({'error': 'rule_yaml is required'}), 400
+    days = SIGMA_DRY_RUN_WINDOWS.get(d.get('window'), 7)
+    rule_id = d.get('rule_id')
+
+    db = get_db()
+    exclusions = []
+    if rule_id:
+        exclusions = [dict(e) for e in db.execute(
+            "SELECT field, operator, value FROM rule_exclusions WHERE rule_id = ? AND enabled = 1", (rule_id,)
+        ).fetchall()]
+
+    from sigma_engine import dry_run_rule
+    try:
+        result = dry_run_rule(db, rule_yaml, days=days, exclusions=exclusions, preview_limit=SIGMA_DRY_RUN_SAMPLE_LIMIT)
+    except Exception as e:
+        return jsonify({'error': f'Rule failed to parse or convert: {e}'}), 400
+    return jsonify(result)
+
 def _build_mitre_coverage(rules):
     """Aggregates MITRE technique coverage across enabled rules (each a dict
     with 'enabled' and 'mitre_techniques', matching _get_rules_cache()'s

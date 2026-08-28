@@ -263,6 +263,50 @@ def _substitute_ioc_placeholder(rule_yaml_text, cursor, cache):
         rule_yaml_text = rule_yaml_text.replace(placeholder, cache[kind])
     return rule_yaml_text
 
+DRY_RUN_PREVIEW_FIELDS = ('id', 'timestamp', 'host', 'app', 'severity', 'event_id', 'username', 'message')
+
+# Tests a Sigma rule against a recent window of live_logs WITHOUT writing to `alerts`,
+# without notifications/SOAR webhook/auto-case, and without touching sigma_state.json's
+# ingest cursor. Reuses the exact same rule-to-SQL conversion path run_detection_cycle()
+# uses (date normalization, IOC placeholder substitution, field-to-column mapping via
+# _make_backend(), exclusions) against a time window instead of an ingest-id cursor, so
+# what this reports is what a live run would actually have matched -- not a separate,
+# driftable reimplementation. Called from app.py's Flask process (a different service
+# than the one that runs run_detection_cycle()), against that request's own SQLite
+# connection -- the TEMP VIEW this creates is connection-scoped and gone once that
+# request's connection closes, so it can never collide with the live engine's own
+# per-cycle `recent_events` view on its separate, long-lived connection.
+def dry_run_rule(conn, rule_yaml, days=7, exclusions=None, preview_limit=20):
+    conn.create_function('REGEXP', 2, _sqlite_regexp)
+    cursor = conn.cursor()
+
+    cutoff = cursor.execute("SELECT datetime('now', ?)", (f'-{days} days',)).fetchone()[0]
+    cursor.execute("DROP VIEW IF EXISTS recent_events")
+    cursor.execute(f"CREATE TEMP VIEW recent_events AS SELECT * FROM live_logs WHERE timestamp >= '{cutoff}'")
+
+    rule_yaml_text = _substitute_ioc_placeholder(_normalize_rule_dates(rule_yaml), cursor, {})
+    backend = _make_backend()
+    queries = backend.convert(SigmaCollection.from_yaml(rule_yaml_text))  # raises on invalid/unconvertible rule -- caller reports it
+
+    # A rule can compile to more than one SQL query (e.g. multiple detection blocks) --
+    # dedup by row id across all of them so a log line matching more than one doesn't
+    # inflate the "how many events would this have caught" count.
+    seen_ids, matches = set(), []
+    for q in queries:
+        for m in cursor.execute(q).fetchall():
+            if m['id'] in seen_ids:
+                continue
+            if any(_exclusion_matches(e, m) for e in (exclusions or [])):
+                continue
+            seen_ids.add(m['id'])
+            matches.append(m)
+    cursor.execute("DROP VIEW IF EXISTS recent_events")
+
+    matches.sort(key=lambda m: m['id'], reverse=True)
+    total = len(matches)
+    preview = [{k: m[k] for k in DRY_RUN_PREVIEW_FIELDS if k in m.keys()} for m in matches[:preview_limit]]
+    return {'total_matches': total, 'preview': preview, 'preview_truncated': total > preview_limit, 'window_days': days}
+
 def run_detection_cycle():
     if not os.path.exists(DB_PATH): return
     conn = sqlite3.connect(DB_PATH, timeout=30); conn.row_factory = sqlite3.Row
