@@ -3059,32 +3059,51 @@ def _run_playbook_action(db, cid, action_type, params, dry_run=False):
         return f"analyzed {entity_type} '{entity_id}'"
 
     if action_type == 'send_webhook':
-        url = (params.get('url') or '').strip()
+        # url_secret (a stored secret's NAME) takes precedence over a literal url --
+        # the resolved value is used to make the real request but is NEVER included in
+        # any returned string (dry-run preview, success message, or failure message),
+        # since those strings get persisted into playbook_runs.detail and the case
+        # timeline where any case viewer -- not just admins -- can read them.
+        secret_name = (params.get('url_secret') or '').strip()
+        if secret_name:
+            row = db.execute("SELECT value FROM playbook_secrets WHERE name = ?", (secret_name,)).fetchone()
+            if not row:
+                return f"secret '{secret_name}' not found, skipped"
+            url, url_display = row['value'], f"[secret: {secret_name}]"
+        else:
+            url = url_display = (params.get('url') or '').strip()
         if not url:
             return "no URL configured, skipped"
         case = db.execute("SELECT title, status, tlp, pap FROM cases WHERE id = ?", (cid,)).fetchone()
         body_text = _fill_playbook_template(params.get('body') or '{"case_id": "{{case_id}}", "title": "{{case_title}}", "status": "{{status}}"}', cid, case)
         if dry_run:
-            return f"would POST to {url} with body: {body_text}"
+            return f"would POST to {url_display} with body: {body_text}"
         try:
             payload = json.loads(body_text)
         except (ValueError, TypeError):
             payload = {"case_id": cid, "raw": body_text}
         import requests
         requests.post(url, json=payload, timeout=8)
-        return f"posted webhook to {url}"
+        return f"posted webhook to {url_display}"
 
     if action_type == 'send_slack':
-        webhook_url = (params.get('webhook_url') or '').strip()
+        secret_name = (params.get('webhook_url_secret') or '').strip()
+        if secret_name:
+            row = db.execute("SELECT value FROM playbook_secrets WHERE name = ?", (secret_name,)).fetchone()
+            if not row:
+                return f"secret '{secret_name}' not found, skipped"
+            webhook_url, url_display = row['value'], f"[secret: {secret_name}]"
+        else:
+            webhook_url = url_display = (params.get('webhook_url') or '').strip()
         if not webhook_url:
             return "no Slack webhook URL configured, skipped"
         case = db.execute("SELECT title, status, tlp, pap FROM cases WHERE id = ?", (cid,)).fetchone()
         message = _fill_playbook_template(params.get('message') or 'Case #{{case_id}}: {{case_title}} ({{status}})', cid, case)
         if dry_run:
-            return f'would send Slack message: "{message}"'
+            return f'would send Slack message via {url_display}: "{message}"'
         import requests
         requests.post(webhook_url, json={'text': message}, timeout=8)
-        return "sent Slack message"
+        return f"sent Slack message via {url_display}"
 
     return f"unknown action type '{action_type}', skipped"
 
@@ -3308,6 +3327,54 @@ def api_playbook_dry_run(pid):
     if result is None:
         return jsonify({'error': 'Playbook or case not found'}), 404
     return jsonify(result)
+
+# Named secrets for playbook send_webhook/send_slack actions, so a live webhook/Slack
+# URL doesn't have to be typed as a literal, visible-to-anyone-who-opens-the-playbook
+# string in playbook_actions.params. Values are write-only after creation -- GET never
+# returns them, matching how _run_playbook_action's dry-run/success/failure strings also
+# never include a resolved secret value (see the comment there). This is plaintext at
+# rest, the same posture every other credential in this app already has (VirusTotal/
+# AbuseIPDB/Shodan keys in the `settings` table) -- not a new encryption story, just a
+# named, reusable, write-only reference instead of a literal string repeated inline.
+@app.route('/api/playbook-secrets', methods=['GET', 'POST'])
+@login_required
+def api_playbook_secrets():
+    db = get_db()
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    if request.method == 'GET':
+        rows = db.execute("SELECT id, name, description, created_by, created_at FROM playbook_secrets ORDER BY name").fetchall()
+        return jsonify([dict(r) for r in rows])
+    d = request.json or {}
+    name = (d.get('name') or '').strip()
+    value = (d.get('value') or '').strip()
+    if not name:
+        return jsonify({'error': 'name is required'}), 400
+    if not value:
+        return jsonify({'error': 'value is required'}), 400
+    if db.execute("SELECT 1 FROM playbook_secrets WHERE name = ?", (name,)).fetchone():
+        return jsonify({'error': f'A secret named "{name}" already exists'}), 400
+    db.execute(
+        "INSERT INTO playbook_secrets (name, value, description, created_by) VALUES (?, ?, ?, ?)",
+        (name, value, (d.get('description') or '').strip(), current_user.username)
+    )
+    db.commit()
+    log_audit('playbook_secret_create', 'playbook_secret', name)
+    return jsonify({'status': 'success'})
+
+@app.route('/api/playbook-secrets/<int:sid>', methods=['DELETE'])
+@login_required
+def api_playbook_secret_delete(sid):
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    db = get_db()
+    existing = db.execute("SELECT name FROM playbook_secrets WHERE id = ?", (sid,)).fetchone()
+    if not existing:
+        return jsonify({'error': 'Secret not found'}), 404
+    db.execute("DELETE FROM playbook_secrets WHERE id = ?", (sid,))
+    db.commit()
+    log_audit('playbook_secret_delete', 'playbook_secret', existing['name'])
+    return jsonify({'ok': 1})
 
 @app.route('/api/case-templates', methods=['GET'])
 @login_required
@@ -4645,6 +4712,22 @@ def migrate_playbooks():
             detail TEXT
         )''')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_playbook_runs_case ON playbook_runs(case_id)')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_playbook_secrets():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS playbook_secrets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            value TEXT NOT NULL,
+            description TEXT,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
         conn.commit()
         conn.close()
     except Exception:
@@ -7248,6 +7331,7 @@ migrate_cases()
 migrate_case_upgrade()
 migrate_case_queues()
 migrate_playbooks()
+migrate_playbook_secrets()
 migrate_live_logs_archive()
 migrate_fim_paths()
 migrate_ueba_priority_scores()
