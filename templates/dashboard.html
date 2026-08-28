@@ -735,6 +735,21 @@
         </div>
 
         <div id="ruleEditorError" class="text-danger small mt-2" style="display:none;"></div>
+
+        <div class="mt-3 border-top border-secondary pt-3">
+            <div class="d-flex align-items-center flex-wrap gap-2 mb-2">
+                <button type="button" class="btn btn-sm btn-outline-info" onclick="testRule()"><i class="fa-solid fa-flask me-1"></i>Test Rule</button>
+                <select id="ruleTestWindow" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;">
+                    <option value="1d">Last 1 day</option>
+                    <option value="7d" selected>Last 7 days</option>
+                    <option value="30d">Last 30 days</option>
+                    <option value="90d">Last 90 days</option>
+                </select>
+                <span class="text-muted small">Backtests against real recent logs -- no alerts, cases, or notifications are created.</span>
+            </div>
+            <div id="ruleTestResult"></div>
+        </div>
+
         <div id="ruleHistoryBox" class="mt-3" style="display:none;">
             <h6 class="text-info mb-2"><i class="fa-solid fa-clock-rotate-left me-1"></i>Edit History</h6>
             <div id="ruleHistoryList" class="small"></div>
@@ -2787,6 +2802,7 @@ async function openRuleModal(id) {
     editingRuleId = id || null;
     editingRuleSource = null;
     document.getElementById('ruleEditorError').style.display = 'none';
+    document.getElementById('ruleTestResult').innerHTML = '';
     document.getElementById('ruleYamlInput').value = '';
     document.getElementById('ruleYamlInput').readOnly = false;
     document.getElementById('ruleMetaBox').style.display = 'none';
@@ -2847,20 +2863,22 @@ async function openRuleModal(id) {
     ruleModal.show();
 }
 
+// Shared by saveRule() and testRule() -- both need "whatever rule is currently being
+// authored," from whichever tab is active, and must stay in exact agreement or a test
+// could pass/fail against different YAML than what actually gets saved.
+function getCurrentRuleYaml() {
+    return activeRuleTab === 'builder' ? generateYamlFromBuilder() : document.getElementById('ruleYamlInput').value;
+}
+
 async function saveRule() {
     const errBox = document.getElementById('ruleEditorError');
     errBox.style.display = 'none';
 
-    let ruleYaml;
-    if (activeRuleTab === 'builder') {
-        ruleYaml = generateYamlFromBuilder();
-        if (!ruleYaml) {
-            errBox.innerText = 'Add at least one match condition with a value before saving.';
-            errBox.style.display = 'block';
-            return;
-        }
-    } else {
-        ruleYaml = document.getElementById('ruleYamlInput').value;
+    const ruleYaml = getCurrentRuleYaml();
+    if (activeRuleTab === 'builder' && !ruleYaml) {
+        errBox.innerText = 'Add at least one match condition with a value before saving.';
+        errBox.style.display = 'block';
+        return;
     }
 
     const url = editingRuleId ? `/api/rules/${editingRuleId}` : '/api/rules';
@@ -2884,6 +2902,51 @@ async function saveRule() {
         errBox.innerText = 'Error saving rule: ' + e;
         errBox.style.display = 'block';
     }
+}
+
+// Backtests the rule currently in the editor (saved or not) against real recent logs --
+// no alert/case/notification side effects. editingRuleId (when set) is sent along so the
+// server applies that rule's real saved exclusions, matching what re-enabling it live
+// would actually do; a brand-new draft has no rule_id and so no exclusions yet.
+function testRule() {
+    const resultEl = document.getElementById('ruleTestResult');
+    const ruleYaml = getCurrentRuleYaml();
+    if (!ruleYaml) {
+        resultEl.innerHTML = '<p class="text-danger small mb-0">Add at least one match condition with a value before testing.</p>';
+        return;
+    }
+    resultEl.innerHTML = '<p class="text-muted small mb-0"><i class="fa-solid fa-spinner fa-spin me-1"></i>Testing against recent logs&hellip;</p>';
+    const payload = { rule_yaml: ruleYaml, window: document.getElementById('ruleTestWindow').value };
+    if (editingRuleId) payload.rule_id = editingRuleId;
+    fetch('/api/rules/dry-run', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+    })
+        .then(r => r.json().then(data => ({ ok: r.ok, data })))
+        .then(({ ok, data }) => {
+            if (!ok) { resultEl.innerHTML = `<p class="text-danger small mb-0">${escHtml(data.error || 'Test failed.')}</p>`; return; }
+            if (!data.total_matches) {
+                resultEl.innerHTML = `<p class="text-muted small mb-0"><i class="fa-solid fa-circle-check text-success me-1"></i>No matches in the last ${data.window_days} day(s).</p>`;
+                return;
+            }
+            const rows = data.preview.map(p => `
+                <tr>
+                    <td class="text-nowrap small">${escHtml(p.timestamp)}</td>
+                    <td class="small">${escHtml(p.host || '')}</td>
+                    <td class="small">${escHtml(p.app || '')}</td>
+                    <td class="small">${escHtml(p.username || '')}</td>
+                    <td class="small">${escHtml((p.message || '').slice(0, 150))}</td>
+                </tr>
+            `).join('');
+            resultEl.innerHTML = `
+                <p class="small mb-2"><strong>${data.total_matches}</strong> match${data.total_matches === 1 ? '' : 'es'} in the last ${data.window_days} day(s)${data.preview_truncated ? ` (showing the ${data.preview.length} most recent)` : ''}.</p>
+                <div class="table-responsive" style="max-height:220px; overflow-y:auto;">
+                    <table class="table table-dark table-sm align-middle mb-0">
+                        <thead><tr><th>Time</th><th>Host</th><th>Source</th><th>User</th><th>Message</th></tr></thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>`;
+        })
+        .catch(err => { resultEl.innerHTML = `<p class="text-danger small mb-0">Error: ${err}</p>`; });
 }
 
 async function doClone(id) {
