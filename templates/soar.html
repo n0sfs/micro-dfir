@@ -6,7 +6,10 @@
         <p>Automated response playbooks triggered by case lifecycle events.</p>
     </div>
     {% if current_user.role == 'admin' %}
-    <button type="button" class="btn btn-primary" onclick="showPlaybookModal()"><i class="fa-solid fa-plus me-1"></i>New Playbook</button>
+    <div class="d-flex gap-2">
+        <button type="button" class="btn btn-outline-secondary" onclick="showSecretsModal()"><i class="fa-solid fa-key me-1"></i>Manage Secrets</button>
+        <button type="button" class="btn btn-primary" onclick="showPlaybookModal()"><i class="fa-solid fa-plus me-1"></i>New Playbook</button>
+    </div>
     {% endif %}
 </div>
 
@@ -137,13 +140,53 @@
     </div>
 </div>
 
+<!-- Manage Secrets modal -- named, write-only references for send_webhook/send_slack URLs, so a live URL isn't typed as a literal string visible in the playbook editor -->
+<div class="modal fade" id="secretsModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content bg-dark text-light border-secondary">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title"><i class="fa-solid fa-key me-2"></i>Playbook Secrets</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted small">Values are write-only -- once saved, a secret can be used by name in a webhook/Slack action but its value is never shown again. Delete and recreate it to change the value.</p>
+                <div class="table-responsive mb-3">
+                    <table class="table table-dark table-sm align-middle mb-0">
+                        <thead><tr><th>Name</th><th>Description</th><th>Created</th><th></th></tr></thead>
+                        <tbody id="secretsTableBody"><tr><td colspan="4" class="text-center text-muted small py-3">Loading&hellip;</td></tr></tbody>
+                    </table>
+                </div>
+                <div class="row g-2 align-items-end bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted mb-1">Name</label>
+                        <input type="text" id="newSecretName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. slack_soc_channel">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted mb-1">Value (URL)</label>
+                        <input type="password" id="newSecretValue" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="https://…" autocomplete="new-password">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted mb-1">Description (optional)</label>
+                        <input type="text" id="newSecretDescription" class="form-control form-control-sm bg-dark text-light border-secondary">
+                    </div>
+                    <div class="col-md-2">
+                        <button type="button" class="btn btn-sm btn-outline-primary w-100" onclick="addSecret()"><i class="fa-solid fa-plus me-1"></i>Add</button>
+                    </div>
+                </div>
+                <div id="newSecretError" class="text-danger small mt-1" style="display:none;"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
 const IS_ADMIN = {{ 'true' if current_user.role == 'admin' else 'false' }};
 let allPlaybooks = [];
 let allQueuesForPb = [];
 let caseTemplatesForPb = [];
+let allPlaybookSecrets = [];
 let pbActionSeq = 0;
-let playbookModal, playbookRunsModal;
+let playbookModal, playbookRunsModal, secretsModal;
 
 const TRIGGER_LABELS = {
     case_created: 'Case created', status_changed: 'Status changed',
@@ -168,6 +211,67 @@ function loadQueuesForPlaybooks() {
 
 function loadTemplatesForPlaybooks() {
     return fetch('/api/case-templates').then(r => r.json()).then(t => { caseTemplatesForPb = t || []; }).catch(() => { caseTemplatesForPb = []; });
+}
+
+// Names/descriptions only -- the API never returns a secret's value (see api_playbook_secrets()).
+function loadPlaybookSecretsList() {
+    if (!IS_ADMIN) return Promise.resolve(); // GET is admin-only; a non-admin never edits playbooks anyway
+    return fetch('/api/playbook-secrets').then(r => r.json()).then(s => { allPlaybookSecrets = Array.isArray(s) ? s : []; }).catch(() => { allPlaybookSecrets = []; });
+}
+
+async function showSecretsModal() {
+    await loadPlaybookSecretsList();
+    renderSecretsTable();
+    document.getElementById('newSecretName').value = '';
+    document.getElementById('newSecretValue').value = '';
+    document.getElementById('newSecretDescription').value = '';
+    document.getElementById('newSecretError').style.display = 'none';
+    if (!secretsModal) secretsModal = new bootstrap.Modal(document.getElementById('secretsModal'));
+    secretsModal.show();
+}
+
+function renderSecretsTable() {
+    const tbody = document.getElementById('secretsTableBody');
+    if (!allPlaybookSecrets.length) {
+        tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted small py-3">No secrets yet.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = allPlaybookSecrets.map(s => `
+        <tr>
+            <td class="small">&#128273; ${escHtml(s.name)}</td>
+            <td class="text-muted small">${escHtml(s.description || '')}</td>
+            <td class="text-muted small text-nowrap">${escHtml(s.created_at)}</td>
+            <td class="text-end"><button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete" onclick="deleteSecret(${s.id}, '${escJs(s.name)}')"><i class="fa-solid fa-trash"></i></button></td>
+        </tr>
+    `).join('');
+}
+
+async function addSecret() {
+    const nameEl = document.getElementById('newSecretName');
+    const valueEl = document.getElementById('newSecretValue');
+    const descEl = document.getElementById('newSecretDescription');
+    const errBox = document.getElementById('newSecretError');
+    errBox.style.display = 'none';
+    const name = nameEl.value.trim();
+    const value = valueEl.value.trim();
+    if (!name) { errBox.innerText = 'Name is required.'; errBox.style.display = 'block'; return; }
+    if (!value) { errBox.innerText = 'Value is required.'; errBox.style.display = 'block'; return; }
+    const res = await fetch('/api/playbook-secrets', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, value, description: descEl.value.trim() })
+    });
+    const data = await res.json();
+    if (!res.ok) { errBox.innerText = data.error || 'Failed to create secret.'; errBox.style.display = 'block'; return; }
+    nameEl.value = ''; valueEl.value = ''; descEl.value = '';
+    await loadPlaybookSecretsList();
+    renderSecretsTable();
+}
+
+async function deleteSecret(sid, name) {
+    if (!(await confirmDialog(`Delete the "${name}" secret? Any playbook action still referencing it will skip cleanly ("secret not found") the next time it runs, rather than sending anywhere.`, { title: 'Delete secret', danger: true, confirmLabel: 'Delete' }))) return;
+    await fetch(`/api/playbook-secrets/${sid}`, { method: 'DELETE' });
+    await loadPlaybookSecretsList();
+    renderSecretsTable();
 }
 
 function loadPlaybooks() {
@@ -224,6 +328,24 @@ function populatePbConditionSelects(current) {
     document.getElementById('pbCondStatus').value = current.condition_status || '';
 }
 
+// Lets a webhook/Slack action reference a stored secret by name instead of a literal
+// URL typed inline. "Enter a URL directly" keeps today's behavior; picking a secret
+// hides the raw URL input (onPlaybookUrlSourceChange) so nothing is typed into a field
+// collectActionRow would otherwise submit as plaintext alongside the secret reference.
+function urlSourceSelectHtml(seq, field, currentSecretName) {
+    return `<select class="form-select form-select-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_${field}_source" onchange="onPlaybookUrlSourceChange(${seq}, '${field}')">
+        <option value="">Enter a URL directly&hellip;</option>
+        ${allPlaybookSecrets.map(s => `<option value="${escHtml(s.name)}" ${s.name === currentSecretName ? 'selected' : ''}>&#128273; ${escHtml(s.name)}</option>`).join('')}
+    </select>`;
+}
+
+function onPlaybookUrlSourceChange(seq, field) {
+    const secretName = document.getElementById(`pbActParam_${seq}_${field}_source`).value;
+    const rawInput = document.getElementById(`pbActParam_${seq}_${field}`);
+    rawInput.style.display = secretName ? 'none' : '';
+    if (secretName) rawInput.value = '';
+}
+
 function actionParamsFieldsHtml(seq, actionType, params) {
     params = params || {};
     switch (actionType) {
@@ -247,10 +369,12 @@ function actionParamsFieldsHtml(seq, actionType, params) {
                 <option value="user" ${params.entity_type === 'user' ? 'selected' : ''}>User</option>
             </select>`;
         case 'send_webhook':
-            return `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_url" placeholder="https://&hellip;" value="${escHtml(params.url || '')}">
+            return urlSourceSelectHtml(seq, 'url', params.url_secret) +
+                `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_url" placeholder="https://&hellip;" value="${escHtml(params.url || '')}" style="${params.url_secret ? 'display:none;' : ''}">
                 <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_body" placeholder="JSON body (optional -- case_id/case_title/status/tlp/pap placeholders supported)" value="${escHtml(params.body || '')}">`;
         case 'send_slack':
-            return `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_webhook_url" placeholder="Slack incoming webhook URL" value="${escHtml(params.webhook_url || '')}">
+            return urlSourceSelectHtml(seq, 'webhook_url', params.webhook_url_secret) +
+                `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_webhook_url" placeholder="Slack incoming webhook URL" value="${escHtml(params.webhook_url || '')}" style="${params.webhook_url_secret ? 'display:none;' : ''}">
                 <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_message" placeholder="Message (optional -- case_id/case_title/status/tlp/pap placeholders supported)" value="${escHtml(params.message || '')}">`;
         default:
             return '';
@@ -293,8 +417,20 @@ function collectActionRow(row) {
         case 'add_note': params.text = getVal('text'); break;
         case 'set_queue': params.queue_id = getVal('queue_id') ? parseInt(getVal('queue_id'), 10) : null; break;
         case 'analyze_entity': params.entity_type = getVal('entity_type'); break;
-        case 'send_webhook': params.url = getVal('url'); params.body = getVal('body'); break;
-        case 'send_slack': params.webhook_url = getVal('webhook_url'); params.message = getVal('message'); break;
+        case 'send_webhook': {
+            const urlSecret = getVal('url_source');
+            params.url_secret = urlSecret || null;
+            params.url = urlSecret ? '' : getVal('url');
+            params.body = getVal('body');
+            break;
+        }
+        case 'send_slack': {
+            const webhookSecret = getVal('webhook_url_source');
+            params.webhook_url_secret = webhookSecret || null;
+            params.webhook_url = webhookSecret ? '' : getVal('webhook_url');
+            params.message = getVal('message');
+            break;
+        }
     }
     return { action_type: actionType, params };
 }
@@ -309,6 +445,7 @@ async function showPlaybookModal() {
     document.getElementById('pbActionsList').innerHTML = '';
     if (!allQueuesForPb.length) await loadQueuesForPlaybooks();
     if (!caseTemplatesForPb.length) await loadTemplatesForPlaybooks();
+    if (!allPlaybookSecrets.length) await loadPlaybookSecretsList();
     populatePbConditionSelects({});
     addPlaybookActionRow('add_note', {});
     if (!playbookModal) playbookModal = new bootstrap.Modal(document.getElementById('playbookModal'));
@@ -327,6 +464,7 @@ async function editPlaybook(pid) {
     document.getElementById('pbActionsList').innerHTML = '';
     if (!allQueuesForPb.length) await loadQueuesForPlaybooks();
     if (!caseTemplatesForPb.length) await loadTemplatesForPlaybooks();
+    if (!allPlaybookSecrets.length) await loadPlaybookSecretsList();
     populatePbConditionSelects(p);
     (p.actions.length ? p.actions : [{ action_type: 'add_note', params: {} }]).forEach(a => addPlaybookActionRow(a.action_type, a.params));
     if (!playbookModal) playbookModal = new bootstrap.Modal(document.getElementById('playbookModal'));
