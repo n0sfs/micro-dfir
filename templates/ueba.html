@@ -186,85 +186,85 @@
                     <div class="row g-3">
                         <div class="col-md-3">
                             <label class="form-label">Baseline Lookback (days)</label>
-                            <input type="number" id="cfgLookback" class="form-control bg-dark text-light border-secondary" min="1" max="365" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                            <input type="number" id="cfgLookback" class="form-control bg-dark text-light border-secondary" min="1" max="365" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                         </div>
                         <div class="col-md-3">
                             <label class="form-label">Spread Multiplier</label>
-                            <input type="number" id="cfgStddev" class="form-control bg-dark text-light border-secondary" min="0.5" max="10" step="0.1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                            <input type="number" id="cfgStddev" class="form-control bg-dark text-light border-secondary" min="0.5" max="10" step="0.1" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                         </div>
                         <div class="col-md-3">
                             <label class="form-label">Minimum Baseline Floor (events/day)</label>
-                            <input type="number" id="cfgMinBaseline" class="form-control bg-dark text-light border-secondary" min="0" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                            <input type="number" id="cfgMinBaseline" class="form-control bg-dark text-light border-secondary" min="0" step="1" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                         </div>
                         <div class="col-md-3">
                             <label class="form-label">Min. Same-Weekday Samples</label>
-                            <input type="number" id="cfgMinDaysObserved" class="form-control bg-dark text-light border-secondary" min="1" max="52" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                            <input type="number" id="cfgMinDaysObserved" class="form-control bg-dark text-light border-secondary" min="1" max="52" step="1" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                             <p class="text-muted small mt-1 mb-0">Below this, falls back to a flat baseline across all weekdays until enough same-weekday history builds up.</p>
                         </div>
                     </div>
                     <div class="form-check form-switch mt-3">
-                        <input class="form-check-input" type="checkbox" id="cfgNewIpEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <input class="form-check-input" type="checkbox" id="cfgNewIpEnabled" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                         <label class="form-check-label small" for="cfgNewIpEnabled">Flag users active from a source IP never seen for them before <span class="text-muted">(needs source IPs to be present in ingested logs — best-effort, extracted from Windows auth event text)</span></label>
                     </div>
                     <div class="form-check form-switch mt-2">
-                        <input class="form-check-input" type="checkbox" id="cfgNewProcessEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <input class="form-check-input" type="checkbox" id="cfgNewProcessEnabled" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                         <label class="form-check-label small" for="cfgNewProcessEnabled">Flag hosts running a process never seen on that host before <span class="text-muted">(needs process_image, agent-sourced logs only)</span></label>
                     </div>
                     <div class="form-check form-switch mt-2">
-                        <input class="form-check-input" type="checkbox" id="cfgNewDestIpEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <input class="form-check-input" type="checkbox" id="cfgNewDestIpEnabled" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                         <label class="form-check-label small" for="cfgNewDestIpEnabled">Flag hosts connecting to a destination IP never seen from that host before</label>
                     </div>
                     <div class="form-check form-switch mt-2">
-                        <input class="form-check-input" type="checkbox" id="cfgProcessLineageEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <input class="form-check-input" type="checkbox" id="cfgProcessLineageEnabled" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                         <label class="form-check-label small" for="cfgProcessLineageEnabled">Flag hosts with a parent-to-child process relationship never seen before <span class="text-muted">(needs process_image + parent_image)</span></label>
                     </div>
                     <div class="form-check form-switch mt-2">
-                        <input class="form-check-input" type="checkbox" id="cfgOffHoursEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <input class="form-check-input" type="checkbox" id="cfgOffHoursEnabled" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                         <label class="form-check-label small" for="cfgOffHoursEnabled">Flag hosts/users active at an hour of day that's unusual for them, judged against a per-hour-of-week baseline <span class="text-muted">(a stable recurring pattern, e.g. always active Friday 11pm, is not penalized)</span></label>
                     </div>
                     <div class="form-check form-switch mt-2 d-flex align-items-center flex-wrap gap-2">
                         <div>
-                            <input class="form-check-input" type="checkbox" id="cfgRareProcessEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                            <input class="form-check-input" type="checkbox" id="cfgRareProcessEnabled" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                             <label class="form-check-label small" for="cfgRareProcessEnabled">Flag processes rare across the whole fleet, seen on</label>
                         </div>
-                        <input type="number" id="cfgRareProcessMaxHosts" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="50" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <input type="number" id="cfgRareProcessMaxHosts" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="50" step="1" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                         <span class="text-muted small">host(s) or fewer <span class="text-muted">(independent of any single host's own baseline)</span></span>
                     </div>
                     <div class="form-check form-switch mt-2 d-flex align-items-center flex-wrap gap-2">
                         <div>
-                            <input class="form-check-input" type="checkbox" id="cfgConvergenceEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                            <input class="form-check-input" type="checkbox" id="cfgConvergenceEnabled" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                             <label class="form-check-label small" for="cfgConvergenceEnabled">Flag an entity that trips at least</label>
                         </div>
-                        <input type="number" id="cfgConvergenceMinIndicators" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:60px;" min="2" max="10" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <input type="number" id="cfgConvergenceMinIndicators" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:60px;" min="2" max="10" step="1" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                         <span class="text-muted small">distinct signal types within</span>
-                        <input type="number" id="cfgConvergenceWindowHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="168" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <input type="number" id="cfgConvergenceWindowHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="168" step="1" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                         <span class="text-muted small">hours <span class="text-muted">(one weak signal alone isn't much -- several different ones close together is)</span></span>
                     </div>
                     <div class="form-check form-switch mt-2 d-flex align-items-center flex-wrap gap-2">
                         <div>
-                            <input class="form-check-input" type="checkbox" id="cfgPriorityEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                            <input class="form-check-input" type="checkbox" id="cfgPriorityEnabled" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                             <label class="form-check-label small" for="cfgPriorityEnabled">Compute an Investigation Priority score over the trailing</label>
                         </div>
-                        <input type="number" id="cfgPriorityWindowDays" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:60px;" min="1" max="365" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <input type="number" id="cfgPriorityWindowDays" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:60px;" min="1" max="365" step="1" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                         <span class="text-muted small">day(s), decaying activity with a</span>
-                        <input type="number" id="cfgPriorityHalfLifeHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="8760" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <input type="number" id="cfgPriorityHalfLifeHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="8760" step="1" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                         <span class="text-muted small">hour half-life <span class="text-muted">(a "what to look at first" ranking, separate from the raw score -- see the Risk Scoring tab)</span></span>
                     </div>
                     <div class="form-check form-switch mt-2 d-flex align-items-center flex-wrap gap-2">
                         <div>
-                            <input class="form-check-input" type="checkbox" id="cfgAutocaseEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                            <input class="form-check-input" type="checkbox" id="cfgAutocaseEnabled" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                             <label class="form-check-label small" for="cfgAutocaseEnabled">Auto-create a Case when an entity's weighted risk score reaches</label>
                         </div>
-                        <input type="number" id="cfgAutocaseThreshold" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="1000" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <input type="number" id="cfgAutocaseThreshold" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="1000" step="1" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                         <span class="text-muted small">points, using template</span>
-                        <select id="cfgAutocaseTemplate" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <select id="cfgAutocaseTemplate" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                             <option value="">No template — empty task list</option>
                         </select>
                         <span class="text-muted small">, waiting at least</span>
-                        <input type="number" id="cfgAutocaseCooldownHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="8760" step="1" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                        <input type="number" id="cfgAutocaseCooldownHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="8760" step="1" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                         <span class="text-muted small">hour(s) before creating another one for the same entity <span class="text-muted">(same rolling window as the Risk Scoring tab)</span></span>
                     </div>
-                    {% if current_user.role == 'admin' %}
+                    {% if current_user.role in ('senior_analyst', 'admin') %}
                     <button class="btn btn-primary btn-sm mt-3" onclick="saveUebaConfig()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Tuning</button>
                     <span id="cfgSaveMsg" class="small ms-2" style="display:none;"></span>
                     {% else %}
@@ -311,7 +311,7 @@
                             <tbody id="ueExclusionsTableBody"><tr><td colspan="5" class="text-muted small">No exclusions yet.</td></tr></tbody>
                         </table>
                     </div>
-                    {% if current_user.role == 'admin' %}
+                    {% if current_user.role in ('senior_analyst', 'admin') %}
                     <div class="row g-2 align-items-end bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
                         <div class="col-md-2">
                             <label class="form-label small text-muted mb-1">Type</label>
@@ -351,7 +351,7 @@
                     <div class="row g-3 mb-4">
                         <div class="col-md-3">
                             <label class="form-label">Scoring Window (days) <i class="fa-solid fa-circle-info text-muted small" title="How many days of history are summed to compute an entity's current composite risk score. Contributing events older than this fall out of the total automatically as time passes -- it does not delete anything, it just stops counting toward the score."></i></label>
-                            <input type="number" id="riskCfgWindowDays" class="form-control bg-dark text-light border-secondary" min="1" max="90" oninput="onDynamicScoringFieldChange()" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                            <input type="number" id="riskCfgWindowDays" class="form-control bg-dark text-light border-secondary" min="1" max="90" oninput="onDynamicScoringFieldChange()" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                         </div>
                     </div>
                     <div class="row g-4">
@@ -365,12 +365,12 @@
                             </button>
                             <div id="rawJsonWrap" style="display:none;">
                                 <label class="form-label small text-muted mb-1">Raw JSON <span class="text-muted">— edits here sync back to the fields on the left and vice versa; mainly useful for pasting in a whole config at once</span></label>
-                                <textarea id="riskCfgPointsJson" class="form-control bg-dark text-light border-secondary font-monospace small" rows="16" spellcheck="false" oninput="onDynamicScoringJsonChange()" {{ '' if current_user.role == 'admin' else 'disabled' }}></textarea>
+                                <textarea id="riskCfgPointsJson" class="form-control bg-dark text-light border-secondary font-monospace small" rows="16" spellcheck="false" oninput="onDynamicScoringJsonChange()" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}></textarea>
                                 <p class="small mt-1 mb-0" id="dynamicScoringJsonStatus">&nbsp;</p>
                             </div>
                         </div>
                     </div>
-                    {% if current_user.role == 'admin' %}
+                    {% if current_user.role in ('senior_analyst', 'admin') %}
                     <button class="btn btn-primary btn-sm mt-3" onclick="saveRiskConfig()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Dynamic Scoring</button>
                     <span id="riskCfgSaveMsg" class="small ms-2" style="display:none;"></span>
                     {% else %}
@@ -393,7 +393,7 @@
                             <button type="button" class="btn btn-outline-secondary ar-quick-filter-btn" data-arqf="disabled" onclick="setArQuickFilter('disabled')">Disabled</button>
                         </div>
                         <span class="ms-auto text-muted small" id="arRowCountLabel"></span>
-                        {% if current_user.role == 'admin' %}
+                        {% if current_user.role in ('senior_analyst', 'admin') %}
                         <button type="button" class="btn btn-sm btn-primary" onclick="openAnomalyRuleModal()"><i class="fa-solid fa-plus me-1"></i> Add Rule</button>
                         {% endif %}
                     </div>
@@ -491,7 +491,10 @@
 
 {% block scripts %}
 <script>
-const IS_ADMIN = {{ 'true' if current_user.role == 'admin' else 'false' }};
+// Every IS_ADMIN-gated control on this page (model tuning, scoring rules,
+// exclusions) falls under "manage backend data" -- Tier 3+, not Admin-only.
+// Named IS_ADMIN still, unchanged, to avoid touching every call site below.
+const IS_ADMIN = roleAtLeast('senior_analyst');
 
 function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));

@@ -63,7 +63,9 @@
             <button type="button" class="btn btn-sm btn-outline-secondary mb-2" onclick="backToList()"><i class="fa-solid fa-arrow-left me-1"></i>Back to Cases</button>
             <h2 id="caseDetailTitleHeading"><i class="fa-solid fa-folder-open me-2"></i>Case Detail</h2>
         </div>
+        {% if current_user.role in ('senior_analyst', 'admin') %}
         <button type="button" class="btn btn-outline-danger" onclick="deleteCase(activeCaseId)"><i class="fa-solid fa-trash me-1"></i>Delete Case</button>
+        {% endif %}
     </div>
     <div id="caseDetailBody"></div>
 </div>
@@ -176,7 +178,8 @@
 </div>
 
 <script>
-const IS_ADMIN = {{ 'true' if current_user.role == 'admin' else 'false' }};
+const IS_ADMIN = {{ 'true' if current_user.role == 'admin' else 'false' }}; // case queue admin stays Admin-only
+const CAN_DELETE_CASES = roleAtLeast('senior_analyst'); // deleting a case is destructive -- Tier 3+
 const CURRENT_USERNAME = {{ current_user.username|tojson }};
 let allCases = [];
 let allQueues = [];
@@ -310,7 +313,7 @@ function renderCases() {
             <td class="text-muted small">${c.task_count > 0 ? `${c.task_done_count}/${c.task_count}` : '—'}</td>
             <td class="text-muted small text-nowrap">${escHtml(c.created_at)}</td>
             <td class="text-end pe-3" onclick="event.stopPropagation()">
-                <button class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete Case" onclick="deleteCase(${c.id})"><i class="fa-solid fa-trash"></i></button>
+                ${CAN_DELETE_CASES ? `<button class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete Case" onclick="deleteCase(${c.id})"><i class="fa-solid fa-trash"></i></button>` : ''}
             </td>
         </tr>
     `).join('');
@@ -448,7 +451,11 @@ function createCase() {
 async function deleteCase(cid) {
     if (!(await confirmDialog('Delete this case? Its item links will also be removed (the underlying alerts/anomalies are not affected).', {title: 'Delete case', danger: true, confirmLabel: 'Delete'}))) return;
     fetch(`/api/cases/${cid}`, {method: 'DELETE'})
-        .then(() => { if (cid === activeCaseId) { backToList(); } else { loadCases(); } })
+        .then(r => r.json().then(data => ({ok: r.ok, data})))
+        .then(({ok, data}) => {
+            if (!ok) { toast(data.error || 'Failed to delete case.', 'danger'); return; }
+            if (cid === activeCaseId) { backToList(); } else { loadCases(); }
+        })
         .catch(err => toast('Error deleting case: ' + err, 'danger'));
 }
 

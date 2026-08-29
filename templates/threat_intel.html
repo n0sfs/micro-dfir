@@ -45,7 +45,7 @@
                     </div>
                     <div id="iocEnrichResults" class="mt-2 small" style="display:none;"></div>
                     <div class="form-text text-muted">Exact-match check against the local IOC set synced from your Threat Feeds below — not a live external lookup. "Enrich" queries free-tier external sources (Shodan InternetDB, AbuseIPDB) on demand, cached 24h.</div>
-                    {% if current_user.role == 'admin' %}
+                    {% if current_user.role in ('senior_analyst', 'admin') %}
                     <div class="d-flex flex-wrap gap-2 align-items-center mt-3 pt-2 border-top border-secondary">
                         <label class="form-label small text-muted mb-0">AbuseIPDB API Key</label>
                         <input type="password" id="abuseipdbKeyInput" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:280px;" placeholder="Leave blank to keep existing">
@@ -59,7 +59,7 @@
             <div class="card bg-dark border-secondary mb-4">
                 <div class="card-header d-flex justify-content-between align-items-center">
                     <span><i class="fa-solid fa-satellite-dish me-2"></i>Feed Sources</span>
-                    {% if current_user.role == 'admin' %}
+                    {% if current_user.role in ('senior_analyst', 'admin') %}
                     <button class="btn btn-primary btn-sm" onclick="openFeedModal()"><i class="fa-solid fa-plus me-1"></i> Add Feed</button>
                     {% endif %}
                 </div>
@@ -138,7 +138,7 @@
             <div class="card bg-dark border-secondary mb-4">
                 <div class="card-header d-flex justify-content-between align-items-center">
                     <span><i class="fa-solid fa-user-ninja me-2"></i>Threat Actor / Malware Entities</span>
-                    {% if current_user.role == 'admin' %}
+                    {% if current_user.role in ('senior_analyst', 'admin') %}
                     <button class="btn btn-primary btn-sm" onclick="openEntityModal()"><i class="fa-solid fa-plus me-1"></i> Add Entity</button>
                     {% endif %}
                 </div>
@@ -1094,7 +1094,7 @@ function loadFeeds() {
                 tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-4">No threat feeds configured.</td></tr>';
                 return;
             }
-            const isAdmin = {{ 'true' if current_user.role == 'admin' else 'false' }};
+            const isAdmin = roleAtLeast('senior_analyst'); // feed/entity/warninglist management -- Tier 3+
             tbody.innerHTML = feeds.map(f => `
                 <tr>
                     <td class="ps-3"><strong>${escHtml(f.name)}</strong></td>
@@ -1303,7 +1303,7 @@ function loadEntities() {
             tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">No entities yet.</td></tr>';
             return;
         }
-        const isAdmin = {{ 'true' if current_user.role == 'admin' else 'false' }};
+        const isAdmin = roleAtLeast('senior_analyst'); // feed/entity/warninglist management -- Tier 3+
         tbody.innerHTML = entities.map(e => `
             <tr>
                 <td class="ps-3"><a href="#" onclick="openEntityDetail(${e.id}); return false;">${escHtml(e.name)}</a></td>
@@ -1533,7 +1533,7 @@ function loadWarninglists() {
                 tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">No warninglists configured.</td></tr>';
                 return;
             }
-            const isAdmin = {{ 'true' if current_user.role == 'admin' else 'false' }};
+            const isAdmin = roleAtLeast('senior_analyst'); // feed/entity/warninglist management -- Tier 3+
             tbody.innerHTML = lists.map(w => `
                 <tr>
                     <td class="ps-3"><strong title="${escHtml(w.description || '')}">${escHtml(w.name)}</strong></td>

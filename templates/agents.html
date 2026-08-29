@@ -127,15 +127,15 @@
             <div class="row g-2 align-items-end mb-3">
                 <div class="col-auto">
                     <label class="form-label small text-muted mb-1">Check interval (seconds)</label>
-                    <input type="number" min="60" max="86400" id="fimIntervalSeconds" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                    <input type="number" min="60" max="86400" id="fimIntervalSeconds" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                 </div>
-                {% if current_user.role == 'admin' %}
+                {% if current_user.role in ('senior_analyst', 'admin') %}
                 <div class="col-auto"><button class="btn btn-outline-primary btn-sm" onclick="saveFimInterval()"><i class="fa-solid fa-floppy-disk me-1"></i>Save</button></div>
                 {% endif %}
                 <div class="col-auto"><span id="fimIntervalMsg" class="small" style="display:none;"></span></div>
             </div>
             <p class="text-muted small mb-3" id="fimIntervalNote"></p>
-            {% if current_user.role == 'admin' %}
+            {% if current_user.role in ('senior_analyst', 'admin') %}
             <div class="row g-2 mb-3" style="max-width:720px;">
                 <div class="col-md-6"><input type="text" id="newFimPath" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. /etc/passwd or C:\Windows\System32\drivers\etc\hosts"></div>
                 <div class="col-md-4"><input type="text" id="newFimDescription" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Description (optional)"></div>
@@ -167,24 +167,24 @@
                     <div id="consoleActionsWrap" class="disabled">
                         <label class="form-label small text-muted mb-1 fw-bold">Response Actions</label>
                         <div class="d-grid gap-2 mb-2">
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" onclick="consoleRun('list_processes')"><i class="fa-solid fa-list me-2"></i>List Processes</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-min-tier="senior_analyst" onclick="consoleRun('list_processes')"><i class="fa-solid fa-list me-2"></i>List Processes</button>
                             <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" onclick="consoleShowParamForm('kill_process')"><i class="fa-solid fa-skull me-2"></i>Kill Process (PID)</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" onclick="consoleShowParamForm('collect_file')"><i class="fa-solid fa-file-arrow-down me-2"></i>Collect File</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-min-tier="senior_analyst" onclick="consoleShowParamForm('collect_file')"><i class="fa-solid fa-file-arrow-down me-2"></i>Collect File</button>
                             <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" onclick="consoleRun('collect_triage')"><i class="fa-solid fa-microscope me-2"></i>Triage Collection</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" onclick="consoleRun('persistence_sweep')"><i class="fa-solid fa-clock-rotate-left me-2"></i>Persistence Sweep</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" onclick="consoleRun('ioc_sweep')"><i class="fa-solid fa-magnifying-glass me-2"></i>IOC Hash Sweep</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" onclick="consoleRun('string_sweep')"><i class="fa-solid fa-font me-2"></i>String Sweep</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="windows" onclick="consoleRun('collect_browser_artifacts')"><i class="fa-solid fa-globe me-2"></i>Browser Artifacts</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="windows" onclick="consoleRun('collect_forensic_timestamps')"><i class="fa-solid fa-stopwatch me-2"></i>Forensic Timestamps</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="windows" onclick="consoleRun('collect_recent_file_changes')"><i class="fa-solid fa-clock-rotate-left me-2"></i>Recent File Changes</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="windows" onclick="consoleRun('collect_live_forensics')"><i class="fa-solid fa-magnifying-glass-chart me-2"></i>Live Forensic Triage</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="linux" onclick="consoleRun('collect_ssh_artifacts')"><i class="fa-solid fa-key me-2"></i>SSH Artifacts</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-min-tier="senior_analyst" onclick="consoleRun('persistence_sweep')"><i class="fa-solid fa-clock-rotate-left me-2"></i>Persistence Sweep</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-min-tier="senior_analyst" onclick="consoleRun('ioc_sweep')"><i class="fa-solid fa-magnifying-glass me-2"></i>IOC Hash Sweep</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-min-tier="senior_analyst" onclick="consoleRun('string_sweep')"><i class="fa-solid fa-font me-2"></i>String Sweep</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="windows" data-min-tier="senior_analyst" onclick="consoleRun('collect_browser_artifacts')"><i class="fa-solid fa-globe me-2"></i>Browser Artifacts</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="windows" data-min-tier="senior_analyst" onclick="consoleRun('collect_forensic_timestamps')"><i class="fa-solid fa-stopwatch me-2"></i>Forensic Timestamps</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="windows" data-min-tier="senior_analyst" onclick="consoleRun('collect_recent_file_changes')"><i class="fa-solid fa-clock-rotate-left me-2"></i>Recent File Changes</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="windows" data-min-tier="senior_analyst" onclick="consoleRun('collect_live_forensics')"><i class="fa-solid fa-magnifying-glass-chart me-2"></i>Live Forensic Triage</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="linux" data-min-tier="senior_analyst" onclick="consoleRun('collect_ssh_artifacts')"><i class="fa-solid fa-key me-2"></i>SSH Artifacts</button>
                             <button type="button" class="btn btn-sm btn-outline-warning console-action-btn" onclick="consoleRun('isolate_host', {}, 'Isolate this host from the network? Only traffic to/from this SOC server will be allowed.')"><i class="fa-solid fa-network-wired me-2"></i>Isolate Host</button>
                             <button type="button" class="btn btn-sm btn-outline-success console-action-btn" onclick="consoleRun('restore_network', {}, 'Restore normal network connectivity on this host?')"><i class="fa-solid fa-wifi me-2"></i>Restore Network</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="linux" onclick="consoleRun('enable_exec_auditing')"><i class="fa-solid fa-shield-halved me-2"></i>Enable Exec Auditing</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="linux" onclick="consoleRun('disable_exec_auditing')"><i class="fa-solid fa-shield me-2"></i>Disable Exec Auditing</button>
-                            <button type="button" class="btn btn-sm btn-outline-info console-action-btn" onclick="consoleUpgrade()"><i class="fa-solid fa-rotate me-2"></i>Upgrade Agent</button>
-                            <button type="button" class="btn btn-sm btn-outline-danger console-action-btn" onclick="consoleUninstall()"><i class="fa-solid fa-trash me-2"></i>Uninstall Agent</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="linux" data-min-tier="senior_analyst" onclick="consoleRun('enable_exec_auditing')"><i class="fa-solid fa-shield-halved me-2"></i>Enable Exec Auditing</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="linux" data-min-tier="senior_analyst" onclick="consoleRun('disable_exec_auditing')"><i class="fa-solid fa-shield me-2"></i>Disable Exec Auditing</button>
+                            <button type="button" class="btn btn-sm btn-outline-info console-action-btn" data-min-tier="senior_analyst" onclick="consoleUpgrade()"><i class="fa-solid fa-rotate me-2"></i>Upgrade Agent</button>
+                            <button type="button" class="btn btn-sm btn-outline-danger console-action-btn" data-min-tier="senior_analyst" onclick="consoleUninstall()"><i class="fa-solid fa-trash me-2"></i>Uninstall Agent</button>
                         </div>
 
                         <div id="consoleParamForm" style="display:none;" class="border border-secondary rounded p-2 mt-2 bg-secondary bg-opacity-10"></div>
@@ -331,7 +331,7 @@ function escHtml(str) {
 }
 
 // ---- File Integrity Monitoring ----
-const FIM_IS_ADMIN = {{ 'true' if current_user.role == 'admin' else 'false' }};
+const FIM_IS_ADMIN = roleAtLeast('senior_analyst'); // FIM config -- Tier 3+
 
 function loadFimInterval() {
     fetch('/api/fim/interval').then(r => r.json()).then(data => {
@@ -908,18 +908,28 @@ function onConsoleHostChange() {
     const wrap = document.getElementById('consoleActionsWrap');
     const active = !!consoleSelectedHost;
     wrap.classList.toggle('disabled', !active);
-    document.getElementById('consoleCmdInput').disabled = !active;
-    document.getElementById('consoleSendBtn').disabled = !active;
+    // Free-text commands always queue as label 'custom' -- Tier 3+ only, same as the
+    // Upgrade/Uninstall buttons -- so the input stays disabled for Tier 1/2 even with
+    // a host selected, rather than letting them type a command that just 403s.
+    const canUseConsole = active && roleAtLeast('senior_analyst');
+    document.getElementById('consoleCmdInput').disabled = !canUseConsole;
+    document.getElementById('consoleSendBtn').disabled = !canUseConsole;
     document.getElementById('consoleParamForm').style.display = 'none';
     const os = consoleSelectedOS();
     document.getElementById('consolePrompt').innerHTML = consolePromptSymbol(os);
-    document.getElementById('consoleCmdInput').placeholder = active
+    document.getElementById('consoleCmdInput').placeholder = !active
         ? `Type a ${os === 'linux' ? 'bash' : 'PowerShell'} command and press Enter...`
-        : 'Type a PowerShell command and press Enter...';
+        : (roleAtLeast('senior_analyst') ? `Type a ${os === 'linux' ? 'bash' : 'PowerShell'} command and press Enter...` : 'Tier 3 (Senior Analyst) or Admin required for free-text commands');
     // auditd only exists on Linux -- hide those two buttons entirely rather than let
     // them queue a command the server will just reject for a Windows target.
     document.querySelectorAll('.console-action-btn[data-os-only]').forEach(btn => {
         btn.style.display = (btn.dataset.osOnly === os) ? '' : 'none';
+    });
+    // Tier 1/2 sees only the safe incident-response subset (isolate/restore/triage/
+    // kill-process) -- everything else queues as a Tier 3+-gated label server-side,
+    // so hide it here rather than let the click end in a 403 toast.
+    document.querySelectorAll('.console-action-btn[data-min-tier]').forEach(btn => {
+        if (!roleAtLeast(btn.dataset.minTier)) btn.style.display = 'none';
     });
     renderConsoleFavSelect();
     renderConsoleTerminal();

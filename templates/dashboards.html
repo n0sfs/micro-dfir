@@ -698,17 +698,19 @@ function renderThreatHunterWidget(container, widgetId, config) {
     input.addEventListener('keyup', (e) => { if (e.key === 'Enter') runLookup(); });
 }
 
-// Deliberately a small, safe subset of every response action agents.html can queue --
-// each of these four takes no required parameters (isolate_host's only param, soc_ip,
-// is auto-filled server-side, see app.py:api_agent_commands), so this compact mini-form
-// never needs to collect one. 'custom' (free-text script) and 'kill_process' (needs a
-// PID this widget has no good source for) are intentionally excluded -- the full,
-// unrestricted console already exists on the Agents page for anything beyond this.
-const EDR_WIDGET_SAFE_ACTIONS = [
-    { label: 'isolate_host', text: 'Isolate Host' },
-    { label: 'restore_network', text: 'Restore Network' },
-    { label: 'collect_triage', text: 'Collect Triage' },
-    { label: 'persistence_sweep', text: 'Persistence Sweep' },
+// Every entry here takes no required parameters (isolate_host's only param, soc_ip,
+// is auto-filled server-side, see app.py:api_agent_commands), so this compact
+// mini-form never needs to collect one. 'custom' (free-text script) and
+// 'kill_process' (needs a PID this widget has no good source for) are intentionally
+// excluded -- the full, unrestricted console already exists on the Agents page for
+// anything beyond this. tier1Safe mirrors app.py's own AGENT_COMMAND_TIER1_LABELS
+// exactly -- those three need no escalation, matching Tier 1/2's incident-response
+// remit; persistence_sweep is hunt-flavored and stays Tier 3+.
+const EDR_WIDGET_ACTIONS = [
+    { label: 'isolate_host', text: 'Isolate Host', tier1Safe: true },
+    { label: 'restore_network', text: 'Restore Network', tier1Safe: true },
+    { label: 'collect_triage', text: 'Collect Triage', tier1Safe: true },
+    { label: 'persistence_sweep', text: 'Persistence Sweep', tier1Safe: false },
 ];
 
 // Mirrors agents.html's own statusBadgeCmd() exactly -- agent_commands.status is
@@ -724,45 +726,46 @@ function edrStatusBadgeWidget(status) {
 
 function renderEdrActionsWidget(container, widgetId, config) {
     clearWidgetInterval(widgetId);
-    // The queue mini-form is hidden entirely (not just disabled) for a non-admin --
-    // the backend 403s a non-admin POST anyway, this just avoids a dead-end submit,
-    // same convention as the admin-only controls elsewhere in this app (e.g. ueba.html).
-    const formHtml = IS_ADMIN ? `
+    // The queue mini-form shows to any logged-in user now -- Tier 1/2 owns incident
+    // response, so isolate/restore/triage are theirs to queue directly. The action
+    // list itself is filtered per-user (tier1Safe-only for Tier 1/2, everything for
+    // Tier 3+), matching exactly what app.py's AGENT_COMMAND_TIER1_LABELS will
+    // actually accept -- no dead-end submit for either tier.
+    const availableActions = EDR_WIDGET_ACTIONS.filter(a => a.tier1Safe || roleAtLeast('senior_analyst'));
+    const formHtml = `
         <div class="row g-1 mb-2">
             <div class="col-5"><select class="form-select form-select-sm bg-dark text-light border-secondary widget-edr-host"><option value="">Host&hellip;</option></select></div>
-            <div class="col-5"><select class="form-select form-select-sm bg-dark text-light border-secondary widget-edr-action">${EDR_WIDGET_SAFE_ACTIONS.map(a => `<option value="${a.label}">${escHtml(a.text)}</option>`).join('')}</select></div>
+            <div class="col-5"><select class="form-select form-select-sm bg-dark text-light border-secondary widget-edr-action">${availableActions.map(a => `<option value="${a.label}">${escHtml(a.text)}</option>`).join('')}</select></div>
             <div class="col-2"><button type="button" class="btn btn-sm btn-outline-danger w-100 widget-edr-queue-btn" title="Queue action"><i class="fa-solid fa-bolt"></i></button></div>
-        </div>` : '';
+        </div>`;
     container.innerHTML = `${formHtml}<div class="widget-edr-history"><p class="text-muted small mb-0">Loading&hellip;</p></div>`;
 
-    if (IS_ADMIN) {
-        const hostSelect = container.querySelector('.widget-edr-host');
-        fetch('/api/agent/checkins').then(r => r.json()).then(hosts => {
-            if (!hostSelect.isConnected) return;
-            hostSelect.innerHTML = '<option value="">Host&hellip;</option>' + (hosts || [])
-                .filter(h => h.status !== 'Offline')
-                .map(h => `<option value="${escHtml(h.hostname)}">${escHtml(h.hostname)} (${escHtml(h.status)})</option>`).join('');
-        }).catch(err => console.error('Error loading agent checkins:', err));
+    const hostSelect = container.querySelector('.widget-edr-host');
+    fetch('/api/agent/checkins').then(r => r.json()).then(hosts => {
+        if (!hostSelect.isConnected) return;
+        hostSelect.innerHTML = '<option value="">Host&hellip;</option>' + (hosts || [])
+            .filter(h => h.status !== 'Offline')
+            .map(h => `<option value="${escHtml(h.hostname)}">${escHtml(h.hostname)} (${escHtml(h.status)})</option>`).join('');
+    }).catch(err => console.error('Error loading agent checkins:', err));
 
-        container.querySelector('.widget-edr-queue-btn').addEventListener('click', async () => {
-            const hostname = hostSelect.value;
-            const label = container.querySelector('.widget-edr-action').value;
-            if (!hostname) { toast('Choose a host first.', 'warning'); return; }
-            const actionText = (EDR_WIDGET_SAFE_ACTIONS.find(a => a.label === label) || {}).text || label;
-            if (!(await confirmDialog(`${actionText} on ${hostname}?`, { title: 'Confirm action', danger: true }))) return;
-            fetch('/api/agent/commands', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ hostname, label, params: {} }),
-            }).then(r => r.json().then(data => ({ ok: r.ok, data }))).then(({ ok, data }) => {
-                if (ok) {
-                    toast(`"${actionText}" queued for ${hostname}.`, 'success');
-                    loadEdrHistory();
-                } else {
-                    toast(data.error || 'Failed to queue command.', 'danger');
-                }
-            }).catch(err => toast('Error queuing command: ' + err, 'danger'));
-        });
-    }
+    container.querySelector('.widget-edr-queue-btn').addEventListener('click', async () => {
+        const hostname = hostSelect.value;
+        const label = container.querySelector('.widget-edr-action').value;
+        if (!hostname) { toast('Choose a host first.', 'warning'); return; }
+        const actionText = (availableActions.find(a => a.label === label) || {}).text || label;
+        if (!(await confirmDialog(`${actionText} on ${hostname}?`, { title: 'Confirm action', danger: true }))) return;
+        fetch('/api/agent/commands', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ hostname, label, params: {} }),
+        }).then(r => r.json().then(data => ({ ok: r.ok, data }))).then(({ ok, data }) => {
+            if (ok) {
+                toast(`"${actionText}" queued for ${hostname}.`, 'success');
+                loadEdrHistory();
+            } else {
+                toast(data.error || 'Failed to queue command.', 'danger');
+            }
+        }).catch(err => toast('Error queuing command: ' + err, 'danger'));
+    });
 
     const loadEdrHistory = () => {
         fetch(`/api/agent/commands?limit=${config.limit || 8}`).then(r => r.json()).then(rows => {
