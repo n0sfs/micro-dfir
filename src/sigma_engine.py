@@ -45,9 +45,10 @@ _FIELD_COLUMN_ALIASES = {
     'destinationip': 'destination_ip', 'destination_ip': 'destination_ip', 'dst_ip': 'destination_ip',
     'dstip': 'destination_ip', 'dst': 'destination_ip',
     'message': 'message',
-    # IOC-match builder fields (see _substitute_ioc_placeholder) map onto the same
+    # IOC-match builder fields (see _prepare_ioc_correlation) map onto the same
     # source_ip/destination_ip columns as their plain counterparts — the only
-    # difference is the *value* side, a live list instead of a single typed-in value.
+    # difference is the *value* side, a lookup-table membership test instead of a
+    # single typed-in value.
     'sourceipioc': 'source_ip', 'destinationipioc': 'destination_ip',
     # Process-creation fields (the single most common Sigma rule category), regex-
     # extracted from the raw message body at ingest time by _extract_process_fields()
@@ -121,10 +122,17 @@ def _get_soar_api_key(cursor):
 
 # The guided rule builder's "Source IP / Destination IP — matches live IOC list"
 # fields emit this literal token as an unquoted YAML scalar (e.g. `SourceIp:
-# __IOC_IP_LIST__`) rather than a typed-in value. Substituting it with a real
-# flow-sequence YAML list *before* parsing — instead of baking a static list into the
-# stored rule at save time — means the match set is always whatever's currently in
-# stix_indicators, including anything ingested since the rule was created.
+# __IOC_IP_LIST__`) rather than a typed-in value -- unchanged rule-authoring surface.
+# Internally this used to be substituted with a literal YAML flow-sequence of every
+# matching IOC value before parsing; once the real feed grew past ~100k IOCs (a real
+# MISP sync did), pysigma's SQLite backend compiled that into a SQL expression tree
+# deep enough to hit SQLite's own max-expression-depth limit (1000), and the rule
+# silently failed to convert on every detection cycle from then on. It's now resolved
+# via a lookup TABLE instead -- the same pattern most SIEMs use for this (Splunk
+# lookups, Sentinel watchlists, Elastic enrich policies): the candidate values live as
+# indexed table rows, and the compiled query does a cheap `IN (SELECT ...)` against
+# them rather than listing every value inline. See _prepare_ioc_correlation() and
+# _rewrite_ioc_lookups() below for how.
 IOC_IP_PLACEHOLDER = "__IOC_IP_LIST__"
 # Same mechanism, extended to the two correlation types live_logs now has real columns
 # for (file_hash/query_name, see app.py's ingest-time extraction) -- "Tier 2" of the
@@ -134,16 +142,7 @@ IOC_DOMAIN_PLACEHOLDER = "__IOC_DOMAIN_LIST__"
 _PORT_SUFFIX_RE = re.compile(r':\d+$')
 _HEX_HASH_RE = re.compile(r'^[0-9a-fA-F]{32}$|^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$')
 
-def _ioc_list_yaml(values):
-    if not values:
-        # An empty `field: []` is invalid Sigma/YAML (and `IN ()` is invalid SQL) — a
-        # sentinel that can never appear in real traffic keeps the rule syntactically
-        # valid and simply match-nothing until IOCs exist.
-        return "['__NO_IOCS_YET__']"
-    escaped = sorted(v.replace("'", "''") for v in values)
-    return '[' + ', '.join(f"'{v}'" for v in escaped) + ']'
-
-def _get_ioc_ip_list_yaml(cursor):
+def _get_ioc_ip_values(cursor):
     # ioc_type vocabulary varies a lot by feed (ip, ipv4-addr, IPv4, ip:port, ...) —
     # nothing in this codebase normalizes it to one taxonomy, so a substring match is
     # the pragmatic way to catch all of them without also catching unrelated types
@@ -163,9 +162,9 @@ def _get_ioc_ip_list_yaml(cursor):
     # resolvers, RFC1918) before it can ever fire the IOC-IP rule -- a phishing kit
     # that transiently sits on a shared Cloudflare IP shouldn't turn ordinary CDN
     # traffic into a "known-bad IP matched" alert.
-    return _ioc_list_yaml(filter_warninglisted_ips(cursor, values))
+    return filter_warninglisted_ips(cursor, values)
 
-def _get_ioc_hash_list_yaml(cursor):
+def _get_ioc_hash_values(cursor):
     # Matched by SHAPE (hex length), the same reasoning as the IP list's substring
     # match above: ioc_type vocabulary for hashes varies just as much across feeds
     # ('md5'/'sha1'/'sha256' from CSV, 'FileHash-SHA256' from generic TAXII, whatever a
@@ -176,16 +175,14 @@ def _get_ioc_hash_list_yaml(cursor):
     rows = cursor.execute(
         "SELECT DISTINCT pattern FROM stix_indicators WHERE revoked = 0 AND pattern IS NOT NULL AND pattern != ''"
     ).fetchall()
-    values = {r['pattern'].strip().lower() for r in rows if _HEX_HASH_RE.match((r['pattern'] or '').strip())}
-    return _ioc_list_yaml(values)
+    return {r['pattern'].strip().lower() for r in rows if _HEX_HASH_RE.match((r['pattern'] or '').strip())}
 
-def _get_ioc_domain_list_yaml(cursor):
+def _get_ioc_domain_values(cursor):
     rows = cursor.execute(
         "SELECT DISTINCT pattern FROM stix_indicators WHERE revoked = 0 "
         "AND pattern IS NOT NULL AND pattern != '' AND LOWER(ioc_type) LIKE '%domain%'"
     ).fetchall()
-    values = {r['pattern'].strip().lower() for r in rows if r['pattern']}
-    return _ioc_list_yaml(values)
+    return {r['pattern'].strip().lower() for r in rows if r['pattern']}
 
 # Records one ioc_sightings row per stix_indicators IOC that actually contributed to a
 # NEW alert firing via one of the __IOC_..._LIST__ correlations (IP, hash, or DNS query
@@ -248,20 +245,52 @@ def _auto_create_case(cursor, rule_title, host, username, alert_id, template_id)
             cursor.execute("INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'system', 'template_applied', ?)", (cid, tpl['name']))
     return cid
 
-_IOC_PLACEHOLDER_KINDS = (('ip', IOC_IP_PLACEHOLDER), ('hash', IOC_HASH_PLACEHOLDER), ('domain', IOC_DOMAIN_PLACEHOLDER))
-_IOC_LIST_BUILDERS = {'ip': _get_ioc_ip_list_yaml, 'hash': _get_ioc_hash_list_yaml, 'domain': _get_ioc_domain_list_yaml}
+# kind -> (rule-facing placeholder token, internal sentinel scalar, TEMP TABLE name, value builder).
+# The sentinel is deliberately alphanumeric-only (no underscores/percent) so pysigma's
+# SQLite backend compiles the field comparison as a plain `column='SENTINEL'` equality
+# instead of a LIKE/ESCAPE pattern (its usual handling for any string containing a
+# LIKE wildcard character) -- that keeps _rewrite_ioc_lookups()'s regex simple and
+# reliable regardless of pysigma version quirks. Never seen by rule authors; only ever
+# exists between _prepare_ioc_correlation() and _rewrite_ioc_lookups() within one
+# rule's conversion.
+_IOC_KINDS = (
+    ('ip', IOC_IP_PLACEHOLDER, 'IOCSENTINELIPVALUE', 'ioc_ip_lookup', _get_ioc_ip_values),
+    ('hash', IOC_HASH_PLACEHOLDER, 'IOCSENTINELHASHVALUE', 'ioc_hash_lookup', _get_ioc_hash_values),
+    ('domain', IOC_DOMAIN_PLACEHOLDER, 'IOCSENTINELDOMAINVALUE', 'ioc_domain_lookup', _get_ioc_domain_values),
+)
+_IOC_LOOKUP_SQL_RE = {kind: re.compile(r"(\w+)\s*=\s*'" + re.escape(sentinel) + r"'") for kind, _, sentinel, _, _ in _IOC_KINDS}
 
-def _substitute_ioc_placeholder(rule_yaml_text, cursor, cache):
-    for kind, placeholder in _IOC_PLACEHOLDER_KINDS:
+# Populates one small TEMP TABLE per IOC kind actually referenced by ANY rule this
+# cycle/dry-run (cached in `cache` so it's built at most once regardless of how many
+# rules reference it, the same restraint the old per-cycle YAML-list cache had), and
+# swaps each rule's __IOC_*_LIST__ placeholder for that kind's internal sentinel
+# scalar. Called BEFORE Sigma parses the rule -- see _rewrite_ioc_lookups() for the
+# other half, which runs AFTER Sigma compiles it to SQL.
+def _prepare_ioc_correlation(rule_yaml_text, cursor, cache):
+    for kind, placeholder, sentinel, table, build_values in _IOC_KINDS:
         if placeholder not in rule_yaml_text:
             continue
         if kind not in cache:
-            # Computed at most once per detection cycle per kind (cached across every
-            # rule that references it), not once per rule -- this is the only place
-            # each of these 3 queries runs per cycle.
-            cache[kind] = _IOC_LIST_BUILDERS[kind](cursor)
-        rule_yaml_text = rule_yaml_text.replace(placeholder, cache[kind])
+            cursor.execute(f"DROP TABLE IF EXISTS {table}")
+            cursor.execute(f"CREATE TEMP TABLE {table} (value TEXT PRIMARY KEY)")
+            values = build_values(cursor)
+            if values:
+                cursor.executemany(f"INSERT OR IGNORE INTO {table} (value) VALUES (?)", [(v,) for v in values])
+            cache[kind] = True
+        rule_yaml_text = rule_yaml_text.replace(placeholder, sentinel)
     return rule_yaml_text
+
+# Rewrites a compiled query's sentinel equality checks into a lookup-table membership
+# test -- `source_ip='IOCSENTINELIPVALUE'` becomes
+# `source_ip IN (SELECT value FROM ioc_ip_lookup)`. A cheap indexed subquery against
+# however many IOCs actually exist, instead of every one of them appearing as literal
+# SQL text (which is what overflowed SQLite's expression-tree depth limit once the
+# real IOC set passed ~100k rows). A no-op (regex just won't match) for any query that
+# doesn't reference one of these sentinels.
+def _rewrite_ioc_lookups(sql):
+    for kind, _, sentinel, table, _ in _IOC_KINDS:
+        sql = _IOC_LOOKUP_SQL_RE[kind].sub(rf"\1 IN (SELECT value FROM {table})", sql)
+    return sql
 
 DRY_RUN_PREVIEW_FIELDS = ('id', 'timestamp', 'host', 'app', 'severity', 'event_id', 'username', 'message')
 
@@ -284,7 +313,7 @@ def dry_run_rule(conn, rule_yaml, days=7, exclusions=None, preview_limit=20):
     cursor.execute("DROP VIEW IF EXISTS recent_events")
     cursor.execute(f"CREATE TEMP VIEW recent_events AS SELECT * FROM live_logs WHERE timestamp >= '{cutoff}'")
 
-    rule_yaml_text = _substitute_ioc_placeholder(_normalize_rule_dates(rule_yaml), cursor, {})
+    rule_yaml_text = _prepare_ioc_correlation(_normalize_rule_dates(rule_yaml), cursor, {})
     backend = _make_backend()
     queries = backend.convert(SigmaCollection.from_yaml(rule_yaml_text))  # raises on invalid/unconvertible rule -- caller reports it
 
@@ -293,6 +322,7 @@ def dry_run_rule(conn, rule_yaml, days=7, exclusions=None, preview_limit=20):
     # inflate the "how many events would this have caught" count.
     seen_ids, matches = set(), []
     for q in queries:
+        q = _rewrite_ioc_lookups(q)
         for m in cursor.execute(q).fetchall():
             if m['id'] in seen_ids:
                 continue
@@ -352,8 +382,9 @@ def run_detection_cycle():
         try:
             rule_exclusions = exclusions_by_rule.get(r['id'], [])
             severity = (r['severity_override'] or '').capitalize() or _extract_level(r['rule_yaml']) or 'High'
-            rule_yaml_text = _substitute_ioc_placeholder(_normalize_rule_dates(r['rule_yaml']), cursor, ioc_cache)
+            rule_yaml_text = _prepare_ioc_correlation(_normalize_rule_dates(r['rule_yaml']), cursor, ioc_cache)
             for q in backend.convert(SigmaCollection.from_yaml(rule_yaml_text)):
+                q = _rewrite_ioc_lookups(q)
                 for m in cursor.execute(q).fetchall():
                     if any(_exclusion_matches(e, m) for e in rule_exclusions):
                         continue
