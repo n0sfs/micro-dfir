@@ -4350,6 +4350,138 @@ def api_case_sla_config():
     log_audit('case_sla_update', 'settings', 'case_sla_hours', str(hours))
     return jsonify({'status': 'success', 'sla_hours': hours})
 
+@app.route('/api/dashboards', methods=['GET', 'POST'])
+@login_required
+def api_dashboards():
+    db = get_db()
+    if request.method == 'GET':
+        rows = db.execute(
+            "SELECT d.id, d.name, d.created_by, d.created_at, "
+            "(SELECT COUNT(*) FROM dashboard_widgets WHERE dashboard_id = d.id) as widget_count "
+            "FROM dashboards d ORDER BY d.name"
+        ).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+    # Unlike case_queues' POST (admin-only), any logged-in user can create a
+    # dashboard here -- it's meant as "my own view," not fleet/team routing config.
+    d = request.json or {}
+    name = (d.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'name is required'}), 400
+    if db.execute("SELECT 1 FROM dashboards WHERE name = ?", (name,)).fetchone():
+        return jsonify({'error': f'A dashboard named "{name}" already exists'}), 400
+    cur = db.execute("INSERT INTO dashboards (name, created_by) VALUES (?, ?)", (name, current_user.username))
+    db.commit()
+    log_audit('dashboard_create', 'dashboard', name)
+    return jsonify({'status': 'success', 'id': cur.lastrowid})
+
+@app.route('/api/dashboards/<int:did>', methods=['PUT', 'DELETE'])
+@login_required
+def api_dashboard_detail(did):
+    db = get_db()
+    existing = db.execute("SELECT name, created_by FROM dashboards WHERE id = ?", (did,)).fetchone()
+    if not existing:
+        return jsonify({'error': 'Dashboard not found'}), 404
+    # The one place in this app that checks a row's own created_by as an ACL rather
+    # than a flat role check -- creators own the dashboards they made, admins can
+    # clean up anyone's. Everything else here (GET, adding/moving widgets) is open
+    # to any logged-in user; only rename/delete of the dashboard itself is gated.
+    if existing['created_by'] != current_user.username and current_user.role != 'admin':
+        return jsonify({'error': 'Only the dashboard creator or an admin can modify this dashboard'}), 403
+
+    if request.method == 'DELETE':
+        # Manual cascade, matching queue_members' precedent -- this app never enables
+        # PRAGMA foreign_keys, so an ON DELETE CASCADE in the schema would be a no-op.
+        db.execute("DELETE FROM dashboard_widgets WHERE dashboard_id = ?", (did,))
+        db.execute("DELETE FROM dashboards WHERE id = ?", (did,))
+        db.commit()
+        log_audit('dashboard_delete', 'dashboard', existing['name'])
+        return jsonify({'ok': 1})
+
+    d = request.json or {}
+    name = (d.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'name is required'}), 400
+    if db.execute("SELECT 1 FROM dashboards WHERE name = ? AND id != ?", (name, did)).fetchone():
+        return jsonify({'error': f'A dashboard named "{name}" already exists'}), 400
+    db.execute("UPDATE dashboards SET name = ? WHERE id = ?", (name, did))
+    db.commit()
+    log_audit('dashboard_rename', 'dashboard', name)
+    return jsonify({'status': 'success'})
+
+@app.route('/api/dashboards/<int:did>/widgets', methods=['GET', 'POST'])
+@login_required
+def api_dashboard_widgets(did):
+    db = get_db()
+    if not db.execute("SELECT 1 FROM dashboards WHERE id = ?", (did,)).fetchone():
+        return jsonify({'error': 'Dashboard not found'}), 404
+
+    if request.method == 'GET':
+        rows = db.execute(
+            "SELECT id, widget_type, x, y, w, h, config FROM dashboard_widgets WHERE dashboard_id = ? ORDER BY id",
+            (did,)
+        ).fetchall()
+        out = []
+        for r in rows:
+            item = dict(r)
+            item['config'] = json.loads(item['config']) if item['config'] else {}
+            out.append(item)
+        return jsonify(out)
+
+    # Adding/removing/rearranging widgets is open to any logged-in user, matching
+    # how case items/tasks are editable by anyone today -- only the dashboard row
+    # itself (rename/delete) is creator-or-admin gated, see api_dashboard_detail().
+    d = request.json or {}
+    widget_type = d.get('widget_type')
+    if widget_type not in WIDGET_TYPES:
+        return jsonify({'error': f'Unknown widget_type: {widget_type}'}), 400
+    x, y, w, h = d.get('x', 0), d.get('y', 0), d.get('w', 4), d.get('h', 4)
+    config = json.dumps(d.get('config')) if d.get('config') else None
+    cur = db.execute(
+        "INSERT INTO dashboard_widgets (dashboard_id, widget_type, x, y, w, h, config) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (did, widget_type, x, y, w, h, config)
+    )
+    db.commit()
+    return jsonify({'status': 'success', 'id': cur.lastrowid})
+
+@app.route('/api/dashboards/<int:did>/widgets/layout', methods=['PUT'])
+@login_required
+def api_dashboard_widgets_layout(did):
+    db = get_db()
+    if not db.execute("SELECT 1 FROM dashboards WHERE id = ?", (did,)).fetchone():
+        return jsonify({'error': 'Dashboard not found'}), 404
+    items = request.json or []
+    if not isinstance(items, list):
+        return jsonify({'error': 'expected a JSON array'}), 400
+    for item in items:
+        wid = item.get('id')
+        if wid is None:
+            continue
+        # The "AND dashboard_id = ?" guard stops a stale/forged client payload from
+        # repointing another dashboard's widget rows.
+        db.execute(
+            "UPDATE dashboard_widgets SET x = ?, y = ?, w = ?, h = ? WHERE id = ? AND dashboard_id = ?",
+            (item.get('x', 0), item.get('y', 0), item.get('w', 4), item.get('h', 4), wid, did)
+        )
+    db.commit()
+    return jsonify({'status': 'success'})
+
+@app.route('/api/dashboards/<int:did>/widgets/<int:wid>', methods=['PUT', 'DELETE'])
+@login_required
+def api_dashboard_widget_detail(did, wid):
+    db = get_db()
+    if not db.execute("SELECT 1 FROM dashboard_widgets WHERE id = ? AND dashboard_id = ?", (wid, did)).fetchone():
+        return jsonify({'error': 'Widget not found'}), 404
+    if request.method == 'DELETE':
+        db.execute("DELETE FROM dashboard_widgets WHERE id = ?", (wid,))
+        db.commit()
+        return jsonify({'ok': 1})
+    d = request.json or {}
+    if 'config' in d:
+        config = json.dumps(d.get('config')) if d.get('config') else None
+        db.execute("UPDATE dashboard_widgets SET config = ? WHERE id = ?", (config, wid))
+        db.commit()
+    return jsonify({'status': 'success'})
 
 # ==========================================
 # GLOBAL SETTINGS & AGENT DEPLOYMENT ROUTES
@@ -4858,6 +4990,76 @@ def migrate_case_assets():
             UNIQUE(case_id, host)
         )''')
         conn.execute("CREATE INDEX IF NOT EXISTS idx_case_assets_case ON case_assets(case_id)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# widget_type -> {} for now (validation only -- rendering is entirely client-side,
+# see WIDGET_REGISTRY in dashboards.html). The 5 app_* keys (Alerts/Cases/Log Search/
+# Threat Hunter/EDR Response Actions) land in a later batch as a purely additive diff
+# to this same dict -- nothing else here needs to change when they do.
+WIDGET_TYPES = {
+    'chart_alert_trend': {}, 'chart_severity': {}, 'chart_risk_trend': {},
+    'chart_top_risk_entities': {}, 'chart_top_anomaly_rules': {}, 'chart_top_countries': {},
+    'chart_agent_status': {}, 'chart_mitre_coverage': {}, 'chart_threat_actors': {},
+    'chart_case_stats': {}, 'chart_case_aging': {}, 'chart_case_queue_backlog': {},
+    'chart_case_workload': {}, 'chart_case_close_trend': {},
+}
+
+# The default "Overview" dashboard's seeded layout -- reproduces today's fixed-page
+# 2-column visual rhythm on a 12-column GridStack grid, so upgrading users see no
+# loss of functionality: it just becomes an editable/deletable dashboard like any
+# other instead of the only page that ever existed. chart_case_stats bundles the 4
+# SLA stat tiles as one widget, matching how they're already one card today.
+DEFAULT_OVERVIEW_WIDGETS = [
+    ('chart_alert_trend', 0, 0, 8, 4),
+    ('chart_severity', 8, 0, 4, 4),
+    ('chart_risk_trend', 0, 4, 8, 4),
+    ('chart_top_risk_entities', 8, 4, 4, 4),
+    ('chart_top_anomaly_rules', 0, 8, 4, 4),
+    ('chart_top_countries', 4, 8, 4, 4),
+    ('chart_agent_status', 8, 8, 4, 4),
+    ('chart_mitre_coverage', 0, 12, 12, 5),
+    ('chart_threat_actors', 0, 17, 12, 5),
+    ('chart_case_stats', 0, 22, 12, 2),
+    ('chart_case_aging', 0, 24, 4, 4),
+    ('chart_case_queue_backlog', 4, 24, 4, 4),
+    ('chart_case_workload', 8, 24, 4, 4),
+    ('chart_case_close_trend', 0, 28, 12, 4),
+]
+
+def migrate_dashboards():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS dashboards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS dashboard_widgets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dashboard_id INTEGER NOT NULL,
+            widget_type TEXT NOT NULL,
+            x INTEGER NOT NULL DEFAULT 0,
+            y INTEGER NOT NULL DEFAULT 0,
+            w INTEGER NOT NULL DEFAULT 4,
+            h INTEGER NOT NULL DEFAULT 4,
+            config TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dashboard_widgets_dashboard ON dashboard_widgets(dashboard_id)")
+
+        row = conn.execute("SELECT id FROM dashboards WHERE name = 'Overview'").fetchone()
+        if not row:
+            cur = conn.execute("INSERT INTO dashboards (name, created_by) VALUES ('Overview', 'system')")
+            did = cur.lastrowid
+            for widget_type, x, y, w, h in DEFAULT_OVERVIEW_WIDGETS:
+                conn.execute(
+                    "INSERT INTO dashboard_widgets (dashboard_id, widget_type, x, y, w, h) VALUES (?, ?, ?, ?, ?, ?)",
+                    (did, widget_type, x, y, w, h)
+                )
         conn.commit()
         conn.close()
     except Exception:
@@ -7592,6 +7794,7 @@ migrate_cases()
 migrate_case_upgrade()
 migrate_case_queues()
 migrate_case_assets()
+migrate_dashboards()
 migrate_playbooks()
 migrate_playbook_secrets()
 migrate_live_logs_archive()
