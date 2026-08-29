@@ -84,22 +84,72 @@ class User(UserMixin):
     def __init__(self, id, username, role):
         self.id = id; self.username = username; self.role = role
 
-# Three-tier SOC hierarchy, replacing the old flat analyst/admin split -- a strict
-# escalation ladder (each tier has everything the one below it has), not independent
-# capability grants, so a single ranked column + a rank comparison is enough; no
-# separate permissions/group-membership table needed. 'analyst' covers Tier 1/2
-# (triage, investigation, incident response); 'senior_analyst' is the Tier 3
-# escalation tier (hunting, detection tuning, UEBA/threat-intel backend data,
-# automation); 'admin' stays reserved for platform ownership (users, certs, backups,
-# retention, system settings) -- kept separate from senior_analyst on purpose, since
-# detection expertise and platform administration are different jobs.
-ROLE_RANK = {'analyst': 1, 'senior_analyst': 2, 'admin': 3}
+# Named-permission RBAC, replacing the old fixed analyst/senior_analyst/admin rank
+# ladder -- roles are now rows in the `roles` table (see migrate_role_permissions())
+# with an arbitrary set of permission keys from PERMISSION_REGISTRY, so an admin can
+# create custom roles instead of being limited to 3 fixed tiers. Grouped to match the
+# app's own page/tab boundaries so the admin UI's checkbox matrix reads like the
+# product's own navigation. Routes with no permission requirement below stay open to
+# any logged-in user, same as before.
+PERMISSION_REGISTRY = [
+    {'key': 'cases.delete', 'label': 'Delete cases', 'category': 'Cases'},
+    {'key': 'cases.queues.manage', 'label': 'Manage case queues', 'category': 'Cases'},
+    {'key': 'logsearch.droprules.manage', 'label': 'Manage ingestion drop rules', 'category': 'Log Search'},
+    {'key': 'rules.manage', 'label': 'Manage detection rules', 'category': 'Detection Rules'},
+    {'key': 'ueba.config.manage', 'label': 'Manage UEBA config & anomaly rules', 'category': 'UEBA'},
+    {'key': 'threatintel.manage', 'label': 'Manage TI feeds, entities & enrichment', 'category': 'Threat Intel'},
+    {'key': 'edr.command.basic', 'label': 'Queue safe response actions', 'category': 'EDR / Agents'},
+    {'key': 'edr.command.advanced', 'label': 'Queue advanced response actions', 'category': 'EDR / Agents'},
+    {'key': 'edr.agent.manage', 'label': 'Manage agents (upgrade/uninstall/enroll/channels)', 'category': 'EDR / Agents'},
+    {'key': 'edr.fim.manage', 'label': 'Manage File Integrity Monitoring', 'category': 'EDR / Agents'},
+    {'key': 'soar.playbooks.manage', 'label': 'Manage SOAR playbooks', 'category': 'SOAR'},
+    {'key': 'soar.secrets.manage', 'label': 'Manage playbook secrets', 'category': 'SOAR'},
+    {'key': 'assets.manage', 'label': 'Manage assets & identities', 'category': 'Assets & Identity'},
+    {'key': 'settings.reports.manage', 'label': 'Manage report branding & schedule', 'category': 'Settings'},
+    {'key': 'settings.notifications.manage', 'label': 'Manage alert notification settings', 'category': 'Settings'},
+    {'key': 'settings.case_sla.manage', 'label': 'Manage case SLA thresholds', 'category': 'Settings'},
+    {'key': 'settings.users.manage', 'label': 'Manage users', 'category': 'Settings'},
+    {'key': 'settings.roles.manage', 'label': 'Manage roles & permissions', 'category': 'Settings'},
+    {'key': 'settings.network.manage', 'label': 'Manage network bindings & TLS certs', 'category': 'Settings'},
+    {'key': 'settings.system.manage', 'label': 'Manage system settings (retention/backup/etc)', 'category': 'Settings'},
+    {'key': 'audit.view', 'label': 'View audit log', 'category': 'Settings'},
+]
+PERMISSION_KEYS = {p['key'] for p in PERMISSION_REGISTRY}
+# The two permissions a role must never lose, or an admin could lock the whole
+# system out of user/role management with no way back in short of DB surgery --
+# pinned onto the built-in 'admin' role specifically, mirroring the existing
+# last-admin-delete protection's "never let the system lock itself out" intent.
+PINNED_ADMIN_PERMISSIONS = {'settings.roles.manage', 'settings.users.manage'}
 
-def require_role(min_role):
-    if ROLE_RANK.get(current_user.role, 0) < ROLE_RANK[min_role]:
-        label = 'Admin' if min_role == 'admin' else 'Tier 3 (Senior Analyst) or Admin'
-        return jsonify({'error': f'{label} access required'}), 403
+def _current_user_permissions():
+    # Memoized on flask.g so multiple require_permission()/has_permission() calls
+    # within one request only hit the DB once.
+    if not hasattr(g, '_perms'):
+        rows = get_db().execute(
+            "SELECT rp.permission_key FROM role_permissions rp JOIN roles r ON r.id = rp.role_id WHERE r.slug = ?",
+            (current_user.role,)
+        ).fetchall()
+        g._perms = {r['permission_key'] for r in rows}
+    return g._perms
+
+def require_permission(perm_key):
+    if perm_key not in _current_user_permissions():
+        label = next((p['label'] for p in PERMISSION_REGISTRY if p['key'] == perm_key), perm_key)
+        return jsonify({'error': f'Missing permission: {label}'}), 403
     return None
+
+def is_admin():
+    # Stand-in for the old "role == 'admin'" check -- true for whichever role(s)
+    # currently hold role/permission management, not tied to a specific role slug.
+    return 'settings.roles.manage' in _current_user_permissions()
+
+app.jinja_env.globals['has_permission'] = lambda key: key in _current_user_permissions()
+app.jinja_env.globals['current_permissions'] = lambda: sorted(_current_user_permissions())
+
+def current_role_label():
+    row = get_db().execute("SELECT label FROM roles WHERE slug = ?", (current_user.role,)).fetchone()
+    return row['label'] if row else current_user.role
+app.jinja_env.globals['current_role_label'] = current_role_label
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -738,7 +788,7 @@ def api_enrichment_settings():
         # Never echo a real key back to the browser -- same masked-placeholder pattern
         # as the alert-notifications SMTP password.
         return jsonify({'abuseipdb_api_key': _ENRICHMENT_KEY_PLACEHOLDER if keys.get('abuseipdb_api_key') else ''})
-    err = require_role('senior_analyst')
+    err = require_permission('threatintel.manage')
     if err: return err
     d = request.json or {}
     new_key = d.get('abuseipdb_api_key')
@@ -951,7 +1001,7 @@ def api_ti_feeds():
         ).fetchall()
         return jsonify([dict(r) for r in rows])
 
-    err = require_role('senior_analyst')
+    err = require_permission('threatintel.manage')
     if err: return err
     d = request.json or {}
     name = (d.get('name') or '').strip()
@@ -979,7 +1029,7 @@ def api_ti_feeds():
 @app.route('/api/ti/feeds/<int:fid>', methods=['PUT', 'DELETE'])
 @login_required
 def api_ti_feed_detail(fid):
-    err = require_role('senior_analyst')
+    err = require_permission('threatintel.manage')
     if err: return err
     db = get_db()
     if request.method == 'DELETE':
@@ -1007,7 +1057,7 @@ def api_ti_feed_detail(fid):
 @app.route('/api/ti/feeds/<int:fid>/sync', methods=['POST'])
 @login_required
 def api_ti_feed_sync(fid):
-    err = require_role('senior_analyst')
+    err = require_permission('threatintel.manage')
     if err: return err
     result = ti_sync_one(fid)
     log_audit('ti_feed_sync', 'ti_feed', fid, str(result.get('count', result.get('message', ''))))
@@ -1016,7 +1066,7 @@ def api_ti_feed_sync(fid):
 @app.route('/api/ti/feeds/upload_csv', methods=['POST'])
 @login_required
 def api_ti_feeds_upload_csv():
-    err = require_role('senior_analyst')
+    err = require_permission('threatintel.manage')
     if err: return err
     if not validate_csrf():
         return jsonify({'error': 'Your session expired or the form was submitted from an unexpected origin. Please refresh and try again.'}), 400
@@ -1206,7 +1256,7 @@ def api_ti_entities():
     db = get_db()
     if request.method == 'GET':
         return jsonify(_get_ti_entities(db))
-    err = require_role('senior_analyst')
+    err = require_permission('threatintel.manage')
     if err: return err
     d = request.json or {}
     name = (d.get('name') or '').strip()
@@ -1230,7 +1280,7 @@ def api_ti_entities():
 @app.route('/api/ti/entities/<int:eid>', methods=['PUT', 'DELETE'])
 @login_required
 def api_ti_entity_detail_admin(eid):
-    err = require_role('senior_analyst')
+    err = require_permission('threatintel.manage')
     if err: return err
     db = get_db()
     existing = db.execute("SELECT name FROM ti_entities WHERE id = ?", (eid,)).fetchone()
@@ -1379,7 +1429,7 @@ def api_ti_warninglists():
 @app.route('/api/ti/warninglists/<int:wid>', methods=['PUT'])
 @login_required
 def api_ti_warninglist_toggle(wid):
-    err = require_role('senior_analyst')
+    err = require_permission('threatintel.manage')
     if err: return err
     d = request.json or {}
     db = get_db()
@@ -1409,7 +1459,7 @@ def api_ti_iocs_facets():
 def api_drop_rules():
     db = get_db()
     if request.method == 'GET': return jsonify([dict(r) for r in db.execute("SELECT * FROM drop_rules ORDER BY id DESC").fetchall()])
-    err = require_role('senior_analyst')
+    err = require_permission('logsearch.droprules.manage')
     if err: return err
     d = request.get_json()
     db.execute("INSERT INTO drop_rules (field, operator, value, description, enabled) VALUES (?, ?, ?, ?, 1)", (d.get('field'), d.get('operator'), d.get('value'), d.get('description')))
@@ -1420,7 +1470,7 @@ def api_drop_rules():
 @app.route('/api/droprules/<int:rid>/toggle', methods=['PUT'])
 @login_required
 def tog_drop(rid):
-    err = require_role('senior_analyst')
+    err = require_permission('logsearch.droprules.manage')
     if err: return err
     get_db().execute("UPDATE drop_rules SET enabled = CASE WHEN enabled = 1 THEN 0 ELSE 1 END WHERE id=?", (rid,)); get_db().commit(); generate_vector_config()
     log_audit('drop_rule_toggle', 'drop_rule', rid)
@@ -1429,7 +1479,7 @@ def tog_drop(rid):
 @app.route('/api/droprules/<int:rid>', methods=['DELETE'])
 @login_required
 def del_drop(rid):
-    err = require_role('senior_analyst')
+    err = require_permission('logsearch.droprules.manage')
     if err: return err
     get_db().execute("DELETE FROM drop_rules WHERE id=?", (rid,)); get_db().commit(); generate_vector_config()
     log_audit('drop_rule_delete', 'drop_rule', rid)
@@ -1622,7 +1672,7 @@ def api_rules():
     if request.method == 'GET':
         return jsonify(_get_rules_cache(db))
 
-    err = require_role('senior_analyst')
+    err = require_permission('rules.manage')
     if err: return err
     ry = request.get_json().get('rule_yaml', '')
     import yaml
@@ -1808,7 +1858,7 @@ def api_rule_detail(rid):
         out['compliance_tags'] = [t for t in (r['compliance_tags'] or '').split(',') if t]
         return jsonify(out)
 
-    err = require_role('senior_analyst')
+    err = require_permission('rules.manage')
     if err: return err
 
     if request.method == 'DELETE':
@@ -1850,7 +1900,7 @@ def api_rule_detail(rid):
 @app.route('/api/rules/<int:rid>/clone', methods=['POST'])
 @login_required
 def api_rule_clone(rid):
-    err = require_role('senior_analyst')
+    err = require_permission('rules.manage')
     if err: return err
     db = get_db()
     r = db.execute("SELECT title, rule_yaml FROM sigma_rules WHERE id = ?", (rid,)).fetchone()
@@ -1891,7 +1941,7 @@ def api_rule_compliance(rid):
     # Compliance-framework tags are metadata layered on top of a rule, independent of
     # whether the rule's own YAML is Sigma-sourced (read-only) or custom — an admin can
     # tag either one without needing to clone a Sigma rule first.
-    err = require_role('senior_analyst')
+    err = require_permission('rules.manage')
     if err: return err
     tags = (request.get_json() or {}).get('tags') or []
     if not isinstance(tags, list) or any(t not in COMPLIANCE_FRAMEWORKS for t in tags):
@@ -1908,7 +1958,7 @@ def api_rule_compliance(rid):
 @app.route('/api/rules/import/sigmahq', methods=['POST'])
 @login_required
 def api_rules_import_sigmahq():
-    err = require_role('senior_analyst')
+    err = require_permission('rules.manage')
     if err: return err
     try:
         stats = _run_sigmahq_import()
@@ -1921,7 +1971,7 @@ def api_rules_import_sigmahq():
 @app.route('/api/rules/<int:rid>/toggle', methods=['PUT'])
 @login_required
 def api_r_tog(rid):
-    err = require_role('senior_analyst')
+    err = require_permission('rules.manage')
     if err: return err
     db=get_db(); db.execute("UPDATE sigma_rules SET enabled = CASE WHEN enabled = 1 THEN 0 ELSE 1 END WHERE id=?", (rid,)); db.commit(); invalidate_rules_cache()
     log_audit('rule_toggle', 'rule', rid)
@@ -1930,7 +1980,7 @@ def api_r_tog(rid):
 @app.route('/api/rules/bulk_update', methods=['PUT'])
 @login_required
 def api_rules_bulk():
-    err = require_role('senior_analyst')
+    err = require_permission('rules.manage')
     if err: return err
     data = request.get_json()
     ids = data.get('ids', [])
@@ -1990,7 +2040,7 @@ def api_rules_tuning():
 @app.route('/api/rules/<int:rid>/severity', methods=['PUT'])
 @login_required
 def api_rule_severity(rid):
-    err = require_role('senior_analyst')
+    err = require_permission('rules.manage')
     if err: return err
     sev = (request.get_json() or {}).get('severity') or None
     if sev and sev not in ('critical', 'high', 'medium', 'low', 'informational'):
@@ -2006,7 +2056,7 @@ def api_rule_severity(rid):
 @app.route('/api/rules/<int:rid>/autocase', methods=['PUT'])
 @login_required
 def api_rule_autocase(rid):
-    err = require_role('senior_analyst')
+    err = require_permission('rules.manage')
     if err: return err
     d = request.get_json() or {}
     enabled = 1 if d.get('auto_case') else 0
@@ -2033,7 +2083,7 @@ def api_rule_exclusions(rid):
         ).fetchall()
         return jsonify([dict(row) for row in rows])
 
-    err = require_role('senior_analyst')
+    err = require_permission('rules.manage')
     if err: return err
     data = request.get_json() or {}
     field = (data.get('field') or '').strip()
@@ -2058,7 +2108,7 @@ def api_rule_exclusions(rid):
 @app.route('/api/rules/exclusions/<int:eid>', methods=['PUT', 'DELETE'])
 @login_required
 def api_rule_exclusion_detail(eid):
-    err = require_role('senior_analyst')
+    err = require_permission('rules.manage')
     if err: return err
     db = get_db()
     if not db.execute("SELECT 1 FROM rule_exclusions WHERE id = ?", (eid,)).fetchone():
@@ -2092,7 +2142,7 @@ def api_yara_scan():
     # Bucketed with hunting/investigation work (Tier 3), not with rule-authoring --
     # this uploads an arbitrary file to scan against existing YARA signatures, it
     # doesn't manage the signature library itself.
-    err = require_role('senior_analyst')
+    err = require_permission('rules.manage')
     if err: return err
     f = request.files['file']
     p = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(f.filename))
@@ -2216,7 +2266,7 @@ def api_report_branding():
     db = get_db()
     if request.method == 'GET':
         return jsonify(get_report_branding_config(db))
-    err = require_role('senior_analyst')
+    err = require_permission('settings.reports.manage')
     if err: return err
     cfg = get_report_branding_config(db)
     cfg['company_name'] = (request.form.get('company_name') or REPORT_BRANDING_DEFAULTS['company_name']).strip()[:120]
@@ -2315,7 +2365,7 @@ def api_report_schedule():
     db = get_db()
     if request.method == 'GET':
         return jsonify(get_report_schedule_config(db))
-    err = require_role('senior_analyst')
+    err = require_permission('settings.reports.manage')
     if err: return err
     d = request.json or {}
     cfg = get_report_schedule_config(db)
@@ -2344,7 +2394,7 @@ def api_alert_notification_settings():
         # value intact rather than overwriting it with the placeholder string itself.
         cfg['smtp_pass'] = _SMTP_PASS_PLACEHOLDER if cfg.get('smtp_pass') else ''
         return jsonify(cfg)
-    err = require_role('senior_analyst')
+    err = require_permission('settings.notifications.manage')
     if err: return err
     d = request.json or {}
     cfg = get_alert_notification_config(db)
@@ -2363,7 +2413,7 @@ def api_alert_notification_settings():
 @app.route('/api/settings/alert-notifications/test', methods=['POST'])
 @login_required
 def api_alert_notification_test():
-    err = require_role('senior_analyst')
+    err = require_permission('settings.notifications.manage')
     if err: return err
     from notifications import get_alert_notification_config, send_alert_notification
     db = get_db()
@@ -2423,7 +2473,7 @@ def api_ueba_exclusions():
         ).fetchall()
         return jsonify([dict(r) for r in rows])
 
-    err = require_role('senior_analyst')
+    err = require_permission('ueba.config.manage')
     if err: return err
     data = request.get_json() or {}
     entity_type = (data.get('entity_type') or '').strip()
@@ -2443,7 +2493,7 @@ def api_ueba_exclusions():
 @app.route('/api/ueba/exclusions/<int:eid>', methods=['PUT', 'DELETE'])
 @login_required
 def api_ueba_exclusion_detail(eid):
-    err = require_role('senior_analyst')
+    err = require_permission('ueba.config.manage')
     if err: return err
     db = get_db()
     if not db.execute("SELECT 1 FROM ueba_exclusions WHERE id = ?", (eid,)).fetchone():
@@ -2474,7 +2524,7 @@ def api_assets():
         rows = db.execute("SELECT id, host, criticality, owner, created_by, created_at FROM assets ORDER BY host").fetchall()
         return jsonify([dict(r) for r in rows])
 
-    err = require_role('senior_analyst')
+    err = require_permission('assets.manage')
     if err: return err
     data = request.get_json() or {}
     host = (data.get('host') or '').strip()
@@ -2496,7 +2546,7 @@ def api_assets():
 @app.route('/api/assets/<int:aid>', methods=['PUT', 'DELETE'])
 @login_required
 def api_asset_detail(aid):
-    err = require_role('senior_analyst')
+    err = require_permission('assets.manage')
     if err: return err
     db = get_db()
     if not db.execute("SELECT 1 FROM assets WHERE id = ?", (aid,)).fetchone():
@@ -2525,7 +2575,7 @@ def api_identities():
         rows = db.execute("SELECT id, username, department, privileged, created_by, created_at FROM identities ORDER BY username").fetchall()
         return jsonify([dict(r) for r in rows])
 
-    err = require_role('senior_analyst')
+    err = require_permission('assets.manage')
     if err: return err
     data = request.get_json() or {}
     username = (data.get('username') or '').strip()
@@ -2545,7 +2595,7 @@ def api_identities():
 @app.route('/api/identities/<int:iid>', methods=['PUT', 'DELETE'])
 @login_required
 def api_identity_detail(iid):
-    err = require_role('senior_analyst')
+    err = require_permission('assets.manage')
     if err: return err
     db = get_db()
     if not db.execute("SELECT 1 FROM identities WHERE id = ?", (iid,)).fetchone():
@@ -2603,8 +2653,8 @@ def api_case_queues():
             out.append({**dict(r), 'members': members})
         return jsonify(out)
 
-    if current_user.role != 'admin':
-        return jsonify({'error': 'Admin required'}), 403
+    err = require_permission('cases.queues.manage')
+    if err: return err
     d = request.json or {}
     name = (d.get('name') or '').strip()
     if not name:
@@ -2619,8 +2669,8 @@ def api_case_queues():
 @app.route('/api/case-queues/<int:qid>', methods=['PUT', 'DELETE'])
 @login_required
 def api_case_queue_detail(qid):
-    if current_user.role != 'admin':
-        return jsonify({'error': 'Admin required'}), 403
+    err = require_permission('cases.queues.manage')
+    if err: return err
     db = get_db()
     existing = db.execute("SELECT name FROM case_queues WHERE id = ?", (qid,)).fetchone()
     if not existing:
@@ -2648,8 +2698,8 @@ def api_case_queue_detail(qid):
 @app.route('/api/case-queues/<int:qid>/members', methods=['POST', 'DELETE'])
 @login_required
 def api_case_queue_members(qid):
-    if current_user.role != 'admin':
-        return jsonify({'error': 'Admin required'}), 403
+    err = require_permission('cases.queues.manage')
+    if err: return err
     db = get_db()
     if not db.execute("SELECT 1 FROM case_queues WHERE id = ?", (qid,)).fetchone():
         return jsonify({'error': 'Queue not found'}), 404
@@ -2780,7 +2830,7 @@ def api_case_detail(cid):
         # action (create/edit/tasks/notes/items), which stays open to any analyst as
         # day-to-day casework, this is gated to Tier 3+ so a case can't vanish by
         # accident or a Tier 1 mis-click.
-        err = require_role('senior_analyst')
+        err = require_permission('cases.delete')
         if err: return err
         db.execute("DELETE FROM case_items WHERE case_id = ?", (cid,))
         db.execute("DELETE FROM case_tasks WHERE case_id = ?", (cid,))
@@ -3401,7 +3451,7 @@ def api_playbooks():
             out.append({**dict(r), 'actions': actions})
         return jsonify(out)
 
-    err = require_role('senior_analyst')
+    err = require_permission('soar.playbooks.manage')
     if err: return err
     d = request.json or {}
     name = (d.get('name') or '').strip()
@@ -3439,7 +3489,7 @@ def api_playbooks():
 @app.route('/api/playbooks/<int:pid>', methods=['PUT', 'DELETE'])
 @login_required
 def api_playbook_detail(pid):
-    err = require_role('senior_analyst')
+    err = require_permission('soar.playbooks.manage')
     if err: return err
     db = get_db()
     existing = db.execute("SELECT name FROM playbooks WHERE id = ?", (pid,)).fetchone()
@@ -3492,7 +3542,7 @@ def api_playbook_detail(pid):
 @app.route('/api/playbooks/<int:pid>/toggle', methods=['PUT'])
 @login_required
 def api_playbook_toggle(pid):
-    err = require_role('senior_analyst')
+    err = require_permission('soar.playbooks.manage')
     if err: return err
     db = get_db()
     if not db.execute("SELECT 1 FROM playbooks WHERE id = ?", (pid,)).fetchone():
@@ -3538,8 +3588,8 @@ def api_playbook_dry_run(pid):
 @login_required
 def api_playbook_secrets():
     db = get_db()
-    if current_user.role != 'admin':
-        return jsonify({'error': 'Admin required'}), 403
+    err = require_permission('soar.secrets.manage')
+    if err: return err
     if request.method == 'GET':
         rows = db.execute("SELECT id, name, description, created_by, created_at FROM playbook_secrets ORDER BY name").fetchall()
         return jsonify([dict(r) for r in rows])
@@ -3563,8 +3613,8 @@ def api_playbook_secrets():
 @app.route('/api/playbook-secrets/<int:sid>', methods=['DELETE'])
 @login_required
 def api_playbook_secret_delete(sid):
-    if current_user.role != 'admin':
-        return jsonify({'error': 'Admin required'}), 403
+    err = require_permission('soar.secrets.manage')
+    if err: return err
     db = get_db()
     existing = db.execute("SELECT name FROM playbook_secrets WHERE id = ?", (sid,)).fetchone()
     if not existing:
@@ -3639,7 +3689,7 @@ def api_ueba_config():
             'autocase_cooldown_hours': int(cfg['ueba_autocase_cooldown_hours']),
         })
 
-    err = require_role('senior_analyst')
+    err = require_permission('ueba.config.manage')
     if err: return err
 
     data = request.json or {}
@@ -3860,7 +3910,7 @@ def api_ueba_risk_config():
     if request.method == 'GET':
         return jsonify(get_risk_score_config(db))
 
-    err = require_role('senior_analyst')
+    err = require_permission('ueba.config.manage')
     if err: return err
     data = request.json or {}
     if not isinstance(data, dict):
@@ -3966,7 +4016,7 @@ def api_anomaly_rules():
         ANOMALY_RULES_CACHE = rules
         ANOMALY_RULES_CACHE_TIME = time.time()
         return jsonify(ANOMALY_RULES_CACHE)
-    err = require_role('senior_analyst')
+    err = require_permission('ueba.config.manage')
     if err: return err
     d = request.get_json() or {}
     err = _validate_anomaly_rule(d)
@@ -3989,7 +4039,7 @@ def api_anomaly_rules():
 @login_required
 def api_anomaly_rule_detail(rid):
     db = get_db()
-    err = require_role('senior_analyst')
+    err = require_permission('ueba.config.manage')
     if err: return err
     if request.method == 'DELETE':
         db.execute("DELETE FROM anomaly_rules WHERE id = ?", (rid,))
@@ -4370,8 +4420,8 @@ def api_case_sla_config():
     db = get_db()
     if request.method == 'GET':
         return jsonify({'sla_hours': _case_sla_hours(db)})
-    if current_user.role != 'admin':
-        return jsonify({'error': 'Admin required'}), 403
+    err = require_permission('settings.case_sla.manage')
+    if err: return err
     try:
         hours = int((request.json or {}).get('sla_hours'))
     except (TypeError, ValueError):
@@ -4419,7 +4469,7 @@ def api_dashboard_detail(did):
     # than a flat role check -- creators own the dashboards they made, admins can
     # clean up anyone's. Everything else here (GET, adding/moving widgets) is open
     # to any logged-in user; only rename/delete of the dashboard itself is gated.
-    if existing['created_by'] != current_user.username and current_user.role != 'admin':
+    if existing['created_by'] != current_user.username and not is_admin():
         return jsonify({'error': 'Only the dashboard creator or an admin can modify this dashboard'}), 403
 
     if request.method == 'DELETE':
@@ -5117,6 +5167,56 @@ def migrate_role_casing():
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
         conn.execute("UPDATE users SET role = 'admin' WHERE role = 'Admin'")
         conn.execute("UPDATE users SET role = 'analyst' WHERE role = 'Analyst'")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# Named-permission roles, replacing the old fixed analyst/senior_analyst/admin rank
+# ladder. Seeded ONLY the first time this runs (roles table starts empty) with the 3
+# original tiers as built-in (is_builtin=1, never deletable) roles, and their exact
+# former permission sets, so this migration is a behavior-preserving upgrade -- an
+# existing user's access doesn't change on the day this ships. See PERMISSION_REGISTRY
+# above for what each key gates.
+_SENIOR_ANALYST_PERMISSIONS = {
+    'cases.delete', 'logsearch.droprules.manage', 'rules.manage', 'ueba.config.manage',
+    'threatintel.manage', 'edr.command.basic', 'edr.command.advanced', 'edr.agent.manage',
+    'edr.fim.manage', 'soar.playbooks.manage', 'assets.manage', 'settings.reports.manage',
+    'settings.notifications.manage',
+}
+_BUILTIN_ROLE_SEED = {
+    'analyst': ('Tier 1/2 Analyst', 'Triage, cases, incident response', {'edr.command.basic'}),
+    'senior_analyst': ('Tier 3 Senior Analyst', 'Adds hunting, detection tuning, backend data', _SENIOR_ANALYST_PERMISSIONS),
+    'admin': ('Admin', 'Adds users, certs, backups, system settings', PERMISSION_KEYS),
+}
+
+def migrate_role_permissions():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS roles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slug TEXT NOT NULL UNIQUE,
+            label TEXT NOT NULL,
+            description TEXT,
+            is_builtin INTEGER NOT NULL DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS role_permissions (
+            role_id INTEGER NOT NULL,
+            permission_key TEXT NOT NULL,
+            PRIMARY KEY (role_id, permission_key)
+        )''')
+        if conn.execute("SELECT COUNT(*) FROM roles").fetchone()[0] == 0:
+            for slug, (label, description, perms) in _BUILTIN_ROLE_SEED.items():
+                cur = conn.execute(
+                    "INSERT INTO roles (slug, label, description, is_builtin) VALUES (?, ?, ?, 1)",
+                    (slug, label, description)
+                )
+                rid = cur.lastrowid
+                conn.executemany(
+                    "INSERT INTO role_permissions (role_id, permission_key) VALUES (?, ?)",
+                    [(rid, key) for key in perms]
+                )
         conn.commit()
         conn.close()
     except Exception:
@@ -5983,8 +6083,8 @@ def _run_sigmahq_import():
 @app.route('/api/audit-log', methods=['GET'])
 @login_required
 def api_audit_log():
-    if current_user.role != 'admin':
-        return jsonify({'error': 'Admin required'}), 403
+    err = require_permission('audit.view')
+    if err: return err
     db = get_db()
     where, params = [], []
     action = request.args.get('action')
@@ -6044,8 +6144,8 @@ def settings():
 @login_required
 def api_settings_token():
     from flask import request, jsonify
-    if current_user.role != 'admin':
-        return jsonify({'error': 'Admin required'}), 403
+    err = require_permission('settings.system.manage')
+    if err: return err
     token = (request.json or {}).get('token', '').strip()
     if not token:
         return jsonify({'error': 'Token cannot be empty'}), 400
@@ -6060,8 +6160,8 @@ def api_settings_token():
 def api_settings_backup():
     from flask import send_file
     import datetime
-    if current_user.role != 'admin':
-        return "Admin required", 403
+    err = require_permission('settings.system.manage')
+    if err: return err
     stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     return send_file(DB_PATH, mimetype='application/octet-stream', as_attachment=True, download_name=f'microdfir_backup_{stamp}.db')
 
@@ -6070,8 +6170,8 @@ def api_settings_backup():
 def api_settings_purge():
     from flask import request, jsonify
     import datetime
-    if current_user.role != 'admin':
-        return jsonify({'error': 'Admin required'}), 403
+    err = require_permission('settings.system.manage')
+    if err: return err
 
     days = (request.json or {}).get('days', 30)
     try:
@@ -6101,8 +6201,8 @@ def api_settings_retention():
         days = int(days_row['value']) if days_row and days_row['value'] else None
         return jsonify({'days': days, 'last_purge': last_row['value'] if last_row and last_row['value'] else None})
 
-    if current_user.role != 'admin':
-        return jsonify({'error': 'Admin required'}), 403
+    err = require_permission('settings.system.manage')
+    if err: return err
     d = request.json or {}
     days = d.get('days')
     if days in (None, '', 0, '0'):
@@ -6146,8 +6246,8 @@ def api_settings_archive():
         days = int(days_row['value']) if days_row and days_row['value'] else DEFAULT_LOG_ARCHIVE_DAYS
         return jsonify({'days': days, 'last_run': last_row['value'] if last_row and last_row['value'] else None})
 
-    if current_user.role != 'admin':
-        return jsonify({'error': 'Admin required'}), 403
+    err = require_permission('settings.system.manage')
+    if err: return err
     d = request.json or {}
     days = d.get('days')
     if days in (None, '', 0, '0'):
@@ -6171,8 +6271,8 @@ def api_settings_archive():
 @app.route('/api/settings/archive/run', methods=['POST'])
 @login_required
 def api_settings_archive_run():
-    if current_user.role != 'admin':
-        return jsonify({'error': 'Admin required'}), 403
+    err = require_permission('settings.system.manage')
+    if err: return err
     from archive_logs import archive_old_logs
     days_override = (request.json or {}).get('days') if request.is_json else None
     if days_override is not None:
@@ -6196,8 +6296,8 @@ def api_settings_ioc_retention():
         days = int(days_row['value']) if days_row and days_row['value'] else DEFAULT_IOC_RETENTION_DAYS
         return jsonify({'days': days, 'last_purge': last_row['value'] if last_row and last_row['value'] else None})
 
-    if current_user.role != 'admin':
-        return jsonify({'error': 'Admin required'}), 403
+    err = require_permission('settings.system.manage')
+    if err: return err
     d = request.json or {}
     days = d.get('days')
     if days in (None, '', 0, '0'):
@@ -6224,8 +6324,8 @@ def api_settings_ioc_retention():
 def api_settings_ioc_retention_run():
     from flask import request, jsonify
     import datetime
-    if current_user.role != 'admin':
-        return jsonify({'error': 'Admin required'}), 403
+    err = require_permission('settings.system.manage')
+    if err: return err
     db = get_db()
     days = (request.json or {}).get('days') if request.is_json else None
     if days is None:
@@ -6250,8 +6350,8 @@ def api_settings_ioc_retention_run():
 @app.route('/api/settings/vacuum', methods=['POST'])
 @login_required
 def api_settings_vacuum():
-    if current_user.role != 'admin':
-        return jsonify({'error': 'Admin required'}), 403
+    err = require_permission('settings.system.manage')
+    if err: return err
     import sqlite3
     try:
         before = os.path.getsize(DB_PATH)
@@ -6275,7 +6375,7 @@ def settings_network():
     import sqlite3, subprocess
     from flask import request, flash, redirect, url_for
 
-    if current_user.role != "admin": return redirect(url_for("home"))
+    if "settings.network.manage" not in _current_user_permissions(): return redirect(url_for("home"))
     if not validate_csrf(): return redirect(url_for("settings"))
 
     ui_ip = request.form.get("ui_bind_ip", "0.0.0.0")
@@ -7143,7 +7243,7 @@ def api_agent_channels():
         # Sigma drop-rules pipeline -- this was previously ungated (any logged-in
         # user could change what gets collected), inconsistent with every
         # neighboring settings route.
-        err = require_role('senior_analyst')
+        err = require_permission('edr.agent.manage')
         if err: return err
         posted = request.json or {}
         channels = {}
@@ -7223,8 +7323,8 @@ def api_settings_metrics():
 def api_settings_cert():
     from flask import request, jsonify
     import ssl
-    if current_user.role != 'admin':
-        return jsonify({'error': 'Admin required'}), 403
+    err = require_permission('settings.network.manage')
+    if err: return err
     if 'cert_file' not in request.files or 'key_file' not in request.files:
         return jsonify({'error': 'Both Certificate and Private Key files are required.'}), 400
 
@@ -7268,11 +7368,11 @@ def api_settings_cert():
 def api_settings_users():
     from flask import request, jsonify
     db = get_db()
-    # Ensure users table has a role column -- lowercase default, matching every
-    # actual role check in this app (current_user.role != 'admin' etc, all lowercase).
-    # A prior version of this migration defaulted to 'Analyst' (capitalized), which
-    # never matched any real permission check -- see migrate_role_casing() below for
-    # the one-time cleanup of any rows that bug already wrote.
+    # Ensure users table has a role column -- lowercase default, matching every role
+    # slug this app stores (roles.slug is always lowercase). A prior version of this
+    # migration defaulted to 'Analyst' (capitalized), which never matched any real
+    # permission check -- see migrate_role_casing() below for the one-time cleanup of
+    # any rows that bug already wrote.
     try:
         db.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'analyst'")
         db.commit()
@@ -7280,7 +7380,7 @@ def api_settings_users():
         pass # Column already exists
 
     if request.method == 'POST':
-        err = require_role('admin')
+        err = require_permission('settings.users.manage')
         if err: return err
         data = request.json
         action = data.get('action')
@@ -7289,8 +7389,9 @@ def api_settings_users():
             username = data.get('username')
             password = generate_password_hash(data.get('password'))
             role = data.get('role', 'analyst')
-            if role not in ROLE_RANK:
-                return jsonify({'error': f"role must be one of {', '.join(ROLE_RANK)}"}), 400
+            valid_roles = {r['slug'] for r in db.execute("SELECT slug FROM roles").fetchall()}
+            if role not in valid_roles:
+                return jsonify({'error': f"role must be one of {', '.join(sorted(valid_roles))}"}), 400
             try:
                 db.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", (username, password, role))
                 db.commit()
@@ -7315,10 +7416,20 @@ def api_settings_users():
                 return jsonify({'error': 'User not found'}), 404
             if target_user['id'] == current_user.id:
                 return jsonify({'error': "You can't delete your own account."}), 400
-            if target_user['role'] == 'admin':
-                remaining_admins = db.execute("SELECT COUNT(*) FROM users WHERE role = 'admin' AND id != ?", (user_id,)).fetchone()[0]
-                if remaining_admins == 0:
-                    return jsonify({'error': 'Cannot delete the last remaining admin account.'}), 400
+            # Generalizes the old "last admin" guard to whichever role(s) currently hold
+            # role/permission management -- with custom roles, that's no longer
+            # necessarily the literal 'admin' slug.
+            target_can_manage_roles = db.execute(
+                "SELECT 1 FROM role_permissions rp JOIN roles r ON r.id = rp.role_id "
+                "WHERE r.slug = ? AND rp.permission_key = 'settings.roles.manage'", (target_user['role'],)
+            ).fetchone() is not None
+            if target_can_manage_roles:
+                remaining = db.execute(
+                    "SELECT COUNT(*) FROM users u JOIN roles r ON r.slug = u.role JOIN role_permissions rp ON rp.role_id = r.id "
+                    "WHERE rp.permission_key = 'settings.roles.manage' AND u.id != ?", (user_id,)
+                ).fetchone()[0]
+                if remaining == 0:
+                    return jsonify({'error': 'Cannot delete the last user who can manage roles & users.'}), 400
             db.execute("DELETE FROM users WHERE id = ?", (user_id,))
             db.commit()
             log_audit('user_delete', 'user', target_user['username'])
@@ -7327,6 +7438,82 @@ def api_settings_users():
     # GET request
     users = db.execute("SELECT id, username, role FROM users").fetchall()
     return jsonify({'users': [dict(u) for u in users]})
+
+_ROLE_SLUG_RE = re.compile(r'^[a-z][a-z0-9_]*$')
+
+@app.route('/api/settings/roles', methods=['GET', 'POST'])
+@login_required
+def api_settings_roles():
+    db = get_db()
+    if request.method == 'GET':
+        roles = []
+        for r in db.execute("SELECT id, slug, label, description, is_builtin FROM roles ORDER BY is_builtin DESC, label").fetchall():
+            perms = [row['permission_key'] for row in db.execute(
+                "SELECT permission_key FROM role_permissions WHERE role_id = ?", (r['id'],)
+            ).fetchall()]
+            member_count = db.execute("SELECT COUNT(*) FROM users WHERE role = ?", (r['slug'],)).fetchone()[0]
+            roles.append({**dict(r), 'permissions': perms, 'member_count': member_count})
+        return jsonify({'roles': roles, 'registry': PERMISSION_REGISTRY})
+
+    err = require_permission('settings.roles.manage')
+    if err: return err
+    d = request.json or {}
+    slug = (d.get('slug') or '').strip().lower()
+    label = (d.get('label') or '').strip()
+    description = (d.get('description') or '').strip()
+    perms = [p for p in (d.get('permissions') or []) if p in PERMISSION_KEYS]
+    if not _ROLE_SLUG_RE.match(slug):
+        return jsonify({'error': 'slug must start with a lowercase letter and contain only lowercase letters, numbers, and underscores'}), 400
+    if not label:
+        return jsonify({'error': 'label is required'}), 400
+    if db.execute("SELECT 1 FROM roles WHERE slug = ?", (slug,)).fetchone():
+        return jsonify({'error': f'A role with slug "{slug}" already exists'}), 400
+    cur = db.execute("INSERT INTO roles (slug, label, description, is_builtin) VALUES (?, ?, ?, 0)", (slug, label, description))
+    rid = cur.lastrowid
+    db.executemany("INSERT INTO role_permissions (role_id, permission_key) VALUES (?, ?)", [(rid, p) for p in perms])
+    db.commit()
+    log_audit('role_create', 'role', slug, f'permissions={",".join(sorted(perms))}')
+    return jsonify({'status': 'success', 'id': rid})
+
+@app.route('/api/settings/roles/<int:rid>', methods=['PUT', 'DELETE'])
+@login_required
+def api_settings_role_detail(rid):
+    err = require_permission('settings.roles.manage')
+    if err: return err
+    db = get_db()
+    existing = db.execute("SELECT slug, is_builtin FROM roles WHERE id = ?", (rid,)).fetchone()
+    if not existing:
+        return jsonify({'error': 'Role not found'}), 404
+
+    if request.method == 'DELETE':
+        if existing['is_builtin']:
+            return jsonify({'error': 'Built-in roles cannot be deleted.'}), 400
+        member_count = db.execute("SELECT COUNT(*) FROM users WHERE role = ?", (existing['slug'],)).fetchone()[0]
+        if member_count > 0:
+            return jsonify({'error': f'{member_count} user(s) still have this role -- reassign them first.'}), 400
+        db.execute("DELETE FROM role_permissions WHERE role_id = ?", (rid,))
+        db.execute("DELETE FROM roles WHERE id = ?", (rid,))
+        db.commit()
+        log_audit('role_delete', 'role', existing['slug'])
+        return jsonify({'ok': 1})
+
+    d = request.json or {}
+    label = (d.get('label') or '').strip()
+    description = (d.get('description') or '').strip()
+    perms = {p for p in (d.get('permissions') or []) if p in PERMISSION_KEYS}
+    if not label:
+        return jsonify({'error': 'label is required'}), 400
+    # The built-in admin role can never lose the two permissions that manage
+    # users/roles -- without this, an admin could accidentally lock the whole
+    # system out of user/role management with no way back in short of DB surgery.
+    if existing['slug'] == 'admin':
+        perms |= PINNED_ADMIN_PERMISSIONS
+    db.execute("UPDATE roles SET label = ?, description = ? WHERE id = ?", (label, description, rid))
+    db.execute("DELETE FROM role_permissions WHERE role_id = ?", (rid,))
+    db.executemany("INSERT INTO role_permissions (role_id, permission_key) VALUES (?, ?)", [(rid, p) for p in perms])
+    db.commit()
+    log_audit('role_update', 'role', existing['slug'], f'permissions={",".join(sorted(perms))}')
+    return jsonify({'status': 'success'})
 
 
 def _get_host_os(db, hostname):
@@ -7495,7 +7682,7 @@ def api_download_agent(os_type):
 
     # Mints a fresh enrollment credential and ships a full installer -- agent
     # deployment, gated the same as every other "manage backend data" Tier 3+ action.
-    err = require_role('senior_analyst')
+    err = require_permission('edr.agent.manage')
     if err: return err
 
     # Grab the exact IP the user is connecting to the UI with
@@ -7643,7 +7830,7 @@ def api_fim_interval():
         seconds = int(row['value']) if row and row['value'] else DEFAULT_FIM_INTERVAL_SECONDS
         return jsonify({'interval_seconds': seconds})
 
-    err = require_role('senior_analyst')
+    err = require_permission('edr.fim.manage')
     if err: return err
     data = request.get_json() or {}
     try:
@@ -7666,7 +7853,7 @@ def api_fim_paths():
         ).fetchall()
         return jsonify([dict(r) for r in rows])
 
-    err = require_role('senior_analyst')
+    err = require_permission('edr.fim.manage')
     if err: return err
     data = request.get_json() or {}
     path = (data.get('path') or '').strip()
@@ -7683,7 +7870,7 @@ def api_fim_paths():
 @app.route('/api/fim/paths/<int:fid>', methods=['PUT', 'DELETE'])
 @login_required
 def api_fim_path_detail(fid):
-    err = require_role('senior_analyst')
+    err = require_permission('edr.fim.manage')
     if err: return err
     db = get_db()
     if not db.execute("SELECT 1 FROM fim_paths WHERE id = ?", (fid,)).fetchone():
@@ -7738,9 +7925,8 @@ def api_agent_commands():
     label = d.get('label')
     if not hostname or not label:
         return jsonify({'error': 'hostname and label are required'}), 400
-    if label not in AGENT_COMMAND_TIER1_LABELS:
-        err = require_role('senior_analyst')
-        if err: return err
+    err = require_permission('edr.command.basic' if label in AGENT_COMMAND_TIER1_LABELS else 'edr.command.advanced')
+    if err: return err
 
     # Response actions are queued from the UI (not by the agent), so there's no
     # X-Agent-OS header on this request — the target host's own last-reported OS
@@ -7846,7 +8032,7 @@ def api_agent_result():
 @login_required
 def delete_agent(hostname):
     from flask import jsonify
-    err = require_role('senior_analyst')
+    err = require_permission('edr.agent.manage')
     if err: return err
     db = get_db()
     db.execute('DELETE FROM agent_polls WHERE user_agent = ?', (hostname,))
@@ -7884,6 +8070,7 @@ migrate_case_queues()
 migrate_case_assets()
 migrate_dashboards()
 migrate_role_casing()
+migrate_role_permissions()
 migrate_playbooks()
 migrate_playbook_secrets()
 migrate_live_logs_archive()

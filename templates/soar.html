@@ -6,10 +6,10 @@
         <p>Automated response playbooks triggered by case lifecycle events.</p>
     </div>
     <div class="d-flex gap-2">
-        {% if current_user.role == 'admin' %}
+        {% if has_permission('soar.secrets.manage') %}
         <button type="button" class="btn btn-outline-secondary" onclick="showSecretsModal()"><i class="fa-solid fa-key me-1"></i>Manage Secrets</button>
         {% endif %}
-        {% if current_user.role in ('senior_analyst', 'admin') %}
+        {% if has_permission('soar.playbooks.manage') %}
         <button type="button" class="btn btn-primary" onclick="showPlaybookModal()"><i class="fa-solid fa-plus me-1"></i>New Playbook</button>
         {% endif %}
     </div>
@@ -182,8 +182,8 @@
 </div>
 
 <script>
-const IS_ADMIN = {{ 'true' if current_user.role == 'admin' else 'false' }}; // playbook secrets stay Admin-only
-const CAN_MANAGE_PLAYBOOKS = roleAtLeast('senior_analyst'); // playbook CRUD/toggle -- Tier 3+
+const IS_ADMIN = hasPermission('soar.secrets.manage');
+const CAN_MANAGE_PLAYBOOKS = hasPermission('soar.playbooks.manage');
 let allPlaybooks = [];
 let allQueuesForPb = [];
 let caseTemplatesForPb = [];

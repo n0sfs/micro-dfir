@@ -30,6 +30,7 @@
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnInsights" onclick="switchUebaTab('insights')"><i class="fa-solid fa-chart-column me-2"></i>Data Insights</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnTuning" onclick="switchUebaTab('tuning')" title="Turn the 8 built-in detection models on/off and tune their thresholds"><i class="fa-solid fa-sliders me-2"></i>Model Tuning</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnRules" onclick="switchUebaTab('rules')" title="Point values, tiers, and admin-defined custom scoring rules"><i class="fa-solid fa-list-check me-2"></i>Scoring &amp; Rules</button></li>
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnAssetIdentity" onclick="switchUebaTab('assetIdentity')" title="Asset criticality and privileged-identity weighting feed the risk score below"><i class="fa-solid fa-building-shield me-2"></i>Asset &amp; Identity</button></li>
         </ul>
     </div>
 
@@ -186,85 +187,85 @@
                     <div class="row g-3">
                         <div class="col-md-3">
                             <label class="form-label">Baseline Lookback (days)</label>
-                            <input type="number" id="cfgLookback" class="form-control bg-dark text-light border-secondary" min="1" max="365" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                            <input type="number" id="cfgLookback" class="form-control bg-dark text-light border-secondary" min="1" max="365" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         </div>
                         <div class="col-md-3">
                             <label class="form-label">Spread Multiplier</label>
-                            <input type="number" id="cfgStddev" class="form-control bg-dark text-light border-secondary" min="0.5" max="10" step="0.1" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                            <input type="number" id="cfgStddev" class="form-control bg-dark text-light border-secondary" min="0.5" max="10" step="0.1" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         </div>
                         <div class="col-md-3">
                             <label class="form-label">Minimum Baseline Floor (events/day)</label>
-                            <input type="number" id="cfgMinBaseline" class="form-control bg-dark text-light border-secondary" min="0" step="1" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                            <input type="number" id="cfgMinBaseline" class="form-control bg-dark text-light border-secondary" min="0" step="1" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         </div>
                         <div class="col-md-3">
                             <label class="form-label">Min. Same-Weekday Samples</label>
-                            <input type="number" id="cfgMinDaysObserved" class="form-control bg-dark text-light border-secondary" min="1" max="52" step="1" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                            <input type="number" id="cfgMinDaysObserved" class="form-control bg-dark text-light border-secondary" min="1" max="52" step="1" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                             <p class="text-muted small mt-1 mb-0">Below this, falls back to a flat baseline across all weekdays until enough same-weekday history builds up.</p>
                         </div>
                     </div>
                     <div class="form-check form-switch mt-3">
-                        <input class="form-check-input" type="checkbox" id="cfgNewIpEnabled" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                        <input class="form-check-input" type="checkbox" id="cfgNewIpEnabled" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         <label class="form-check-label small" for="cfgNewIpEnabled">Flag users active from a source IP never seen for them before <span class="text-muted">(needs source IPs to be present in ingested logs — best-effort, extracted from Windows auth event text)</span></label>
                     </div>
                     <div class="form-check form-switch mt-2">
-                        <input class="form-check-input" type="checkbox" id="cfgNewProcessEnabled" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                        <input class="form-check-input" type="checkbox" id="cfgNewProcessEnabled" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         <label class="form-check-label small" for="cfgNewProcessEnabled">Flag hosts running a process never seen on that host before <span class="text-muted">(needs process_image, agent-sourced logs only)</span></label>
                     </div>
                     <div class="form-check form-switch mt-2">
-                        <input class="form-check-input" type="checkbox" id="cfgNewDestIpEnabled" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                        <input class="form-check-input" type="checkbox" id="cfgNewDestIpEnabled" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         <label class="form-check-label small" for="cfgNewDestIpEnabled">Flag hosts connecting to a destination IP never seen from that host before</label>
                     </div>
                     <div class="form-check form-switch mt-2">
-                        <input class="form-check-input" type="checkbox" id="cfgProcessLineageEnabled" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                        <input class="form-check-input" type="checkbox" id="cfgProcessLineageEnabled" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         <label class="form-check-label small" for="cfgProcessLineageEnabled">Flag hosts with a parent-to-child process relationship never seen before <span class="text-muted">(needs process_image + parent_image)</span></label>
                     </div>
                     <div class="form-check form-switch mt-2">
-                        <input class="form-check-input" type="checkbox" id="cfgOffHoursEnabled" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                        <input class="form-check-input" type="checkbox" id="cfgOffHoursEnabled" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         <label class="form-check-label small" for="cfgOffHoursEnabled">Flag hosts/users active at an hour of day that's unusual for them, judged against a per-hour-of-week baseline <span class="text-muted">(a stable recurring pattern, e.g. always active Friday 11pm, is not penalized)</span></label>
                     </div>
                     <div class="form-check form-switch mt-2 d-flex align-items-center flex-wrap gap-2">
                         <div>
-                            <input class="form-check-input" type="checkbox" id="cfgRareProcessEnabled" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                            <input class="form-check-input" type="checkbox" id="cfgRareProcessEnabled" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                             <label class="form-check-label small" for="cfgRareProcessEnabled">Flag processes rare across the whole fleet, seen on</label>
                         </div>
-                        <input type="number" id="cfgRareProcessMaxHosts" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="50" step="1" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                        <input type="number" id="cfgRareProcessMaxHosts" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="50" step="1" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         <span class="text-muted small">host(s) or fewer <span class="text-muted">(independent of any single host's own baseline)</span></span>
                     </div>
                     <div class="form-check form-switch mt-2 d-flex align-items-center flex-wrap gap-2">
                         <div>
-                            <input class="form-check-input" type="checkbox" id="cfgConvergenceEnabled" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                            <input class="form-check-input" type="checkbox" id="cfgConvergenceEnabled" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                             <label class="form-check-label small" for="cfgConvergenceEnabled">Flag an entity that trips at least</label>
                         </div>
-                        <input type="number" id="cfgConvergenceMinIndicators" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:60px;" min="2" max="10" step="1" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                        <input type="number" id="cfgConvergenceMinIndicators" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:60px;" min="2" max="10" step="1" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         <span class="text-muted small">distinct signal types within</span>
-                        <input type="number" id="cfgConvergenceWindowHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="168" step="1" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                        <input type="number" id="cfgConvergenceWindowHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="168" step="1" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         <span class="text-muted small">hours <span class="text-muted">(one weak signal alone isn't much -- several different ones close together is)</span></span>
                     </div>
                     <div class="form-check form-switch mt-2 d-flex align-items-center flex-wrap gap-2">
                         <div>
-                            <input class="form-check-input" type="checkbox" id="cfgPriorityEnabled" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                            <input class="form-check-input" type="checkbox" id="cfgPriorityEnabled" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                             <label class="form-check-label small" for="cfgPriorityEnabled">Compute an Investigation Priority score over the trailing</label>
                         </div>
-                        <input type="number" id="cfgPriorityWindowDays" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:60px;" min="1" max="365" step="1" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                        <input type="number" id="cfgPriorityWindowDays" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:60px;" min="1" max="365" step="1" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         <span class="text-muted small">day(s), decaying activity with a</span>
-                        <input type="number" id="cfgPriorityHalfLifeHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="8760" step="1" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                        <input type="number" id="cfgPriorityHalfLifeHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="8760" step="1" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         <span class="text-muted small">hour half-life <span class="text-muted">(a "what to look at first" ranking, separate from the raw score -- see the Risk Scoring tab)</span></span>
                     </div>
                     <div class="form-check form-switch mt-2 d-flex align-items-center flex-wrap gap-2">
                         <div>
-                            <input class="form-check-input" type="checkbox" id="cfgAutocaseEnabled" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                            <input class="form-check-input" type="checkbox" id="cfgAutocaseEnabled" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                             <label class="form-check-label small" for="cfgAutocaseEnabled">Auto-create a Case when an entity's weighted risk score reaches</label>
                         </div>
-                        <input type="number" id="cfgAutocaseThreshold" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="1000" step="1" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                        <input type="number" id="cfgAutocaseThreshold" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="1000" step="1" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         <span class="text-muted small">points, using template</span>
-                        <select id="cfgAutocaseTemplate" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                        <select id="cfgAutocaseTemplate" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                             <option value="">No template — empty task list</option>
                         </select>
                         <span class="text-muted small">, waiting at least</span>
-                        <input type="number" id="cfgAutocaseCooldownHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="8760" step="1" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                        <input type="number" id="cfgAutocaseCooldownHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="8760" step="1" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         <span class="text-muted small">hour(s) before creating another one for the same entity <span class="text-muted">(same rolling window as the Risk Scoring tab)</span></span>
                     </div>
-                    {% if current_user.role in ('senior_analyst', 'admin') %}
+                    {% if has_permission('ueba.config.manage') %}
                     <button class="btn btn-primary btn-sm mt-3" onclick="saveUebaConfig()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Tuning</button>
                     <span id="cfgSaveMsg" class="small ms-2" style="display:none;"></span>
                     {% else %}
@@ -311,7 +312,7 @@
                             <tbody id="ueExclusionsTableBody"><tr><td colspan="5" class="text-muted small">No exclusions yet.</td></tr></tbody>
                         </table>
                     </div>
-                    {% if current_user.role in ('senior_analyst', 'admin') %}
+                    {% if has_permission('ueba.config.manage') %}
                     <div class="row g-2 align-items-end bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
                         <div class="col-md-2">
                             <label class="form-label small text-muted mb-1">Type</label>
@@ -351,7 +352,7 @@
                     <div class="row g-3 mb-4">
                         <div class="col-md-3">
                             <label class="form-label">Scoring Window (days) <i class="fa-solid fa-circle-info text-muted small" title="How many days of history are summed to compute an entity's current composite risk score. Contributing events older than this fall out of the total automatically as time passes -- it does not delete anything, it just stops counting toward the score."></i></label>
-                            <input type="number" id="riskCfgWindowDays" class="form-control bg-dark text-light border-secondary" min="1" max="90" oninput="onDynamicScoringFieldChange()" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
+                            <input type="number" id="riskCfgWindowDays" class="form-control bg-dark text-light border-secondary" min="1" max="90" oninput="onDynamicScoringFieldChange()" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         </div>
                     </div>
                     <div class="row g-4">
@@ -365,12 +366,12 @@
                             </button>
                             <div id="rawJsonWrap" style="display:none;">
                                 <label class="form-label small text-muted mb-1">Raw JSON <span class="text-muted">— edits here sync back to the fields on the left and vice versa; mainly useful for pasting in a whole config at once</span></label>
-                                <textarea id="riskCfgPointsJson" class="form-control bg-dark text-light border-secondary font-monospace small" rows="16" spellcheck="false" oninput="onDynamicScoringJsonChange()" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}></textarea>
+                                <textarea id="riskCfgPointsJson" class="form-control bg-dark text-light border-secondary font-monospace small" rows="16" spellcheck="false" oninput="onDynamicScoringJsonChange()" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}></textarea>
                                 <p class="small mt-1 mb-0" id="dynamicScoringJsonStatus">&nbsp;</p>
                             </div>
                         </div>
                     </div>
-                    {% if current_user.role in ('senior_analyst', 'admin') %}
+                    {% if has_permission('ueba.config.manage') %}
                     <button class="btn btn-primary btn-sm mt-3" onclick="saveRiskConfig()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Dynamic Scoring</button>
                     <span id="riskCfgSaveMsg" class="small ms-2" style="display:none;"></span>
                     {% else %}
@@ -393,7 +394,7 @@
                             <button type="button" class="btn btn-outline-secondary ar-quick-filter-btn" data-arqf="disabled" onclick="setArQuickFilter('disabled')">Disabled</button>
                         </div>
                         <span class="ms-auto text-muted small" id="arRowCountLabel"></span>
-                        {% if current_user.role in ('senior_analyst', 'admin') %}
+                        {% if has_permission('ueba.config.manage') %}
                         <button type="button" class="btn btn-sm btn-primary" onclick="openAnomalyRuleModal()"><i class="fa-solid fa-plus me-1"></i> Add Rule</button>
                         {% endif %}
                     </div>
@@ -418,6 +419,60 @@
                         </table>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Asset & Identity pane -->
+    <div id="paneAssetIdentity" style="display:none;">
+        <div class="card-body">
+            <h6 class="text-info mb-3">Assets</h6>
+            <p class="text-muted small mb-3">Mark a host as more important than the fleet default so its UEBA risk score is weighted up -- a domain controller tripping the same indicator as a random workstation deserves more attention, not the same flat score.</p>
+            {% if has_permission('assets.manage') %}
+            <div class="row g-2 mb-3" style="max-width:640px;">
+                <div class="col-md-4"><input type="text" id="newAssetHost" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Hostname"></div>
+                <div class="col-md-3">
+                    <select id="newAssetCriticality" class="form-select form-select-sm bg-dark text-light border-secondary">
+                        <option value="standard">Standard (1x)</option>
+                        <option value="important">Important (1.5x)</option>
+                        <option value="critical">Critical (2x)</option>
+                    </select>
+                </div>
+                <div class="col-md-3"><input type="text" id="newAssetOwner" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Owner (optional)"></div>
+                <div class="col-md-2"><button class="btn btn-outline-primary btn-sm w-100" onclick="addAsset()"><i class="fa-solid fa-plus me-1"></i>Add</button></div>
+            </div>
+            <div id="assetError" class="text-danger small mb-2" style="display:none;"></div>
+            {% endif %}
+            <div class="table-responsive">
+                <table class="table table-dark table-sm align-middle mb-0">
+                    <thead><tr><th>Host</th><th>Criticality</th><th>Owner</th><th></th></tr></thead>
+                    <tbody id="assetsTableBody"><tr><td colspan="4" class="text-center text-muted py-3">Loading…</td></tr></tbody>
+                </table>
+            </div>
+
+            <hr class="border-secondary my-4">
+
+            <h6 class="text-info mb-3">Identities</h6>
+            <p class="text-muted small mb-3">Mark a user as privileged so their UEBA risk score is weighted up (&times;1.5) -- an admin account is a higher-value target than a standard one.</p>
+            {% if has_permission('assets.manage') %}
+            <div class="row g-2 mb-3" style="max-width:640px;">
+                <div class="col-md-4"><input type="text" id="newIdentityUsername" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Username"></div>
+                <div class="col-md-3"><input type="text" id="newIdentityDepartment" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Department (optional)"></div>
+                <div class="col-md-3 d-flex align-items-center">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="newIdentityPrivileged">
+                        <label class="form-check-label small" for="newIdentityPrivileged">Privileged</label>
+                    </div>
+                </div>
+                <div class="col-md-2"><button class="btn btn-outline-primary btn-sm w-100" onclick="addIdentity()"><i class="fa-solid fa-plus me-1"></i>Add</button></div>
+            </div>
+            <div id="identityError" class="text-danger small mb-2" style="display:none;"></div>
+            {% endif %}
+            <div class="table-responsive">
+                <table class="table table-dark table-sm align-middle mb-0">
+                    <thead><tr><th>Username</th><th>Department</th><th>Privileged</th><th></th></tr></thead>
+                    <tbody id="identitiesTableBody"><tr><td colspan="4" class="text-center text-muted py-3">Loading…</td></tr></tbody>
+                </table>
             </div>
         </div>
     </div>
@@ -492,16 +547,16 @@
 {% block scripts %}
 <script>
 // Every IS_ADMIN-gated control on this page (model tuning, scoring rules,
-// exclusions) falls under "manage backend data" -- Tier 3+, not Admin-only.
-// Named IS_ADMIN still, unchanged, to avoid touching every call site below.
-const IS_ADMIN = roleAtLeast('senior_analyst');
+// exclusions) requires the ueba.config.manage permission. Named IS_ADMIN still,
+// unchanged, to avoid touching every call site below.
+const IS_ADMIN = hasPermission('ueba.config.manage');
 
 function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
 // ---- Tabs + shared stat row (repurposed per active tab, not two separate rows) ----
-const UEBA_TABS = ['timeline', 'risk', 'insights', 'tuning', 'rules'];
+const UEBA_TABS = ['timeline', 'risk', 'insights', 'tuning', 'rules', 'assetIdentity'];
 let activeUebaTab = 'timeline';
 
 function switchUebaTab(tab) {
@@ -515,6 +570,7 @@ function switchUebaTab(tab) {
     if (tab === 'risk' && !riskScoresLoadedOnce) loadRiskScores();
     if (tab === 'rules' && !anomalyRulesLoadedOnce) loadAnomalyRules();
     if (tab === 'timeline' && !timelineLoadedOnce) loadTimeline();
+    if (tab === 'assetIdentity' && !assetIdentityLoadedOnce) { assetIdentityLoadedOnce = true; loadAssets(); loadIdentities(); }
     updateSharedStats();
 }
 
@@ -1577,6 +1633,129 @@ async function deleteAnomalyRule(rid) {
     fetch(`/api/ueba/anomaly-rules/${rid}`, {method: 'DELETE'})
         .then(() => loadAnomalyRules())
         .catch(err => toast('Error deleting rule: ' + err, 'danger'));
+}
+
+// ---- Asset & Identity ----
+// Lives here (not Settings) because asset criticality / identity privileged flags are
+// UEBA risk-scoring inputs, not general platform config.
+let assetIdentityLoadedOnce = false;
+const ASSET_IS_ADMIN = hasPermission('assets.manage');
+const CRITICALITY_LABELS = {standard: 'Standard (1x)', important: 'Important (1.5x)', critical: 'Critical (2x)'};
+const CRITICALITY_BADGE = {standard: 'secondary', important: 'warning', critical: 'danger'};
+
+function loadAssets() {
+    fetch('/api/assets').then(r => r.json()).then(rows => {
+        const tbody = document.getElementById('assetsTableBody');
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="4" class="text-muted small">No assets yet.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map(a => `<tr>
+            <td class="fw-bold">${escHtml(a.host)}</td>
+            <td>${ASSET_IS_ADMIN
+                ? `<select class="form-select form-select-sm bg-dark text-light border-secondary d-inline-block w-auto" onchange="updateAssetCriticality(${a.id}, this.value)">
+                    ${Object.keys(CRITICALITY_LABELS).map(c => `<option value="${c}" ${c === a.criticality ? 'selected' : ''}>${CRITICALITY_LABELS[c]}</option>`).join('')}
+                   </select>`
+                : `<span class="badge bg-${CRITICALITY_BADGE[a.criticality] || 'secondary'}">${CRITICALITY_LABELS[a.criticality] || a.criticality}</span>`}</td>
+            <td class="small text-muted">${escHtml(a.owner || '')}</td>
+            <td>${ASSET_IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteAsset(${a.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
+        </tr>`).join('');
+    }).catch(err => console.error('Error loading assets:', err));
+}
+
+function addAsset() {
+    const payload = {
+        host: document.getElementById('newAssetHost').value.trim(),
+        criticality: document.getElementById('newAssetCriticality').value,
+        owner: document.getElementById('newAssetOwner').value.trim()
+    };
+    const errBox = document.getElementById('assetError');
+    errBox.style.display = 'none';
+    if (!payload.host) {
+        errBox.innerText = 'Host is required.'; errBox.style.display = 'block'; return;
+    }
+    fetch('/api/assets', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (ok) {
+            document.getElementById('newAssetHost').value = '';
+            document.getElementById('newAssetOwner').value = '';
+            loadAssets();
+        } else {
+            errBox.innerText = data.error || 'Failed to add asset.'; errBox.style.display = 'block';
+        }
+    }).catch(err => { errBox.innerText = 'Error: ' + err; errBox.style.display = 'block'; });
+}
+
+function updateAssetCriticality(aid, criticality) {
+    fetch(`/api/assets/${aid}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({criticality})
+    }).then(() => loadAssets())
+      .catch(err => toast('Error updating asset: ' + err, 'danger'));
+}
+
+async function deleteAsset(aid) {
+    if (!(await confirmDialog('Delete this asset?', {title: 'Delete asset', danger: true, confirmLabel: 'Delete'}))) return;
+    fetch(`/api/assets/${aid}`, {method: 'DELETE'})
+        .then(() => loadAssets())
+        .catch(err => toast('Error deleting asset: ' + err, 'danger'));
+}
+
+function loadIdentities() {
+    fetch('/api/identities').then(r => r.json()).then(rows => {
+        const tbody = document.getElementById('identitiesTableBody');
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="4" class="text-muted small">No identities yet.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map(i => `<tr>
+            <td class="fw-bold">${escHtml(i.username)}</td>
+            <td class="small text-muted">${escHtml(i.department || '')}</td>
+            <td>${ASSET_IS_ADMIN
+                ? `<input type="checkbox" class="form-check-input" ${i.privileged ? 'checked' : ''} onchange="updateIdentityPrivileged(${i.id}, this.checked)">`
+                : (i.privileged ? '<span class="badge bg-warning">Privileged</span>' : '<span class="badge bg-secondary">Standard</span>')}</td>
+            <td>${ASSET_IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteIdentity(${i.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
+        </tr>`).join('');
+    }).catch(err => console.error('Error loading identities:', err));
+}
+
+function addIdentity() {
+    const payload = {
+        username: document.getElementById('newIdentityUsername').value.trim(),
+        department: document.getElementById('newIdentityDepartment').value.trim(),
+        privileged: document.getElementById('newIdentityPrivileged').checked
+    };
+    const errBox = document.getElementById('identityError');
+    errBox.style.display = 'none';
+    if (!payload.username) {
+        errBox.innerText = 'Username is required.'; errBox.style.display = 'block'; return;
+    }
+    fetch('/api/identities', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (ok) {
+            document.getElementById('newIdentityUsername').value = '';
+            document.getElementById('newIdentityDepartment').value = '';
+            document.getElementById('newIdentityPrivileged').checked = false;
+            loadIdentities();
+        } else {
+            errBox.innerText = data.error || 'Failed to add identity.'; errBox.style.display = 'block';
+        }
+    }).catch(err => { errBox.innerText = 'Error: ' + err; errBox.style.display = 'block'; });
+}
+
+function updateIdentityPrivileged(iid, privileged) {
+    fetch(`/api/identities/${iid}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({privileged})
+    }).then(() => loadIdentities())
+      .catch(err => toast('Error updating identity: ' + err, 'danger'));
+}
+
+async function deleteIdentity(iid) {
+    if (!(await confirmDialog('Delete this identity?', {title: 'Delete identity', danger: true, confirmLabel: 'Delete'}))) return;
+    fetch(`/api/identities/${iid}`, {method: 'DELETE'})
+        .then(() => loadIdentities())
+        .catch(err => toast('Error deleting identity: ' + err, 'danger'));
 }
 
 // ---- Init ----
