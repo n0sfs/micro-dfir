@@ -428,8 +428,9 @@ body.sidebar-collapsed .btn-logout span{display:none;}
             <a href="{{ url_for('settings') }}" class="nav-link {{ 'active' if request.endpoint in ['settings','settings_network'] else '' }}" title="Settings"><i class="fa-solid fa-gear"></i><span>Settings</span></a>
         </div>
 
+        {% set role_labels = {'analyst': 'Tier 1/2', 'senior_analyst': 'Tier 3', 'admin': 'Admin'} %}
         <div class="user-panel">
-            <div class="user-row" title="{{ current_user.username }} ({{ current_user.role }})"><i class="fa-solid fa-circle-user"></i> <span>{{ current_user.username }}</span> <span class="role-badge">{{ current_user.role }}</span></div>
+            <div class="user-row" title="{{ current_user.username }} ({{ role_labels.get(current_user.role, current_user.role) }})"><i class="fa-solid fa-circle-user"></i> <span>{{ current_user.username }}</span> <span class="role-badge">{{ role_labels.get(current_user.role, current_user.role) }}</span></div>
             <a href="/logout" class="btn-logout" title="Logout"><i class="fa-solid fa-arrow-right-from-bracket"></i> <span>Logout</span></a>
         </div>
     </div>
@@ -445,6 +446,18 @@ body.sidebar-collapsed .btn-logout span{display:none;}
     </div>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script><script src="https://cdn.jsdelivr.net/npm/gridstack@8.2.1/dist/gridstack-all.js"></script>
     <script>
+        // ---------- SOC tier access (shared across every page) ----------
+        // Mirrors src/app.py's ROLE_RANK/require_role() exactly -- a strict escalation
+        // ladder (Tier 1/2 analyst < Tier 3 senior_analyst < admin), not independent
+        // capability grants, so a rank comparison is all any page needs. This is
+        // UI-only convenience (hiding a control a user's real request would 403 on
+        // anyway) -- the actual enforcement is always server-side.
+        const CURRENT_ROLE = {{ current_user.role|tojson }};
+        const ROLE_RANK = { analyst: 1, senior_analyst: 2, admin: 3 };
+        function roleAtLeast(minRole) {
+            return (ROLE_RANK[CURRENT_ROLE] || 0) >= ROLE_RANK[minRole];
+        }
+
         function toggleSidebar() {
             const collapsed = document.body.classList.toggle('sidebar-collapsed');
             try { localStorage.setItem('microdfir_sidebar_collapsed', collapsed ? '1' : '0'); } catch (e) {}

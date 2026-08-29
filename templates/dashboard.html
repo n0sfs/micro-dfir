@@ -812,7 +812,7 @@
 
         <h6 class="text-info mb-2"><i class="fa-solid fa-gauge-high me-1"></i>Severity Scoring</h6>
         <div class="d-flex align-items-center gap-2 mb-4">
-            <select id="tuneSeveritySelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+            <select id="tuneSeveritySelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                 <option value="">Inherit from rule level</option>
                 <option value="critical">Critical</option>
                 <option value="high">High</option>
@@ -820,7 +820,7 @@
                 <option value="low">Low</option>
                 <option value="informational">Informational</option>
             </select>
-            {% if current_user.role == 'admin' %}
+            {% if current_user.role in ('senior_analyst', 'admin') %}
             <button type="button" class="btn btn-sm btn-outline-primary" onclick="saveSeverity()"><i class="fa-solid fa-floppy-disk me-1"></i> Save</button>
             <span id="tuneSeverityMsg" class="small text-success" style="display:none;"></span>
             {% endif %}
@@ -829,13 +829,13 @@
         <h6 class="text-info mb-2"><i class="fa-solid fa-folder-plus me-1"></i>Automation <span class="text-muted small">— auto-create a Case the first time this rule fires on a host/user (repeat occurrences within the existing 15-min alert window just add to that same alert, not a new case)</span></h6>
         <div class="d-flex align-items-center flex-wrap gap-2 mb-4">
             <div class="form-check form-switch mb-0">
-                <input class="form-check-input" type="checkbox" id="tuneAutoCaseEnabled" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+                <input class="form-check-input" type="checkbox" id="tuneAutoCaseEnabled" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                 <label class="form-check-label small" for="tuneAutoCaseEnabled">Auto-create a case when this rule fires</label>
             </div>
-            <select id="tuneAutoCaseTemplate" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;" {{ '' if current_user.role == 'admin' else 'disabled' }}>
+            <select id="tuneAutoCaseTemplate" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;" {{ '' if current_user.role in ('senior_analyst', 'admin') else 'disabled' }}>
                 <option value="">No template — empty task list</option>
             </select>
-            {% if current_user.role == 'admin' %}
+            {% if current_user.role in ('senior_analyst', 'admin') %}
             <button type="button" class="btn btn-sm btn-outline-primary" onclick="saveAutoCase()"><i class="fa-solid fa-floppy-disk me-1"></i> Save</button>
             <span id="tuneAutoCaseMsg" class="small text-success" style="display:none;"></span>
             {% endif %}
@@ -848,7 +848,7 @@
                 <tbody id="exclusionsTableBody"><tr><td colspan="6" class="text-muted small">No exclusions yet.</td></tr></tbody>
             </table>
         </div>
-        {% if current_user.role == 'admin' %}
+        {% if current_user.role in ('senior_analyst', 'admin') %}
         <div class="row g-2 align-items-end bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
             <div class="col-md-2">
                 <label class="form-label small text-muted mb-1">Field</label>
@@ -874,7 +874,7 @@
         {% endif %}
       </div>
       <div class="modal-footer border-secondary">
-        {% if current_user.role == 'admin' %}
+        {% if current_user.role in ('senior_analyst', 'admin') %}
         <button type="button" class="btn btn-outline-warning me-auto" id="tuneToggleBtn" onclick="toggleTuneRuleEnabled()"></button>
         {% endif %}
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
@@ -2244,7 +2244,10 @@ function initPipelineTab() {
 // =====================================================================
 // DETECTION RULES TAB
 // =====================================================================
-const IS_ADMIN = {{ 'true' if current_user.role == 'admin' else 'false' }};
+// Compliance-tag checkboxes and exclusion management are both "tune detection
+// logic" -- Tier 3+, not Admin-only. Named IS_ADMIN still, unchanged, to avoid
+// touching every call site below.
+const IS_ADMIN = roleAtLeast('senior_analyst');
 let allRules = [];
 let selectedIds = new Set();
 

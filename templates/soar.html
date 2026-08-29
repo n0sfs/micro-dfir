@@ -5,12 +5,14 @@
         <h2><i class="fa-solid fa-robot me-2"></i>SOAR</h2>
         <p>Automated response playbooks triggered by case lifecycle events.</p>
     </div>
-    {% if current_user.role == 'admin' %}
     <div class="d-flex gap-2">
+        {% if current_user.role == 'admin' %}
         <button type="button" class="btn btn-outline-secondary" onclick="showSecretsModal()"><i class="fa-solid fa-key me-1"></i>Manage Secrets</button>
+        {% endif %}
+        {% if current_user.role in ('senior_analyst', 'admin') %}
         <button type="button" class="btn btn-primary" onclick="showPlaybookModal()"><i class="fa-solid fa-plus me-1"></i>New Playbook</button>
+        {% endif %}
     </div>
-    {% endif %}
 </div>
 
 <div class="card bg-dark border-secondary mb-3">
@@ -180,7 +182,8 @@
 </div>
 
 <script>
-const IS_ADMIN = {{ 'true' if current_user.role == 'admin' else 'false' }};
+const IS_ADMIN = {{ 'true' if current_user.role == 'admin' else 'false' }}; // playbook secrets stay Admin-only
+const CAN_MANAGE_PLAYBOOKS = roleAtLeast('senior_analyst'); // playbook CRUD/toggle -- Tier 3+
 let allPlaybooks = [];
 let allQueuesForPb = [];
 let caseTemplatesForPb = [];
@@ -292,7 +295,7 @@ function conditionSummary(p) {
 function renderPlaybooksTable() {
     const tbody = document.getElementById('playbooksTableBody');
     if (!allPlaybooks.length) {
-        tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-4">No playbooks yet.${IS_ADMIN ? ' Click "New Playbook" to create one.' : ''}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-4">No playbooks yet.${CAN_MANAGE_PLAYBOOKS ? ' Click "New Playbook" to create one.' : ''}</td></tr>`;
         return;
     }
     tbody.innerHTML = allPlaybooks.map(p => `
@@ -303,13 +306,13 @@ function renderPlaybooksTable() {
             <td class="small">${p.actions.length} step${p.actions.length === 1 ? '' : 's'}</td>
             <td class="small"><a href="#" onclick="showPlaybookRuns(${p.id}, '${escJs(p.name)}'); return false;">${p.run_count}</a></td>
             <td>
-                ${IS_ADMIN
+                ${CAN_MANAGE_PLAYBOOKS
                     ? `<div class="form-check form-switch mb-0"><input class="form-check-input" type="checkbox" role="switch" ${p.enabled ? 'checked' : ''} onchange="togglePlaybook(${p.id}, this.checked)"></div>`
                     : (p.enabled ? '<span class="badge bg-success">On</span>' : '<span class="badge bg-secondary">Off</span>')}
             </td>
             <td class="text-end pe-3">
                 <button type="button" class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="Test against a real case (no changes made)" onclick="showPlaybookTestModal(${p.id}, '${escJs(p.name)}')"><i class="fa-solid fa-flask"></i></button>
-                ${IS_ADMIN ? `
+                ${CAN_MANAGE_PLAYBOOKS ? `
                 <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 me-1" title="Edit" onclick="editPlaybook(${p.id})"><i class="fa-solid fa-pen"></i></button>
                 <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete" onclick="deletePlaybook(${p.id}, '${escJs(p.name)}')"><i class="fa-solid fa-trash"></i></button>` : ''}
             </td>
