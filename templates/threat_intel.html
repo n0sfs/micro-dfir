@@ -87,6 +87,30 @@
                 </div>
             </div>
 
+            {% if current_user.role == 'admin' %}
+            <div class="card bg-dark border-secondary mb-4">
+                <div class="card-header"><i class="fa-solid fa-broom me-2"></i>IOC Retention</div>
+                <div class="card-body">
+                    <p class="text-muted small mb-3">ThreatFox/URLhaus/Feodo Tracker sync "recent" rolling-window data hourly, but nothing removes an indicator once it ages out of that window — left unchecked, the local IOC set grows unbounded. Automatic purge is on by default; the actual "this was observed in your environment" sighting history is kept regardless.</p>
+                    <div class="row g-2 align-items-end mb-3">
+                        <div class="col-auto">
+                            <label class="form-label small text-muted mb-1">Retention (days)</label>
+                            <input type="number" min="1" id="iocRetentionDays" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;">
+                        </div>
+                        <div class="col-auto">
+                            <button class="btn btn-outline-danger btn-sm" onclick="purgeIocsNow()"><i class="fa-solid fa-trash-can me-1"></i> Purge Now</button>
+                        </div>
+                    </div>
+                    <div class="form-check form-switch mb-2">
+                        <input class="form-check-input" type="checkbox" id="iocRetentionAutoEnabled">
+                        <label class="form-check-label small" for="iocRetentionAutoEnabled">Automatically purge indicators older than the period above (checked daily)</label>
+                    </div>
+                    <button class="btn btn-outline-primary btn-sm" onclick="saveIocRetentionPolicy()"><i class="fa-solid fa-save me-1"></i> Save Retention Policy</button>
+                    <div class="small text-muted mt-2" id="iocRetentionStatus"></div>
+                </div>
+            </div>
+            {% endif %}
+
             <div class="card bg-dark border-secondary mb-4">
                 <div class="card-header">
                     <i class="fa-solid fa-shield-halved me-2"></i>Warninglist Suppression
@@ -1190,6 +1214,61 @@ async function saveEnrichmentSettings() {
     }
 }
 
+function loadIocRetentionSettings() {
+    const input = document.getElementById('iocRetentionDays');
+    if (!input) return;  // non-admin: the section isn't rendered
+    fetch('/api/settings/ioc-retention').then(r => r.json()).then(data => {
+        input.value = data.days || 30;
+        document.getElementById('iocRetentionAutoEnabled').checked = !!data.days;
+        renderIocRetentionStatus(data);
+    }).catch(err => console.error('Error loading IOC retention settings:', err));
+}
+
+function renderIocRetentionStatus(data) {
+    const el = document.getElementById('iocRetentionStatus');
+    if (data.days) {
+        const last = data.last_purge ? `Last purge: ${data.last_purge}.` : 'No purge yet (checked daily).';
+        el.innerText = `Automatic purge is ON — indicators older than ${data.days} day(s) are removed. ${last}`;
+    } else {
+        el.innerText = 'Automatic purge is OFF. Use "Purge Now" for a one-time run.';
+    }
+}
+
+function purgeIocsNow() {
+    const days = parseInt(document.getElementById('iocRetentionDays').value, 10);
+    if (!days || days < 1) { toast('Enter a valid number of days.', 'warning'); return; }
+    fetch('/api/settings/ioc-retention/run', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({days: days})
+    })
+        .then(r => r.json())
+        .then(res => {
+            if (res.status === 'success') {
+                toast(`Purged ${res.deleted} indicator(s) older than ${res.cutoff}.`, 'success', {duration: 6000});
+                loadIocRetentionSettings();
+                loadIocs();
+            } else {
+                toast(res.error || 'IOC purge failed.', 'danger');
+            }
+        }).catch(err => toast('Error running IOC purge: ' + err, 'danger'));
+}
+
+function saveIocRetentionPolicy() {
+    const autoEnabled = document.getElementById('iocRetentionAutoEnabled').checked;
+    const days = parseInt(document.getElementById('iocRetentionDays').value, 10);
+    if (autoEnabled && (!days || days < 1)) { toast('Enter a valid number of days.', 'warning'); return; }
+    fetch('/api/settings/ioc-retention', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({days: autoEnabled ? days : 0})
+    }).then(r => r.json()).then(res => {
+        if (res.status === 'success') {
+            loadIocRetentionSettings();
+        } else {
+            toast(res.error || 'Failed to save IOC retention policy.', 'danger');
+        }
+    }).catch(err => toast('Error saving IOC retention policy: ' + err, 'danger'));
+}
+
 function loadEnrichmentSettings() {
     const input = document.getElementById('abuseipdbKeyInput');
     if (!input) return;  // non-admin: the section isn't rendered
@@ -1610,6 +1689,7 @@ loadFeeds();
 loadEntities();
 loadWarninglists();
 loadEnrichmentSettings();
+loadIocRetentionSettings();
 loadIocs();
 loadIocFacets();
 initIocFilterDropdowns();

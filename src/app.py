@@ -5871,6 +5871,12 @@ def api_settings_retention():
 # since this route only needs the number for display, not the archiving logic itself.
 DEFAULT_LOG_ARCHIVE_DAYS = 90
 
+# Mirrors sigma_engine.py's own DEFAULT_IOC_RETENTION_DAYS -- see run_due_ioc_purge()
+# there for why this is enabled by default (unlike log retention/purge above): an IOC
+# that ages out just re-syncs if its feed still carries it, and the "this was actually
+# observed here" evidence lives in ioc_sightings, untouched by this purge.
+DEFAULT_IOC_RETENTION_DAYS = 30
+
 @app.route('/api/settings/archive', methods=['GET', 'POST'])
 @login_required
 def api_settings_archive():
@@ -5920,6 +5926,69 @@ def api_settings_archive_run():
     result = archive_old_logs(days_override)
     log_audit('manual_log_archive', 'settings', None, f"archived={result['archived']}, cutoff={result['cutoff']}")
     return jsonify({'status': 'success', **result})
+
+@app.route('/api/settings/ioc-retention', methods=['GET', 'POST'])
+@login_required
+def api_settings_ioc_retention():
+    from flask import request, jsonify
+    db = get_db()
+
+    if request.method == 'GET':
+        days_row = db.execute("SELECT value FROM settings WHERE key = 'ioc_retention_days'").fetchone()
+        last_row = db.execute("SELECT value FROM settings WHERE key = 'ioc_retention_last_purge'").fetchone()
+        days = int(days_row['value']) if days_row and days_row['value'] else DEFAULT_IOC_RETENTION_DAYS
+        return jsonify({'days': days, 'last_purge': last_row['value'] if last_row and last_row['value'] else None})
+
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    d = request.json or {}
+    days = d.get('days')
+    if days in (None, '', 0, '0'):
+        # '0' is a real stored sentinel (not just an unset row) so run_due_ioc_purge()
+        # can tell "admin explicitly disabled this" from "never configured" -- the
+        # latter still defaults to DEFAULT_IOC_RETENTION_DAYS above/there.
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ioc_retention_days', '0')")
+        db.commit()
+        log_audit('ioc_retention_policy_change', 'settings', None, 'disabled')
+        return jsonify({'status': 'success', 'days': 0})
+    try:
+        days = int(days)
+        if days < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({'error': 'days must be a positive integer, or 0 to disable automatic purge'}), 400
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ioc_retention_days', ?)", (str(days),))
+    db.commit()
+    log_audit('ioc_retention_policy_change', 'settings', None, f'{days} days')
+    return jsonify({'status': 'success', 'days': days})
+
+@app.route('/api/settings/ioc-retention/run', methods=['POST'])
+@login_required
+def api_settings_ioc_retention_run():
+    from flask import request, jsonify
+    import datetime
+    if current_user.role != 'admin':
+        return jsonify({'error': 'Admin required'}), 403
+    db = get_db()
+    days = (request.json or {}).get('days') if request.is_json else None
+    if days is None:
+        days_row = db.execute("SELECT value FROM settings WHERE key = 'ioc_retention_days'").fetchone()
+        days = int(days_row['value']) if days_row and days_row['value'] else DEFAULT_IOC_RETENTION_DAYS
+    try:
+        days = int(days)
+        if days < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({'error': 'days must be a positive integer'}), 400
+
+    now = datetime.datetime.now()
+    cutoff = (now - datetime.timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+    cur = db.execute("DELETE FROM stix_indicators WHERE inserted_at < ?", (cutoff,))
+    deleted = cur.rowcount
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ioc_retention_last_purge', ?)", (now.strftime('%Y-%m-%d %H:%M:%S'),))
+    db.commit()
+    log_audit('manual_ioc_purge', 'settings', None, f'deleted={deleted}, cutoff={cutoff}')
+    return jsonify({'status': 'success', 'deleted': deleted, 'cutoff': cutoff})
 
 @app.route('/api/settings/vacuum', methods=['POST'])
 @login_required
