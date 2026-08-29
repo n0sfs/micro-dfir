@@ -644,13 +644,15 @@ function addWidgetToGrid(w) {
             <div class="card-body widget-body" id="widgetBody_${w.id}"></div>
         </div>`,
     });
-    // Deferred a frame so the grid item's CSS layout has resolved a real height
-    // before Chart.js measures its canvas's parent -- otherwise a chart built
-    // synchronously here can measure a still-zero-height container and draw nothing.
-    requestAnimationFrame(() => {
-        const container = document.getElementById(`widgetBody_${w.id}`);
-        if (container) def.render(container, w.id, w.config || {});
-    });
+    // Rendered synchronously, right after grid.addWidget() returns -- GridStack
+    // applies the grid item's layout (and so a real, non-zero pixel height) inline
+    // and immediately as part of addWidget() itself, so the container already has
+    // a real height by the time Chart.js measures it here. (Deliberately NOT
+    // deferred via requestAnimationFrame: rAF callbacks are suspended entirely in a
+    // backgrounded/unfocused tab, which would leave every widget stuck on "Loading"
+    // until the tab regains focus -- confirmed live, not a hypothetical.)
+    const container = document.getElementById(`widgetBody_${w.id}`);
+    if (container) def.render(container, w.id, w.config || {});
 }
 
 function removeWidget(wid) {
