@@ -1678,6 +1678,48 @@ def api_rules_validate_all():
             failed.append({'id': r['id'], 'title': r['title'], 'error': str(e)})
     return jsonify({'checked': len(rules), 'failed': failed})
 
+# The real, execute-against-logs dry run (see api_rules_dry_run() above) for a
+# hand-picked, bounded set of rules instead of one at a time -- e.g. the exact rules
+# an analyst is about to enable, or a set they're curious about. Deliberately capped
+# (SIGMA_VALIDATE_SELECTED_MAX) rather than left open-ended: this is the same
+# execute-against-live_logs work api_rules_validate_all() specifically avoids for
+# performance reasons (a full "Select All Visible" -> hundreds/thousands of rules
+# would reproduce that exact multi-minute problem), so it only stays fast because the
+# caller is choosing a small, deliberate set, not "every rule."
+SIGMA_VALIDATE_SELECTED_MAX = 25
+SIGMA_VALIDATE_SELECTED_PREVIEW_LIMIT = 5
+
+@app.route('/api/rules/validate-selected', methods=['POST'])
+@login_required
+def api_rules_validate_selected():
+    d = request.get_json() or {}
+    rule_ids = d.get('rule_ids') or []
+    if not isinstance(rule_ids, list) or not rule_ids:
+        return jsonify({'error': 'rule_ids must be a non-empty list'}), 400
+    if len(rule_ids) > SIGMA_VALIDATE_SELECTED_MAX:
+        return jsonify({'error': f'Select at most {SIGMA_VALIDATE_SELECTED_MAX} rules at a time to test against real logs.'}), 400
+    days = SIGMA_DRY_RUN_WINDOWS.get(d.get('window'), 7)
+
+    db = get_db()
+    from sigma_engine import dry_run_rule
+    ioc_cache = {}
+    results = []
+    for rid in rule_ids:
+        row = db.execute("SELECT title, rule_yaml FROM sigma_rules WHERE id = ?", (rid,)).fetchone()
+        if not row:
+            results.append({'id': rid, 'title': f'(rule {rid})', 'ok': False, 'error': 'Rule not found'})
+            continue
+        exclusions = [dict(e) for e in db.execute(
+            "SELECT field, operator, value FROM rule_exclusions WHERE rule_id = ? AND enabled = 1", (rid,)
+        ).fetchall()]
+        try:
+            dr = dry_run_rule(db, row['rule_yaml'], days=days, exclusions=exclusions,
+                               preview_limit=SIGMA_VALIDATE_SELECTED_PREVIEW_LIMIT, ioc_cache=ioc_cache)
+            results.append({'id': rid, 'title': row['title'], 'ok': True, **dr})
+        except Exception as e:
+            results.append({'id': rid, 'title': row['title'], 'ok': False, 'error': f'Rule failed to parse or convert: {e}'})
+    return jsonify({'window_days': days, 'results': results})
+
 def _build_mitre_coverage(rules):
     """Aggregates MITRE technique coverage across enabled rules (each a dict
     with 'enabled' and 'mitre_techniques', matching _get_rules_cache()'s

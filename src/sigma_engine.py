@@ -327,7 +327,7 @@ DRY_RUN_PREVIEW_FIELDS = ('id', 'timestamp', 'host', 'app', 'severity', 'event_i
 # connection -- the TEMP VIEW this creates is connection-scoped and gone once that
 # request's connection closes, so it can never collide with the live engine's own
 # per-cycle `recent_events` view on its separate, long-lived connection.
-def dry_run_rule(conn, rule_yaml, days=7, exclusions=None, preview_limit=20):
+def dry_run_rule(conn, rule_yaml, days=7, exclusions=None, preview_limit=20, ioc_cache=None):
     conn.create_function('REGEXP', 2, _sqlite_regexp)
     cursor = conn.cursor()
 
@@ -335,7 +335,12 @@ def dry_run_rule(conn, rule_yaml, days=7, exclusions=None, preview_limit=20):
     cursor.execute("DROP VIEW IF EXISTS recent_events")
     cursor.execute(f"CREATE TEMP VIEW recent_events AS SELECT * FROM live_logs WHERE timestamp >= '{cutoff}'")
 
-    rule_yaml_text = _prepare_ioc_correlation(_normalize_rule_dates(rule_yaml), cursor, {})
+    # ioc_cache defaults to a fresh dict (this call's own IOC lookup tables, built once
+    # for however many kinds THIS rule references) -- a caller validating several rules
+    # in one pass can instead pass one shared dict across every call, so the tables are
+    # built at most once for the whole batch rather than once per rule (same restraint
+    # check_rule_converts()/run_detection_cycle() apply).
+    rule_yaml_text = _prepare_ioc_correlation(_normalize_rule_dates(rule_yaml), cursor, ioc_cache if ioc_cache is not None else {})
     backend = _make_backend()
     queries = backend.convert(SigmaCollection.from_yaml(rule_yaml_text))  # raises on invalid/unconvertible rule -- caller reports it
 
