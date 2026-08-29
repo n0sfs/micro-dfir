@@ -544,13 +544,64 @@ def run_due_log_purge():
     if deleted:
         print(f"[+] Automatic log purge: deleted {deleted} log(s) older than {retention_days} day(s) (cutoff {cutoff}).", flush=True)
 
+# stix_indicators has no natural TTL of its own -- ThreatFox/URLhaus/Feodo Tracker's
+# "recent" endpoints are rolling windows, so an indicator that ages out of the feed just
+# stops being re-synced (see migrate_stix_indicators's INSERT OR REPLACE, and
+# `inserted_at DEFAULT CURRENT_TIMESTAMP` in schema.sql -- a resync refreshes it, so an
+# unchanged inserted_at genuinely means "not seen in any feed export since"). Left
+# unchecked this grows unbounded -- confirmed at 135k+ rows in production, which is what
+# originally blew SQLite's expression-tree-depth limit on IOC-correlation rules (see
+# _IOC_KINDS above). Unlike log retention, this defaults to ON: an aged-out IOC just
+# re-syncs if its feed still carries it, and the actual "this was observed in our
+# environment" evidence lives in ioc_sightings (untouched -- see _record_ioc_sightings),
+# so purging stix_indicators here is low-risk cache cleanup, not evidence destruction.
+DEFAULT_IOC_RETENTION_DAYS = 30
+
+def run_due_ioc_purge():
+    if not os.path.exists(DB_PATH):
+        return
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    days_row = cursor.execute("SELECT value FROM settings WHERE key = 'ioc_retention_days'").fetchone()
+    try:
+        retention_days = int(days_row['value']) if days_row and days_row['value'] else DEFAULT_IOC_RETENTION_DAYS
+    except (TypeError, ValueError):
+        retention_days = DEFAULT_IOC_RETENTION_DAYS
+    if retention_days < 1:
+        conn.close()
+        return  # admin explicitly disabled automatic purge (stored '0', not just unset)
+
+    now = datetime.datetime.now()
+    last_row = cursor.execute("SELECT value FROM settings WHERE key = 'ioc_retention_last_purge'").fetchone()
+    if last_row and last_row['value']:
+        try:
+            last_purge = datetime.datetime.strptime(last_row['value'], '%Y-%m-%d %H:%M:%S')
+            if (now - last_purge).total_seconds() < 24 * 3600:
+                conn.close()
+                return  # already ran within the last day
+        except (ValueError, TypeError):
+            pass  # unparseable timestamp -- treat as due, same as never having run
+
+    cutoff = (now - datetime.timedelta(days=retention_days)).strftime('%Y-%m-%d %H:%M:%S')
+    now_str = now.strftime('%Y-%m-%d %H:%M:%S')
+    cursor.execute("DELETE FROM stix_indicators WHERE inserted_at < ?", (cutoff,))
+    deleted = cursor.rowcount
+    cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ioc_retention_last_purge', ?)", (now_str,))
+    conn.commit()
+    conn.close()
+    if deleted:
+        print(f"[+] Automatic IOC purge: deleted {deleted} stale indicator(s) older than {retention_days} day(s) (cutoff {cutoff}).", flush=True)
+
 if __name__ == "__main__":
-    # Threat intel feed auto-sync and automatic log purge both piggyback on this loop
-    # rather than running as their own scheduler service — this is the only long-lived
-    # background loop deployable through the existing update.sh pipeline without
-    # hand-provisioning a new systemd unit or cron entry on the host. Both checks are
-    # cheap on every cycle (a SELECT against settings/ti_feeds) unless something's
-    # actually due, so running them every 30s adds negligible overhead.
+    # Threat intel feed auto-sync, automatic log purge, and automatic IOC purge all
+    # piggyback on this loop rather than running as their own scheduler service — this
+    # is the only long-lived background loop deployable through the existing update.sh
+    # pipeline without hand-provisioning a new systemd unit or cron entry on the host.
+    # All three checks are cheap on every cycle (a SELECT against settings/ti_feeds)
+    # unless something's actually due, so running them every 30s adds negligible
+    # overhead.
     from taxii_client import sync_due_feeds
     while True:
         run_detection_cycle()
@@ -562,4 +613,8 @@ if __name__ == "__main__":
             run_due_log_purge()
         except Exception as e:
             print(f"[-] Automatic log purge check failed: {e}")
+        try:
+            run_due_ioc_purge()
+        except Exception as e:
+            print(f"[-] Automatic IOC purge check failed: {e}")
         time.sleep(30)
