@@ -418,6 +418,7 @@
             <div class="ms-auto d-flex gap-2">
                 <button class="btn btn-sm btn-outline-success" onclick="bulkAction(true)"><i class="fa-solid fa-play"></i> Enable Selected</button>
                 <button class="btn btn-sm btn-outline-danger" onclick="bulkAction(false)"><i class="fa-solid fa-stop"></i> Disable Selected</button>
+                <button class="btn btn-sm btn-outline-info" id="validateSelectedBtn" onclick="validateSelectedRules()" title="Backtest just the checked rules against real recent logs and see what they'd actually match, before enabling them"><i class="fa-solid fa-flask"></i> Validate Selected</button>
                 <button class="btn btn-sm btn-outline-warning" id="validateRulesBtn" onclick="validateAllRules()" title="Backtest every enabled rule against a 1-day log window to catch any that silently fail to convert or run"><i class="fa-solid fa-stethoscope"></i> Validate Rules</button>
                 <button class="btn btn-sm btn-outline-info" id="importSigmaBtn" onclick="importSigmaHQ()"><i class="fa-solid fa-cloud-arrow-down"></i> Import SigmaHQ Rules</button>
                 <button class="btn btn-sm btn-primary" onclick="openRuleModal()"><i class="fa-solid fa-plus"></i> New Rule</button>
@@ -777,6 +778,22 @@
       <div class="modal-body">
         <div id="ruleValidationSummary" class="mb-3"></div>
         <div id="ruleValidationList"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Validate Selected Rules Results modal -->
+<div class="modal fade" id="ruleValidateSelectedModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title"><i class="fa-solid fa-flask me-2"></i>Validate Selected Rules</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-muted small mb-3">Backtests each selected rule against real recent logs -- no alerts, cases, or notifications are created.</p>
+        <div id="validateSelectedList"></div>
       </div>
     </div>
   </div>
@@ -3009,6 +3026,81 @@ function renderRuleValidationResults(data) {
     }
     if (!ruleValidationModal) ruleValidationModal = new bootstrap.Modal(document.getElementById('ruleValidationModal'));
     ruleValidationModal.show();
+}
+
+// Real, execute-against-logs validation (see api_rules_validate_selected()) for just
+// the checked rows -- reuses the same selectedIds Set the Enable/Disable Selected
+// buttons already populate, so the natural flow is: check the rules you're about to
+// enable, click Validate Selected to see what they'd actually catch, then Enable
+// Selected once satisfied. Capped server-side (SIGMA_VALIDATE_SELECTED_MAX) since this
+// is real log-scanning work per rule, not the cheap compile-only check Validate Rules
+// uses for the full enabled set.
+let validateSelectedModal;
+const VALIDATE_SELECTED_MAX = 25;
+
+function validateSelectedRules() {
+    const ids = Array.from(selectedIds).map(id => parseInt(id));
+    if (ids.length === 0) return toast('Please select at least one rule.', 'warning');
+    if (ids.length > VALIDATE_SELECTED_MAX) return toast(`Select at most ${VALIDATE_SELECTED_MAX} rules at a time to test against real logs.`, 'warning');
+
+    const btn = document.getElementById('validateSelectedBtn');
+    const origHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Validating&hellip;';
+    fetch('/api/rules/validate-selected', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rule_ids: ids, window: '7d' })
+    })
+        .then(r => r.json().then(data => ({ ok: r.ok, data })))
+        .then(({ ok, data }) => {
+            if (!ok) { toast(data.error || 'Validation failed.', 'danger'); return; }
+            renderValidateSelectedResults(data);
+        })
+        .catch(err => toast('Error validating rules: ' + err, 'danger'))
+        .finally(() => { btn.disabled = false; btn.innerHTML = origHtml; });
+}
+
+function renderValidateSelectedResults(data) {
+    const listEl = document.getElementById('validateSelectedList');
+    listEl.innerHTML = data.results.map(r => {
+        if (!r.ok) {
+            return `<div class="border border-danger rounded p-2 mb-2">
+                <div class="d-flex justify-content-between align-items-center gap-2">
+                    <strong class="small">${escHtml(r.title)}</strong>
+                    <span class="badge bg-danger text-nowrap">Failed</span>
+                </div>
+                <div class="small text-danger mt-1">${escHtml(r.error)}</div>
+            </div>`;
+        }
+        const matchBadge = r.total_matches
+            ? `<span class="badge bg-warning text-dark text-nowrap">${r.total_matches} match${r.total_matches === 1 ? '' : 'es'}</span>`
+            : `<span class="badge bg-success text-nowrap">No matches</span>`;
+        const rows = (r.preview || []).map(p => `
+            <tr>
+                <td class="text-nowrap small">${escHtml(p.timestamp)}</td>
+                <td class="small">${escHtml(p.host || '')}</td>
+                <td class="small">${escHtml(p.app || '')}</td>
+                <td class="small">${escHtml(p.username || '')}</td>
+                <td class="small">${escHtml((p.message || '').slice(0, 120))}</td>
+            </tr>`).join('');
+        return `<div class="border border-secondary rounded p-2 mb-2">
+            <div class="d-flex justify-content-between align-items-center gap-2">
+                <strong class="small">${escHtml(r.title)}</strong>
+                ${matchBadge}
+            </div>
+            ${r.total_matches ? `
+            <details class="mt-2">
+                <summary class="small" style="cursor:pointer;">View matching log preview${r.preview_truncated ? ` (showing ${r.preview.length} of ${r.total_matches})` : ''}</summary>
+                <div class="table-responsive mt-2" style="max-height:180px; overflow-y:auto;">
+                    <table class="table table-dark table-sm align-middle mb-0">
+                        <thead><tr><th>Time</th><th>Host</th><th>Source</th><th>User</th><th>Message</th></tr></thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>
+            </details>` : ''}
+        </div>`;
+    }).join('');
+    if (!validateSelectedModal) validateSelectedModal = new bootstrap.Modal(document.getElementById('ruleValidateSelectedModal'));
+    validateSelectedModal.show();
 }
 
 async function doClone(id) {
