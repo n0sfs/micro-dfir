@@ -14,10 +14,12 @@
 <div class="card bg-dark border-secondary">
     <div class="card-header border-secondary p-0">
         <ul class="nav nav-tabs border-0" id="settingsTabs">
-            <li class="nav-item"><button type="button" class="nav-link active" id="tabBtnSecurity" onclick="switchSettingsTab('security')"><i class="fa-solid fa-shield-halved me-2"></i>Security</button></li>
+            {% if current_user.role == 'admin' %}
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnSecurity" onclick="switchSettingsTab('security')"><i class="fa-solid fa-shield-halved me-2"></i>Security</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnNetwork" onclick="switchSettingsTab('network')"><i class="fa-solid fa-network-wired me-2"></i>Network</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnSystem" onclick="switchSettingsTab('system')"><i class="fa-solid fa-database me-2"></i>System</button></li>
-            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnReports" onclick="switchSettingsTab('reports')"><i class="fa-solid fa-file-pdf me-2"></i>Reports</button></li>
+            {% endif %}
+            <li class="nav-item"><button type="button" class="nav-link active" id="tabBtnReports" onclick="switchSettingsTab('reports')"><i class="fa-solid fa-file-pdf me-2"></i>Reports</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnNotifications" onclick="switchSettingsTab('notifications')"><i class="fa-solid fa-bell me-2"></i>Notifications</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnAssetIdentity" onclick="switchSettingsTab('assetIdentity')"><i class="fa-solid fa-building-shield me-2"></i>Asset &amp; Identity</button></li>
             {% if current_user.role == 'admin' %}
@@ -26,8 +28,9 @@
         </ul>
     </div>
 
+    {% if current_user.role == 'admin' %}
     <!-- Security pane -->
-    <div id="paneSecurity">
+    <div id="paneSecurity" style="display:none;">
         <div class="card-body">
             <div class="d-flex justify-content-between align-items-center mb-3">
                 <span class="text-muted small">Manage platform access, users, and role-based permissions.</span>
@@ -202,6 +205,7 @@
             <div class="small text-muted mt-2" id="archiveStatus"></div>
         </div>
     </div>
+    {% endif %}
 
     <!-- Reports pane -->
     <div id="paneReports" style="display:none;">
@@ -491,19 +495,21 @@
 
 <script>
 const SETTINGS_TAB_KEY = 'microdfir_settings_active_tab';
-// 'audit' is admin-only server-side (see the admin-role Jinja guard around its tab
-// button/pane above) -- a non-admin's DOM simply won't have those elements, so each
-// lookup below is null-checked rather than assumed to exist.
+// 'security'/'network'/'system' are admin-only server-side and 'audit' is admin-only
+// server-side (see the admin-role Jinja guards around their tab buttons/panes above)
+// -- a non-admin's DOM simply won't have those elements, so each lookup below is
+// null-checked rather than assumed to exist. 'reports' is the fallback default since
+// it's the first tab every role can actually see.
 const SETTINGS_TABS = ['security', 'network', 'system', 'reports', 'notifications', 'assetIdentity', 'audit'];
 
 function switchSettingsTab(tab) {
-    if (!SETTINGS_TABS.includes(tab)) tab = 'security';
+    if (!SETTINGS_TABS.includes(tab)) tab = 'reports';
     let resolvedTab = tab;
     SETTINGS_TABS.forEach(t => {
         const cap = t.charAt(0).toUpperCase() + t.slice(1);
         const btn = document.getElementById('tabBtn' + cap);
         const pane = document.getElementById('pane' + cap);
-        if (!btn || !pane) { if (t === tab) resolvedTab = 'security'; return; }
+        if (!btn || !pane) { if (t === tab) resolvedTab = 'reports'; return; }
         btn.classList.toggle('active', t === tab);
         pane.style.display = (t === tab) ? 'block' : 'none';
     });
@@ -513,8 +519,8 @@ function switchSettingsTab(tab) {
 }
 
 document.addEventListener("DOMContentLoaded", function() {
-    let savedTab = 'security';
-    try { savedTab = localStorage.getItem(SETTINGS_TAB_KEY) || 'security'; } catch (e) {}
+    let savedTab = 'reports';
+    try { savedTab = localStorage.getItem(SETTINGS_TAB_KEY) || 'reports'; } catch (e) {}
     switchSettingsTab(savedTab);
 
     loadMetrics();
