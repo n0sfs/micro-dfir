@@ -383,7 +383,7 @@ def run_detection_cycle():
     rule_titles = {r['id']: r['title'] for r in rules}
     rule_autocase = {r['id']: r['auto_case_template_id'] for r in rules if r['auto_case']}
     rule_uses_ioc_placeholder = {
-        r['id']: {kind: placeholder in r['rule_yaml'] for kind, placeholder in _IOC_PLACEHOLDER_KINDS}
+        r['id']: {kind: placeholder in r['rule_yaml'] for kind, placeholder, *_ in _IOC_KINDS}
         for r in rules
     }
     backend = _make_backend()
