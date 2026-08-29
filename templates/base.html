@@ -387,6 +387,23 @@ body.sidebar-collapsed .btn-logout span{display:none;}
 </head>
 <body>
     <script>
+        // ---------- SOC tier access (shared across every page) ----------
+        // Mirrors src/app.py's ROLE_RANK/require_role() exactly -- a strict escalation
+        // ladder (Tier 1/2 analyst < Tier 3 senior_analyst < admin), not independent
+        // capability grants, so a rank comparison is all any page needs. This is
+        // UI-only convenience (hiding a control a user's real request would 403 on
+        // anyway) -- the actual enforcement is always server-side.
+        // Defined in this early pre-sidebar script (not the later one after the main
+        // content block) because every gated page's own script lives inside that
+        // content block, which renders before the later script tag -- a page
+        // referencing roleAtLeast() at its own top level would otherwise throw
+        // ReferenceError: roleAtLeast is not defined and abort its whole script.
+        const CURRENT_ROLE = {{ current_user.role|tojson }};
+        const ROLE_RANK = { analyst: 1, senior_analyst: 2, admin: 3 };
+        function roleAtLeast(minRole) {
+            return (ROLE_RANK[CURRENT_ROLE] || 0) >= ROLE_RANK[minRole];
+        }
+
         // Applied before the sidebar renders so a previously-collapsed sidebar doesn't
         // flash full-width on every page load (this is a traditional multi-page app —
         // base.html re-renders fresh on every navigation, so the state has to be
@@ -446,18 +463,6 @@ body.sidebar-collapsed .btn-logout span{display:none;}
     </div>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script><script src="https://cdn.jsdelivr.net/npm/gridstack@8.2.1/dist/gridstack-all.js"></script>
     <script>
-        // ---------- SOC tier access (shared across every page) ----------
-        // Mirrors src/app.py's ROLE_RANK/require_role() exactly -- a strict escalation
-        // ladder (Tier 1/2 analyst < Tier 3 senior_analyst < admin), not independent
-        // capability grants, so a rank comparison is all any page needs. This is
-        // UI-only convenience (hiding a control a user's real request would 403 on
-        // anyway) -- the actual enforcement is always server-side.
-        const CURRENT_ROLE = {{ current_user.role|tojson }};
-        const ROLE_RANK = { analyst: 1, senior_analyst: 2, admin: 3 };
-        function roleAtLeast(minRole) {
-            return (ROLE_RANK[CURRENT_ROLE] || 0) >= ROLE_RANK[minRole];
-        }
-
         function toggleSidebar() {
             const collapsed = document.body.classList.toggle('sidebar-collapsed');
             try { localStorage.setItem('microdfir_sidebar_collapsed', collapsed ? '1' : '0'); } catch (e) {}
