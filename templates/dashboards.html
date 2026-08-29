@@ -711,9 +711,15 @@ const EDR_WIDGET_SAFE_ACTIONS = [
     { label: 'persistence_sweep', text: 'Persistence Sweep' },
 ];
 
+// Mirrors agents.html's own statusBadgeCmd() exactly -- agent_commands.status is
+// 'pending'/'sent'/'done'/'failed', not the generic pending/completed vocabulary this
+// widget almost shipped with (confirmed live: "done" fell through to a plain grey
+// badge before this fix).
 function edrStatusBadgeWidget(status) {
-    const map = { pending: 'bg-secondary', sent: 'bg-info text-dark', completed: 'bg-success', failed: 'bg-danger' };
-    return `<span class="badge ${map[status] || 'bg-secondary'}">${escHtml(status || 'unknown')}</span>`;
+    if (status === 'done') return '<span class="badge bg-success">Done</span>';
+    if (status === 'failed') return '<span class="badge bg-danger">Failed</span>';
+    if (status === 'sent') return '<span class="badge bg-info text-dark">Sent</span>';
+    return '<span class="badge bg-secondary">Pending</span>';
 }
 
 function renderEdrActionsWidget(container, widgetId, config) {
