@@ -202,6 +202,32 @@ function caseStatusBadge(status) {
         : '<span class="badge bg-success">Open</span>';
 }
 
+// Case Assets -- 'suspected' is the default starting state, escalate to 'confirmed' or
+// walk it back to 'cleared' as evidence comes in.
+function criticalityBadge(c) {
+    if (!c) return '<span class="text-muted">—</span>';
+    const cls = { critical: 'bg-danger', important: 'bg-warning text-dark', standard: 'bg-secondary' }[c] || 'bg-secondary';
+    return `<span class="badge ${cls}">${escHtml(c)}</span>`;
+}
+
+function caseAssetRow(a) {
+    return `
+        <tr>
+            <td class="small fw-bold">${escHtml(a.host)}</td>
+            <td>${criticalityBadge(a.criticality)}</td>
+            <td>
+                <select class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" onchange="updateCaseAssetStatus(${a.id}, this.value)">
+                    <option value="suspected" ${a.compromise_status === 'suspected' ? 'selected' : ''}>Suspected</option>
+                    <option value="confirmed" ${a.compromise_status === 'confirmed' ? 'selected' : ''}>Confirmed</option>
+                    <option value="cleared" ${a.compromise_status === 'cleared' ? 'selected' : ''}>Cleared</option>
+                </select>
+            </td>
+            <td class="small">${escHtml(a.related_indicator || '')}</td>
+            <td class="small text-muted">${escHtml(a.notes || '')}</td>
+            <td class="text-end"><button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove asset" onclick="removeCaseAsset(${a.id})"><i class="fa-solid fa-xmark"></i></button></td>
+        </tr>`;
+}
+
 // Standard TLP/PAP color convention -- red/amber/green/clear (TLP), same 4-step scale for PAP.
 const TLP_VALUES = ['clear', 'green', 'amber', 'amber-strict', 'red'];
 const PAP_VALUES = ['clear', 'green', 'amber', 'red'];
@@ -471,6 +497,9 @@ function caseEventLabel(e) {
         note: escHtml(e.detail),
         playbook_run: `<i class="fa-solid fa-robot me-1"></i>${escHtml(e.detail)}`,
         analysis: (e.detail || '').split('\n')[0] || 'Analysis',
+        asset_added: `Asset added: <strong>${escHtml(e.detail)}</strong>`,
+        asset_status_change: `Asset status changed: ${escHtml(e.detail)}`,
+        asset_removed: `Asset removed: <strong>${escHtml(e.detail)}</strong>`,
     };
     return map[e.event_type] || escHtml(e.event_type);
 }
@@ -601,6 +630,35 @@ function loadAndRenderCaseDetail(cid) {
                         <div class="card-body"><div id="linkToEntityWrap"></div></div>
                     </div>
                     <div class="card bg-dark border-secondary mb-3">
+                        <div class="card-header border-secondary">Case Assets <span class="text-muted small">— hosts implicated in this case, with a compromise-status judgment call and an optional related indicator</span></div>
+                        <div class="card-body">
+                            ${c.assets.length ? `
+                            <div class="table-responsive mb-2">
+                                <table class="table table-dark table-sm align-middle mb-0">
+                                    <thead><tr><th>Host</th><th>Criticality</th><th>Status</th><th>Indicator</th><th>Notes</th><th></th></tr></thead>
+                                    <tbody>${c.assets.map(caseAssetRow).join('')}</tbody>
+                                </table>
+                            </div>` : '<p class="text-muted small mb-2">No assets tracked yet.</p>'}
+                            <div class="row g-2">
+                                <div class="col-4">
+                                    <input type="text" id="newAssetHost" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Host, e.g. WKS-04">
+                                </div>
+                                <div class="col-3">
+                                    <select id="newAssetStatus" class="form-select form-select-sm bg-dark text-light border-secondary">
+                                        <option value="suspected">Suspected</option>
+                                        <option value="confirmed">Confirmed</option>
+                                        <option value="cleared">Cleared</option>
+                                    </select>
+                                </div>
+                                <div class="col-5">
+                                    <input type="text" id="newAssetIndicator" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Related indicator (optional)">
+                                </div>
+                            </div>
+                            <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="addCaseAsset()"><i class="fa-solid fa-plus me-1"></i>Add Asset</button>
+                            <div id="newAssetError" class="text-danger small mt-1" style="display:none;"></div>
+                        </div>
+                    </div>
+                    <div class="card bg-dark border-secondary mb-3">
                         <div class="card-header border-secondary">Analyze Host / User <span class="text-muted small">— alerts, UEBA activity, risk score, and IOC enrichment over the Risk Scoring window, posted to the timeline</span></div>
                         <div class="card-body">
                             <div class="d-flex gap-2 flex-wrap">
@@ -685,6 +743,36 @@ async function removeCaseItem(itemRowId) {
         .then(() => openCaseDetail(activeCaseId))
         .then(() => loadCases())
         .catch(err => toast('Error removing item: ' + err, 'danger'));
+}
+
+function addCaseAsset() {
+    const hostEl = document.getElementById('newAssetHost');
+    const host = hostEl.value.trim();
+    const status = document.getElementById('newAssetStatus').value;
+    const indicator = document.getElementById('newAssetIndicator').value.trim();
+    const errBox = document.getElementById('newAssetError');
+    errBox.style.display = 'none';
+    if (!host) { errBox.innerText = 'Host is required.'; errBox.style.display = 'block'; return; }
+    fetch(`/api/cases/${activeCaseId}/assets`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({host, compromise_status: status, related_indicator: indicator})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (!ok) { errBox.innerText = data.error || 'Failed to add asset.'; errBox.style.display = 'block'; return; }
+        openCaseDetail(activeCaseId);
+    }).catch(err => { errBox.innerText = 'Error: ' + err; errBox.style.display = 'block'; });
+}
+
+function updateCaseAssetStatus(assetId, status) {
+    fetch(`/api/cases/${activeCaseId}/assets/${assetId}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({compromise_status: status})
+    }).then(() => openCaseDetail(activeCaseId)).catch(err => toast('Error updating asset: ' + err, 'danger'));
+}
+
+async function removeCaseAsset(assetId) {
+    if (!(await confirmDialog('Remove this asset from the case?', {title: 'Remove asset', danger: true, confirmLabel: 'Remove'}))) return;
+    fetch(`/api/cases/${activeCaseId}/assets/${assetId}`, {method: 'DELETE'})
+        .then(() => openCaseDetail(activeCaseId))
+        .catch(err => toast('Error removing asset: ' + err, 'danger'));
 }
 
 function addCaseTask() {

@@ -2546,6 +2546,10 @@ def api_identity_detail(iid):
 CASE_ITEM_TYPES = {'alert': 'alerts', 'ueba_event': 'events', 'command_result': 'agent_commands'}
 CASE_TLP_VALUES = ('clear', 'green', 'amber', 'amber-strict', 'red')
 CASE_PAP_VALUES = ('clear', 'green', 'amber', 'red')
+# 'suspected' is the default starting state for anything an analyst adds to a case's
+# asset list -- there's no separate "unknown" state since adding it to the case at all
+# already implies at least a suspicion it's involved.
+CASE_ASSET_STATUSES = ('suspected', 'confirmed', 'cleared')
 
 def _log_case_event(db, cid, event_type, detail=None):
     # Append-only -- never UPDATEd/DELETEd (except cascade-deleted alongside the case
@@ -2818,7 +2822,11 @@ def api_case_detail(cid):
     events = [dict(e) for e in db.execute(
         "SELECT id, ts, actor, event_type, detail FROM case_events WHERE case_id = ? ORDER BY ts DESC, id DESC", (cid,)
     ).fetchall()]
-    return jsonify({**dict(case), 'items': items_out, 'tasks': tasks, 'events': events})
+    case_assets = [dict(a) for a in db.execute(
+        "SELECT ca.id, ca.host, ca.compromise_status, ca.related_indicator, ca.notes, ca.added_by, ca.added_at, a.criticality "
+        "FROM case_assets ca LEFT JOIN assets a ON a.host = ca.host WHERE ca.case_id = ? ORDER BY ca.added_at", (cid,)
+    ).fetchall()]
+    return jsonify({**dict(case), 'items': items_out, 'tasks': tasks, 'events': events, 'assets': case_assets})
 
 @app.route('/api/cases/<int:cid>/items', methods=['POST'])
 @login_required
@@ -2854,6 +2862,61 @@ def api_case_remove_item(cid, item_row_id):
     _log_case_event(db, cid, 'item_removed', f"{item['item_type']}:{item['item_id']}")
     db.commit()
     return jsonify({"ok": 1})
+
+@app.route('/api/cases/<int:cid>/assets', methods=['POST'])
+@login_required
+def api_case_add_asset(cid):
+    db = get_db()
+    if not db.execute("SELECT 1 FROM cases WHERE id = ?", (cid,)).fetchone():
+        return jsonify({"error": "Case not found"}), 404
+    data = request.get_json() or {}
+    host = (data.get('host') or '').strip()
+    if not host:
+        return jsonify({"error": "host is required"}), 400
+    status = (data.get('compromise_status') or 'suspected').strip()
+    if status not in CASE_ASSET_STATUSES:
+        return jsonify({"error": f"compromise_status must be one of {', '.join(CASE_ASSET_STATUSES)}"}), 400
+    if db.execute("SELECT 1 FROM case_assets WHERE case_id = ? AND host = ?", (cid, host)).fetchone():
+        return jsonify({"error": "That host is already tracked in this case"}), 400
+    related_indicator = (data.get('related_indicator') or '').strip() or None
+    notes = (data.get('notes') or '').strip() or None
+    db.execute(
+        "INSERT INTO case_assets (case_id, host, compromise_status, related_indicator, notes, added_by) VALUES (?, ?, ?, ?, ?, ?)",
+        (cid, host, status, related_indicator, notes, current_user.username)
+    )
+    _log_case_event(db, cid, 'asset_added', f"{host} ({status})")
+    db.commit()
+    return jsonify({"status": "success"})
+
+@app.route('/api/cases/<int:cid>/assets/<int:asset_id>', methods=['PUT', 'DELETE'])
+@login_required
+def api_case_asset_detail(cid, asset_id):
+    db = get_db()
+    asset = db.execute("SELECT * FROM case_assets WHERE id = ? AND case_id = ?", (asset_id, cid)).fetchone()
+    if not asset:
+        return jsonify({"error": "Case asset not found"}), 404
+
+    if request.method == 'DELETE':
+        db.execute("DELETE FROM case_assets WHERE id = ?", (asset_id,))
+        _log_case_event(db, cid, 'asset_removed', asset['host'])
+        db.commit()
+        return jsonify({"ok": 1})
+
+    data = request.get_json() or {}
+    status = (data['compromise_status'].strip() if data.get('compromise_status') else asset['compromise_status'])
+    if status not in CASE_ASSET_STATUSES:
+        return jsonify({"error": f"compromise_status must be one of {', '.join(CASE_ASSET_STATUSES)}"}), 400
+    related_indicator = (data['related_indicator'].strip() if 'related_indicator' in data else (asset['related_indicator'] or '')) or None
+    notes = (data['notes'].strip() if 'notes' in data else (asset['notes'] or '')) or None
+    status_changed = status != asset['compromise_status']
+    db.execute(
+        "UPDATE case_assets SET compromise_status = ?, related_indicator = ?, notes = ? WHERE id = ?",
+        (status, related_indicator, notes, asset_id)
+    )
+    if status_changed:
+        _log_case_event(db, cid, 'asset_status_change', f"{asset['host']} → {status}")
+    db.commit()
+    return jsonify({"status": "success"})
 
 @app.route('/api/cases/<int:cid>/tasks', methods=['POST'])
 @login_required
@@ -4768,6 +4831,33 @@ def migrate_case_queues():
             conn.execute("ALTER TABLE cases ADD COLUMN queue_id INTEGER")
         for name, desc in QUEUE_SEED:
             conn.execute("INSERT OR IGNORE INTO case_queues (name, description, created_by) VALUES (?, ?, 'system')", (name, desc))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# A case's "blast radius" -- which hosts are actually implicated, at what confidence
+# (an analyst's own judgment call, not auto-derived), and optionally what indicator
+# put them there. `host` is a plain string (matching how every other host reference in
+# this app works -- alerts.host, events.hostname, live_logs.host are none of them FKs
+# either) rather than a hard link to the global `assets` table, since a case can easily
+# involve a host that has no `assets` row yet; the UI still joins against `assets` by
+# host name to show criticality when one exists.
+def migrate_case_assets():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS case_assets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id INTEGER NOT NULL,
+            host TEXT NOT NULL,
+            compromise_status TEXT NOT NULL DEFAULT 'suspected',
+            related_indicator TEXT,
+            notes TEXT,
+            added_by TEXT,
+            added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(case_id, host)
+        )''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_case_assets_case ON case_assets(case_id)")
         conn.commit()
         conn.close()
     except Exception:
@@ -7432,6 +7522,7 @@ migrate_assets_identities()
 migrate_cases()
 migrate_case_upgrade()
 migrate_case_queues()
+migrate_case_assets()
 migrate_playbooks()
 migrate_playbook_secrets()
 migrate_live_logs_archive()
