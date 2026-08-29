@@ -1651,25 +1651,29 @@ def api_rules_dry_run():
         return jsonify({'error': f'Rule failed to parse or convert: {e}'}), 400
     return jsonify(result)
 
-# Runs every currently-ENABLED rule through the exact same dry_run_rule() path the
-# "Test Rule" button uses (short 1-day window, tiny preview -- this only cares whether
-# a rule converts and executes cleanly, not what it matches) and reports which ones
-# fail. This is the systematic version of what the dry-run feature caught by accident
-# for one rule: run_detection_cycle() silently swallows a per-rule conversion/execution
-# exception into a stdout print, so a rule can be broken for a long time with nothing
-# in the UI ever showing it. Only enabled rules are checked -- a disabled rule failing
-# to convert has no live impact until someone enables it.
+# Runs every currently-ENABLED rule through sigma_engine.check_rule_converts() -- a
+# compile-only check (no live_logs scan) -- and reports which ones fail. This is the
+# systematic version of what the dry-run feature caught by accident for one rule:
+# run_detection_cycle() silently swallows a per-rule conversion exception into a
+# stdout print, so a rule can be broken for a long time with nothing in the UI ever
+# showing it. Deliberately NOT built on dry_run_rule() (which DOES execute against
+# live_logs, needed for a single rule's real match preview) -- looping that across
+# every enabled rule in one request took minutes against this appliance's real log
+# volume; compilation alone is pure in-memory work and checks the same failure class
+# in a fraction of a second per rule. Only enabled rules are checked -- a disabled
+# rule failing to convert has no live impact until someone enables it.
 @app.route('/api/rules/validate-all', methods=['POST'])
 @login_required
 def api_rules_validate_all():
     db = get_db()
     rules = db.execute("SELECT id, title, rule_yaml FROM sigma_rules WHERE enabled = 1 ORDER BY id").fetchall()
 
-    from sigma_engine import dry_run_rule
+    from sigma_engine import check_rule_converts
+    ioc_cache = {}
     failed = []
     for r in rules:
         try:
-            dry_run_rule(db, r['rule_yaml'], days=1, preview_limit=1)
+            check_rule_converts(db, r['rule_yaml'], ioc_cache)
         except Exception as e:
             failed.append({'id': r['id'], 'title': r['title'], 'error': str(e)})
     return jsonify({'checked': len(rules), 'failed': failed})
