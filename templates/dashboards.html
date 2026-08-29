@@ -101,7 +101,7 @@
 
 {% block scripts %}
 <script>
-const IS_ADMIN = {{ 'true' if current_user.role == 'admin' else 'false' }};
+const IS_ADMIN = hasPermission('settings.roles.manage'); // stand-in for "true admin" -- dashboard ownership override
 const CURRENT_USERNAME = {{ current_user.username|tojson }};
 
 function escHtml(s) {
@@ -441,7 +441,7 @@ function loadCaseStatsInto(container, config) {
         container.querySelector('.widget-closed-range').innerText = d.closed_in_range_count;
         container.querySelector('.widget-sla-display').innerText = d.sla_target_hours;
         container.querySelector('.widget-sla-input').value = d.sla_target_hours;
-        if (IS_ADMIN) container.querySelector('.widget-sla-edit-link').style.display = '';
+        if (hasPermission('settings.case_sla.manage')) container.querySelector('.widget-sla-edit-link').style.display = '';
     }).catch(err => console.error('Error loading case stats:', err));
 }
 
@@ -703,14 +703,14 @@ function renderThreatHunterWidget(container, widgetId, config) {
 // mini-form never needs to collect one. 'custom' (free-text script) and
 // 'kill_process' (needs a PID this widget has no good source for) are intentionally
 // excluded -- the full, unrestricted console already exists on the Agents page for
-// anything beyond this. tier1Safe mirrors app.py's own AGENT_COMMAND_TIER1_LABELS
-// exactly -- those three need no escalation, matching Tier 1/2's incident-response
-// remit; persistence_sweep is hunt-flavored and stays Tier 3+.
+// anything beyond this. `permission` mirrors exactly what app.py's api_agent_commands
+// will actually require for that label (edr.command.basic for the three "safe"
+// incident-response actions, edr.command.advanced for persistence_sweep).
 const EDR_WIDGET_ACTIONS = [
-    { label: 'isolate_host', text: 'Isolate Host', tier1Safe: true },
-    { label: 'restore_network', text: 'Restore Network', tier1Safe: true },
-    { label: 'collect_triage', text: 'Collect Triage', tier1Safe: true },
-    { label: 'persistence_sweep', text: 'Persistence Sweep', tier1Safe: false },
+    { label: 'isolate_host', text: 'Isolate Host', permission: 'edr.command.basic' },
+    { label: 'restore_network', text: 'Restore Network', permission: 'edr.command.basic' },
+    { label: 'collect_triage', text: 'Collect Triage', permission: 'edr.command.basic' },
+    { label: 'persistence_sweep', text: 'Persistence Sweep', permission: 'edr.command.advanced' },
 ];
 
 // Mirrors agents.html's own statusBadgeCmd() exactly -- agent_commands.status is
@@ -728,10 +728,9 @@ function renderEdrActionsWidget(container, widgetId, config) {
     clearWidgetInterval(widgetId);
     // The queue mini-form shows to any logged-in user now -- Tier 1/2 owns incident
     // response, so isolate/restore/triage are theirs to queue directly. The action
-    // list itself is filtered per-user (tier1Safe-only for Tier 1/2, everything for
-    // Tier 3+), matching exactly what app.py's AGENT_COMMAND_TIER1_LABELS will
-    // actually accept -- no dead-end submit for either tier.
-    const availableActions = EDR_WIDGET_ACTIONS.filter(a => a.tier1Safe || roleAtLeast('senior_analyst'));
+    // list itself is filtered per-user by the exact permission app.py's
+    // api_agent_commands will actually require for that label -- no dead-end submit.
+    const availableActions = EDR_WIDGET_ACTIONS.filter(a => hasPermission(a.permission));
     const formHtml = `
         <div class="row g-1 mb-2">
             <div class="col-5"><select class="form-select form-select-sm bg-dark text-light border-secondary widget-edr-host"><option value="">Host&hellip;</option></select></div>

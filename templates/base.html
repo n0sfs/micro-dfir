@@ -387,21 +387,20 @@ body.sidebar-collapsed .btn-logout span{display:none;}
 </head>
 <body>
     <script>
-        // ---------- SOC tier access (shared across every page) ----------
-        // Mirrors src/app.py's ROLE_RANK/require_role() exactly -- a strict escalation
-        // ladder (Tier 1/2 analyst < Tier 3 senior_analyst < admin), not independent
-        // capability grants, so a rank comparison is all any page needs. This is
-        // UI-only convenience (hiding a control a user's real request would 403 on
-        // anyway) -- the actual enforcement is always server-side.
+        // ---------- Permission access (shared across every page) ----------
+        // Mirrors src/app.py's PERMISSION_REGISTRY/require_permission() exactly -- a
+        // named-permission model (a role is just a set of permission keys, not a rank),
+        // so any role -- built-in or admin-created custom -- works the same way here.
+        // This is UI-only convenience (hiding a control a user's real request would
+        // 403 on anyway) -- the actual enforcement is always server-side.
         // Defined in this early pre-sidebar script (not the later one after the main
         // content block) because every gated page's own script lives inside that
         // content block, which renders before the later script tag -- a page
-        // referencing roleAtLeast() at its own top level would otherwise throw
-        // ReferenceError: roleAtLeast is not defined and abort its whole script.
-        const CURRENT_ROLE = {{ current_user.role|tojson }};
-        const ROLE_RANK = { analyst: 1, senior_analyst: 2, admin: 3 };
-        function roleAtLeast(minRole) {
-            return (ROLE_RANK[CURRENT_ROLE] || 0) >= ROLE_RANK[minRole];
+        // referencing hasPermission() at its own top level would otherwise throw
+        // ReferenceError: hasPermission is not defined and abort its whole script.
+        const CURRENT_PERMISSIONS = {{ current_permissions()|tojson }};
+        function hasPermission(key) {
+            return CURRENT_PERMISSIONS.includes(key);
         }
 
         // Applied before the sidebar renders so a previously-collapsed sidebar doesn't
@@ -445,9 +444,9 @@ body.sidebar-collapsed .btn-logout span{display:none;}
             <a href="{{ url_for('settings') }}" class="nav-link {{ 'active' if request.endpoint in ['settings','settings_network'] else '' }}" title="Settings"><i class="fa-solid fa-gear"></i><span>Settings</span></a>
         </div>
 
-        {% set role_labels = {'analyst': 'Tier 1/2', 'senior_analyst': 'Tier 3', 'admin': 'Admin'} %}
+        {% set role_label = current_role_label() %}
         <div class="user-panel">
-            <div class="user-row" title="{{ current_user.username }} ({{ role_labels.get(current_user.role, current_user.role) }})"><i class="fa-solid fa-circle-user"></i> <span>{{ current_user.username }}</span> <span class="role-badge">{{ role_labels.get(current_user.role, current_user.role) }}</span></div>
+            <div class="user-row" title="{{ current_user.username }} ({{ role_label }})"><i class="fa-solid fa-circle-user"></i> <span>{{ current_user.username }}</span> <span class="role-badge">{{ role_label }}</span></div>
             <a href="/logout" class="btn-logout" title="Logout"><i class="fa-solid fa-arrow-right-from-bracket"></i> <span>Logout</span></a>
         </div>
     </div>
