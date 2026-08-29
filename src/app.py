@@ -5005,6 +5005,12 @@ WIDGET_TYPES = {
     'chart_agent_status': {}, 'chart_mitre_coverage': {}, 'chart_threat_actors': {},
     'chart_case_stats': {}, 'chart_case_aging': {}, 'chart_case_queue_backlog': {},
     'chart_case_workload': {}, 'chart_case_close_trend': {},
+    # "App" widgets (Batch 2) -- compact live embeds of other pages, all reusing their
+    # existing endpoints (/api/alerts, /api/cases, /api/logs/search, /api/ti/lookup,
+    # /api/agent/commands) rather than any new backend logic. Purely additive to this
+    # dict; see WIDGET_REGISTRY in dashboards.html for the actual render functions.
+    'app_alerts': {}, 'app_cases': {}, 'app_log_search': {},
+    'app_threat_hunter': {}, 'app_edr_actions': {},
 }
 
 # The default "Overview" dashboard's seeded layout -- reproduces today's fixed-page

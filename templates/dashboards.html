@@ -118,6 +118,15 @@ function destroyChart(key) {
     if (DASH_CHARTS[key]) { DASH_CHARTS[key].destroy(); delete DASH_CHARTS[key]; }
 }
 
+// A couple of the app_* widgets (Batch 2) poll on their own timer -- tracked by
+// widgetId so removeWidget()/switchDashboard() can clear the interval instead of
+// leaving it ticking forever against a widget body that no longer exists.
+let WIDGET_INTERVALS = {};
+
+function clearWidgetInterval(wid) {
+    if (WIDGET_INTERVALS[wid]) { clearInterval(WIDGET_INTERVALS[wid]); delete WIDGET_INTERVALS[wid]; }
+}
+
 // Reads the app's own theme CSS custom properties (already flipped by base.html's
 // light/dark toggle -- see :root / html[data-bs-theme="light"] in base.html) instead
 // of hardcoding a light and a dark palette here. Whatever the current theme is, these
@@ -538,12 +547,243 @@ function renderCaseCloseTrendWidget(container, widgetId, config) {
     }).catch(err => console.error('Error loading case close trend:', err));
 }
 
-// widget_type -> {label, icon, category, defaultW, defaultH, live, render}. Batch 1
-// contains only the 14 chart_* entries; the 5 app_* entries (Alerts/Cases/Log Search/
-// Threat Hunter/EDR Response Actions) land in a later batch as a purely additive
-// diff to this object -- the Add Widget picker's "Live App Views" section is simply
-// omitted for now (see renderWidgetPicker()) and reappears automatically once those
-// entries exist, with no other code needing to change.
+// ---- App widgets (Batch 2) -- compact live embeds of other pages, all reusing
+// their existing endpoints rather than any new backend logic. ----
+
+function severityBadgeWidget(sev) {
+    const s = (sev || '').toUpperCase();
+    const cls = (s === 'CRITICAL' || s === 'HIGH') ? 'bg-danger' : s === 'MEDIUM' ? 'bg-warning text-dark' : s === 'LOW' ? 'bg-secondary' : 'bg-info text-dark';
+    return `<span class="badge ${cls}">${escHtml(s || 'INFO')}</span>`;
+}
+
+// Mirrors home.html's acknowledgeAlert() exactly -- acknowledged and status move
+// together (marks resolved), the one place that decides that, matching PUT
+// /api/alerts/<id>'s deliberately independent-per-field design.
+function ackAlertWidget(aid, btn) {
+    btn.disabled = true;
+    fetch(`/api/alerts/${aid}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ acknowledged: true, status: 'resolved' })
+    }).then(r => r.json().then(data => ({ ok: r.ok, data }))).then(({ ok }) => {
+        if (ok) {
+            const row = btn.closest('.list-group-item');
+            if (row) row.remove();
+        } else {
+            btn.disabled = false;
+        }
+    }).catch(() => { btn.disabled = false; });
+}
+
+function renderAlertsWidget(container, widgetId, config) {
+    clearWidgetInterval(widgetId);
+    container.innerHTML = `
+        <div class="d-flex justify-content-end mb-1"><a href="/" class="small">View all &raquo;</a></div>
+        <div class="widget-alerts-list"><p class="text-muted small mb-0">Loading&hellip;</p></div>`;
+    const load = () => {
+        fetch(`/api/alerts?limit=${config.limit || 8}`).then(r => r.json()).then(rows => {
+            const list = container.querySelector('.widget-alerts-list');
+            if (!list) return; // the widget was removed while this poll's fetch was in flight
+            const unacked = (rows || []).filter(a => !a.acknowledged).slice(0, config.limit || 8);
+            if (!unacked.length) { list.innerHTML = '<p class="text-muted small mb-0">No unacknowledged alerts.</p>'; return; }
+            list.innerHTML = `<div class="list-group list-group-flush">${unacked.map(a => `
+                <div class="list-group-item bg-dark border-secondary px-0 py-2">
+                    <div class="d-flex justify-content-between align-items-start gap-2">
+                        <span class="small">${escHtml(a.rule_title)}</span>
+                        <div class="d-flex align-items-center gap-1">
+                            ${severityBadgeWidget(a.severity)}
+                            <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1" title="Acknowledge" onclick="ackAlertWidget(${a.id}, this)"><i class="fa-solid fa-check"></i></button>
+                        </div>
+                    </div>
+                    <div class="text-muted small">${escHtml(a.hostname || '—')} &middot; ${escHtml(a.timestamp)}</div>
+                </div>
+            `).join('')}</div>`;
+        }).catch(err => console.error('Error loading alerts widget:', err));
+    };
+    load();
+    // Alerts aren't range-parameterized like the chart widgets -- this is the widget's
+    // own timer, not the page-level "Live" convention, since it also drives the ack
+    // list dropping an entry the moment someone (possibly on another screen) acks it.
+    WIDGET_INTERVALS[widgetId] = setInterval(load, 30000);
+}
+
+function caseStatusBadgeWidget(status) {
+    return status === 'closed' ? '<span class="badge bg-secondary">Closed</span>' : '<span class="badge bg-success">Open</span>';
+}
+
+function renderCasesWidget(container, widgetId, config) {
+    container.innerHTML = '<p class="text-muted small mb-0">Loading&hellip;</p>';
+    fetch('/api/cases').then(r => r.json()).then(rows => {
+        // /api/cases has no server-side limit param (it's a small admin-facing list
+        // endpoint, not paginated) -- already returns open-first, so slicing after
+        // filtering to open-only is enough to get "recent open cases" here.
+        const open = (rows || []).filter(c => c.status === 'open').slice(0, config.limit || 8);
+        if (!open.length) { container.innerHTML = '<p class="text-muted small mb-0">No open cases.</p>'; return; }
+        container.innerHTML = `<div class="list-group list-group-flush">${open.map(c => `
+            <a href="/cases?case=${c.id}" class="list-group-item list-group-item-action bg-dark border-secondary px-0 py-2 text-reset text-decoration-none d-block">
+                <div class="d-flex justify-content-between align-items-start gap-2">
+                    <span class="small">${escHtml(c.title)}</span>
+                    ${caseStatusBadgeWidget(c.status)}
+                </div>
+                <div class="text-muted small">${escHtml(c.assignee || 'Unassigned')} &middot; ${escHtml(c.queue_name || 'No queue')} &middot; ${c.task_done_count}/${c.task_count} tasks</div>
+            </a>
+        `).join('')}</div>`;
+    }).catch(err => { container.innerHTML = `<p class="text-danger small mb-0">Error loading cases: ${escHtml(String(err))}</p>`; });
+}
+
+function renderLogSearchWidget(container, widgetId, config) {
+    container.innerHTML = `
+        <div class="input-group input-group-sm mb-2">
+            <input type="text" class="form-control bg-dark text-light border-secondary widget-log-q" placeholder="Search recent logs...">
+            <button class="btn btn-outline-secondary widget-log-search-btn" type="button"><i class="fa-solid fa-magnifying-glass"></i></button>
+        </div>
+        <div class="widget-log-results"></div>`;
+    const input = container.querySelector('.widget-log-q');
+    const results = container.querySelector('.widget-log-results');
+    // A user-typed search is real search activity and stays audited server-side like
+    // any other Log Search query -- poll=1 (which suppresses that audit entry) is
+    // reserved for a widget's own unattended timer refresh, and this widget doesn't
+    // run one by default (see the app_log_search registry note below).
+    const runSearch = () => {
+        const q = input.value.trim();
+        results.innerHTML = '<p class="text-muted small mb-0">Loading&hellip;</p>';
+        const params = new URLSearchParams({ q, range: config.range || '24h', limit: config.limit || 10 });
+        fetch(`/api/logs/search?${params}`).then(r => r.json()).then(d => {
+            const logs = d.logs || [];
+            if (!logs.length) { results.innerHTML = '<p class="text-muted small mb-0">No matching logs.</p>'; return; }
+            results.innerHTML = `
+                <table class="table table-dark table-sm align-middle mb-0">
+                    <thead><tr><th>Time</th><th>Host</th><th>Message</th></tr></thead>
+                    <tbody>${logs.map(l => `
+                        <tr>
+                            <td class="small text-nowrap">${escHtml(l.time)}</td>
+                            <td class="small">${escHtml(l.host || '—')}</td>
+                            <td class="small text-truncate" style="max-width:220px;" title="${escHtml(l.message || '')}">${escHtml(l.message || '')}</td>
+                        </tr>`).join('')}</tbody>
+                </table>`;
+        }).catch(err => { results.innerHTML = `<p class="text-danger small mb-0">Error: ${escHtml(String(err))}</p>`; });
+    };
+    container.querySelector('.widget-log-search-btn').addEventListener('click', runSearch);
+    input.addEventListener('keyup', (e) => { if (e.key === 'Enter') runSearch(); });
+    runSearch(); // shows recent logs by default, even before the user types a query
+}
+
+function renderThreatHunterWidget(container, widgetId, config) {
+    container.innerHTML = `
+        <div class="input-group input-group-sm mb-2">
+            <input type="text" class="form-control bg-dark text-light border-secondary widget-ioc-input" placeholder="IP, domain, URL, or file hash...">
+            <button class="btn btn-outline-secondary widget-ioc-btn" type="button"><i class="fa-solid fa-magnifying-glass"></i></button>
+        </div>
+        <div class="widget-ioc-result small"><span class="text-muted">Enter a value to check.</span></div>`;
+    const input = container.querySelector('.widget-ioc-input');
+    const resultEl = container.querySelector('.widget-ioc-result');
+    const runLookup = () => {
+        const ioc = input.value.trim();
+        if (!ioc) { resultEl.innerHTML = '<span class="text-muted">Enter a value to check.</span>'; return; }
+        resultEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+        fetch('/api/ti/lookup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ioc }) })
+            .then(r => r.json().then(data => ({ ok: r.ok, data })))
+            .then(({ ok, data }) => {
+                if (!ok) { resultEl.innerHTML = `<span class="text-danger">${escHtml(data.message || 'Lookup failed.')}</span>`; return; }
+                if (data.status === 'clean') {
+                    resultEl.innerHTML = '<span class="text-success"><i class="fa-solid fa-circle-check me-1"></i>No match in the local IOC set.</span>';
+                } else if (data.status === 'revoked') {
+                    resultEl.innerHTML = `<span class="text-muted"><i class="fa-solid fa-circle-minus me-1"></i>Matches ${data.matches.length} revoked/inactive indicator(s) only.</span>`;
+                } else {
+                    const m = data.matches.find(x => !x.revoked) || data.matches[0];
+                    const sightingNote = m.sighting_count > 0 ? `, observed here ${m.sighting_count}x` : ', never observed here';
+                    resultEl.innerHTML = `<span class="text-danger"><i class="fa-solid fa-triangle-exclamation me-1"></i>MATCH — ${escHtml(m.name || m.ioc_type)} (${escHtml(m.source_name || 'Unknown')}${sightingNote})</span>`;
+                }
+            }).catch(err => { resultEl.innerHTML = `<span class="text-danger">Error: ${escHtml(String(err))}</span>`; });
+    };
+    container.querySelector('.widget-ioc-btn').addEventListener('click', runLookup);
+    input.addEventListener('keyup', (e) => { if (e.key === 'Enter') runLookup(); });
+}
+
+// Deliberately a small, safe subset of every response action agents.html can queue --
+// each of these four takes no required parameters (isolate_host's only param, soc_ip,
+// is auto-filled server-side, see app.py:api_agent_commands), so this compact mini-form
+// never needs to collect one. 'custom' (free-text script) and 'kill_process' (needs a
+// PID this widget has no good source for) are intentionally excluded -- the full,
+// unrestricted console already exists on the Agents page for anything beyond this.
+const EDR_WIDGET_SAFE_ACTIONS = [
+    { label: 'isolate_host', text: 'Isolate Host' },
+    { label: 'restore_network', text: 'Restore Network' },
+    { label: 'collect_triage', text: 'Collect Triage' },
+    { label: 'persistence_sweep', text: 'Persistence Sweep' },
+];
+
+function edrStatusBadgeWidget(status) {
+    const map = { pending: 'bg-secondary', sent: 'bg-info text-dark', completed: 'bg-success', failed: 'bg-danger' };
+    return `<span class="badge ${map[status] || 'bg-secondary'}">${escHtml(status || 'unknown')}</span>`;
+}
+
+function renderEdrActionsWidget(container, widgetId, config) {
+    clearWidgetInterval(widgetId);
+    // The queue mini-form is hidden entirely (not just disabled) for a non-admin --
+    // the backend 403s a non-admin POST anyway, this just avoids a dead-end submit,
+    // same convention as the admin-only controls elsewhere in this app (e.g. ueba.html).
+    const formHtml = IS_ADMIN ? `
+        <div class="row g-1 mb-2">
+            <div class="col-5"><select class="form-select form-select-sm bg-dark text-light border-secondary widget-edr-host"><option value="">Host&hellip;</option></select></div>
+            <div class="col-5"><select class="form-select form-select-sm bg-dark text-light border-secondary widget-edr-action">${EDR_WIDGET_SAFE_ACTIONS.map(a => `<option value="${a.label}">${escHtml(a.text)}</option>`).join('')}</select></div>
+            <div class="col-2"><button type="button" class="btn btn-sm btn-outline-danger w-100 widget-edr-queue-btn" title="Queue action"><i class="fa-solid fa-bolt"></i></button></div>
+        </div>` : '';
+    container.innerHTML = `${formHtml}<div class="widget-edr-history"><p class="text-muted small mb-0">Loading&hellip;</p></div>`;
+
+    if (IS_ADMIN) {
+        const hostSelect = container.querySelector('.widget-edr-host');
+        fetch('/api/agent/checkins').then(r => r.json()).then(hosts => {
+            if (!hostSelect.isConnected) return;
+            hostSelect.innerHTML = '<option value="">Host&hellip;</option>' + (hosts || [])
+                .filter(h => h.status !== 'Offline')
+                .map(h => `<option value="${escHtml(h.hostname)}">${escHtml(h.hostname)} (${escHtml(h.status)})</option>`).join('');
+        }).catch(err => console.error('Error loading agent checkins:', err));
+
+        container.querySelector('.widget-edr-queue-btn').addEventListener('click', async () => {
+            const hostname = hostSelect.value;
+            const label = container.querySelector('.widget-edr-action').value;
+            if (!hostname) { toast('Choose a host first.', 'warning'); return; }
+            const actionText = (EDR_WIDGET_SAFE_ACTIONS.find(a => a.label === label) || {}).text || label;
+            if (!(await confirmDialog(`${actionText} on ${hostname}?`, { title: 'Confirm action', danger: true }))) return;
+            fetch('/api/agent/commands', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ hostname, label, params: {} }),
+            }).then(r => r.json().then(data => ({ ok: r.ok, data }))).then(({ ok, data }) => {
+                if (ok) {
+                    toast(`"${actionText}" queued for ${hostname}.`, 'success');
+                    loadEdrHistory();
+                } else {
+                    toast(data.error || 'Failed to queue command.', 'danger');
+                }
+            }).catch(err => toast('Error queuing command: ' + err, 'danger'));
+        });
+    }
+
+    const loadEdrHistory = () => {
+        fetch(`/api/agent/commands?limit=${config.limit || 8}`).then(r => r.json()).then(rows => {
+            const hist = container.querySelector('.widget-edr-history');
+            if (!hist) return; // widget was removed while this poll's fetch was in flight
+            if (!rows.length) { hist.innerHTML = '<p class="text-muted small mb-0">No response actions queued yet.</p>'; return; }
+            hist.innerHTML = `
+                <table class="table table-dark table-sm align-middle mb-0">
+                    <thead><tr><th>Host</th><th>Action</th><th>Status</th><th>Queued</th></tr></thead>
+                    <tbody>${rows.map(c => `
+                        <tr>
+                            <td class="small">${escHtml(c.hostname)}</td>
+                            <td class="small">${escHtml(c.label)}</td>
+                            <td>${edrStatusBadgeWidget(c.status)}</td>
+                            <td class="small text-nowrap">${escHtml(c.queued_at)}</td>
+                        </tr>`).join('')}</tbody>
+                </table>`;
+        }).catch(err => console.error('Error loading EDR command history:', err));
+    };
+    loadEdrHistory();
+    WIDGET_INTERVALS[widgetId] = setInterval(loadEdrHistory, 30000);
+}
+
+// widget_type -> {label, icon, category, defaultW, defaultH, live, render}. The 14
+// chart_* entries (Batch 1) and 5 app_* entries (Batch 2) are otherwise identical in
+// shape -- the Add Widget picker's "Live App Views" section (see renderWidgetPicker())
+// just groups by category, and was empty until the app_* entries below existed.
 const WIDGET_REGISTRY = {
     chart_alert_trend:        { label: 'Alert Volume Trend', icon: 'fa-chart-area', category: 'chart', defaultW: 8, defaultH: 4, render: renderAlertTrendWidget },
     chart_severity:           { label: 'Severity Breakdown', icon: 'fa-chart-pie', category: 'chart', defaultW: 4, defaultH: 4, render: renderSeverityWidget },
@@ -559,6 +799,12 @@ const WIDGET_REGISTRY = {
     chart_case_queue_backlog: { label: 'Open Cases by Queue', icon: 'fa-inbox', category: 'chart', defaultW: 4, defaultH: 4, live: true, render: renderCaseQueueBacklogWidget },
     chart_case_workload:      { label: 'Analyst Workload', icon: 'fa-user-clock', category: 'chart', defaultW: 4, defaultH: 4, live: true, render: renderCaseWorkloadWidget },
     chart_case_close_trend:   { label: 'Cases Closed Trend', icon: 'fa-chart-line', category: 'chart', defaultW: 12, defaultH: 4, render: renderCaseCloseTrendWidget },
+    // App widgets (Batch 2) -- compact live embeds, all reusing existing endpoints.
+    app_alerts:        { label: 'Alerts', icon: 'fa-triangle-exclamation', category: 'app', defaultW: 4, defaultH: 5, render: renderAlertsWidget },
+    app_cases:         { label: 'Cases', icon: 'fa-folder-open', category: 'app', defaultW: 4, defaultH: 5, render: renderCasesWidget },
+    app_log_search:    { label: 'Log Search', icon: 'fa-magnifying-glass-chart', category: 'app', defaultW: 6, defaultH: 5, render: renderLogSearchWidget },
+    app_threat_hunter: { label: 'Threat Hunter', icon: 'fa-magnifying-glass-arrow-right', category: 'app', defaultW: 4, defaultH: 3, render: renderThreatHunterWidget },
+    app_edr_actions:   { label: 'EDR Response Actions', icon: 'fa-laptop-medical', category: 'app', defaultW: 6, defaultH: 5, render: renderEdrActionsWidget },
 };
 
 // widgetId (number) -> {widget_type, config} for whatever's actually on screen right
@@ -631,7 +877,7 @@ function persistLayout() {
 
 function addWidgetToGrid(w) {
     const def = WIDGET_REGISTRY[w.widget_type];
-    if (!def) return; // e.g. an app_* row saved by a session that already has Batch 2's JS, viewed here before this deploy -- degrade gracefully
+    if (!def) return; // an unrecognized widget_type (e.g. added by a future version) -- degrade gracefully instead of throwing
     RENDERED_WIDGETS[w.id] = { widget_type: w.widget_type, config: w.config || {} };
     const liveBadge = def.live ? '<span class="badge bg-secondary me-1" title="Reflects current state, not the selected time range">Live</span>' : '';
     grid.addWidget({
@@ -659,6 +905,7 @@ function removeWidget(wid) {
     const el = grid.getGridItems().find(item => item.gridstackNode && String(item.gridstackNode.id) === String(wid));
     if (el) grid.removeWidget(el);
     destroyChart(wid);
+    clearWidgetInterval(wid);
     delete RENDERED_WIDGETS[wid];
     fetch(`/api/dashboards/${currentDashboardId}/widgets/${wid}`, { method: 'DELETE' })
         .catch(err => console.error('Error removing widget:', err));
@@ -668,6 +915,7 @@ async function switchDashboard(did) {
     currentDashboardId = Number(did);
     try { localStorage.setItem('microdfir_last_dashboard', did); } catch (e) {}
     Object.keys(DASH_CHARTS).forEach(destroyChart);
+    Object.keys(WIDGET_INTERVALS).forEach(clearWidgetInterval);
     RENDERED_WIDGETS = {};
     grid.removeAll();
     updateDashOwnerControls();
