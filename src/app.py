@@ -5022,11 +5022,11 @@ DEFAULT_OVERVIEW_WIDGETS = [
     ('chart_agent_status', 8, 8, 4, 4),
     ('chart_mitre_coverage', 0, 12, 12, 5),
     ('chart_threat_actors', 0, 17, 12, 5),
-    ('chart_case_stats', 0, 22, 12, 2),
-    ('chart_case_aging', 0, 24, 4, 4),
-    ('chart_case_queue_backlog', 4, 24, 4, 4),
-    ('chart_case_workload', 8, 24, 4, 4),
-    ('chart_case_close_trend', 0, 28, 12, 4),
+    ('chart_case_stats', 0, 22, 12, 3),
+    ('chart_case_aging', 0, 25, 4, 4),
+    ('chart_case_queue_backlog', 4, 25, 4, 4),
+    ('chart_case_workload', 8, 25, 4, 4),
+    ('chart_case_close_trend', 0, 29, 12, 4),
 ]
 
 def migrate_dashboards():
