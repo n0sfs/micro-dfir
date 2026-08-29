@@ -292,6 +292,28 @@ def _rewrite_ioc_lookups(sql):
         sql = _IOC_LOOKUP_SQL_RE[kind].sub(rf"\1 IN (SELECT value FROM {table})", sql)
     return sql
 
+# Lighter than dry_run_rule() below -- checks that a rule PARSES and COMPILES to SQL
+# (date normalization, IOC lookup-table correlation, Sigma YAML parsing, SQL
+# generation) WITHOUT ever executing the compiled query against live_logs.
+# SigmaCollection.from_yaml()/backend.convert() are pure in-memory work with no
+# database access at all, so this only touches the DB for _prepare_ioc_correlation()'s
+# (cheap, cached) lookup-table population -- never the live_logs table itself, which is
+# what actually made a first version of this (built on dry_run_rule(), which DOES
+# execute against live_logs) far too slow to run across every enabled rule in one
+# request: 106 real rules each scanning live_logs took minutes, not seconds. A
+# conversion-time exception -- like the expression-tree-depth bug this very lookup-
+# table mechanism was built to fix -- is exactly the failure mode silently swallowed by
+# run_detection_cycle()'s per-rule try/except, and is what this is checking for.
+# `ioc_cache` should be shared across every rule checked in one bulk pass (the same
+# restraint run_detection_cycle()'s own per-cycle cache uses), so the IOC lookup tables
+# are built at most once regardless of how many rules reference them.
+def check_rule_converts(conn, rule_yaml, ioc_cache):
+    cursor = conn.cursor()
+    rule_yaml_text = _prepare_ioc_correlation(_normalize_rule_dates(rule_yaml), cursor, ioc_cache)
+    backend = _make_backend()
+    for q in backend.convert(SigmaCollection.from_yaml(rule_yaml_text)):
+        _rewrite_ioc_lookups(q)
+
 DRY_RUN_PREVIEW_FIELDS = ('id', 'timestamp', 'host', 'app', 'severity', 'event_id', 'username', 'message')
 
 # Tests a Sigma rule against a recent window of live_logs WITHOUT writing to `alerts`,
