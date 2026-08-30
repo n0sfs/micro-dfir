@@ -35,6 +35,7 @@
                 <thead>
                     <tr>
                         <th class="ps-3">Title</th>
+                        <th>Severity</th>
                         <th>Status</th>
                         <th>Queue</th>
                         <th>TLP</th>
@@ -46,7 +47,7 @@
                     </tr>
                 </thead>
                 <tbody id="casesTableBody">
-                    <tr><td colspan="9" class="text-center text-muted py-4">Loading…</td></tr>
+                    <tr><td colspan="10" class="text-center text-muted py-4">Loading…</td></tr>
                 </tbody>
             </table>
         </div>
@@ -97,15 +98,24 @@
                     </select>
                 </div>
                 <div class="row g-2 mb-2">
-                    <div class="col-6">
+                    <div class="col-md-3">
                         <label class="form-label small text-muted mb-1">Assignee (optional)</label>
                         <input type="text" id="newCaseAssignee" class="form-control bg-dark text-light border-secondary">
                     </div>
-                    <div class="col-3">
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted mb-1">Severity</label>
+                        <select id="newCaseSeverity" class="form-select bg-dark text-light border-secondary">
+                            <option value="critical">Critical</option>
+                            <option value="high">High</option>
+                            <option value="medium" selected>Medium</option>
+                            <option value="low">Low</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
                         <label class="form-label small text-muted mb-1">TLP</label>
                         <select id="newCaseTlp" class="form-select bg-dark text-light border-secondary"></select>
                     </div>
-                    <div class="col-3">
+                    <div class="col-md-3">
                         <label class="form-label small text-muted mb-1">PAP</label>
                         <select id="newCasePap" class="form-select bg-dark text-light border-secondary"></select>
                     </div>
@@ -180,12 +190,19 @@
 <script>
 const IS_ADMIN = hasPermission('cases.queues.manage');
 const CAN_DELETE_CASES = hasPermission('cases.delete');
+const CAN_EDR_RESPOND = hasPermission('edr.command.basic');
 const CURRENT_USERNAME = {{ current_user.username|tojson }};
 let allCases = [];
 let allQueues = [];
 let caseFilter = 'all';
 let activeCaseId = null;
 let newCaseModal, manageQueuesModal;
+// Fleet-wide SLA target (hours) and known EDR-enrolled hosts -- both loaded once at
+// page init (see DOMContentLoaded below) and reused across every case detail render
+// rather than re-fetched per case.
+let caseSlaHours = 24;
+let knownAgentsByHost = {};
+let caseTimerInterval = null;
 
 function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -205,12 +222,89 @@ function caseStatusBadge(status) {
         : '<span class="badge bg-success">Open</span>';
 }
 
+function caseSeverityBadge(sev) {
+    return `<span class="badge ${severityBadgeClass(sev)}">${escHtml((sev || 'medium').toUpperCase())}</span>`;
+}
+
+// Deliberately separate from Status (Open/Closed) -- this is the analyst-facing
+// triage-progress indicator layered on top, see migrate_case_severity()'s comment
+// in src/app.py for why the two aren't merged into one enum.
+const WORKFLOW_STATE_LABELS = { new: 'New', investigating: 'Investigating', awaiting_input: 'Awaiting Input', resolved: 'Resolved' };
+const WORKFLOW_STATE_COLORS = { new: 'bg-secondary', investigating: 'bg-primary', awaiting_input: 'bg-warning text-dark', resolved: 'bg-success' };
+function workflowStateBadge(ws) {
+    return `<span class="badge ${WORKFLOW_STATE_COLORS[ws] || 'bg-secondary'}">${escHtml(WORKFLOW_STATE_LABELS[ws] || ws || 'New')}</span>`;
+}
+
+// Duration formatter (45m / 3.2h / 2.1d) -- matches dashboards.html's hoursLabel(),
+// duplicated locally per this codebase's existing "small catalogs stay local to the
+// file that uses them" convention rather than a cross-template import.
+function hoursLabel(h) {
+    if (h === null || h === undefined) return '—';
+    if (h < 1) return `${Math.round(h * 60)}m`;
+    if (h < 48) return `${h.toFixed(1)}h`;
+    return `${(h / 24).toFixed(1)}d`;
+}
+
+// Renders the Case Header's SLA/TTA summary chips from the case object's own
+// timestamps (created_at, acknowledged_at, closed_at) against the fleet-wide SLA
+// target -- reuses the exact julianday()-hours math the Case Metrics dashboard
+// widget already applies fleet-wide (src/app.py's _case_sla_hours family), just
+// scoped to this one case, computed client-side against ISO-ish 'YYYY-MM-DD HH:MM:SS'
+// strings (all UTC, matching how the backend stamps them).
+function elapsedHours(fromTs, toTs) {
+    const from = new Date((fromTs || '').replace(' ', 'T') + 'Z').getTime();
+    const to = toTs ? new Date((toTs || '').replace(' ', 'T') + 'Z').getTime() : Date.now();
+    if (isNaN(from)) return null;
+    return Math.max(0, (to - from) / 3600000);
+}
+
+function renderCaseSlaTimers(c) {
+    const isOpen = c.status !== 'closed';
+    const totalHours = elapsedHours(c.created_at, c.closed_at);
+    const totalBreached = isOpen && totalHours !== null && totalHours > caseSlaHours;
+    const totalLabel = isOpen
+        ? `<span class="${totalBreached ? 'text-danger fw-bold' : 'text-light'}">${hoursLabel(totalHours)} open</span>${totalBreached ? ' <span class="badge bg-danger">SLA breached</span>' : ''}`
+        : `<span class="text-muted">Closed after ${hoursLabel(totalHours)}</span>`;
+
+    let ackLabel;
+    if (c.acknowledged_at) {
+        ackLabel = `<span class="text-success">Acked after ${hoursLabel(elapsedHours(c.created_at, c.acknowledged_at))}</span>`;
+    } else if (isOpen) {
+        const waitHours = elapsedHours(c.created_at, null);
+        const ackBreached = waitHours !== null && waitHours > caseSlaHours;
+        ackLabel = `<span class="${ackBreached ? 'text-danger fw-bold' : 'text-warning'}">Not yet acknowledged (${hoursLabel(waitHours)})</span>`;
+    } else {
+        ackLabel = '<span class="text-muted">Never acknowledged</span>';
+    }
+
+    return `
+        <div class="d-flex flex-wrap gap-3 small mb-3 case-sla-timers">
+            <div><i class="fa-solid fa-stopwatch me-1 text-muted"></i>${totalLabel}</div>
+            <div><i class="fa-solid fa-hourglass-half me-1 text-muted"></i>${ackLabel}</div>
+            <div class="text-muted">SLA target: ${caseSlaHours}h</div>
+        </div>`;
+}
+
 // Case Assets -- 'suspected' is the default starting state, escalate to 'confirmed' or
 // walk it back to 'cleared' as evidence comes in.
 function criticalityBadge(c) {
     if (!c) return '<span class="text-muted">—</span>';
     const cls = { critical: 'bg-danger', important: 'bg-warning text-dark', standard: 'bg-secondary' }[c] || 'bg-secondary';
     return `<span class="badge ${cls}">${escHtml(c)}</span>`;
+}
+
+// Isolate Host / Kill Process only show up for a host with a currently-enrolled EDR
+// agent (see knownAgentsByHost, loaded once at page init from the same
+// /api/agent/checkins the EDR Agents page itself uses) -- a case asset's host is
+// freeform text an analyst typed in, so there's no guarantee it maps to a real agent.
+function caseAssetEdrActions(a) {
+    if (!CAN_EDR_RESPOND) return '';
+    const agent = knownAgentsByHost[a.host];
+    if (!agent) return '<span class="text-muted small" title="No enrolled EDR agent found for this hostname">No agent</span>';
+    const offline = agent.status === 'Offline';
+    return `
+        <button type="button" class="btn btn-sm btn-outline-warning py-0 px-2 me-1" title="Isolate host from the network" ${offline ? 'disabled' : ''} onclick="caseIsolateHost('${escJs(a.host)}')"><i class="fa-solid fa-network-wired"></i></button>
+        <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Kill a process (PID)" ${offline ? 'disabled' : ''} onclick="caseKillProcess('${escJs(a.host)}')"><i class="fa-solid fa-skull-crossbones"></i></button>`;
 }
 
 function caseAssetRow(a) {
@@ -227,8 +321,44 @@ function caseAssetRow(a) {
             </td>
             <td class="small">${escHtml(a.related_indicator || '')}</td>
             <td class="small text-muted">${escHtml(a.notes || '')}</td>
+            <td class="text-nowrap">${caseAssetEdrActions(a)}</td>
             <td class="text-end"><button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove asset" onclick="removeCaseAsset(${a.id})"><i class="fa-solid fa-xmark"></i></button></td>
         </tr>`;
+}
+
+// Mirrors agents.html's queueCommand() (same /api/agent/commands endpoint, same
+// confirmDialog + toast pattern) -- duplicated locally rather than shared, matching
+// this codebase's existing per-file convention, since the two templates don't share a
+// script include. On success, also drops a note on the case timeline so isolating/
+// killing a process from a case asset row shows up in the case's own audit trail,
+// not just the EDR page's command history.
+async function queueCaseAssetCommand(hostname, label, params, confirmMsg) {
+    if (confirmMsg && !(await confirmDialog(confirmMsg, {title: 'Confirm action', danger: true}))) return;
+    fetch('/api/agent/commands', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({hostname, label, params: params || {}})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (ok) {
+            toast(`"${label}" queued for ${hostname}. It will run on the endpoint's next check-in (usually within 15s).`, 'success');
+            fetch(`/api/cases/${activeCaseId}/notes`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({text: `Queued EDR action "${label}" on ${hostname} from Case Assets.`})
+            }).then(() => openCaseDetail(activeCaseId));
+        } else {
+            toast(data.error || 'Failed to queue command.', 'danger');
+        }
+    }).catch(err => toast('Error queuing command: ' + err, 'danger'));
+}
+
+function caseIsolateHost(host) {
+    queueCaseAssetCommand(host, 'isolate_host', {}, `Isolate ${host} from the network? Only traffic to/from this SOC server will be allowed.`);
+}
+
+function caseKillProcess(host) {
+    const pid = prompt(`PID to terminate on ${host}:`);
+    if (pid === null) return;
+    if (!/^\d+$/.test(pid.trim())) { toast('PID must be a whole number.', 'danger'); return; }
+    queueCaseAssetCommand(host, 'kill_process', {pid: pid.trim()}, `Terminate PID ${pid.trim()} on ${host}? This cannot be undone.`);
 }
 
 // Standard TLP/PAP color convention -- red/amber/green/clear (TLP), same 4-step scale for PAP.
@@ -299,12 +429,13 @@ function renderCases() {
         rows = rows.filter(c => myQueueIds.has(c.queue_id));
     }
     if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-4">No cases match these filters.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted py-4">No cases match these filters.</td></tr>';
         return;
     }
     tbody.innerHTML = rows.map(c => `
         <tr style="cursor:pointer;" onclick="openCaseDetail(${c.id})">
             <td class="ps-3 fw-bold">${escHtml(c.title)}</td>
+            <td>${caseSeverityBadge(c.severity)}</td>
             <td>${caseStatusBadge(c.status)}</td>
             <td class="small">${c.queue_name ? `<span class="badge bg-secondary">${escHtml(c.queue_name)}</span>` : '<span class="text-muted">—</span>'}</td>
             <td>${tlpBadge(c.tlp)}</td>
@@ -411,6 +542,7 @@ function showNewCaseModal() {
     document.getElementById('newCaseAssignee').value = '';
     document.getElementById('newCaseDescription').value = '';
     document.getElementById('newCaseError').style.display = 'none';
+    document.getElementById('newCaseSeverity').value = 'medium';
     populateTlpPapSelect('newCaseTlp', TLP_VALUES, 'clear');
     populateTlpPapSelect('newCasePap', PAP_VALUES, 'clear');
     populateQueueSelect('newCaseQueue', '');
@@ -428,6 +560,7 @@ function createCase() {
         description: document.getElementById('newCaseDescription').value.trim(),
         tlp: document.getElementById('newCaseTlp').value,
         pap: document.getElementById('newCasePap').value,
+        severity: document.getElementById('newCaseSeverity').value,
         template_id: templateId ? parseInt(templateId, 10) : null,
         queue_id: queueId ? parseInt(queueId, 10) : null
     };
@@ -493,6 +626,8 @@ function caseEventLabel(e) {
         assignee_change: `Assignee changed to <strong>${escHtml(e.detail)}</strong>`,
         tlp_change: `TLP changed to <strong>${escHtml((e.detail || '').toUpperCase())}</strong>`,
         pap_change: `PAP changed to <strong>${escHtml((e.detail || '').toUpperCase())}</strong>`,
+        severity_change: `Severity changed to <strong>${escHtml((e.detail || '').toUpperCase())}</strong>`,
+        workflow_state_change: `Workflow state changed to <strong>${escHtml(WORKFLOW_STATE_LABELS[e.detail] || e.detail)}</strong>`,
         queue_change: `Queue changed to <strong>${escHtml(e.detail)}</strong>`,
         item_added: `Item added: ${escHtml(e.detail)}`,
         item_removed: `Item removed: ${escHtml(e.detail)}`,
@@ -541,6 +676,7 @@ function showDetailView() {
 
 function backToList() {
     activeCaseId = null;
+    if (caseTimerInterval) { clearInterval(caseTimerInterval); caseTimerInterval = null; }
     showListView();
     loadCases();
     if (window.location.search) history.pushState({}, '', '/cases');
@@ -572,6 +708,7 @@ function loadAndRenderCaseDetail(cid) {
                 <div class="col-lg-7">
                     <div class="card bg-dark border-secondary mb-3">
                         <div class="card-body">
+                            <div id="caseSlaTimersWrap">${renderCaseSlaTimers(c)}</div>
                             <div class="row g-2 mb-2">
                                 <div class="col-md-8">
                                     <label class="form-label small text-muted mb-1">Title</label>
@@ -599,6 +736,28 @@ function loadAndRenderCaseDetail(cid) {
                                 <div class="col-md-4">
                                     <label class="form-label small text-muted mb-1">PAP</label>
                                     <select id="editCasePap" class="form-select bg-dark text-light border-secondary"></select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small text-muted mb-1">Severity</label>
+                                    <select id="editCaseSeverity" class="form-select bg-dark text-light border-secondary">
+                                        <option value="critical" ${c.severity === 'critical' ? 'selected' : ''}>Critical</option>
+                                        <option value="high" ${c.severity === 'high' ? 'selected' : ''}>High</option>
+                                        <option value="medium" ${!c.severity || c.severity === 'medium' ? 'selected' : ''}>Medium</option>
+                                        <option value="low" ${c.severity === 'low' ? 'selected' : ''}>Low</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small text-muted mb-1">Workflow</label>
+                                    <select id="editCaseWorkflowState" class="form-select bg-dark text-light border-secondary">
+                                        <option value="new" ${(!c.workflow_state || c.workflow_state === 'new') ? 'selected' : ''}>New</option>
+                                        <option value="investigating" ${c.workflow_state === 'investigating' ? 'selected' : ''}>Investigating</option>
+                                        <option value="awaiting_input" ${c.workflow_state === 'awaiting_input' ? 'selected' : ''}>Awaiting Input</option>
+                                        <option value="resolved" ${c.workflow_state === 'resolved' ? 'selected' : ''}>Resolved</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small text-muted mb-1">SLA Target</label>
+                                    <div class="form-control-plaintext text-muted small">${caseSlaHours}h fleet-wide <a href="/dashboards" class="text-light">(edit)</a></div>
                                 </div>
                                 <div class="col-12">
                                     <label class="form-label small text-muted mb-1">Description</label>
@@ -642,7 +801,7 @@ function loadAndRenderCaseDetail(cid) {
                             ${c.assets.length ? `
                             <div class="table-responsive mb-2">
                                 <table class="table table-dark table-sm align-middle mb-0">
-                                    <thead><tr><th>Host</th><th>Criticality</th><th>Status</th><th>Indicator</th><th>Notes</th><th></th></tr></thead>
+                                    <thead><tr><th>Host</th><th>Criticality</th><th>Status</th><th>Indicator</th><th>Notes</th><th>EDR</th><th></th></tr></thead>
                                     <tbody>${c.assets.map(caseAssetRow).join('')}</tbody>
                                 </table>
                             </div>` : '<p class="text-muted small mb-2">No assets tracked yet.</p>'}
@@ -710,6 +869,13 @@ function loadAndRenderCaseDetail(cid) {
         renderLinkToEntityControl();
         loadCaseReports(c.id);
         showDetailView();
+        // Live-ish SLA/TTA chips -- re-render just that strip every 30s while the case
+        // is open in the browser, rather than re-fetching/re-rendering the whole case.
+        if (caseTimerInterval) clearInterval(caseTimerInterval);
+        caseTimerInterval = setInterval(() => {
+            const wrap = document.getElementById('caseSlaTimersWrap');
+            if (wrap) wrap.innerHTML = renderCaseSlaTimers(c);
+        }, 30000);
     }).catch(err => toast('Error loading case: ' + err, 'danger'));
 }
 
@@ -731,6 +897,8 @@ function saveCaseDetail() {
         description: document.getElementById('editCaseDescription').value.trim(),
         tlp: document.getElementById('editCaseTlp').value,
         pap: document.getElementById('editCasePap').value,
+        severity: document.getElementById('editCaseSeverity').value,
+        workflow_state: document.getElementById('editCaseWorkflowState').value,
         queue_id: queueVal ? parseInt(queueVal, 10) : null
     };
     fetch(`/api/cases/${activeCaseId}`, {
@@ -1010,11 +1178,31 @@ async function viewCaseCommandResult(commandId) {
     }
 }
 
+function loadCaseSlaHours() {
+    return fetch('/api/settings/case-sla').then(r => r.json()).then(d => {
+        if (d && d.sla_hours) caseSlaHours = d.sla_hours;
+    }).catch(() => {});
+}
+
+// Resolves a case asset's freeform hostname to a currently-enrolled EDR agent (same
+// /api/agent/checkins the Agents page itself uses) -- skipped entirely for a user who
+// can't queue response actions anyway (CAN_EDR_RESPOND gate), since the buttons it
+// feeds never render for them.
+function loadKnownAgents() {
+    if (!CAN_EDR_RESPOND) return Promise.resolve();
+    return fetch('/api/agent/checkins').then(r => r.json()).then(data => {
+        knownAgentsByHost = {};
+        (Array.isArray(data) ? data : []).forEach(a => { knownAgentsByHost[a.hostname] = a; });
+    }).catch(() => {});
+}
+
 document.addEventListener("DOMContentLoaded", function() {
     // Queues load first (and are awaited) since the case-detail queue picker needs
     // allQueues populated before it can render -- relevant on a fresh page load that
-    // deep-links straight into a case via /cases?case=<id>.
-    loadCaseQueues().then(() => {
+    // deep-links straight into a case via /cases?case=<id>. SLA hours and known agents
+    // are awaited alongside it for the same reason -- the SLA timer chips and the
+    // Case Assets EDR buttons both need them on that same first render.
+    Promise.all([loadCaseQueues(), loadCaseSlaHours(), loadKnownAgents()]).then(() => {
         loadCases();
         const cidParam = new URLSearchParams(window.location.search).get('case');
         if (cidParam) openCaseDetail(parseInt(cidParam, 10));

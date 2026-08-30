@@ -2627,6 +2627,10 @@ CASE_PAP_VALUES = ('clear', 'green', 'amber', 'red')
 # asset list -- there's no separate "unknown" state since adding it to the case at all
 # already implies at least a suspicion it's involved.
 CASE_ASSET_STATUSES = ('suspected', 'confirmed', 'cleared')
+CASE_SEVERITY_VALUES = ('critical', 'high', 'medium', 'low')
+# Deliberately separate from the open/closed `status` -- see migrate_case_severity()'s
+# comment for why the two aren't merged into one enum.
+CASE_WORKFLOW_STATES = ('new', 'investigating', 'awaiting_input', 'resolved')
 
 def _log_case_event(db, cid, event_type, detail=None):
     # Append-only -- never UPDATEd/DELETEd (except cascade-deleted alongside the case
@@ -2721,7 +2725,7 @@ def api_cases():
     db = get_db()
     if request.method == 'GET':
         rows = db.execute(
-            "SELECT c.id, c.title, c.status, c.assignee, c.description, c.created_by, c.created_at, c.closed_at, c.tlp, c.pap, "
+            "SELECT c.id, c.title, c.status, c.severity, c.workflow_state, c.assignee, c.description, c.created_by, c.created_at, c.closed_at, c.acknowledged_at, c.tlp, c.pap, "
             "c.queue_id, q.name as queue_name, "
             "COUNT(DISTINCT ci.id) as item_count, "
             "COUNT(DISTINCT ct.id) as task_count, "
@@ -2740,16 +2744,19 @@ def api_cases():
     description = (data.get('description') or '').strip()
     tlp = (data.get('tlp') or 'clear').strip()
     pap = (data.get('pap') or 'clear').strip()
+    severity = (data.get('severity') or 'medium').strip()
     queue_id = data.get('queue_id') or None
     if tlp not in CASE_TLP_VALUES:
         return jsonify({"error": f"tlp must be one of {', '.join(CASE_TLP_VALUES)}"}), 400
     if pap not in CASE_PAP_VALUES:
         return jsonify({"error": f"pap must be one of {', '.join(CASE_PAP_VALUES)}"}), 400
+    if severity not in CASE_SEVERITY_VALUES:
+        return jsonify({"error": f"severity must be one of {', '.join(CASE_SEVERITY_VALUES)}"}), 400
     if queue_id and not db.execute("SELECT 1 FROM case_queues WHERE id = ?", (queue_id,)).fetchone():
         return jsonify({"error": "Queue not found"}), 400
     cur = db.execute(
-        "INSERT INTO cases (title, assignee, description, created_by, tlp, pap, queue_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (title, assignee, description, current_user.username, tlp, pap, queue_id)
+        "INSERT INTO cases (title, assignee, description, created_by, tlp, pap, severity, queue_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (title, assignee, description, current_user.username, tlp, pap, severity, queue_id)
     )
     cid = cur.lastrowid
     _log_case_event(db, cid, 'created', title)
@@ -2847,6 +2854,8 @@ def api_case_detail(cid):
         description = data['description'].strip() if 'description' in data else (case['description'] or '')
         tlp = data['tlp'].strip() if 'tlp' in data and data['tlp'] else case['tlp']
         pap = data['pap'].strip() if 'pap' in data and data['pap'] else case['pap']
+        severity = data['severity'].strip() if 'severity' in data and data['severity'] else case['severity']
+        workflow_state = data['workflow_state'].strip() if 'workflow_state' in data and data['workflow_state'] else case['workflow_state']
         queue_id = data['queue_id'] if 'queue_id' in data else case['queue_id']
         queue_id = queue_id or None
         if status not in ('open', 'closed'):
@@ -2855,6 +2864,10 @@ def api_case_detail(cid):
             return jsonify({"error": f"tlp must be one of {', '.join(CASE_TLP_VALUES)}"}), 400
         if pap not in CASE_PAP_VALUES:
             return jsonify({"error": f"pap must be one of {', '.join(CASE_PAP_VALUES)}"}), 400
+        if severity not in CASE_SEVERITY_VALUES:
+            return jsonify({"error": f"severity must be one of {', '.join(CASE_SEVERITY_VALUES)}"}), 400
+        if workflow_state not in CASE_WORKFLOW_STATES:
+            return jsonify({"error": f"workflow_state must be one of {', '.join(CASE_WORKFLOW_STATES)}"}), 400
         if queue_id and not db.execute("SELECT 1 FROM case_queues WHERE id = ?", (queue_id,)).fetchone():
             return jsonify({"error": "Queue not found"}), 400
         closed_at = case['closed_at']
@@ -2863,8 +2876,18 @@ def api_case_detail(cid):
             # default (also UTC) or every time-to-close calculation (case metrics/SLA
             # dashboard) silently skews by the server's local UTC offset.
             closed_at = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+            # A case closed while still "New"/"Investigating" reads as a data-entry
+            # gap on the timeline -- auto-advance to Resolved unless the caller already
+            # told us what workflow_state they want.
+            if 'workflow_state' not in data:
+                workflow_state = 'resolved'
         elif status == 'open':
             closed_at = None
+        # TTA (time to acknowledge): stamped once, the first time a case's workflow
+        # moves off the 'new' starting state -- never re-stamped after that.
+        acknowledged_at = case['acknowledged_at']
+        if workflow_state != 'new' and not acknowledged_at:
+            acknowledged_at = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
         # Timeline entries only for what actually CHANGED -- a save that only edits the
         # description shouldn't manufacture a spurious "status changed to open" event.
         status_changed = status != case['status']
@@ -2878,12 +2901,16 @@ def api_case_detail(cid):
             _log_case_event(db, cid, 'tlp_change', tlp)
         if pap != case['pap']:
             _log_case_event(db, cid, 'pap_change', pap)
+        if severity != case['severity']:
+            _log_case_event(db, cid, 'severity_change', severity)
+        if workflow_state != case['workflow_state']:
+            _log_case_event(db, cid, 'workflow_state_change', workflow_state)
         if queue_changed:
             queue_name = db.execute("SELECT name FROM case_queues WHERE id = ?", (queue_id,)).fetchone()['name'] if queue_id else '(none)'
             _log_case_event(db, cid, 'queue_change', queue_name)
         db.execute(
-            "UPDATE cases SET title = ?, status = ?, assignee = ?, description = ?, closed_at = ?, tlp = ?, pap = ?, queue_id = ? WHERE id = ?",
-            (title, status, assignee, description, closed_at, tlp, pap, queue_id, cid)
+            "UPDATE cases SET title = ?, status = ?, assignee = ?, description = ?, closed_at = ?, tlp = ?, pap = ?, severity = ?, workflow_state = ?, acknowledged_at = ?, queue_id = ? WHERE id = ?",
+            (title, status, assignee, description, closed_at, tlp, pap, severity, workflow_state, acknowledged_at, queue_id, cid)
         )
         if status_changed:
             _run_playbooks_for_case(db, cid, 'status_changed', queue_id, tlp, status)
@@ -5073,6 +5100,27 @@ def migrate_case_assets():
             UNIQUE(case_id, host)
         )''')
         conn.execute("CREATE INDEX IF NOT EXISTS idx_case_assets_case ON case_assets(case_id)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# Layered on top of the existing open/closed `status` (which SLA math, playbook
+# `condition_status` filters, and the cases-list sort all key off of and which this
+# migration deliberately leaves untouched) rather than replacing it -- `workflow_state`
+# is the analyst-facing triage-progress indicator (New/Investigating/Awaiting Input/
+# Resolved), `severity` is a plain priority signal, and `acknowledged_at` is TTA (time
+# to acknowledge): set once, the first time workflow_state moves off 'new'.
+def migrate_case_severity():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(cases)").fetchall()}
+        if 'severity' not in cols:
+            conn.execute("ALTER TABLE cases ADD COLUMN severity TEXT NOT NULL DEFAULT 'medium'")
+        if 'workflow_state' not in cols:
+            conn.execute("ALTER TABLE cases ADD COLUMN workflow_state TEXT NOT NULL DEFAULT 'new'")
+        if 'acknowledged_at' not in cols:
+            conn.execute("ALTER TABLE cases ADD COLUMN acknowledged_at DATETIME")
         conn.commit()
         conn.close()
     except Exception:
@@ -8068,6 +8116,7 @@ migrate_cases()
 migrate_case_upgrade()
 migrate_case_queues()
 migrate_case_assets()
+migrate_case_severity()
 migrate_dashboards()
 migrate_role_casing()
 migrate_role_permissions()
