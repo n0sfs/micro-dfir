@@ -2639,9 +2639,17 @@ CASE_WORKFLOW_STATES = ('new', 'investigating', 'awaiting_input', 'resolved')
 def _log_case_event(db, cid, event_type, detail=None):
     # Append-only -- never UPDATEd/DELETEd (except cascade-deleted alongside the case
     # itself), so this is always a truthful record of what actually happened, in order.
+    # current_user is unavailable in its normal (logged-in) sense for the one caller with
+    # no real session behind it -- the scheduled-playbook internal route, hit by
+    # sigma_engine.py's background loop, not a browser -- where it's Flask-Login's
+    # AnonymousUserMixin (no .username attribute) rather than a real user.
+    try:
+        actor = current_user.username
+    except AttributeError:
+        actor = 'scheduler'
     db.execute(
         "INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, ?, ?, ?)",
-        (cid, current_user.username, event_type, detail)
+        (cid, actor, event_type, detail)
     )
 
 @app.route('/api/case-queues', methods=['GET', 'POST'])
@@ -3279,9 +3287,34 @@ def api_case_analyze(cid):
     return jsonify({'status': 'success', 'summary': summary})
 
 # ---- Playbooks (SOAR) ----
-PLAYBOOK_TRIGGERS = ('case_created', 'status_changed', 'queue_changed', 'assignee_changed')
-PLAYBOOK_ACTION_TYPES = ('apply_template', 'add_task', 'add_note', 'set_queue', 'analyze_entity', 'send_webhook', 'send_slack')
+PLAYBOOK_TRIGGERS = ('case_created', 'status_changed', 'queue_changed', 'assignee_changed', 'scheduled')
+PLAYBOOK_ACTION_TYPES = ('apply_template', 'add_task', 'add_note', 'set_queue', 'analyze_entity', 'send_webhook', 'send_slack', 'isolate_host')
 PLAYBOOK_APPROVAL_STATUSES = ('pending', 'approved', 'rejected')
+# isolate_host is the one playbook action type with real, physical consequences (it
+# cuts network access on a real endpoint) -- requires_approval is forced to 1 for it at
+# save time (see api_playbooks/api_playbook_detail below), never left to the editor's
+# checkbox, so there's no way to configure an unattended auto-isolate.
+PLAYBOOK_ACTION_TYPES_ALWAYS_GATED = {'isolate_host'}
+
+def _parse_max_runs_per_hour(d):
+    val = d.get('max_runs_per_hour')
+    if val in (None, ''):
+        return None
+    try:
+        val = int(val)
+    except (TypeError, ValueError):
+        return None
+    return val if val > 0 else None
+
+def _parse_schedule_interval(d):
+    val = d.get('schedule_interval_minutes')
+    if val in (None, ''):
+        return None
+    try:
+        val = int(val)
+    except (TypeError, ValueError):
+        return None
+    return val if val > 0 else None
 
 def _fill_playbook_template(text, cid, case_row):
     # Deliberately plain string substitution, not a real template engine -- the
@@ -3437,6 +3470,36 @@ def _run_playbook_action(db, cid, action_type, params, dry_run=False):
         requests.post(webhook_url, json={'text': message}, timeout=8)
         return f"sent Slack message via {url_display}"
 
+    if action_type == 'isolate_host':
+        # No params -- unlike analyze_entity, a playbook can't be authored against a
+        # specific hostname ahead of time. Targets every Case Asset an analyst has
+        # explicitly marked 'confirmed' compromised (not every host merely mentioned in
+        # a linked alert) -- the same curated, analyst-judged list the one-click Isolate
+        # button on the case page itself already targets, not a broader auto-derived set.
+        confirmed_hosts = [r['host'] for r in db.execute(
+            "SELECT host FROM case_assets WHERE case_id = ? AND compromise_status = 'confirmed'", (cid,)
+        ).fetchall()]
+        if not confirmed_hosts:
+            return "no confirmed-compromised hosts in this case, skipped"
+        if dry_run:
+            return f"would isolate {len(confirmed_hosts)} confirmed host(s): {', '.join(confirmed_hosts)}"
+        # Same soc_ip auto-fill api_agent_commands() applies when the caller (there, the
+        # EDR console UI; here, an approved playbook action) doesn't supply one.
+        settings_map = {r[0]: r[1] for r in db.execute("SELECT key, value FROM settings").fetchall()}
+        soc_ip = settings_map.get('ingest_bind_ip', '0.0.0.0')
+        if soc_ip == '0.0.0.0':
+            soc_ip = request.host.split(':')[0]
+        queued = []
+        for host in confirmed_hosts:
+            builder, _ = agent_scripts.TEMPLATES_BY_OS[_get_host_os(db, host)]['isolate_host']
+            script = builder({'soc_ip': soc_ip})
+            db.execute(
+                "INSERT INTO agent_commands (hostname, label, script, queued_by) VALUES (?, 'isolate_host', ?, 'playbook')",
+                (host, script)
+            )
+            queued.append(host)
+        return f"queued isolate_host for {len(queued)} host(s): {', '.join(queued)}"
+
     return f"unknown action type '{action_type}', skipped"
 
 # Companion to the /api/playbooks/<id>/dry-run route -- checks whether a playbook's OWN
@@ -3520,6 +3583,31 @@ def _execute_playbook_actions(db, cid, playbook_id, actions):
 # for this trigger whose optional condition filters are unset or satisfied; one
 # playbook's action failing doesn't stop another matching playbook from running, and
 # doesn't stop the rest of ITS OWN actions either (see _execute_playbook_actions).
+# Guards against a misconfigured playbook re-firing in a loop (e.g. a status_changed
+# playbook whose own set_queue/webhook action indirectly re-triggers itself). Checked
+# against playbook_runs, not some separate counter, so it's always looking at the real
+# execution history -- no separate state to drift out of sync. Tripping it auto-disables
+# the playbook (not just this one run) since a rate that was fine a minute ago clearly
+# isn't now; re-enabling is a deliberate admin action via the same toggle as any other
+# disable, not automatic.
+def _check_playbook_rate_limit(db, pb, cid):
+    if not pb['max_runs_per_hour']:
+        return True
+    recent = db.execute(
+        "SELECT COUNT(*) FROM playbook_runs WHERE playbook_id = ? AND triggered_at >= datetime('now', '-1 hour')",
+        (pb['id'],)
+    ).fetchone()[0]
+    if recent < pb['max_runs_per_hour']:
+        return True
+    db.execute("UPDATE playbooks SET enabled = 0 WHERE id = ?", (pb['id'],))
+    detail = f"rate limit tripped ({recent}/{pb['max_runs_per_hour']} runs in the last hour) -- playbook auto-disabled"
+    db.execute(
+        "INSERT INTO playbook_runs (playbook_id, case_id, status, detail) VALUES (?, ?, 'rate_limited', ?)",
+        (pb['id'], cid, detail)
+    )
+    _log_case_event(db, cid, 'playbook_run', f"{pb['name']}: {detail}")
+    return False
+
 def _run_playbooks_for_case(db, cid, trigger_event, queue_id, tlp, status, severity):
     playbooks = db.execute(
         "SELECT * FROM playbooks WHERE enabled = 1 AND trigger_event = ? "
@@ -3530,6 +3618,8 @@ def _run_playbooks_for_case(db, cid, trigger_event, queue_id, tlp, status, sever
         (trigger_event, queue_id, tlp, status, severity)
     ).fetchall()
     for pb in playbooks:
+        if not _check_playbook_rate_limit(db, pb, cid):
+            continue
         actions = db.execute("SELECT action_type, params, requires_approval FROM playbook_actions WHERE playbook_id = ? ORDER BY position", (pb['id'],)).fetchall()
         detail, overall_status = _execute_playbook_actions(db, cid, pb['id'], actions)
         db.execute(
@@ -3537,6 +3627,71 @@ def _run_playbooks_for_case(db, cid, trigger_event, queue_id, tlp, status, sever
             (pb['id'], cid, overall_status, detail)
         )
         _log_case_event(db, cid, 'playbook_run', f"{pb['name']}: {detail}")
+
+# A scheduled playbook has no single case_id from a trigger event to act on -- its
+# condition_queue_id/tlp/status/severity filters become a case SELECTOR here (picking
+# which open cases to sweep) instead of a fire-time check against one case in hand, the
+# same filter columns doing double duty rather than a parallel set just for this.
+# condition_status, when set, is taken at face value (an admin who explicitly wants to
+# sweep closed cases can); left unset, only currently-open cases are swept by default --
+# a "check every open case in this queue every morning" playbook has no business ever
+# touching a case that's already closed.
+def _run_scheduled_playbooks(db):
+    playbooks = db.execute(
+        "SELECT * FROM playbooks WHERE enabled = 1 AND trigger_event = 'scheduled' AND schedule_interval_minutes IS NOT NULL"
+    ).fetchall()
+    now = datetime.utcnow()
+    for pb in playbooks:
+        due = True
+        if pb['last_scheduled_run']:
+            try:
+                last = datetime.strptime(pb['last_scheduled_run'], '%Y-%m-%d %H:%M:%S')
+                due = (now - last).total_seconds() >= pb['schedule_interval_minutes'] * 60
+            except (ValueError, TypeError):
+                due = True
+        if not due:
+            continue
+
+        conditions, params = [], []
+        if pb['condition_queue_id']:
+            conditions.append("queue_id = ?"); params.append(pb['condition_queue_id'])
+        if pb['condition_tlp']:
+            conditions.append("tlp = ?"); params.append(pb['condition_tlp'])
+        if pb['condition_status']:
+            conditions.append("status = ?"); params.append(pb['condition_status'])
+        else:
+            conditions.append("status != 'closed'")
+        if pb['condition_severity']:
+            conditions.append("severity = ?"); params.append(pb['condition_severity'])
+        matching_cases = db.execute(f"SELECT id FROM cases WHERE {' AND '.join(conditions)}", params).fetchall()
+
+        actions = db.execute("SELECT action_type, params, requires_approval FROM playbook_actions WHERE playbook_id = ? ORDER BY position", (pb['id'],)).fetchall()
+        for case_row in matching_cases:
+            cid = case_row['id']
+            if not _check_playbook_rate_limit(db, pb, cid):
+                break  # this playbook just auto-disabled itself -- stop sweeping the rest
+            detail, overall_status = _execute_playbook_actions(db, cid, pb['id'], actions)
+            db.execute(
+                "INSERT INTO playbook_runs (playbook_id, case_id, status, detail) VALUES (?, ?, ?, ?)",
+                (pb['id'], cid, overall_status, detail)
+            )
+            _log_case_event(db, cid, 'playbook_run', f"{pb['name']} (scheduled): {detail}")
+        db.execute("UPDATE playbooks SET last_scheduled_run = datetime('now') WHERE id = ?", (pb['id'],))
+        db.commit()
+
+# Hit by sigma_engine.py's background loop (every ~30s, same cadence as its TI-feed
+# auto-sync check) -- not a user-facing route, so no @login_required/current_user. The
+# due-check inside _run_scheduled_playbooks() makes this cheap to call that often (a
+# no-op unless something's actually due), same shape as taxii_client.sync_due_feeds().
+# Restricted to localhost since this process and the Flask app always run on the same
+# host and there's no legitimate reason for this to be reachable from outside it.
+@app.route('/api/internal/run-scheduled-playbooks', methods=['POST'])
+def api_run_scheduled_playbooks():
+    if request.remote_addr not in ('127.0.0.1', '::1'):
+        return jsonify({'error': 'Forbidden'}), 403
+    db = get_db()
+    _run_scheduled_playbooks(db)
+    return jsonify({'status': 'success'})
 
 @app.route('/api/playbooks', methods=['GET', 'POST'])
 @login_required
@@ -3581,15 +3736,20 @@ def api_playbooks():
     condition_tlp = (d.get('condition_tlp') or '').strip() or None
     condition_status = (d.get('condition_status') or '').strip() or None
     condition_severity = (d.get('condition_severity') or '').strip() or None
+    max_runs_per_hour = _parse_max_runs_per_hour(d)
+    schedule_interval_minutes = _parse_schedule_interval(d)
+    if trigger_event == 'scheduled' and not schedule_interval_minutes:
+        return jsonify({'error': 'Scheduled playbooks require a schedule interval (in minutes)'}), 400
     cur = db.execute(
-        "INSERT INTO playbooks (name, description, trigger_event, enabled, condition_queue_id, condition_tlp, condition_status, condition_severity, created_by) "
-        "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)",
-        (name, (d.get('description') or '').strip(), trigger_event, condition_queue_id, condition_tlp, condition_status, condition_severity, current_user.username)
+        "INSERT INTO playbooks (name, description, trigger_event, enabled, condition_queue_id, condition_tlp, condition_status, condition_severity, max_runs_per_hour, schedule_interval_minutes, created_by) "
+        "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
+        (name, (d.get('description') or '').strip(), trigger_event, condition_queue_id, condition_tlp, condition_status, condition_severity, max_runs_per_hour, schedule_interval_minutes, current_user.username)
     )
     pid = cur.lastrowid
     for i, a in enumerate(actions):
+        gated = a['action_type'] in PLAYBOOK_ACTION_TYPES_ALWAYS_GATED or bool(a.get('requires_approval'))
         db.execute("INSERT INTO playbook_actions (playbook_id, position, action_type, params, requires_approval) VALUES (?, ?, ?, ?, ?)",
-                   (pid, i, a['action_type'], json.dumps(a.get('params') or {}), 1 if a.get('requires_approval') else 0))
+                   (pid, i, a['action_type'], json.dumps(a.get('params') or {}), 1 if gated else 0))
     db.commit()
     log_audit('playbook_create', 'playbook', name)
     return jsonify({'status': 'success', 'id': pid})
@@ -3636,14 +3796,19 @@ def api_playbook_detail(pid):
     condition_tlp = (d.get('condition_tlp') or '').strip() or None
     condition_status = (d.get('condition_status') or '').strip() or None
     condition_severity = (d.get('condition_severity') or '').strip() or None
+    max_runs_per_hour = _parse_max_runs_per_hour(d)
+    schedule_interval_minutes = _parse_schedule_interval(d)
+    if trigger_event == 'scheduled' and not schedule_interval_minutes:
+        return jsonify({'error': 'Scheduled playbooks require a schedule interval (in minutes)'}), 400
     db.execute(
-        "UPDATE playbooks SET name = ?, description = ?, trigger_event = ?, condition_queue_id = ?, condition_tlp = ?, condition_status = ?, condition_severity = ? WHERE id = ?",
-        (name, (d.get('description') or '').strip(), trigger_event, condition_queue_id, condition_tlp, condition_status, condition_severity, pid)
+        "UPDATE playbooks SET name = ?, description = ?, trigger_event = ?, condition_queue_id = ?, condition_tlp = ?, condition_status = ?, condition_severity = ?, max_runs_per_hour = ?, schedule_interval_minutes = ? WHERE id = ?",
+        (name, (d.get('description') or '').strip(), trigger_event, condition_queue_id, condition_tlp, condition_status, condition_severity, max_runs_per_hour, schedule_interval_minutes, pid)
     )
     db.execute("DELETE FROM playbook_actions WHERE playbook_id = ?", (pid,))
     for i, a in enumerate(actions):
+        gated = a['action_type'] in PLAYBOOK_ACTION_TYPES_ALWAYS_GATED or bool(a.get('requires_approval'))
         db.execute("INSERT INTO playbook_actions (playbook_id, position, action_type, params, requires_approval) VALUES (?, ?, ?, ?, ?)",
-                   (pid, i, a['action_type'], json.dumps(a.get('params') or {}), 1 if a.get('requires_approval') else 0))
+                   (pid, i, a['action_type'], json.dumps(a.get('params') or {}), 1 if gated else 0))
     db.commit()
     log_audit('playbook_update', 'playbook', name)
     return jsonify({'status': 'success'})
@@ -3722,6 +3887,9 @@ def api_playbook_run(pid):
         skip_reasons.append("the case's severity doesn't match the condition")
     if skip_reasons:
         return jsonify({'error': "This playbook wouldn't fire for this case: " + '; '.join(skip_reasons)}), 400
+    if not _check_playbook_rate_limit(db, pb, case_id):
+        db.commit()  # persist the rate-limit run row + auto-disable _check_playbook_rate_limit already staged
+        return jsonify({'error': f"Rate limit reached ({pb['max_runs_per_hour']} runs/hour) -- the playbook has been auto-disabled."}), 429
 
     actions = db.execute("SELECT action_type, params, requires_approval FROM playbook_actions WHERE playbook_id = ? ORDER BY position", (pid,)).fetchall()
     detail, overall_status = _execute_playbook_actions(db, case_id, pid, actions)
@@ -5601,6 +5769,12 @@ def migrate_playbook_approvals():
         pb_cols = {row[1] for row in conn.execute("PRAGMA table_info(playbooks)").fetchall()}
         if 'condition_severity' not in pb_cols:
             conn.execute("ALTER TABLE playbooks ADD COLUMN condition_severity TEXT")
+        if 'max_runs_per_hour' not in pb_cols:
+            conn.execute("ALTER TABLE playbooks ADD COLUMN max_runs_per_hour INTEGER")
+        if 'schedule_interval_minutes' not in pb_cols:
+            conn.execute("ALTER TABLE playbooks ADD COLUMN schedule_interval_minutes INTEGER")
+        if 'last_scheduled_run' not in pb_cols:
+            conn.execute("ALTER TABLE playbooks ADD COLUMN last_scheduled_run DATETIME")
         conn.execute('''CREATE TABLE IF NOT EXISTS playbook_approvals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             playbook_id INTEGER NOT NULL,

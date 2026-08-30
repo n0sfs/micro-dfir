@@ -621,6 +621,13 @@ if __name__ == "__main__":
     # unless something's actually due, so running them every 30s adds negligible
     # overhead.
     from taxii_client import sync_due_feeds
+    # The Flask app terminates TLS itself with a self-signed cert (see
+    # config/microsoc-web.service's --certfile/--keyfile) -- verify=False for this
+    # same-host call is the same tradeoff Vector's own ingest sink already makes
+    # (config/vector.toml's tls.verify_certificate = false), not a new one.
+    import warnings
+    from urllib3.exceptions import InsecureRequestWarning
+    warnings.simplefilter('ignore', InsecureRequestWarning)
     while True:
         run_detection_cycle()
         try:
@@ -635,4 +642,8 @@ if __name__ == "__main__":
             run_due_ioc_purge()
         except Exception as e:
             print(f"[-] Automatic IOC purge check failed: {e}")
+        try:
+            requests.post("https://127.0.0.1:5001/api/internal/run-scheduled-playbooks", timeout=15, verify=False)
+        except Exception as e:
+            print(f"[-] Scheduled playbook check failed: {e}")
         time.sleep(30)
