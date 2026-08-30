@@ -620,6 +620,15 @@
 <!-- ============================ COVERAGE PANE ============================= -->
 <div id="paneCoverage" style="display: {{ 'block' if active_tab == 'coverage' else 'none' }};">
 <div class="card shadow-sm border-secondary bg-dark text-light mb-4">
+    <div class="card-header border-secondary">
+        <h5 class="mb-0 text-info"><i class="fa-solid fa-chart-line"></i> Coverage Over Time</h5>
+    </div>
+    <div class="card-body">
+        <div id="coverageHistoryEmpty" class="text-muted small text-center py-4" style="display:none;">History builds up daily starting today — check back tomorrow to see a trend.</div>
+        <div style="height:200px;"><canvas id="coverageHistoryChart"></canvas></div>
+    </div>
+</div>
+<div class="card shadow-sm border-secondary bg-dark text-light mb-4">
     <div class="card-header border-secondary d-flex justify-content-between align-items-center">
         <h5 class="mb-0 text-info"><i class="fa-solid fa-diagram-project"></i> MITRE ATT&amp;CK Detection Coverage</h5>
         <select id="coverageRange" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" onchange="loadCoverageTab()">
@@ -634,6 +643,7 @@
             <span class="badge me-1 ms-3" style="background:#664d0322;color:#ffc107;">&nbsp;&nbsp;</span> Inactive — mapped rule(s) disabled
             <span class="badge me-1 ms-3" style="background:#0dcaf033;color:#0dcaf0;">&nbsp;&nbsp;</span> Active — enabled, not yet validated
             <span class="badge me-1 ms-3" style="background:#19875433;color:#19a35a;">&nbsp;&nbsp;</span> Validated — enabled rule has fired
+            <span class="ms-3"><i class="fa-solid fa-plug-circle-xmark text-warning"></i> No matching log source ingested — enabled, but its rule(s) need data this appliance doesn't collect</span>
         </div>
         <div id="coverageGrid" class="d-flex flex-wrap gap-3">
             <div class="text-center text-muted py-4 w-100">Loading…</div>
@@ -3616,8 +3626,65 @@ const COVERAGE_TIER_STYLE = {
     validated: 'background:#19875433; color:#19a35a; font-weight:700;',
 };
 
+let coverageHistoryChart = null;
+
 function initCoverageTab() {
     loadCoverageTab();
+    loadCoverageHistory();
+}
+
+function loadCoverageHistory() {
+    fetch('/api/mitre/coverage/history?days=90').then(r => r.json()).then(d => {
+        renderCoverageHistoryChart(d.snapshots || []);
+    }).catch(err => console.error('Error loading coverage history:', err));
+}
+
+function renderCoverageHistoryChart(snapshots) {
+    const emptyEl = document.getElementById('coverageHistoryEmpty');
+    const canvas = document.getElementById('coverageHistoryChart');
+    if (coverageHistoryChart) { coverageHistoryChart.destroy(); coverageHistoryChart = null; }
+    if (snapshots.length < 2) {
+        emptyEl.style.display = 'block';
+        canvas.style.display = 'none';
+        return;
+    }
+    emptyEl.style.display = 'none';
+    canvas.style.display = 'block';
+    coverageHistoryChart = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+            labels: snapshots.map(s => s.snapshot_date),
+            datasets: [{
+                label: 'Coverage %',
+                data: snapshots.map(s => s.coverage_pct),
+                borderColor: '#19a35a',
+                backgroundColor: 'rgba(25, 163, 90, 0.1)',
+                borderWidth: 2,
+                fill: true,
+                tension: 0.2,
+                pointRadius: 2
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: { mode: 'index', intersect: false }
+            },
+            scales: {
+                x: {
+                    grid: { color: '#2b2f33' },
+                    ticks: { color: '#adb5bd', font: { size: 10 }, maxTicksLimit: 12 }
+                },
+                y: {
+                    grid: { color: '#2b2f33' },
+                    ticks: { color: '#adb5bd', font: { size: 10 }, callback: v => v + '%' },
+                    beginAtZero: true, max: 100
+                }
+            }
+        }
+    });
 }
 
 function loadCoverageTab() {
@@ -3663,7 +3730,7 @@ function renderCoverageGrid(d) {
             <div style="max-height: 260px; overflow-y: auto;">
                 ${t.techniques.map(tech => `
                 <div class="mb-1 px-2 py-1 rounded small" style="cursor:pointer; ${COVERAGE_TIER_STYLE[tech.tier]}" onclick="openCoverageDrilldown('${escHtml(t.tactic)}','${escHtml(tech.id)}')" title="T${escHtml(tech.id)} ${escHtml(tech.name || '')}">
-                    T${escHtml(tech.id)}${tech.threat_actors && tech.threat_actors.length ? ' <i class="fa-solid fa-triangle-exclamation text-warning" title="A known threat actor/malware uses this technique"></i>' : ''}
+                    T${escHtml(tech.id)}${tech.threat_actors && tech.threat_actors.length ? ' <i class="fa-solid fa-triangle-exclamation text-warning" title="A known threat actor/malware uses this technique"></i>' : ''}${tech.log_source_gap ? ' <i class="fa-solid fa-plug-circle-xmark text-warning" title="Enabled, but its rule(s) need a log source this appliance does not ingest"></i>' : ''}
                 </div>`).join('')}
             </div>
         </div>`).join('');
@@ -3712,6 +3779,10 @@ function openCoverageDrilldown(tactic, techId) {
         html += `<div class="alert alert-danger py-2 small"><i class="fa-solid fa-user-ninja me-1"></i>Known to be used by: ${tech.threat_actors.map(a => `<a href="/threat-intel?tab=entities&entity=${a.id}" target="_blank" class="text-light">${escHtml(a.name)}</a>`).join(', ')} — no rule currently covers this technique.</div>`;
     }
 
+    if (tech.log_source_gap) {
+        html += `<div class="alert alert-warning py-2 small"><i class="fa-solid fa-plug-circle-xmark me-1"></i>Every enabled rule mapped to this technique needs a log source this appliance does not currently ingest, so despite showing "active" it may never actually fire here.</div>`;
+    }
+
     if (!tech.rules.length) {
         html += '<div class="text-muted small">No rules are mapped to this technique.</div>';
     } else {
@@ -3721,8 +3792,10 @@ function openCoverageDrilldown(tactic, techId) {
                 html += `<tr><td colspan="3" class="text-muted small">+ more rules not shown</td></tr>`;
                 return;
             }
+            const noLogSource = r.log_source_ingestible === false
+                ? ' <i class="fa-solid fa-plug-circle-xmark text-warning" title="Its expected log source does not appear to be ingested here"></i>' : '';
             html += `<tr>
-                <td><a href="/rules?rule_id=${r.id}" target="_blank">${escHtml(r.title)}</a> ${r.enabled ? '' : '<span class="badge bg-secondary ms-1">disabled</span>'}</td>
+                <td><a href="/rules?rule_id=${r.id}" target="_blank">${escHtml(r.title)}</a> ${r.enabled ? '' : '<span class="badge bg-secondary ms-1">disabled</span>'}${noLogSource}</td>
                 <td><span class="badge ${LEVEL_BADGE[r.level] || 'bg-secondary'}">${escHtml(r.level || 'medium')}</span></td>
                 <td><span class="badge ${STATUS_BADGE[r.status] || 'bg-secondary'}">${escHtml(r.status || 'unknown')}</span></td>
             </tr>`;
