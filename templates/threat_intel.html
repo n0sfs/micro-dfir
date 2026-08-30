@@ -457,7 +457,7 @@
                 <option value="sslbl">SSLBL Malicious TLS Certificates (public)</option>
                 <option value="spamhaus_drop">Spamhaus DROP (hijacked netblocks, public)</option>
                 <option value="tor_exit">Tor Exit Node List (public)</option>
-                <option value="malwarebazaar">MalwareBazaar Recent Samples (public — API key optional)</option>
+                <option value="malwarebazaar">MalwareBazaar Recent Samples (free API key required)</option>
                 <option value="taxii">STIX / TAXII 2.1 Server</option>
                 <option value="csv">CSV File Upload</option>
             </select>
@@ -904,7 +904,10 @@ const FEED_TYPES_WITH_API_KEY = ['taxii', 'otx', 'yaraify', 'threatfox', 'urlhau
 // These keep working with zero configuration (their legacy public export endpoints
 // need no auth) -- a key here only raises the rate limit / attributes requests to your
 // abuse.ch account instead of anonymous access, so it's optional, not required.
-const FEED_TYPES_WITH_OPTIONAL_API_KEY = ['threatfox', 'urlhaus', 'feodotracker', 'yaraify', 'sslbl', 'malwarebazaar'];
+// MalwareBazaar is the one abuse.ch feed here that's the exception -- it now requires
+// a free Auth-Key unconditionally (a 401 with no key at all, confirmed live), same as
+// OTX, so it's deliberately left OUT of this optional list.
+const FEED_TYPES_WITH_OPTIONAL_API_KEY = ['threatfox', 'urlhaus', 'feodotracker', 'yaraify', 'sslbl'];
 
 // Feed types with a configurable base URL, and what that URL means for each.
 const FEED_TYPES_WITH_URL = ['taxii', 'misp'];
