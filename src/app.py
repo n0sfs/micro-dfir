@@ -1497,9 +1497,22 @@ def api_ti_entity_full_detail(eid):
         tname, tactic = mitre_lookup(tid)
         techniques.append({'id': tid, 'name': tname, 'tactic': tactic, 'tactic_label': TACTIC_LABELS.get(tactic, tactic)})
 
+    # Entity-to-entity links are stored as one directed row (entity_id -> target_id),
+    # but shown on BOTH entities' detail pages -- the UNION's second branch is this
+    # entity's INCOMING side of a link some other entity created, with target_id
+    # re-mapped to "the other entity" either way so the frontend can treat both
+    # branches uniformly. Only entity-type relationships get an entity_name resolved;
+    # alert/case/ioc/ueba_event rows keep the existing raw-target_id display.
     relationships = [dict(r) for r in db.execute(
-        "SELECT id, target_type, target_id, relationship_type, created_by, created_at FROM ti_relationships WHERE entity_id = ? ORDER BY created_at DESC",
-        (eid,)
+        "SELECT id, target_type, target_id, relationship_type, created_by, created_at, 'outgoing' as direction, "
+        "(SELECT name FROM ti_entities WHERE id = CAST(target_id AS INTEGER)) as entity_name "
+        "FROM ti_relationships WHERE entity_id = ? "
+        "UNION ALL "
+        "SELECT id, target_type, CAST(entity_id AS TEXT) as target_id, relationship_type, created_by, created_at, 'incoming' as direction, "
+        "(SELECT name FROM ti_entities WHERE id = entity_id) as entity_name "
+        "FROM ti_relationships WHERE target_type = 'entity' AND target_id = ? "
+        "ORDER BY created_at DESC",
+        (eid, str(eid))
     ).fetchall()]
 
     return jsonify({**entity, 'techniques': techniques, 'matched_iocs': matched_iocs, 'relationships': relationships})
@@ -1509,7 +1522,7 @@ def api_ti_entity_full_detail(eid):
 # matched_iocs above and the actor-summary widget) doesn't catch it. Open to any
 # logged-in user, not admin-gated -- same collaborative-annotation posture as case
 # items/tasks/notes, distinct from entity CRUD which edits the canonical library.
-TI_RELATIONSHIP_TARGET_TYPES = {'alert', 'ueba_event', 'case', 'ioc'}
+TI_RELATIONSHIP_TARGET_TYPES = {'alert', 'ueba_event', 'case', 'ioc', 'entity'}
 
 @app.route('/api/ti/entities/<int:eid>/relationships', methods=['POST'])
 @login_required
@@ -1528,6 +1541,13 @@ def api_ti_entity_relationship_add(eid):
     if target_type == 'case' and target_id.isdigit():
         err = _require_open_case(db, int(target_id))
         if err: return err
+    if target_type == 'entity':
+        if not target_id.isdigit():
+            return jsonify({'error': 'Entity target_id must be an entity ID'}), 400
+        if int(target_id) == eid:
+            return jsonify({'error': 'An entity cannot be linked to itself'}), 400
+        if not db.execute("SELECT 1 FROM ti_entities WHERE id = ?", (int(target_id),)).fetchone():
+            return jsonify({'error': 'Target entity not found'}), 404
     if db.execute(
         "SELECT 1 FROM ti_relationships WHERE entity_id = ? AND target_type = ? AND target_id = ?",
         (eid, target_type, target_id)
@@ -1545,7 +1565,14 @@ def api_ti_entity_relationship_add(eid):
 @login_required
 def api_ti_entity_relationship_delete(eid, rid):
     db = get_db()
-    rel = db.execute("SELECT target_type, target_id FROM ti_relationships WHERE id = ? AND entity_id = ?", (rid, eid)).fetchone()
+    # An entity-to-entity link shows on both entities' pages (see the UNION in the
+    # detail route above) and must be deletable from either -- the row itself is only
+    # ever stored under the CREATING entity's entity_id, so the viewing-from-the-
+    # target-side case needs the second OR branch to find it at all.
+    rel = db.execute(
+        "SELECT target_type, target_id FROM ti_relationships WHERE id = ? AND (entity_id = ? OR (target_type = 'entity' AND target_id = ?))",
+        (rid, eid, str(eid))
+    ).fetchone()
     if not rel:
         return jsonify({'error': 'Relationship not found'}), 404
     if rel['target_type'] == 'case' and rel['target_id'].isdigit():

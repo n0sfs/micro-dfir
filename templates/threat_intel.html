@@ -1582,22 +1582,51 @@ async function deleteEntity(id, name) {
 }
 
 function relationshipRow(rel, eid) {
+    // Entity-to-entity links resolve to the OTHER entity's real name (clickable,
+    // opens its own detail) and show which way the link points -- 'incoming' means
+    // some other entity created a link TO this one, so the verb reads in reverse
+    // ("used by" instead of "uses") rather than misleadingly implying this entity is
+    // the one that did the "using". Non-entity targets (alert/case/ioc/ueba_event)
+    // render exactly as before.
+    const targetCell = rel.target_type === 'entity' && rel.entity_name
+        ? `<a href="#" onclick="openEntityDetail(${rel.target_id}); return false;">${escHtml(rel.entity_name)}</a>`
+        : `<span class="text-muted small">${escHtml(rel.target_type)}</span> <span class="font-monospace small">${escHtml(rel.target_id)}</span>`;
+    const verb = rel.target_type === 'entity' && rel.direction === 'incoming'
+        ? `${escHtml(rel.relationship_type)} <i class="fa-solid fa-arrow-left mx-1" title="Linked from the other entity's page"></i>`
+        : `${rel.target_type === 'entity' ? '<i class="fa-solid fa-arrow-right me-1"></i>' : ''}${escHtml(rel.relationship_type)}`;
     return `<tr>
-        <td class="small">${escHtml(rel.target_type)}</td>
-        <td class="small font-monospace">${escHtml(rel.target_id)}</td>
-        <td class="small text-muted">${escHtml(rel.relationship_type)}</td>
+        <td class="small">${targetCell}</td>
+        <td class="small text-muted">${verb}</td>
         <td class="small text-muted">${escHtml(rel.created_by || '')}</td>
         <td class="text-end"><button type="button" class="btn btn-sm btn-outline-danger py-0 px-1" title="Remove" onclick="deleteRelationship(${eid}, ${rel.id})"><i class="fa-solid fa-xmark"></i></button></td>
     </tr>`;
 }
 
+// Entity targets are picked from a real dropdown (excludes the current entity) since
+// typing a raw entity ID by hand is poor UX for a small curated catalog; every other
+// target type keeps the free-text ID field, since those aren't enumerable the same way.
+function onRelTargetTypeChange() {
+    const isEntity = document.getElementById('relTargetType').value === 'entity';
+    document.getElementById('relTargetIdEntity').style.display = isEntity ? '' : 'none';
+    document.getElementById('relTargetId').style.display = isEntity ? 'none' : '';
+    if (isEntity) {
+        const sel = document.getElementById('relTargetIdEntity');
+        sel.innerHTML = allEntities
+            .filter(en => en.id !== activeEntityDetailId)
+            .map(en => `<option value="${en.id}">${escHtml(en.name)}</option>`)
+            .join('') || '<option value="">No other entities yet</option>';
+    }
+}
+
 async function addRelationship() {
     const msg = document.getElementById('addRelMsg');
     const target_type = document.getElementById('relTargetType').value;
-    const target_id = document.getElementById('relTargetId').value.trim();
+    const target_id = (target_type === 'entity'
+        ? document.getElementById('relTargetIdEntity').value
+        : document.getElementById('relTargetId').value.trim());
     const relationship_type = document.getElementById('relRelationshipType').value;
     if (!target_id) {
-        msg.className = 'small mt-1 text-danger'; msg.innerText = 'Target ID is required.'; msg.style.display = 'block';
+        msg.className = 'small mt-1 text-danger'; msg.innerText = 'Target is required.'; msg.style.display = 'block';
         return;
     }
     try {
@@ -1693,14 +1722,15 @@ async function openEntityDetail(id) {
             <h6 class="small text-uppercase text-muted">Manual Relationships (${(e.relationships || []).length})</h6>
             <div class="table-responsive mb-2">
                 <table class="table table-dark table-sm mb-0">
-                    <thead><tr><th>Target Type</th><th>Target ID</th><th>Relationship</th><th>Added By</th><th></th></tr></thead>
-                    <tbody>${relRows || '<tr><td colspan="5" class="text-center text-muted small py-2">None yet.</td></tr>'}</tbody>
+                    <thead><tr><th>Target</th><th>Relationship</th><th>Added By</th><th></th></tr></thead>
+                    <tbody>${relRows || '<tr><td colspan="4" class="text-center text-muted small py-2">None yet.</td></tr>'}</tbody>
                 </table>
             </div>
             <div class="d-flex flex-wrap gap-2 align-items-end">
                 <div>
                     <label class="form-label small text-muted mb-1">Target Type</label>
-                    <select id="relTargetType" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:130px;">
+                    <select id="relTargetType" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:130px;" onchange="onRelTargetTypeChange()">
+                        <option value="entity">Entity</option>
                         <option value="alert">Alert</option>
                         <option value="ueba_event">UEBA Event</option>
                         <option value="case">Case</option>
@@ -1708,12 +1738,14 @@ async function openEntityDetail(id) {
                     </select>
                 </div>
                 <div>
-                    <label class="form-label small text-muted mb-1">Target ID</label>
-                    <input type="text" id="relTargetId" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:170px;" placeholder="e.g. 42" onkeyup="if(event.key === 'Enter') addRelationship()">
+                    <label class="form-label small text-muted mb-1">Target</label>
+                    <select id="relTargetIdEntity" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:190px;"></select>
+                    <input type="text" id="relTargetId" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:170px; display:none;" placeholder="e.g. 42" onkeyup="if(event.key === 'Enter') addRelationship()">
                 </div>
                 <div>
                     <label class="form-label small text-muted mb-1">Relationship</label>
                     <select id="relRelationshipType" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:160px;">
+                        <option value="uses">uses</option>
                         <option value="indicates">indicates</option>
                         <option value="attributed-to">attributed-to</option>
                         <option value="related-to">related-to</option>
@@ -1725,6 +1757,7 @@ async function openEntityDetail(id) {
             </div>
             <div id="addRelMsg" class="small mt-1" style="display:none;"></div>
         `;
+        onRelTargetTypeChange();
     } catch (err) {
         document.getElementById('entityDetailBody').innerHTML = `<span class="text-danger">Error: ${escHtml(String(err))}</span>`;
     }
