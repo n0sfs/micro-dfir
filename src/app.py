@@ -2754,14 +2754,20 @@ def api_cases():
         return jsonify({"error": "Title is required"}), 400
     assignee = (data.get('assignee') or '').strip()
     description = (data.get('description') or '').strip()
-    tlp = (data.get('tlp') or 'clear').strip()
-    pap = (data.get('pap') or 'clear').strip()
+    # Unlike every other case field, TLP/PAP have no sensible forced default -- they're
+    # an explicit information-sharing classification an analyst may not have assessed
+    # yet, especially on a single-operator/internal-only appliance where "who else can
+    # see this" often just doesn't apply. Empty string (not NULL -- tlp/pap stay NOT
+    # NULL, no schema change) means "not set", distinct from an explicit 'clear'
+    # classification (which means "assessed, no restriction").
+    tlp = (data.get('tlp') or '').strip()
+    pap = (data.get('pap') or '').strip()
     severity = (data.get('severity') or 'medium').strip()
     queue_id = data.get('queue_id') or None
-    if tlp not in CASE_TLP_VALUES:
-        return jsonify({"error": f"tlp must be one of {', '.join(CASE_TLP_VALUES)}"}), 400
-    if pap not in CASE_PAP_VALUES:
-        return jsonify({"error": f"pap must be one of {', '.join(CASE_PAP_VALUES)}"}), 400
+    if tlp and tlp not in CASE_TLP_VALUES:
+        return jsonify({"error": f"tlp must be empty (not set) or one of {', '.join(CASE_TLP_VALUES)}"}), 400
+    if pap and pap not in CASE_PAP_VALUES:
+        return jsonify({"error": f"pap must be empty (not set) or one of {', '.join(CASE_PAP_VALUES)}"}), 400
     if severity not in CASE_SEVERITY_VALUES:
         return jsonify({"error": f"severity must be one of {', '.join(CASE_SEVERITY_VALUES)}"}), 400
     if queue_id and not db.execute("SELECT 1 FROM case_queues WHERE id = ?", (queue_id,)).fetchone():
@@ -2870,18 +2876,20 @@ def api_case_detail(cid):
         status = data['status'].strip() if 'status' in data and data['status'] else case['status']
         assignee = data['assignee'].strip() if 'assignee' in data else (case['assignee'] or '')
         description = data['description'].strip() if 'description' in data else (case['description'] or '')
-        tlp = data['tlp'].strip() if 'tlp' in data and data['tlp'] else case['tlp']
-        pap = data['pap'].strip() if 'pap' in data and data['pap'] else case['pap']
+        # 'tlp' in data (not "and data['tlp']") -- an explicit empty string must actually
+        # clear it back to not-set, not silently fall through to keeping the old value.
+        tlp = data['tlp'].strip() if 'tlp' in data else case['tlp']
+        pap = data['pap'].strip() if 'pap' in data else case['pap']
         severity = data['severity'].strip() if 'severity' in data and data['severity'] else case['severity']
         workflow_state = data['workflow_state'].strip() if 'workflow_state' in data and data['workflow_state'] else case['workflow_state']
         queue_id = data['queue_id'] if 'queue_id' in data else case['queue_id']
         queue_id = queue_id or None
         if status not in ('open', 'closed'):
             return jsonify({"error": "status must be 'open' or 'closed'"}), 400
-        if tlp not in CASE_TLP_VALUES:
-            return jsonify({"error": f"tlp must be one of {', '.join(CASE_TLP_VALUES)}"}), 400
-        if pap not in CASE_PAP_VALUES:
-            return jsonify({"error": f"pap must be one of {', '.join(CASE_PAP_VALUES)}"}), 400
+        if tlp and tlp not in CASE_TLP_VALUES:
+            return jsonify({"error": f"tlp must be empty (not set) or one of {', '.join(CASE_TLP_VALUES)}"}), 400
+        if pap and pap not in CASE_PAP_VALUES:
+            return jsonify({"error": f"pap must be empty (not set) or one of {', '.join(CASE_PAP_VALUES)}"}), 400
         if severity not in CASE_SEVERITY_VALUES:
             return jsonify({"error": f"severity must be one of {', '.join(CASE_SEVERITY_VALUES)}"}), 400
         if workflow_state not in CASE_WORKFLOW_STATES:

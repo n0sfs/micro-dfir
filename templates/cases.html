@@ -226,9 +226,11 @@ function caseSeverityBadge(sev) {
     return `<span class="badge ${severityBadgeClass(sev)}">${escHtml((sev || 'medium').toUpperCase())}</span>`;
 }
 
-// Deliberately separate from Status (Open/Closed) -- this is the analyst-facing
-// triage-progress indicator layered on top, see migrate_case_severity()'s comment
-// in src/app.py for why the two aren't merged into one enum.
+// Deliberately separate from Status (Open/Closed) in the schema -- this is the
+// analyst-facing triage-progress indicator layered on top, see migrate_case_severity()'s
+// comment in src/app.py for why the two aren't merged into one enum. The case-detail
+// edit form presents them as a single merged dropdown (editCaseStatusWorkflow) purely
+// as a UI convenience; saveCaseDetail() splits that one value back into status+workflow_state.
 const WORKFLOW_STATE_LABELS = { new: 'New', investigating: 'Investigating', awaiting_input: 'Awaiting Input', resolved: 'Resolved' };
 const WORKFLOW_STATE_COLORS = { new: 'bg-secondary', investigating: 'bg-primary', awaiting_input: 'bg-warning text-dark', resolved: 'bg-success' };
 function workflowStateBadge(ws) {
@@ -426,12 +428,16 @@ const TLP_VALUES = ['clear', 'green', 'amber', 'amber-strict', 'red'];
 const PAP_VALUES = ['clear', 'green', 'amber', 'red'];
 const TLP_PAP_COLORS = {clear: 'bg-secondary', green: 'bg-success', amber: 'bg-warning text-dark', 'amber-strict': 'bg-warning text-dark', red: 'bg-danger'};
 
-function tlpBadge(v) { return `<span class="badge ${TLP_PAP_COLORS[v] || 'bg-secondary'}" title="Traffic Light Protocol">TLP:${escHtml((v || 'clear').toUpperCase())}</span>`; }
-function papBadge(v) { return `<span class="badge ${TLP_PAP_COLORS[v] || 'bg-secondary'}" title="Permissible Actions Protocol">PAP:${escHtml((v || 'clear').toUpperCase())}</span>`; }
+// Empty/falsy is "not set" (never assessed) -- deliberately NOT the same as an explicit
+// 'clear' classification ("assessed, no restriction"), so it gets its own muted badge
+// rather than silently displaying as CLEAR.
+function tlpBadge(v) { return v ? `<span class="badge ${TLP_PAP_COLORS[v] || 'bg-secondary'}" title="Traffic Light Protocol">TLP:${escHtml(v.toUpperCase())}</span>` : `<span class="badge bg-secondary bg-opacity-25 text-muted" title="Traffic Light Protocol -- not set">TLP: —</span>`; }
+function papBadge(v) { return v ? `<span class="badge ${TLP_PAP_COLORS[v] || 'bg-secondary'}" title="Permissible Actions Protocol">PAP:${escHtml(v.toUpperCase())}</span>` : `<span class="badge bg-secondary bg-opacity-25 text-muted" title="Permissible Actions Protocol -- not set">PAP: —</span>`; }
 
 function populateTlpPapSelect(elId, values, current) {
     const el = document.getElementById(elId);
-    el.innerHTML = values.map(v => `<option value="${v}" ${v === current ? 'selected' : ''}>${v.toUpperCase()}</option>`).join('');
+    el.innerHTML = '<option value="">Not set</option>' + values.map(v => `<option value="${v}" ${v === current ? 'selected' : ''}>${v.toUpperCase()}</option>`).join('');
+    el.value = current || '';
 }
 
 let caseTemplates = [];
@@ -603,8 +609,8 @@ function showNewCaseModal() {
     document.getElementById('newCaseDescription').value = '';
     document.getElementById('newCaseError').style.display = 'none';
     document.getElementById('newCaseSeverity').value = 'medium';
-    populateTlpPapSelect('newCaseTlp', TLP_VALUES, 'clear');
-    populateTlpPapSelect('newCasePap', PAP_VALUES, 'clear');
+    populateTlpPapSelect('newCaseTlp', TLP_VALUES, '');
+    populateTlpPapSelect('newCasePap', PAP_VALUES, '');
     populateQueueSelect('newCaseQueue', '');
     if (!caseTemplates.length) loadCaseTemplates();
     if (!newCaseModal) newCaseModal = new bootstrap.Modal(document.getElementById('newCaseModal'));
@@ -684,8 +690,8 @@ function caseEventLabel(e) {
         created: 'Case created',
         status_change: `Status changed to <strong>${escHtml(e.detail)}</strong>`,
         assignee_change: `Assignee changed to <strong>${escHtml(e.detail)}</strong>`,
-        tlp_change: `TLP changed to <strong>${escHtml((e.detail || '').toUpperCase())}</strong>`,
-        pap_change: `PAP changed to <strong>${escHtml((e.detail || '').toUpperCase())}</strong>`,
+        tlp_change: `TLP changed to <strong>${e.detail ? escHtml(e.detail.toUpperCase()) : 'Not set'}</strong>`,
+        pap_change: `PAP changed to <strong>${e.detail ? escHtml(e.detail.toUpperCase()) : 'Not set'}</strong>`,
         severity_change: `Severity changed to <strong>${escHtml((e.detail || '').toUpperCase())}</strong>`,
         workflow_state_change: `Workflow state changed to <strong>${escHtml(WORKFLOW_STATE_LABELS[e.detail] || e.detail)}</strong>`,
         queue_change: `Queue changed to <strong>${escHtml(e.detail)}</strong>`,
@@ -780,8 +786,11 @@ function loadAndRenderCaseDetail(cid) {
                                 </div>
                                 <div class="col-md-4">
                                     <label class="form-label small text-muted mb-1">Status</label>
-                                    <select id="editCaseStatus" class="form-select bg-dark text-light border-secondary">
-                                        <option value="open" ${c.status === 'open' ? 'selected' : ''}>Open</option>
+                                    <select id="editCaseStatusWorkflow" class="form-select bg-dark text-light border-secondary">
+                                        <option value="new" ${c.status !== 'closed' && (!c.workflow_state || c.workflow_state === 'new') ? 'selected' : ''}>New</option>
+                                        <option value="investigating" ${c.status !== 'closed' && c.workflow_state === 'investigating' ? 'selected' : ''}>Investigating</option>
+                                        <option value="awaiting_input" ${c.status !== 'closed' && c.workflow_state === 'awaiting_input' ? 'selected' : ''}>Awaiting Input</option>
+                                        <option value="resolved" ${c.status !== 'closed' && c.workflow_state === 'resolved' ? 'selected' : ''}>Resolved</option>
                                         <option value="closed" ${c.status === 'closed' ? 'selected' : ''}>Closed</option>
                                     </select>
                                 </div>
@@ -808,15 +817,6 @@ function loadAndRenderCaseDetail(cid) {
                                         <option value="high" ${c.severity === 'high' ? 'selected' : ''}>High</option>
                                         <option value="medium" ${!c.severity || c.severity === 'medium' ? 'selected' : ''}>Medium</option>
                                         <option value="low" ${c.severity === 'low' ? 'selected' : ''}>Low</option>
-                                    </select>
-                                </div>
-                                <div class="col-md-4">
-                                    <label class="form-label small text-muted mb-1">Workflow</label>
-                                    <select id="editCaseWorkflowState" class="form-select bg-dark text-light border-secondary">
-                                        <option value="new" ${(!c.workflow_state || c.workflow_state === 'new') ? 'selected' : ''}>New</option>
-                                        <option value="investigating" ${c.workflow_state === 'investigating' ? 'selected' : ''}>Investigating</option>
-                                        <option value="awaiting_input" ${c.workflow_state === 'awaiting_input' ? 'selected' : ''}>Awaiting Input</option>
-                                        <option value="resolved" ${c.workflow_state === 'resolved' ? 'selected' : ''}>Resolved</option>
                                     </select>
                                 </div>
                                 <div class="col-md-4">
@@ -984,15 +984,16 @@ function openCaseDetail(cid) {
 
 function saveCaseDetail() {
     const queueVal = document.getElementById('editCaseQueue').value;
+    const statusWorkflow = document.getElementById('editCaseStatusWorkflow').value;
     const payload = {
         title: document.getElementById('editCaseTitle').value.trim(),
-        status: document.getElementById('editCaseStatus').value,
+        status: statusWorkflow === 'closed' ? 'closed' : 'open',
         assignee: document.getElementById('editCaseAssignee').value.trim(),
         description: document.getElementById('editCaseDescription').value.trim(),
         tlp: document.getElementById('editCaseTlp').value,
         pap: document.getElementById('editCasePap').value,
         severity: document.getElementById('editCaseSeverity').value,
-        workflow_state: document.getElementById('editCaseWorkflowState').value,
+        workflow_state: statusWorkflow === 'closed' ? 'resolved' : statusWorkflow,
         queue_id: queueVal ? parseInt(queueVal, 10) : null
     };
     fetch(`/api/cases/${activeCaseId}`, {
