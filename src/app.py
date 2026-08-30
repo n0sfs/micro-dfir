@@ -1545,12 +1545,20 @@ def api_ti_entity_relationship_delete(eid, rid):
     log_audit('ti_relationship_delete', 'ti_entity', eid, str(rid))
     return jsonify({'ok': 1})
 
+def _looks_like_ip_or_cidr(value):
+    import ipaddress
+    try:
+        ipaddress.ip_network(value, strict=False)
+        return True
+    except ValueError:
+        return False
+
 @app.route('/api/ti/warninglists', methods=['GET'])
 @login_required
 def api_ti_warninglists():
     db = get_db()
     rows = db.execute(
-        "SELECT w.id, w.name, w.description, w.type, w.enabled, COUNT(e.id) AS entry_count "
+        "SELECT w.id, w.name, w.description, w.type, w.enabled, w.source_list, COUNT(e.id) AS entry_count "
         "FROM warninglists w LEFT JOIN warninglist_entries e ON e.warninglist_id = w.id "
         "GROUP BY w.id ORDER BY w.name"
     ).fetchall()
@@ -1570,6 +1578,124 @@ def api_ti_warninglist_toggle(wid):
     db.commit()
     log_audit('warninglist_toggle', 'warninglist', wid, 'enabled' if enabled else 'disabled')
     return jsonify({'status': 'success'})
+
+@app.route('/api/ti/warninglists/<int:wid>', methods=['DELETE'])
+@login_required
+def api_ti_warninglist_delete(wid):
+    err = require_permission('threatintel.manage')
+    if err: return err
+    db = get_db()
+    w = db.execute("SELECT name FROM warninglists WHERE id = ?", (wid,)).fetchone()
+    if not w:
+        return jsonify({'error': 'Warninglist not found'}), 404
+    db.execute("DELETE FROM warninglist_entries WHERE warninglist_id = ?", (wid,))
+    db.execute("DELETE FROM warninglists WHERE id = ?", (wid,))
+    db.commit()
+    log_audit('warninglist_delete', 'warninglist', wid, w['name'])
+    return jsonify({'status': 'success'})
+
+@app.route('/api/ti/warninglists/<int:wid>/entries', methods=['GET'])
+@login_required
+def api_ti_warninglist_entries(wid):
+    # Capped at 500 -- purely a "what's actually in this list" viewer, not a full
+    # export; an admin who needs the whole thing already has it in src/warninglists.py
+    # (seed lists) or can re-fetch the source (imported lists).
+    db = get_db()
+    w = db.execute("SELECT id, name FROM warninglists WHERE id = ?", (wid,)).fetchone()
+    if not w:
+        return jsonify({'error': 'Warninglist not found'}), 404
+    total = db.execute("SELECT COUNT(*) FROM warninglist_entries WHERE warninglist_id = ?", (wid,)).fetchone()[0]
+    entries = [r[0] for r in db.execute(
+        "SELECT value FROM warninglist_entries WHERE warninglist_id = ? ORDER BY value LIMIT 500", (wid,)
+    ).fetchall()]
+    return jsonify({'name': w['name'], 'total': total, 'entries': entries})
+
+_WARNINGLIST_CATALOG_CACHE = {}
+_WARNINGLIST_CATALOG_CACHE_TTL = 3600  # seconds -- a repo directory listing, doesn't change often
+
+@app.route('/api/ti/warninglists/catalog', methods=['GET'])
+@login_required
+def api_ti_warninglist_catalog():
+    # Lists every list NAME available in the real MISP misp-warninglists project (one
+    # cheap GitHub API call, cached an hour) so an admin can pick one to import --
+    # deliberately NOT fetching every list's full content just to show entry counts,
+    # since that would be 100+ requests on every page load. A specific list's real
+    # content is only fetched at actual import time (see the import route below).
+    import time, urllib.request, json as _json
+    now = time.time()
+    cached = _WARNINGLIST_CATALOG_CACHE.get('data')
+    if cached is not None and (now - _WARNINGLIST_CATALOG_CACHE.get('time', 0)) < _WARNINGLIST_CATALOG_CACHE_TTL:
+        names = cached
+    else:
+        try:
+            req = urllib.request.Request(
+                "https://api.github.com/repos/MISP/misp-warninglists/contents/lists",
+                headers={'User-Agent': 'micro-dfir-appliance'}
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = _json.loads(resp.read())
+            names = sorted(item['name'] for item in data if item.get('type') == 'dir')
+            _WARNINGLIST_CATALOG_CACHE['data'] = names
+            _WARNINGLIST_CATALOG_CACHE['time'] = now
+        except Exception as e:
+            return jsonify({'error': f'Failed to fetch the misp-warninglists catalog: {e}'}), 502
+    db = get_db()
+    imported = {r[0] for r in db.execute(
+        "SELECT source_list FROM warninglists WHERE source_list IS NOT NULL"
+    ).fetchall()}
+    return jsonify([{'name': n, 'imported': n in imported} for n in names])
+
+@app.route('/api/ti/warninglists/import', methods=['POST'])
+@login_required
+def api_ti_warninglist_import():
+    err = require_permission('threatintel.manage')
+    if err: return err
+    import urllib.request, json as _json, ipaddress
+    list_name = ((request.json or {}).get('list_name') or '').strip()
+    if not list_name or not re.match(r'^[a-z0-9_-]+$', list_name):
+        return jsonify({'error': 'Invalid list name.'}), 400
+    db = get_db()
+    if db.execute("SELECT 1 FROM warninglists WHERE source_list = ?", (list_name,)).fetchone():
+        return jsonify({'error': 'This list has already been imported.'}), 400
+    try:
+        req = urllib.request.Request(
+            f"https://raw.githubusercontent.com/MISP/misp-warninglists/main/lists/{list_name}/list.json",
+            headers={'User-Agent': 'micro-dfir-appliance'}
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = _json.loads(resp.read())
+    except Exception as e:
+        return jsonify({'error': f'Failed to fetch "{list_name}": {e}'}), 502
+
+    entries = data.get('list') or []
+    if not entries:
+        return jsonify({'error': f'"{list_name}" has no entries.'}), 400
+
+    # This appliance's suppression only ever matches IPs (warninglists.py's
+    # filter_warninglisted_ips) -- a MISP list of domains/hashes/strings would import
+    # cleanly but silently suppress nothing, so validate the entries actually look
+    # IP-shaped before accepting it, rather than trusting MISP's own declared 'type'
+    # field (some CIDR-shaped lists are still tagged type='string' upstream).
+    sample = entries[:25]
+    ip_like = sum(1 for v in sample if _looks_like_ip_or_cidr(str(v)))
+    if ip_like < len(sample) * 0.8:
+        return jsonify({'error': f'"{list_name}" does not look like an IP/CIDR-based list (only usable warninglist type today).'}), 400
+
+    local_type = 'cidr' if '/' in str(sample[0]) else 'ip'
+    name = data.get('name') or list_name
+    description = data.get('description') or f'Imported from misp-warninglists/{list_name}.'
+    cur = db.execute(
+        "INSERT INTO warninglists (name, description, type, enabled, source_list) VALUES (?, ?, ?, 1, ?)",
+        (name, description, local_type, list_name)
+    )
+    wid = cur.lastrowid
+    db.executemany(
+        "INSERT INTO warninglist_entries (warninglist_id, value) VALUES (?, ?)",
+        [(wid, str(v)) for v in entries]
+    )
+    db.commit()
+    log_audit('warninglist_import', 'warninglist', wid, f'{list_name} ({len(entries)} entries)')
+    return jsonify({'status': 'success', 'id': wid, 'name': name, 'entry_count': len(entries)})
 
 @app.route('/api/ti/iocs/facets', methods=['GET'])
 @login_required
@@ -6411,6 +6537,13 @@ def migrate_warninglists():
             value TEXT NOT NULL
         )''')
         conn.execute("CREATE INDEX IF NOT EXISTS idx_warninglist_entries_wid ON warninglist_entries(warninglist_id)")
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(warninglists)").fetchall()}
+        if 'source_list' not in cols:
+            # The misp-warninglists directory name a list was imported from (see
+            # api_ti_warninglist_import), NULL for the 3 hand-curated seed lists and any
+            # manually-added custom ones -- lets the catalog picker mark "already
+            # imported" without re-fetching GitHub on every page load.
+            conn.execute("ALTER TABLE warninglists ADD COLUMN source_list TEXT")
         # Seed once, on an empty table only -- an admin who's since disabled one of the
         # curated lists shouldn't have it silently re-enabled by a later restart/update.
         if conn.execute("SELECT COUNT(*) FROM warninglists").fetchone()[0] == 0:

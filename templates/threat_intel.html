@@ -186,10 +186,15 @@
             {% endif %}
 
             <div class="card bg-dark border-secondary">
-                <div class="card-header">
-                    <i class="fa-solid fa-shield-halved me-2"></i>Warninglist Suppression
-                    <span class="text-muted small ms-2">Suppresses known-benign IPs (CDNs, public DNS resolvers, private ranges) from the IOC-IP correlation, so they never fire a false "known-bad IP" alert.</span>
-                    <div class="text-muted small ms-2 mt-1"><i class="fa-solid fa-circle-info me-1"></i>Hand-curated static list, patterned after MISP's <a href="https://github.com/MISP/misp-warninglists" target="_blank" rel="noopener" class="text-muted">misp-warninglists</a> project — not a live sync; extending it means editing <code>src/warninglists.py</code>.</div>
+                <div class="card-header d-flex justify-content-between align-items-start flex-wrap gap-2">
+                    <div>
+                        <i class="fa-solid fa-shield-halved me-2"></i>Warninglist Suppression
+                        <span class="text-muted small ms-2">Suppresses known-benign IPs (CDNs, public DNS resolvers, private ranges) from the IOC-IP correlation, so they never fire a false "known-bad IP" alert.</span>
+                        <div class="text-muted small ms-2 mt-1"><i class="fa-solid fa-circle-info me-1"></i>The 3 built-in lists are hand-curated, patterned after MISP's <a href="https://github.com/MISP/misp-warninglists" target="_blank" rel="noopener" class="text-muted">misp-warninglists</a> project (not a live sync — extending those specifically means editing <code>src/warninglists.py</code>). Additional lists can be pulled straight from that project below.</div>
+                    </div>
+                    {% if has_permission('threatintel.manage') %}
+                    <button class="btn btn-primary btn-sm text-nowrap" onclick="openWarninglistCatalog()"><i class="fa-solid fa-plus me-1"></i> Add List</button>
+                    {% endif %}
                 </div>
                 <div class="card-body p-0">
                     <div class="table-responsive">
@@ -200,10 +205,11 @@
                                     <th>Type</th>
                                     <th>Entries</th>
                                     <th>Enabled</th>
+                                    <th style="width:100px;">Actions</th>
                                 </tr>
                             </thead>
                             <tbody id="warninglistsTableBody">
-                                <tr><td colspan="4" class="text-center text-muted py-3">Loading...</td></tr>
+                                <tr><td colspan="5" class="text-center text-muted py-3">Loading...</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -374,6 +380,38 @@
 </div>
 
 <!-- IOC Sweep Hit Detail Modal -->
+<!-- Warninglist Entries Modal -->
+<div class="modal fade" id="warninglistEntriesModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-scrollable">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title" id="warninglistEntriesTitle"><i class="fa-solid fa-list me-2"></i>List Entries</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="warninglistEntriesBody"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Add Warninglist (misp-warninglists catalog) Modal -->
+<div class="modal fade" id="warninglistCatalogModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-scrollable">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title"><i class="fa-solid fa-cloud-arrow-down me-2"></i>Add List from misp-warninglists</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="text-muted small mb-2">Only IP/CIDR-based lists are usable for suppression here — a list of domains, hashes, or other strings will be rejected on import. AWS, Azure, Google, Microsoft 365, and most CDN/cloud-provider lists are IP-based; most others (e.g. url-shortener, dynamic-dns) are not.</div>
+        <input type="text" id="warninglistCatalogSearch" class="form-control form-control-sm bg-dark text-light border-secondary mb-2" placeholder="Filter by name..." oninput="renderWarninglistCatalog()">
+        <div id="warninglistCatalogBody" style="max-height:360px; overflow-y:auto;">
+            <div class="text-center text-muted py-3">Loading catalog...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="modal fade" id="sweepDetailModal" tabindex="-1">
   <div class="modal-dialog modal-lg modal-dialog-scrollable">
     <div class="modal-content bg-dark text-light border-secondary">
@@ -1674,19 +1712,22 @@ function checkEntityDeepLink() {
     if (eid) openEntityDetail(parseInt(eid, 10));
 }
 
+let allWarninglists = [];
+
 function loadWarninglists() {
     fetch('/api/ti/warninglists')
         .then(r => r.json())
         .then(lists => {
+            allWarninglists = lists;
             const tbody = document.getElementById('warninglistsTableBody');
             if (!lists.length) {
-                tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">No warninglists configured.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">No warninglists configured.</td></tr>';
                 return;
             }
             const isAdmin = hasPermission('threatintel.manage');
             tbody.innerHTML = lists.map(w => `
                 <tr>
-                    <td class="ps-3"><strong title="${escHtml(w.description || '')}">${escHtml(w.name)}</strong></td>
+                    <td class="ps-3"><strong title="${escHtml(w.description || '')}">${escHtml(w.name)}</strong>${w.source_list ? `<span class="badge bg-secondary ms-1" title="Imported from misp-warninglists/${escHtml(w.source_list)}">imported</span>` : ''}</td>
                     <td><span class="badge bg-secondary">${escHtml(w.type)}</span></td>
                     <td>${w.entry_count}</td>
                     <td>
@@ -1694,10 +1735,96 @@ function loadWarninglists() {
                             <input class="form-check-input" type="checkbox" ${w.enabled ? 'checked' : ''} ${isAdmin ? '' : 'disabled'} onchange="toggleWarninglistEnabled(${w.id}, this.checked)">
                         </div>
                     </td>
+                    <td class="text-nowrap">
+                        <button class="btn btn-sm btn-outline-secondary py-0 px-2 me-1" title="View Entries" onclick="openWarninglistEntries(${w.id})"><i class="fa-solid fa-eye"></i></button>
+                        ${isAdmin ? `<button class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete" onclick="deleteWarninglist(${w.id}, '${w.name.replace(/'/g, "\\'")}')"><i class="fa-solid fa-trash"></i></button>` : ''}
+                    </td>
                 </tr>
             `).join('');
         })
         .catch(err => console.error('Error loading warninglists:', err));
+}
+
+async function openWarninglistEntries(id) {
+    const body = document.getElementById('warninglistEntriesBody');
+    document.getElementById('warninglistEntriesTitle').innerHTML = '<i class="fa-solid fa-list me-2"></i>List Entries';
+    body.innerHTML = '<div class="text-center text-muted py-3"><i class="fa-solid fa-spinner fa-spin"></i></div>';
+    new bootstrap.Modal(document.getElementById('warninglistEntriesModal')).show();
+    try {
+        const res = await fetch(`/api/ti/warninglists/${id}/entries`);
+        const data = await res.json();
+        if (!res.ok) { body.innerHTML = `<span class="text-danger">${escHtml(data.error || 'Failed to load entries.')}</span>`; return; }
+        document.getElementById('warninglistEntriesTitle').innerHTML = `<i class="fa-solid fa-list me-2"></i>${escHtml(data.name)}`;
+        if (!data.entries.length) { body.innerHTML = '<p class="text-muted small mb-0">No entries.</p>'; return; }
+        const capped = data.total > data.entries.length ? `<div class="text-muted small mb-2">Showing ${data.entries.length} of ${data.total} entries.</div>` : '';
+        body.innerHTML = capped + `<div class="d-flex flex-wrap gap-1">${data.entries.map(e => `<code class="badge bg-black border border-secondary text-light fw-normal">${escHtml(e)}</code>`).join('')}</div>`;
+    } catch (e) {
+        body.innerHTML = `<span class="text-danger">Error: ${escHtml(String(e))}</span>`;
+    }
+}
+
+async function deleteWarninglist(id, name) {
+    if (!(await confirmDialog(`Delete the warninglist "${name}"? Suppression using it will stop immediately.`, {title: 'Delete warninglist', danger: true, confirmLabel: 'Delete'}))) return;
+    try {
+        const res = await fetch(`/api/ti/warninglists/${id}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (!res.ok) { toast(data.error || 'Failed to delete warninglist.', 'danger'); return; }
+        toast('Warninglist deleted.', 'success');
+        loadWarninglists();
+    } catch (e) {
+        toast('Error deleting warninglist: ' + e, 'danger');
+    }
+}
+
+let warninglistCatalog = [];
+
+async function openWarninglistCatalog() {
+    document.getElementById('warninglistCatalogSearch').value = '';
+    const body = document.getElementById('warninglistCatalogBody');
+    body.innerHTML = '<div class="text-center text-muted py-3"><i class="fa-solid fa-spinner fa-spin"></i></div>';
+    new bootstrap.Modal(document.getElementById('warninglistCatalogModal')).show();
+    try {
+        const res = await fetch('/api/ti/warninglists/catalog');
+        const data = await res.json();
+        if (!res.ok) { body.innerHTML = `<span class="text-danger">${escHtml(data.error || 'Failed to load the catalog.')}</span>`; return; }
+        warninglistCatalog = data;
+        renderWarninglistCatalog();
+    } catch (e) {
+        body.innerHTML = `<span class="text-danger">Error: ${escHtml(String(e))}</span>`;
+    }
+}
+
+function renderWarninglistCatalog() {
+    const body = document.getElementById('warninglistCatalogBody');
+    const q = (document.getElementById('warninglistCatalogSearch').value || '').toLowerCase().trim();
+    const filtered = warninglistCatalog.filter(c => !q || c.name.includes(q));
+    if (!filtered.length) { body.innerHTML = '<p class="text-muted small mb-0">No matching lists.</p>'; return; }
+    body.innerHTML = filtered.map(c => `
+        <div class="d-flex justify-content-between align-items-center py-1 border-bottom border-secondary">
+            <span class="small">${escHtml(c.name)}</span>
+            ${c.imported
+                ? '<span class="badge bg-secondary">Already added</span>'
+                : `<button class="btn btn-sm btn-outline-primary py-0 px-2" onclick="importWarninglist('${c.name}', this)">Add</button>`}
+        </div>
+    `).join('');
+}
+
+async function importWarninglist(listName, btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+    try {
+        const res = await fetch('/api/ti/warninglists/import', {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({list_name: listName})
+        });
+        const data = await res.json();
+        if (!res.ok) { toast(data.error || 'Failed to import list.', 'danger'); btn.disabled = false; btn.innerText = 'Add'; return; }
+        toast(`Imported "${data.name}" (${data.entry_count} entries).`, 'success');
+        loadWarninglists();
+        openWarninglistCatalog(); // refresh so this list now shows "Already added"
+    } catch (e) {
+        toast('Error importing list: ' + e, 'danger');
+        btn.disabled = false; btn.innerText = 'Add';
+    }
 }
 
 async function toggleWarninglistEnabled(id, checked) {
