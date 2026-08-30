@@ -7654,11 +7654,11 @@ def _build_log_response_rows(rows):
             process_image = process_image or raw.get('process_image')
             command_line = command_line or raw.get('command_line')
             parent_image = parent_image or raw.get('parent_image')
-        # GeoIP is a fast local mmdb lookup (no network call), but still only worth paying
-        # for on alert rows -- source_ip is rarely externally-routable on a raw log/anomaly
-        # row, and doing this for every one of up to 2000 rows would add up for no benefit.
+        # A fast local mmdb lookup (no network call, cached reader) -- applied to every
+        # row type. A private/reserved/non-routable source_ip (common on raw log/anomaly
+        # rows) just resolves to (None, None), same as it always has for those.
         country_code = country_name = None
-        if r['log_type'] == 'alert' and r['source_ip']:
+        if r['source_ip']:
             country_code, country_name = lookup_country(r['source_ip'])
         logs.append({
             'id': r['item_id'],
