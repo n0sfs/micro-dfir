@@ -4034,6 +4034,7 @@ UEBA_CONFIG_DEFAULTS = {
     'ueba_rare_process_enabled': '1', 'ueba_rare_process_max_hosts': '2',
     'ueba_convergence_enabled': '1', 'ueba_convergence_min_indicators': '3',
     'ueba_convergence_window_hours': '24',
+    'ueba_sequence_chain_enabled': '1', 'ueba_sequence_chain_window_hours': '24',
     'ueba_priority_enabled': '1', 'ueba_priority_window_days': '30', 'ueba_priority_half_life_hours': '24',
     'ueba_autocase_enabled': '0', 'ueba_autocase_threshold': '80', 'ueba_autocase_template_id': '',
     'ueba_autocase_cooldown_hours': '24',
@@ -4051,6 +4052,7 @@ def api_ueba_config():
             "'ueba_new_process_enabled', 'ueba_new_dest_ip_enabled', 'ueba_process_lineage_enabled', 'ueba_off_hours_enabled', "
             "'ueba_rare_process_enabled', 'ueba_rare_process_max_hosts', "
             "'ueba_convergence_enabled', 'ueba_convergence_min_indicators', 'ueba_convergence_window_hours', "
+            "'ueba_sequence_chain_enabled', 'ueba_sequence_chain_window_hours', "
             "'ueba_priority_enabled', 'ueba_priority_window_days', 'ueba_priority_half_life_hours', "
             "'ueba_autocase_enabled', 'ueba_autocase_threshold', 'ueba_autocase_template_id', 'ueba_autocase_cooldown_hours')"
         ).fetchall()
@@ -4070,6 +4072,8 @@ def api_ueba_config():
             'convergence_enabled': str(cfg['ueba_convergence_enabled']) not in ('0', 'false', 'False'),
             'convergence_min_indicators': int(cfg['ueba_convergence_min_indicators']),
             'convergence_window_hours': int(cfg['ueba_convergence_window_hours']),
+            'sequence_chain_enabled': str(cfg['ueba_sequence_chain_enabled']) not in ('0', 'false', 'False'),
+            'sequence_chain_window_hours': int(cfg['ueba_sequence_chain_window_hours']),
             'priority_enabled': str(cfg['ueba_priority_enabled']) not in ('0', 'false', 'False'),
             'priority_window_days': int(cfg['ueba_priority_window_days']),
             'priority_half_life_hours': float(cfg['ueba_priority_half_life_hours']),
@@ -4098,6 +4102,8 @@ def api_ueba_config():
         convergence_enabled = bool(data.get('convergence_enabled'))
         convergence_min_indicators = int(data.get('convergence_min_indicators'))
         convergence_window_hours = int(data.get('convergence_window_hours'))
+        sequence_chain_enabled = bool(data.get('sequence_chain_enabled'))
+        sequence_chain_window_hours = int(data.get('sequence_chain_window_hours'))
         priority_enabled = bool(data.get('priority_enabled'))
         priority_window_days = int(data.get('priority_window_days'))
         priority_half_life_hours = float(data.get('priority_half_life_hours'))
@@ -4113,6 +4119,7 @@ def api_ueba_config():
         if not (1 <= rare_process_max_hosts <= 50): raise ValueError('rare_process_max_hosts must be 1-50')
         if not (2 <= convergence_min_indicators <= 10): raise ValueError('convergence_min_indicators must be 2-10')
         if not (1 <= convergence_window_hours <= 168): raise ValueError('convergence_window_hours must be 1-168')
+        if not (1 <= sequence_chain_window_hours <= 168): raise ValueError('sequence_chain_window_hours must be 1-168')
         if not (1 <= priority_window_days <= 365): raise ValueError('priority_window_days must be 1-365')
         if not (1 <= priority_half_life_hours <= 8760): raise ValueError('priority_half_life_hours must be 1-8760')
         if not (1 <= autocase_threshold <= 1000): raise ValueError('autocase_threshold must be 1-1000')
@@ -4136,6 +4143,8 @@ def api_ueba_config():
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_convergence_enabled', ?)", ('1' if convergence_enabled else '0',))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_convergence_min_indicators', ?)", (str(convergence_min_indicators),))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_convergence_window_hours', ?)", (str(convergence_window_hours),))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_sequence_chain_enabled', ?)", ('1' if sequence_chain_enabled else '0',))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_sequence_chain_window_hours', ?)", (str(sequence_chain_window_hours),))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_priority_enabled', ?)", ('1' if priority_enabled else '0',))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_priority_window_days', ?)", (str(priority_window_days),))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_priority_half_life_hours', ?)", (str(priority_half_life_hours),))
@@ -4160,6 +4169,7 @@ RISK_SCORE_DEFAULTS = {
         'new_process': 20, 'new_destination_ip': 15, 'process_lineage': 25, 'off_hours_activity': 10,
         'rare_process_population': 18,
         'multi_signal_convergence': 30,
+        'sequence_chain_progression': 15,
     },
     'tiers': {'low': 0, 'medium': 20, 'high': 50, 'critical': 100},
 }
@@ -4355,6 +4365,23 @@ def _validate_anomaly_rule(d):
             int(d.get('first_time_bonus_points'))
         except (TypeError, ValueError):
             return 'first_time_bonus_points must be a number'
+    # Both sequence fields are optional together -- a rule not part of any progression
+    # simply leaves both unset. Setting one without the other is rejected rather than
+    # silently ignored, since a stage number with no sequence name (or vice versa) can't
+    # be matched against anything.
+    seq_name = (d.get('sequence_name') or '').strip()
+    seq_stage = d.get('sequence_stage')
+    if seq_name and seq_stage in (None, ''):
+        return 'sequence_stage is required when sequence_name is set'
+    if seq_stage not in (None, '') and not seq_name:
+        return 'sequence_name is required when sequence_stage is set'
+    if seq_stage not in (None, ''):
+        try:
+            seq_stage = int(seq_stage)
+        except (TypeError, ValueError):
+            return 'sequence_stage must be a whole number'
+        if not (1 <= seq_stage <= 20):
+            return 'sequence_stage must be between 1 and 20'
     return None
 
 def _condition_summary(conditions):
@@ -4414,10 +4441,12 @@ def api_anomaly_rules():
         return jsonify({'error': err}), 400
     bonus = d.get('first_time_bonus_points')
     bonus = int(bonus) if bonus not in (None, '') else None
+    seq_name = (d.get('sequence_name') or '').strip() or None
+    seq_stage = int(d['sequence_stage']) if d.get('sequence_stage') not in (None, '') else None
     cur = db.execute(
-        "INSERT INTO anomaly_rules (name, source, entity_field, entity_type, points, first_time_bonus_points, enabled, created_by) "
-        "VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
-        (d['name'].strip(), d['source'], d['entity_field'], d['entity_type'], int(d['points']), bonus, current_user.username)
+        "INSERT INTO anomaly_rules (name, source, entity_field, entity_type, points, first_time_bonus_points, sequence_name, sequence_stage, enabled, created_by) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+        (d['name'].strip(), d['source'], d['entity_field'], d['entity_type'], int(d['points']), bonus, seq_name, seq_stage, current_user.username)
     )
     _replace_anomaly_rule_conditions(db, cur.lastrowid, d['conditions'])
     db.commit()
@@ -4454,11 +4483,13 @@ def api_anomaly_rule_detail(rid):
         return jsonify({'error': err}), 400
     bonus = d.get('first_time_bonus_points')
     bonus = int(bonus) if bonus not in (None, '') else None
+    seq_name = (d.get('sequence_name') or '').strip() or None
+    seq_stage = int(d['sequence_stage']) if d.get('sequence_stage') not in (None, '') else None
     db.execute(
         "UPDATE anomaly_rules SET name=?, source=?, entity_field=?, entity_type=?, points=?, "
-        "first_time_bonus_points=?, enabled=?, updated_by=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        "first_time_bonus_points=?, sequence_name=?, sequence_stage=?, enabled=?, updated_by=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
         (d['name'].strip(), d['source'], d['entity_field'], d['entity_type'],
-         int(d['points']), bonus, 1 if d.get('enabled', True) else 0, current_user.username, rid)
+         int(d['points']), bonus, seq_name, seq_stage, 1 if d.get('enabled', True) else 0, current_user.username, rid)
     )
     _replace_anomaly_rule_conditions(db, rid, d['conditions'])
     db.commit()
@@ -6237,6 +6268,23 @@ def migrate_anomaly_rules():
         # was pulled back out shortly after shipping -- Sigma alerts only for now. Clean
         # up any rows a prior deploy already seeded; harmless no-op once none remain.
         conn.execute("DELETE FROM anomaly_rules WHERE source = 'audit_log'")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_anomaly_rules_sequence_columns():
+    # Optional sequence chain fields -- a rule with sequence_name set is one STAGE of a
+    # named, ordered progression (e.g. "New IP" stage 1 -> "New Process" stage 2 ->
+    # "New Destination IP" stage 3). Both NULL means an ordinary standalone rule,
+    # unaffected. See run_sequence_chain_scoring() in ueba_engine.py.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(anomaly_rules)").fetchall()]
+        if 'sequence_name' not in cols:
+            conn.execute("ALTER TABLE anomaly_rules ADD COLUMN sequence_name TEXT")
+        if 'sequence_stage' not in cols:
+            conn.execute("ALTER TABLE anomaly_rules ADD COLUMN sequence_stage INTEGER")
         conn.commit()
         conn.close()
     except Exception:
@@ -8596,6 +8644,7 @@ migrate_agent_tokens()
 migrate_audit_log()
 migrate_risk_scoring()
 migrate_anomaly_rules()
+migrate_anomaly_rules_sequence_columns()
 migrate_anomaly_rule_conditions()
 migrate_anomaly_rule_conditions_logic()
 migrate_seed_ueba_rules()

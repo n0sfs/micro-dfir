@@ -8,6 +8,7 @@ UEBA_DEFAULTS = {
     'ueba_rare_process_enabled': 1, 'ueba_rare_process_max_hosts': 2,
     'ueba_convergence_enabled': 1, 'ueba_convergence_min_indicators': 3,
     'ueba_convergence_window_hours': 24,
+    'ueba_sequence_chain_enabled': 1, 'ueba_sequence_chain_window_hours': 24,
     'ueba_priority_enabled': 1, 'ueba_priority_window_days': 30, 'ueba_priority_half_life_hours': 24,
     'ueba_autocase_enabled': 0, 'ueba_autocase_threshold': 80, 'ueba_autocase_template_id': None,
     'ueba_autocase_cooldown_hours': 24,
@@ -43,6 +44,7 @@ RISK_SCORE_DEFAULTS = {
         'new_process': 20, 'new_destination_ip': 15, 'process_lineage': 25, 'off_hours_activity': 10,
         'rare_process_population': 18,
         'multi_signal_convergence': 30,
+        'sequence_chain_progression': 15,
     },
     'tiers': {'low': 0, 'medium': 20, 'high': 50, 'critical': 100},
 }
@@ -100,7 +102,7 @@ def _load_anomaly_rules(conn, source):
     if not allowed:
         return []
     rows = conn.execute(
-        "SELECT id, name, entity_field, entity_type, points, first_time_bonus_points "
+        "SELECT id, name, entity_field, entity_type, points, first_time_bonus_points, sequence_name, sequence_stage "
         "FROM anomaly_rules WHERE source = ? AND enabled = 1",
         (source,)
     ).fetchall()
@@ -185,6 +187,8 @@ def get_ueba_config():
         'convergence_enabled': str(cfg['ueba_convergence_enabled']) not in ('0', 'false', 'False'),
         'convergence_min_indicators': max(2, min(10, int(cfg['ueba_convergence_min_indicators']))),
         'convergence_window_hours': max(1, min(168, int(cfg['ueba_convergence_window_hours']))),
+        'sequence_chain_enabled': str(cfg['ueba_sequence_chain_enabled']) not in ('0', 'false', 'False'),
+        'sequence_chain_window_hours': max(1, min(168, int(cfg['ueba_sequence_chain_window_hours']))),
         'priority_enabled': str(cfg['ueba_priority_enabled']) not in ('0', 'false', 'False'),
         'priority_window_days': max(1, min(365, int(cfg['ueba_priority_window_days']))),
         'priority_half_life_hours': max(1.0, float(cfg['ueba_priority_half_life_hours'])),
@@ -681,11 +685,45 @@ def _save_risk_marks(conn, marks):
     for name, key in _RISK_MARK_KEYS.items():
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(marks[name])))
 
+# A sequence-aware sibling to run_convergence_scoring() below: that one rewards ANY N
+# distinct signal types converging, order-blind. This rewards a SPECIFIC admin-defined
+# ordered progression -- two or more anomaly_rules sharing a sequence_name, each at a
+# distinct sequence_stage -- escalating rather than flat, since reaching stage 3 of a
+# real attack chain is a stronger signal than reaching stage 2. Only fires once per
+# (entity, rule) thanks to the rule_id dedup check below, so re-matching the same stage
+# repeatedly doesn't restack the bonus.
+def _sequence_chain_bonus_event(conn, risk_cfg, ueba_cfg, rule, entity_type, entity_id, alert_id):
+    if not ueba_cfg['sequence_chain_enabled'] or not rule.get('sequence_name') or not rule.get('sequence_stage'):
+        return None
+    stage = rule['sequence_stage']
+    if stage <= 1:
+        return None  # stage 1 is the entry point into the chain, nothing earlier to progress from
+    window = f"-{ueba_cfg['sequence_chain_window_hours']} hours"
+    earlier_stage = conn.execute(
+        "SELECT MAX(ar.sequence_stage) as max_stage FROM risk_score_events rse "
+        "JOIN anomaly_rules ar ON ar.id = rse.rule_id "
+        "WHERE rse.entity_type = ? AND rse.entity_id = ? AND ar.sequence_name = ? "
+        "AND ar.sequence_stage < ? AND rse.computed_at >= datetime('now', ?)",
+        (entity_type, entity_id, rule['sequence_name'], stage, window)
+    ).fetchone()
+    if not earlier_stage or earlier_stage['max_stage'] is None:
+        return None
+    already = conn.execute(
+        "SELECT COUNT(*) FROM risk_score_events WHERE entity_type = ? AND entity_id = ? "
+        "AND indicator = 'sequence_chain_progression' AND rule_id = ? AND computed_at >= datetime('now', ?)",
+        (entity_type, entity_id, rule['id'], window)
+    ).fetchone()[0]
+    if already:
+        return None
+    bonus = risk_cfg['points']['sequence_chain_progression'] * (stage - 1)
+    detail = f"Sequence '{rule['sequence_name']}' progressed to stage {stage} ('{rule['name']}') within {ueba_cfg['sequence_chain_window_hours']}h"
+    return (entity_type, entity_id, 'sequence_chain_progression', bonus, detail, 'alerts', str(alert_id), rule['id'])
+
 # Both host and username get scored independently from the same alert -- an alert is
 # relevant to both entities' risk posture, the same way the existing volume-baseline
 # model already treats host and user as independently-modeled entity types from the
 # same live_logs stream.
-def _score_alerts(conn, cfg, last_id):
+def _score_alerts(conn, cfg, ueba_cfg, last_id):
     rows = conn.execute("SELECT id, host, username, severity, rule_name, source_ip, destination_ip FROM alerts WHERE id > ?", (last_id,)).fetchall()
     events, max_id = [], last_id
     if not rows:
@@ -713,6 +751,9 @@ def _score_alerts(conn, cfg, last_id):
             if rule['first_time_bonus_points'] and not _rule_ever_matched_before(conn, 'alerts', rule, entity_id, r['id']):
                 events.append((rule['entity_type'], entity_id, 'first_time_action', rule['first_time_bonus_points'],
                                f"First match of rule '{rule['name']}' by this entity", 'alerts', str(r['id']), rule['id']))
+            chain_event = _sequence_chain_bonus_event(conn, cfg, ueba_cfg, rule, rule['entity_type'], entity_id, r['id'])
+            if chain_event:
+                events.append(chain_event)
     return events, max_id
 
 # Anomaly rules don't cover audit_log for now (Sigma alerts only) -- this indicator
@@ -746,11 +787,12 @@ def _score_sweeps(conn, cfg, last_id):
 
 def run_risk_scoring():
     cfg = get_risk_score_config()
+    ueba_cfg = get_ueba_config()
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     try:
         marks = _get_risk_marks(conn)
-        alert_events, marks['alert'] = _score_alerts(conn, cfg, marks['alert'])
+        alert_events, marks['alert'] = _score_alerts(conn, cfg, ueba_cfg, marks['alert'])
         audit_events, marks['audit'] = _score_audit(conn, cfg, marks['audit'])
         sweep_events, marks['sweep'] = _score_sweeps(conn, cfg, marks['sweep'])
         all_events = alert_events + audit_events + sweep_events
