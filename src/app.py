@@ -759,17 +759,23 @@ def api_ti_lookup():
     # the CTI gap-analysis Tier 1 work) plus sighting history is strictly more useful:
     # instant, works offline, and tells you whether this value has actually been
     # OBSERVED here, not just whether some feed once flagged it.
-    ioc = ((request.get_json() or {}).get('ioc') or '').strip()
+    body = request.get_json() or {}
+    ioc = (body.get('ioc') or '').strip()
+    feed_id = body.get('feed_id')  # optional: scope the match to one specific feed source
     if not ioc:
         return jsonify({'status': 'error', 'message': 'No IOC value provided'}), 400
     db = get_db()
+    where = "WHERE LOWER(si.pattern) = LOWER(?)"
+    params = [ioc]
+    if feed_id:
+        where += " AND si.feed_id = ?"
+        params.append(feed_id)
     rows = db.execute(
         "SELECT si.stix_id, si.ioc_type, si.name, si.description, si.revoked, si.feed_id, tf.name as source_name, "
         "(SELECT COUNT(*) FROM ioc_sightings s WHERE s.stix_id = si.stix_id) as sighting_count, "
         "(SELECT MAX(seen_at) FROM ioc_sightings s WHERE s.stix_id = si.stix_id) as last_sighted "
-        "FROM stix_indicators si LEFT JOIN ti_feeds tf ON si.feed_id = tf.id "
-        "WHERE LOWER(si.pattern) = LOWER(?)",
-        (ioc,)
+        f"FROM stix_indicators si LEFT JOIN ti_feeds tf ON si.feed_id = tf.id {where}",
+        params
     ).fetchall()
     if not rows:
         return jsonify({'status': 'clean', 'message': 'No match in the local Threat Intel IOC set.'})
@@ -783,6 +789,24 @@ def api_ti_lookup():
     return jsonify({'status': 'malicious', 'matches': matches, 'corroboration_count': corroboration_count})
 
 _ENRICHMENT_KEY_PLACEHOLDER = '••••••••'
+
+@app.route('/api/ti/analyzers', methods=['GET'])
+@login_required
+def api_ti_analyzers():
+    # Lists the live on-demand enrichment sources (analyzers.py's ANALYZERS) -- a
+    # different mechanism from ti_feeds (synced IOC lists): these run one query per
+    # lookup, nothing is bulk-synced into stix_indicators. Surfaced so Quick IOC
+    # Lookup's source picker and the Feed Sources tab's Live Enrichment Sources list
+    # can both show "is this one configured" without duplicating the key-lookup logic.
+    from analyzers import ANALYZERS
+    db = get_db()
+    key_row = db.execute("SELECT value FROM settings WHERE key = 'enrichment_api_keys'").fetchone()
+    api_keys = json.loads(key_row['value']) if key_row and key_row['value'] else {}
+    return jsonify([{
+        'key': a['key'], 'label': a['label'], 'ioc_types': list(a['ioc_types']),
+        'requires_key': a['requires_key'],
+        'configured': (not a['requires_key']) or bool(api_keys.get(a['settings_key'])),
+    } for a in ANALYZERS])
 
 @app.route('/api/settings/enrichment', methods=['GET', 'POST'])
 @login_required
@@ -812,11 +836,16 @@ def api_ti_enrich():
     d = request.get_json() or {}
     value = (d.get('value') or '').strip()
     ioc_type = (d.get('ioc_type') or '').strip()
+    source = (d.get('source') or '').strip()  # optional: run just this one analyzer (Quick Lookup's source picker)
     if not value:
         return jsonify({'error': 'value is required'}), 400
     analyzers = applicable_analyzers(ioc_type)
+    if source:
+        analyzers = [a for a in analyzers if a['key'] == source]
     if not analyzers:
-        return jsonify({'results': [], 'message': f'No enrichment analyzers apply to type "{ioc_type or "unknown"}" yet.'})
+        msg = f'"{source}" does not apply to type "{ioc_type or "unknown"}".' if source else \
+              f'No enrichment analyzers apply to type "{ioc_type or "unknown"}" yet.'
+        return jsonify({'results': [], 'message': msg})
 
     db = get_db()
     key_row = db.execute("SELECT value FROM settings WHERE key = 'enrichment_api_keys'").fetchone()
