@@ -492,6 +492,12 @@
             <label class="form-label small">Description <span class="text-muted">(optional)</span></label>
             <input type="text" class="form-control bg-dark text-light border-secondary" id="roleDescription">
         </div>
+        <div class="mb-3">
+            <label class="form-label small">Default Dashboard <span class="text-muted">(optional)</span></label>
+            <select id="roleDefaultDashboard" class="form-select bg-dark text-light border-secondary">
+                <option value="">— none (falls back to Overview) —</option>
+            </select>
+        </div>
         <div id="roleError" class="alert alert-danger py-2 small" style="display:none;"></div>
         <label class="form-label small mb-2">Permissions</label>
         <div id="rolePermissionsGrid"></div>
@@ -791,6 +797,7 @@ function loadUsers() {
 let roleModal = null;
 let ROLES_CACHE = [];
 let PERMISSION_REGISTRY_CACHE = [];
+let DASHBOARDS_CACHE = [];
 // The built-in admin role can never lose these two -- mirrors the server-side pin in
 // PUT /api/settings/roles/<id>, shown here as checked-and-disabled so an admin isn't
 // surprised when an attempt to uncheck them silently doesn't stick.
@@ -826,9 +833,13 @@ function renderRolesTable() {
 }
 
 function loadRoles() {
-    return fetch('/api/settings/roles').then(r => r.json()).then(data => {
+    return Promise.all([
+        fetch('/api/settings/roles').then(r => r.json()),
+        fetch('/api/dashboards').then(r => r.json()),
+    ]).then(([data, dashboards]) => {
         ROLES_CACHE = data.roles || [];
         PERMISSION_REGISTRY_CACHE = data.registry || [];
+        DASHBOARDS_CACHE = dashboards || [];
         renderRolesTable();
         populateManageRoleSelect();
     }).catch(err => console.error('Error loading groups:', err));
@@ -865,6 +876,10 @@ function showRoleModal(slug) {
     document.getElementById('groupRoleSlug').style.display = role ? 'none' : 'block';
     document.getElementById('roleLabel').value = role ? role.label : '';
     document.getElementById('roleDescription').value = role ? (role.description || '') : '';
+    const dashSel = document.getElementById('roleDefaultDashboard');
+    dashSel.innerHTML = '<option value="">— none (falls back to Overview) —</option>' +
+        DASHBOARDS_CACHE.map(d => `<option value="${d.id}">${escHtml(d.name)}</option>`).join('');
+    dashSel.value = (role && role.default_dashboard_id) ? String(role.default_dashboard_id) : '';
     renderRolePermissionsGrid(role ? role.permissions : [], !!(role && role.slug === 'admin'));
     roleModal.show();
 }
@@ -880,7 +895,11 @@ function submitRoleForm() {
     if (!label) { errBox.innerText = 'Display name is required.'; errBox.style.display = 'block'; return; }
 
     let url = '/api/settings/roles', method = 'POST';
-    const payload = { label, description: document.getElementById('roleDescription').value.trim(), permissions };
+    const defaultDashSel = document.getElementById('roleDefaultDashboard').value;
+    const payload = {
+        label, description: document.getElementById('roleDescription').value.trim(), permissions,
+        default_dashboard_id: defaultDashSel ? Number(defaultDashSel) : null,
+    };
     if (id) {
         url = `/api/settings/roles/${id}`; method = 'PUT';
     } else {

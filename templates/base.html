@@ -429,8 +429,7 @@ body.sidebar-collapsed .btn-logout span{display:none;}
             <button type="button" id="sidebarToggleBtn" class="sidebar-toggle-btn" onclick="toggleSidebar()" title="Collapse sidebar"><i class="fa-solid fa-angles-left"></i></button>
         </div>
         <nav class="sidebar-nav">
-            <a href="{{ url_for('home') }}" class="nav-block {{ 'active' if request.endpoint == 'home' else '' }}" title="Home"><i class="fa-solid fa-house"></i><span>Home</span></a>
-            <a href="{{ url_for('dashboards_page') }}" class="nav-block {{ 'active' if request.endpoint == 'dashboards_page' else '' }}" title="Dashboards"><i class="fa-solid fa-chart-line"></i><span>Dashboards</span></a>
+            <a href="{{ url_for('dashboards_page') }}" class="nav-block {{ 'active' if request.endpoint in ['home', 'dashboards_page'] else '' }}" title="Home"><i class="fa-solid fa-house"></i><span>Home</span></a>
             <a href="{{ url_for('dash') }}" class="nav-block {{ 'active' if request.endpoint in ['dash','pipeline','rules','detection_tuning','reports','download_report','trigger_report'] else '' }}" title="SIEM"><i class="fa-solid fa-shield-halved"></i><span>SIEM</span></a>
             <a href="/agents" class="nav-block {{ 'active' if request.endpoint == 'agents' else '' }}" title="EDR"><i class="fa-solid fa-laptop-medical"></i><span>EDR</span></a>
             <a href="/ueba" class="nav-block {{ 'active' if request.endpoint in ['ueba', 'ueba_tuning'] else '' }}" title="UEBA"><i class="fa-solid fa-user-secret"></i><span>UEBA</span></a>

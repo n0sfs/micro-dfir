@@ -598,7 +598,9 @@ def dash():
 @app.route('/')
 @login_required
 def home():
-    return render_template('home.html', current_user=current_user)
+    # Home was merged into Dashboards -- kept as a route (rather than removed) so
+    # url_for('home') call sites and any bookmarked '/' links keep working.
+    return redirect(url_for('dashboards_page'))
 
 @app.route('/api/home/stats')
 @login_required
@@ -643,7 +645,9 @@ def agents():
 @app.route('/dashboards')
 @login_required
 def dashboards_page():
-    return render_template('dashboards.html', current_user=current_user)
+    row = get_db().execute("SELECT default_dashboard_id FROM roles WHERE slug = ?", (current_user.role,)).fetchone()
+    role_default_dashboard_id = row['default_dashboard_id'] if row else None
+    return render_template('dashboards.html', current_user=current_user, role_default_dashboard_id=role_default_dashboard_id)
 
 # Placeholder nav entry -- the SOAR *backend* already exists and runs today
 # (microsoc-soar.service / src/soar_engine.py, a separate FastAPI process that
@@ -4904,6 +4908,7 @@ def api_dashboard_detail(did):
     if request.method == 'DELETE':
         # Manual cascade, matching queue_members' precedent -- this app never enables
         # PRAGMA foreign_keys, so an ON DELETE CASCADE in the schema would be a no-op.
+        db.execute("UPDATE roles SET default_dashboard_id = NULL WHERE default_dashboard_id = ?", (did,))
         db.execute("DELETE FROM dashboard_widgets WHERE dashboard_id = ?", (did,))
         db.execute("DELETE FROM dashboards WHERE id = ?", (did,))
         db.commit()
@@ -5602,6 +5607,8 @@ WIDGET_TYPES = {
     # dict; see WIDGET_REGISTRY in dashboards.html for the actual render functions.
     'app_alerts': {}, 'app_cases': {}, 'app_log_search': {},
     'app_threat_hunter': {}, 'app_edr_actions': {},
+    # Ported from the retired standalone Home page -- see DEFAULT_HOME_WIDGETS below.
+    'app_stat_tiles': {},
 }
 
 # The default "Overview" dashboard's seeded layout -- reproduces today's fixed-page
@@ -5624,6 +5631,15 @@ DEFAULT_OVERVIEW_WIDGETS = [
     ('chart_case_queue_backlog', 4, 25, 4, 4),
     ('chart_case_workload', 8, 25, 4, 4),
     ('chart_case_close_trend', 0, 29, 12, 4),
+]
+
+# Reproduces the retired Home page's fixed layout (stat strip + Recent Alerts +
+# Top Risk Entities) as a second seeded dashboard, additive alongside 'Overview' --
+# see migrate_role_default_dashboard() for how roles get pointed at this by default.
+DEFAULT_HOME_WIDGETS = [
+    ('app_stat_tiles', 0, 0, 12, 2),
+    ('app_alerts', 0, 2, 6, 5),
+    ('chart_top_risk_entities', 6, 2, 6, 5),
 ]
 
 def migrate_dashboards():
@@ -5653,6 +5669,16 @@ def migrate_dashboards():
             cur = conn.execute("INSERT INTO dashboards (name, created_by) VALUES ('Overview', 'system')")
             did = cur.lastrowid
             for widget_type, x, y, w, h in DEFAULT_OVERVIEW_WIDGETS:
+                conn.execute(
+                    "INSERT INTO dashboard_widgets (dashboard_id, widget_type, x, y, w, h) VALUES (?, ?, ?, ?, ?, ?)",
+                    (did, widget_type, x, y, w, h)
+                )
+
+        home_row = conn.execute("SELECT id FROM dashboards WHERE name = 'Home'").fetchone()
+        if not home_row:
+            cur = conn.execute("INSERT INTO dashboards (name, created_by) VALUES ('Home', 'system')")
+            did = cur.lastrowid
+            for widget_type, x, y, w, h in DEFAULT_HOME_WIDGETS:
                 conn.execute(
                     "INSERT INTO dashboard_widgets (dashboard_id, widget_type, x, y, w, h) VALUES (?, ?, ?, ?, ?, ?)",
                     (did, widget_type, x, y, w, h)
@@ -5725,6 +5751,28 @@ def migrate_role_permissions():
                     "INSERT INTO role_permissions (role_id, permission_key) VALUES (?, ?)",
                     [(rid, key) for key in perms]
                 )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# Lets each role default into a specific dashboard on login instead of always
+# falling back to 'Overview' -- see loadDashboards()'s fallback chain in
+# dashboards.html. Backfill only touches rows still NULL, so re-running this
+# after an admin has customized a role's default via Settings never clobbers it.
+def migrate_role_default_dashboard():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(roles)").fetchall()}
+        if 'default_dashboard_id' not in cols:
+            conn.execute("ALTER TABLE roles ADD COLUMN default_dashboard_id INTEGER")
+        home_row = conn.execute("SELECT id FROM dashboards WHERE name = 'Home'").fetchone()
+        if home_row:
+            conn.execute(
+                "UPDATE roles SET default_dashboard_id = ? "
+                "WHERE slug IN ('analyst','senior_analyst','admin') AND default_dashboard_id IS NULL",
+                (home_row[0],)
+            )
         conn.commit()
         conn.close()
     except Exception:
@@ -8011,12 +8059,16 @@ def api_settings_roles():
     db = get_db()
     if request.method == 'GET':
         roles = []
-        for r in db.execute("SELECT id, slug, label, description, is_builtin FROM roles ORDER BY is_builtin DESC, label").fetchall():
+        for r in db.execute("SELECT id, slug, label, description, is_builtin, default_dashboard_id FROM roles ORDER BY is_builtin DESC, label").fetchall():
             perms = [row['permission_key'] for row in db.execute(
                 "SELECT permission_key FROM role_permissions WHERE role_id = ?", (r['id'],)
             ).fetchall()]
             member_count = db.execute("SELECT COUNT(*) FROM users WHERE role = ?", (r['slug'],)).fetchone()[0]
-            roles.append({**dict(r), 'permissions': perms, 'member_count': member_count})
+            dash_name = None
+            if r['default_dashboard_id']:
+                dn = db.execute("SELECT name FROM dashboards WHERE id = ?", (r['default_dashboard_id'],)).fetchone()
+                dash_name = dn['name'] if dn else None
+            roles.append({**dict(r), 'permissions': perms, 'member_count': member_count, 'default_dashboard_name': dash_name})
         return jsonify({'roles': roles, 'registry': PERMISSION_REGISTRY})
 
     err = require_permission('settings.roles.manage')
@@ -8026,13 +8078,19 @@ def api_settings_roles():
     label = (d.get('label') or '').strip()
     description = (d.get('description') or '').strip()
     perms = [p for p in (d.get('permissions') or []) if p in PERMISSION_KEYS]
+    default_dashboard_id = d.get('default_dashboard_id') or None
     if not _ROLE_SLUG_RE.match(slug):
         return jsonify({'error': 'slug must start with a lowercase letter and contain only lowercase letters, numbers, and underscores'}), 400
     if not label:
         return jsonify({'error': 'label is required'}), 400
     if db.execute("SELECT 1 FROM roles WHERE slug = ?", (slug,)).fetchone():
         return jsonify({'error': f'A role with slug "{slug}" already exists'}), 400
-    cur = db.execute("INSERT INTO roles (slug, label, description, is_builtin) VALUES (?, ?, ?, 0)", (slug, label, description))
+    if default_dashboard_id and not db.execute("SELECT 1 FROM dashboards WHERE id = ?", (default_dashboard_id,)).fetchone():
+        return jsonify({'error': 'default_dashboard_id does not exist'}), 400
+    cur = db.execute(
+        "INSERT INTO roles (slug, label, description, is_builtin, default_dashboard_id) VALUES (?, ?, ?, 0, ?)",
+        (slug, label, description, default_dashboard_id)
+    )
     rid = cur.lastrowid
     db.executemany("INSERT INTO role_permissions (role_id, permission_key) VALUES (?, ?)", [(rid, p) for p in perms])
     db.commit()
@@ -8065,14 +8123,20 @@ def api_settings_role_detail(rid):
     label = (d.get('label') or '').strip()
     description = (d.get('description') or '').strip()
     perms = {p for p in (d.get('permissions') or []) if p in PERMISSION_KEYS}
+    default_dashboard_id = d.get('default_dashboard_id') or None
     if not label:
         return jsonify({'error': 'label is required'}), 400
+    if default_dashboard_id and not db.execute("SELECT 1 FROM dashboards WHERE id = ?", (default_dashboard_id,)).fetchone():
+        return jsonify({'error': 'default_dashboard_id does not exist'}), 400
     # The built-in admin role can never lose the two permissions that manage
     # users/roles -- without this, an admin could accidentally lock the whole
     # system out of user/role management with no way back in short of DB surgery.
     if existing['slug'] == 'admin':
         perms |= PINNED_ADMIN_PERMISSIONS
-    db.execute("UPDATE roles SET label = ?, description = ? WHERE id = ?", (label, description, rid))
+    db.execute(
+        "UPDATE roles SET label = ?, description = ?, default_dashboard_id = ? WHERE id = ?",
+        (label, description, default_dashboard_id, rid)
+    )
     db.execute("DELETE FROM role_permissions WHERE role_id = ?", (rid,))
     db.executemany("INSERT INTO role_permissions (role_id, permission_key) VALUES (?, ?)", [(rid, p) for p in perms])
     db.commit()
@@ -8637,6 +8701,7 @@ migrate_case_iocs()
 migrate_dashboards()
 migrate_role_casing()
 migrate_role_permissions()
+migrate_role_default_dashboard()
 migrate_playbooks()
 migrate_playbook_secrets()
 migrate_playbook_approvals()

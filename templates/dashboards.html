@@ -103,6 +103,7 @@
 <script>
 const IS_ADMIN = hasPermission('settings.roles.manage'); // stand-in for "true admin" -- dashboard ownership override
 const CURRENT_USERNAME = {{ current_user.username|tojson }};
+const ROLE_DEFAULT_DASHBOARD_ID = {{ role_default_dashboard_id|tojson }};
 
 function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -556,9 +557,9 @@ function severityBadgeWidget(sev) {
     return `<span class="badge ${cls}">${escHtml(s || 'INFO')}</span>`;
 }
 
-// Mirrors home.html's acknowledgeAlert() exactly -- acknowledged and status move
-// together (marks resolved), the one place that decides that, matching PUT
-// /api/alerts/<id>'s deliberately independent-per-field design.
+// Acknowledged and status move together here (marks resolved), the one place
+// that decides that, matching PUT /api/alerts/<id>'s deliberately
+// independent-per-field design.
 function ackAlertWidget(aid, btn) {
     btn.disabled = true;
     fetch(`/api/alerts/${aid}`, {
@@ -576,7 +577,7 @@ function ackAlertWidget(aid, btn) {
 function renderAlertsWidget(container, widgetId, config) {
     clearWidgetInterval(widgetId);
     container.innerHTML = `
-        <div class="d-flex justify-content-end mb-1"><a href="/" class="small">View all &raquo;</a></div>
+        <div class="d-flex justify-content-end mb-1"><a href="/siem" class="small">View all &raquo;</a></div>
         <div class="widget-alerts-list"><p class="text-muted small mb-0">Loading&hellip;</p></div>`;
     const load = () => {
         fetch(`/api/alerts?limit=${config.limit || 8}`).then(r => r.json()).then(rows => {
@@ -603,6 +604,28 @@ function renderAlertsWidget(container, widgetId, config) {
     // own timer, not the page-level "Live" convention, since it also drives the ack
     // list dropping an entry the moment someone (possibly on another screen) acks it.
     WIDGET_INTERVALS[widgetId] = setInterval(load, 30000);
+}
+
+// Ported from the retired standalone Home page -- same 5 numbers, same endpoint,
+// just the chart_case_stats-style lightweight row instead of Home's padded
+// .stat-tile cards (this widget already lives inside its own card header).
+// Plain counts, not an actionable list, so no polling interval like app_alerts.
+function renderStatTilesWidget(container, widgetId, config) {
+    container.innerHTML = `
+        <div class="row g-2 text-center">
+            <div class="col"><div class="fs-4 fw-bold widget-hosts">&mdash;</div><div class="small text-muted">Hosts Tracked</div></div>
+            <div class="col"><div class="fs-4 fw-bold widget-users">&mdash;</div><div class="small text-muted">Users Tracked</div></div>
+            <div class="col"><div class="fs-4 fw-bold widget-events">&mdash;</div><div class="small text-muted">Events Today</div></div>
+            <div class="col"><div class="fs-4 fw-bold widget-alerts">&mdash;</div><div class="small text-muted">Unacked Alerts</div></div>
+            <div class="col"><div class="fs-4 fw-bold widget-anomalies">&mdash;</div><div class="small text-muted">Anomalies Today</div></div>
+        </div>`;
+    fetch('/api/home/stats').then(r => r.json()).then(d => {
+        container.querySelector('.widget-hosts').innerText = d.hosts_tracked;
+        container.querySelector('.widget-users').innerText = d.users_tracked;
+        container.querySelector('.widget-events').innerText = d.events_today;
+        container.querySelector('.widget-alerts').innerText = d.alerts_unacknowledged;
+        container.querySelector('.widget-anomalies').innerText = d.anomalies_today;
+    }).catch(err => console.error('Error loading stat tiles widget:', err));
 }
 
 function caseStatusBadgeWidget(status) {
@@ -1153,6 +1176,8 @@ const WIDGET_REGISTRY = {
     app_log_search:    { label: 'Log Search', icon: 'fa-magnifying-glass-chart', category: 'app', defaultW: 12, defaultH: 9, render: renderLogSearchWidget },
     app_threat_hunter: { label: 'Threat Hunter', icon: 'fa-magnifying-glass-arrow-right', category: 'app', defaultW: 4, defaultH: 3, render: renderThreatHunterWidget },
     app_edr_actions:   { label: 'EDR Response Actions', icon: 'fa-laptop-medical', category: 'app', defaultW: 6, defaultH: 5, render: renderEdrActionsWidget },
+    // Ported from the retired standalone Home page.
+    app_stat_tiles:    { label: 'Stat Tiles', icon: 'fa-gauge', category: 'app', defaultW: 12, defaultH: 2, render: renderStatTilesWidget },
 };
 
 // widgetId (number) -> {widget_type, config} for whatever's actually on screen right
@@ -1289,7 +1314,11 @@ async function loadDashboards() {
     let startId = null;
     try { startId = parseInt(localStorage.getItem('microdfir_last_dashboard'), 10); } catch (e) {}
     if (!startId || !allDashboards.some(d => d.id === startId)) {
-        startId = (allDashboards.find(d => d.name === 'Overview') || allDashboards[0]).id;
+        if (ROLE_DEFAULT_DASHBOARD_ID && allDashboards.some(d => d.id === ROLE_DEFAULT_DASHBOARD_ID)) {
+            startId = ROLE_DEFAULT_DASHBOARD_ID;
+        } else {
+            startId = (allDashboards.find(d => d.name === 'Overview') || allDashboards[0]).id;
+        }
     }
     currentDashboardId = startId;
     populateDashboardSelect();
