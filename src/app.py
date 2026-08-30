@@ -879,12 +879,17 @@ def threat_intel():
     yara_files_set = set(yara_files)
     # Grouped purely for display (identify where the rules came from) -- the flat
     # yara_files list above stays the actual POST-time validation allowlist. Category
-    # is the rule's subdirectory under rules/yara_imported/ (a checkout of the
-    # community Yara-Rules/rules GitHub project); files with no subdirectory fall
-    # back to 'Other'.
+    # is each file's IMMEDIATE parent directory, not the first path segment -- the
+    # real category dirs (malware/, webshells/, crypto/, etc, each a checkout of the
+    # community Yara-Rules/rules project) sit one level deeper than yara_dir, under a
+    # rules-master/ wrapper (confirmed on disk: yara_dir also has a sibling
+    # yaraify_synced/ for feed-synced rules, so segment[0] alone would lump everything
+    # from either source into one bucket). Files with no parent dir at all fall back
+    # to 'Other'.
     yara_files_by_category = {}
     for rf in yara_files:
-        category = rf.split(os.sep)[0] if os.sep in rf else 'Other'
+        parts = rf.split(os.sep)
+        category = parts[-2] if len(parts) > 1 else 'Other'
         yara_files_by_category.setdefault(category, []).append(rf)
 
     if request.method == 'POST' and yara_available:
