@@ -2899,7 +2899,7 @@ function renderTable(rules) {
                 <div class="dropdown">
                     <button class="btn btn-sm btn-outline-secondary py-0 px-2" type="button" data-bs-toggle="dropdown"><i class="fa-solid fa-ellipsis-vertical"></i></button>
                     <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
-                        <li><a class="dropdown-item" href="#" onclick="openRuleModal(${rl.id}); return false;"><i class="fa-solid ${rl.source === 'custom' ? 'fa-pen' : 'fa-eye'} me-2"></i>${rl.source === 'custom' ? 'Edit' : 'View'}</a></li>
+                        <li><a class="dropdown-item" href="#" onclick="openRuleModal(${rl.id}); return false;"><i class="fa-solid fa-pen me-2"></i>Edit</a></li>
                         <li><a class="dropdown-item" href="#" onclick="quickClone(${rl.id}, '${rl.title.replace(/'/g, "\\'")}'); return false;"><i class="fa-solid fa-copy me-2"></i>Clone</a></li>
                         <li><hr class="dropdown-divider"></li>
                         <li><a class="dropdown-item text-danger" href="#" onclick="deleteRule(${rl.id}, '${rl.title.replace(/'/g, "\\'")}'); return false;"><i class="fa-solid fa-trash me-2"></i>Delete</a></li>
