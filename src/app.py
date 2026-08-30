@@ -1204,6 +1204,7 @@ def api_ti_iocs():
     ioc_types = [t for t in request.args.get('type', '').split(',') if t]
     feed_ids = [f for f in request.args.get('feed_id', '').split(',') if f]
     statuses = [s for s in request.args.get('status', '').split(',') if s in ('0', '1')]
+    sightings_vals = [s for s in request.args.get('sightings', '').split(',') if s in ('has', 'none')]
 
     # Aliased (si/tf) since this joins against ti_feeds to resolve each indicator's
     # source feed name — stix_indicators only ever stored a feed_id, never a name.
@@ -1220,6 +1221,13 @@ def api_ti_iocs():
     if statuses:
         conditions.append(f"si.revoked IN ({','.join('?' * len(statuses))})")
         params.extend(statuses)
+    # sighting_count is a computed subquery column, not a real one -- can't IN()-filter
+    # it directly, so this only applies when exactly one of has/none is picked (both
+    # selected naturally degrades to "no filter", same as selecting every option in any
+    # of the other checkbox filters above already does).
+    if len(sightings_vals) == 1:
+        exists_clause = "EXISTS (SELECT 1 FROM ioc_sightings s WHERE s.stix_id = si.stix_id)"
+        conditions.append(exists_clause if sightings_vals[0] == 'has' else f"NOT {exists_clause}")
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     rows = db.execute(
         f"SELECT si.stix_id, si.type, si.ioc_type, si.name, si.description, si.pattern, si.valid_from, si.revoked, "
@@ -1467,7 +1475,10 @@ def api_ti_entity_full_detail(eid):
             f"(SELECT COUNT(DISTINCT feed_id) FROM stix_indicators si2 WHERE si2.pattern = si.pattern AND si2.revoked = 0) AS corroboration_count "
             f"FROM stix_indicators si LEFT JOIN ti_feeds tf ON si.feed_id = tf.id "
             f"WHERE si.revoked = 0 AND ({' OR '.join(conditions)}) "
-            f"ORDER BY si.inserted_at DESC LIMIT 200",
+            # Sighted first -- an IOC actually observed in this environment is the whole
+            # point of this view; without this, one could sit unseen past the LIMIT 200
+            # cutoff behind 200 more-recently-inserted but never-sighted catalog entries.
+            f"ORDER BY sighting_count DESC, si.inserted_at DESC LIMIT 200",
             cond_params
         ).fetchall()
         # Confirm each SQL-prefiltered candidate with the same whole-word match the
