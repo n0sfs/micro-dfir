@@ -69,6 +69,7 @@
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'rules' else '' }}" id="tabBtnRules" onclick="switchSiemTab('rules')"><i class="fa-solid fa-file-shield me-1"></i>Detection Rules</button></li>
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'tuning' else '' }}" id="tabBtnTuning" onclick="switchSiemTab('tuning')"><i class="fa-solid fa-sliders me-1"></i>Detection Tuning</button></li>
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'reports' else '' }}" id="tabBtnReports" onclick="switchSiemTab('reports')"><i class="fa-solid fa-file-pdf me-1"></i>Reports</button></li>
+    <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'coverage' else '' }}" id="tabBtnCoverage" onclick="switchSiemTab('coverage')"><i class="fa-solid fa-diagram-project me-1"></i>Coverage</button></li>
 </ul>
 
 <!-- ============================= LOG SEARCH PANE ============================= -->
@@ -616,6 +617,59 @@
 </div>
 <!-- =========================== END REPORTS PANE =========================== -->
 
+<!-- ============================ COVERAGE PANE ============================= -->
+<div id="paneCoverage" style="display: {{ 'block' if active_tab == 'coverage' else 'none' }};">
+<div class="card shadow-sm border-secondary bg-dark text-light mb-4">
+    <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+        <h5 class="mb-0 text-info"><i class="fa-solid fa-diagram-project"></i> MITRE ATT&amp;CK Detection Coverage</h5>
+        <select id="coverageRange" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" onchange="loadCoverageTab()">
+            <option value="7d">Last 7 days</option>
+            <option value="30d" selected>Last 30 days</option>
+            <option value="90d">Last 90 days</option>
+        </select>
+    </div>
+    <div class="card-body">
+        <div class="text-muted small mb-3">
+            <span class="badge me-1" style="background:#3a3f4b;">&nbsp;&nbsp;</span> Gap — no rule mapped
+            <span class="badge me-1 ms-3" style="background:#664d0322;color:#ffc107;">&nbsp;&nbsp;</span> Inactive — mapped rule(s) disabled
+            <span class="badge me-1 ms-3" style="background:#0dcaf033;color:#0dcaf0;">&nbsp;&nbsp;</span> Active — enabled, not yet validated
+            <span class="badge me-1 ms-3" style="background:#19875433;color:#19a35a;">&nbsp;&nbsp;</span> Validated — enabled rule has fired
+        </div>
+        <div id="coverageGrid" class="d-flex flex-wrap gap-3">
+            <div class="text-center text-muted py-4 w-100">Loading…</div>
+        </div>
+    </div>
+</div>
+
+<div class="card shadow-sm border-secondary bg-dark text-light mb-4" id="coverageGapCard" style="display:none;">
+    <div class="card-header border-secondary">
+        <h5 class="mb-0 text-warning"><i class="fa-solid fa-triangle-exclamation"></i> Prioritized Gaps <span class="text-muted small fw-normal">— techniques a known threat actor/malware entity uses, with zero rule coverage</span></h5>
+    </div>
+    <div class="card-body">
+        <div class="table-responsive">
+            <table class="table table-dark table-hover table-sm align-middle">
+                <thead><tr><th>Technique</th><th>Tactic</th><th>Known to be used by</th></tr></thead>
+                <tbody id="coverageGapBody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+</div>
+<!-- =========================== END COVERAGE PANE =========================== -->
+
+<!-- MITRE COVERAGE DRILLDOWN MODAL (Coverage) -->
+<div class="modal fade" id="coverageDrilldownModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title" id="coverageDrilldownTitle"></h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body" id="coverageDrilldownBody"></div>
+    </div>
+  </div>
+</div>
+
 <!-- FIELD MANAGER MODAL (Log Search) -->
 <div class="modal fade" id="fieldManagerModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
@@ -944,11 +998,17 @@ function updateSharedStats(tab) {
         setStatTile(1, 'Latest Report', latest ? (REPORT_TYPE_LABELS[latest.report_type] || latest.report_type) : 'None yet', true);
         setStatTile(2, 'Last Generated', latest ? (latest.completed_at || latest.started_at || '—').split(' ')[0] : '—', true);
         setStatTile(3, 'Format', 'PDF', true);
+    } else if (tab === 'coverage') {
+        const tiers = coverageTierTotals();
+        setStatTile(0, 'Validated', tiers.validated);
+        setStatTile(1, 'Active', tiers.active);
+        setStatTile(2, 'Inactive', tiers.inactive);
+        setStatTile(3, 'Gaps', tiers.gap);
     }
 }
 
-const SIEM_TABS = ['search', 'pipeline', 'rules', 'tuning', 'reports'];
-let siemTabLoaded = { search: false, pipeline: false, rules: false, tuning: false, reports: false };
+const SIEM_TABS = ['search', 'pipeline', 'rules', 'tuning', 'reports', 'coverage'];
+let siemTabLoaded = { search: false, pipeline: false, rules: false, tuning: false, reports: false, coverage: false };
 
 function siemTabCap(tab) { return tab.charAt(0).toUpperCase() + tab.slice(1); }
 
@@ -965,6 +1025,7 @@ function switchSiemTab(tab) {
         else if (tab === 'rules') initRulesTab();
         else if (tab === 'tuning') initTuningTab();
         else if (tab === 'reports') initReportsTab();
+        else if (tab === 'coverage') initCoverageTab();
     } else {
         updateSharedStats(tab);
     }
@@ -3541,6 +3602,136 @@ function renderReportHistory() {
             <td class="small text-muted">${h.file_size_bytes ? formatReportSize(h.file_size_bytes) : '—'}</td>
             <td class="text-end">${h.file_exists ? `<a href="/reports/download/${h.id}" class="btn btn-sm btn-outline-primary"><i class="fa-solid fa-download"></i> Download</a>` : '<span class="text-muted small">File deleted</span>'}</td>
         </tr>`).join('');
+}
+
+// =====================================================================
+// COVERAGE TAB
+// =====================================================================
+let coverageData = null;
+
+const COVERAGE_TIER_STYLE = {
+    gap:       'background:#3a3f4b; color:#adb5bd;',
+    inactive:  'background:#664d0322; color:#ffc107;',
+    active:    'background:#0dcaf033; color:#0dcaf0; font-weight:600;',
+    validated: 'background:#19875433; color:#19a35a; font-weight:700;',
+};
+
+function initCoverageTab() {
+    loadCoverageTab();
+}
+
+function loadCoverageTab() {
+    const range = document.getElementById('coverageRange').value;
+    document.getElementById('coverageGrid').innerHTML = '<div class="text-center text-muted py-4 w-100">Loading…</div>';
+    fetch(`/api/mitre/coverage?range=${range}`).then(r => r.json()).then(d => {
+        coverageData = d;
+        renderCoverageGrid(d);
+        renderCoverageGaps(d);
+        updateSharedStats('coverage');
+    }).catch(err => {
+        document.getElementById('coverageGrid').innerHTML = '<div class="text-center text-danger py-4 w-100">Error loading coverage data.</div>';
+        console.error('Error loading MITRE coverage:', err);
+    });
+}
+
+function coverageTierTotals() {
+    const totals = { gap: 0, inactive: 0, active: 0, validated: 0 };
+    if (!coverageData) return totals;
+    coverageData.tactics.forEach(t => {
+        Object.keys(totals).forEach(tier => totals[tier] += (t.tiers[tier] || 0));
+    });
+    return totals;
+}
+
+function coverageTierBadge(tiers) {
+    return `<span class="text-success" title="Validated">${tiers.validated}</span> `
+         + `<span class="text-info" title="Active">${tiers.active}</span> `
+         + `<span class="text-warning" title="Inactive">${tiers.inactive}</span> `
+         + `<span class="text-muted" title="Gap">${tiers.gap}</span>`;
+}
+
+function renderCoverageGrid(d) {
+    const grid = document.getElementById('coverageGrid');
+    if (!d.tactics || !d.tactics.length) {
+        grid.innerHTML = '<div class="text-center text-muted py-4 w-100">No technique data available.</div>';
+        return;
+    }
+    grid.innerHTML = d.tactics.map(t => `
+        <div class="bg-black border border-secondary rounded p-2" style="width: 220px;">
+            <div class="text-uppercase text-muted small fw-bold mb-1">${escHtml(t.label)}</div>
+            <div class="small mb-2">${coverageTierBadge(t.tiers)}</div>
+            <div style="max-height: 260px; overflow-y: auto;">
+                ${t.techniques.map(tech => `
+                <div class="mb-1 px-2 py-1 rounded small" style="cursor:pointer; ${COVERAGE_TIER_STYLE[tech.tier]}" onclick="openCoverageDrilldown('${escHtml(t.tactic)}','${escHtml(tech.id)}')" title="T${escHtml(tech.id)} ${escHtml(tech.name || '')}">
+                    T${escHtml(tech.id)}${tech.threat_actors && tech.threat_actors.length ? ' <i class="fa-solid fa-triangle-exclamation text-warning" title="A known threat actor/malware uses this technique"></i>' : ''}
+                </div>`).join('')}
+            </div>
+        </div>`).join('');
+}
+
+function renderCoverageGaps(d) {
+    const card = document.getElementById('coverageGapCard');
+    const body = document.getElementById('coverageGapBody');
+    const gaps = [];
+    (d.tactics || []).forEach(t => {
+        t.techniques.forEach(tech => {
+            if (tech.tier === 'gap' && tech.threat_actors && tech.threat_actors.length) {
+                gaps.push({ tactic: t.label, tech });
+            }
+        });
+    });
+    if (!gaps.length) {
+        card.style.display = 'none';
+        return;
+    }
+    card.style.display = 'block';
+    body.innerHTML = gaps.map(g => `
+        <tr>
+            <td>T${escHtml(g.tech.id)}${g.tech.name ? ' — ' + escHtml(g.tech.name) : ''}</td>
+            <td class="text-muted small">${escHtml(g.tactic)}</td>
+            <td>${g.tech.threat_actors.map(a => `<a href="/threat-intel?tab=entities&entity=${a.id}" target="_blank" class="badge bg-secondary text-decoration-none me-1">${escHtml(a.name)}</a>`).join('')}</td>
+        </tr>`).join('');
+}
+
+function openCoverageDrilldown(tactic, techId) {
+    if (!coverageData) return;
+    const t = coverageData.tactics.find(x => x.tactic === tactic);
+    const tech = t && t.techniques.find(x => x.id === techId);
+    if (!tech) return;
+
+    document.getElementById('coverageDrilldownTitle').innerHTML =
+        `T${escHtml(tech.id)} ${escHtml(tech.name || '')} <span class="badge ms-2" style="${COVERAGE_TIER_STYLE[tech.tier]}">${tech.tier}</span>`;
+
+    let html = `<div class="text-muted small mb-3">${t.label} · ${tech.count} enabled rule${tech.count === 1 ? '' : 's'}, ${tech.disabled_count} disabled, ${tech.validated_count} alert${tech.validated_count === 1 ? '' : 's'} in the selected range</div>`;
+
+    if (tech.tier === 'inactive' && tech.validated_count > 0) {
+        html += `<div class="alert alert-warning py-2 small"><i class="fa-solid fa-clock-rotate-left me-1"></i>Previously validated ${tech.validated_count} time${tech.validated_count === 1 ? '' : 's'} in the selected range before its rule(s) were disabled.</div>`;
+    }
+
+    if (tech.threat_actors && tech.threat_actors.length) {
+        html += `<div class="alert alert-danger py-2 small"><i class="fa-solid fa-user-ninja me-1"></i>Known to be used by: ${tech.threat_actors.map(a => `<a href="/threat-intel?tab=entities&entity=${a.id}" target="_blank" class="text-light">${escHtml(a.name)}</a>`).join(', ')} — no rule currently covers this technique.</div>`;
+    }
+
+    if (!tech.rules.length) {
+        html += '<div class="text-muted small">No rules are mapped to this technique.</div>';
+    } else {
+        html += '<div class="table-responsive"><table class="table table-dark table-hover table-sm align-middle"><thead><tr><th>Rule</th><th>Level</th><th>Status</th></tr></thead><tbody>';
+        tech.rules.forEach(r => {
+            if (r.more) {
+                html += `<tr><td colspan="3" class="text-muted small">+ more rules not shown</td></tr>`;
+                return;
+            }
+            html += `<tr>
+                <td><a href="/rules?rule_id=${r.id}" target="_blank">${escHtml(r.title)}</a> ${r.enabled ? '' : '<span class="badge bg-secondary ms-1">disabled</span>'}</td>
+                <td><span class="badge ${LEVEL_BADGE[r.level] || 'bg-secondary'}">${escHtml(r.level || 'medium')}</span></td>
+                <td><span class="badge ${STATUS_BADGE[r.status] || 'bg-secondary'}">${escHtml(r.status || 'unknown')}</span></td>
+            </tr>`;
+        });
+        html += '</tbody></table></div>';
+    }
+
+    document.getElementById('coverageDrilldownBody').innerHTML = html;
+    new bootstrap.Modal(document.getElementById('coverageDrilldownModal')).show();
 }
 
 // =====================================================================
