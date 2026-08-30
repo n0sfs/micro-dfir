@@ -87,20 +87,30 @@
                     <input type="text" id="pbDescription" class="form-control bg-dark text-light border-secondary">
                 </div>
                 <div class="row g-2 mb-3">
-                    <div class="col-md-4">
+                    <div class="col-md-3">
                         <label class="form-label small text-muted mb-1">Only if Queue is&hellip;</label>
                         <select id="pbCondQueue" class="form-select bg-dark text-light border-secondary"><option value="">Any queue</option></select>
                     </div>
-                    <div class="col-md-4">
+                    <div class="col-md-3">
                         <label class="form-label small text-muted mb-1">Only if TLP is&hellip;</label>
                         <select id="pbCondTlp" class="form-select bg-dark text-light border-secondary"><option value="">Any TLP</option></select>
                     </div>
-                    <div class="col-md-4">
+                    <div class="col-md-3">
                         <label class="form-label small text-muted mb-1">Only if Status is&hellip;</label>
                         <select id="pbCondStatus" class="form-select bg-dark text-light border-secondary">
                             <option value="">Any status</option>
                             <option value="open">Open</option>
                             <option value="closed">Closed</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted mb-1">Only if Severity is&hellip;</label>
+                        <select id="pbCondSeverity" class="form-select bg-dark text-light border-secondary">
+                            <option value="">Any severity</option>
+                            <option value="critical">Critical</option>
+                            <option value="high">High</option>
+                            <option value="medium">Medium</option>
+                            <option value="low">Low</option>
                         </select>
                     </div>
                 </div>
@@ -313,6 +323,7 @@ function conditionSummary(p) {
     if (p.condition_queue_name) parts.push(`Queue: ${escHtml(p.condition_queue_name)}`);
     if (p.condition_tlp) parts.push(`TLP: ${escHtml(p.condition_tlp.toUpperCase())}`);
     if (p.condition_status) parts.push(`Status: ${escHtml(p.condition_status)}`);
+    if (p.condition_severity) parts.push(`Severity: ${escHtml(p.condition_severity.toUpperCase())}`);
     return parts.length ? parts.map(x => `<span class="badge bg-secondary me-1">${x}</span>`).join('') : '<span class="text-muted">any</span>';
 }
 
@@ -353,6 +364,7 @@ function populatePbConditionSelects(current) {
     tlpSel.innerHTML = '<option value="">Any TLP</option>' + ['clear', 'green', 'amber', 'amber-strict', 'red'].map(v => `<option value="${v}">${v.toUpperCase()}</option>`).join('');
     tlpSel.value = current.condition_tlp || '';
     document.getElementById('pbCondStatus').value = current.condition_status || '';
+    document.getElementById('pbCondSeverity').value = current.condition_severity || '';
 }
 
 // Lets a webhook/Slack action reference a stored secret by name instead of a literal
@@ -516,6 +528,7 @@ function savePlaybook() {
         condition_queue_id: document.getElementById('pbCondQueue').value ? parseInt(document.getElementById('pbCondQueue').value, 10) : null,
         condition_tlp: document.getElementById('pbCondTlp').value || null,
         condition_status: document.getElementById('pbCondStatus').value || null,
+        condition_severity: document.getElementById('pbCondSeverity').value || null,
         actions
     };
     if (!payload.name) { errBox.innerText = 'Name is required.'; errBox.style.display = 'block'; return; }

@@ -913,7 +913,7 @@ def threat_intel():
 
     return render_template('threat_intel.html', matches=matches, yara_files=yara_files, active_tab=active_tab, current_user=current_user)
 
-TI_FEED_TYPES = ('taxii', 'threatfox', 'otx', 'urlhaus', 'feodotracker', 'yaraify', 'misp', 'sslbl', 'spamhaus_drop', 'tor_exit', 'csv')
+TI_FEED_TYPES = ('taxii', 'threatfox', 'otx', 'urlhaus', 'feodotracker', 'yaraify', 'misp', 'sslbl', 'spamhaus_drop', 'tor_exit', 'malwarebazaar', 'csv')
 
 _CSV_VALUE_COLS = ('value', 'indicator', 'ioc', 'pattern', 'ip', 'url', 'domain', 'hash', 'ioc_value')
 _CSV_TYPE_COLS = ('type', 'ioc_type')
@@ -2778,9 +2778,9 @@ def api_cases():
             )
             _log_case_event(db, cid, 'template_applied', tpl['name'])
 
-    _run_playbooks_for_case(db, cid, 'case_created', queue_id, tlp, 'open')
+    _run_playbooks_for_case(db, cid, 'case_created', queue_id, tlp, 'open', severity)
     if queue_id:
-        _run_playbooks_for_case(db, cid, 'queue_changed', queue_id, tlp, 'open')
+        _run_playbooks_for_case(db, cid, 'queue_changed', queue_id, tlp, 'open', severity)
     db.commit()
     return jsonify({"status": "success", "id": cid})
 
@@ -2921,11 +2921,11 @@ def api_case_detail(cid):
             (title, status, assignee, description, closed_at, tlp, pap, severity, workflow_state, acknowledged_at, queue_id, cid)
         )
         if status_changed:
-            _run_playbooks_for_case(db, cid, 'status_changed', queue_id, tlp, status)
+            _run_playbooks_for_case(db, cid, 'status_changed', queue_id, tlp, status, severity)
         if queue_changed:
-            _run_playbooks_for_case(db, cid, 'queue_changed', queue_id, tlp, status)
+            _run_playbooks_for_case(db, cid, 'queue_changed', queue_id, tlp, status, severity)
         if assignee_changed:
-            _run_playbooks_for_case(db, cid, 'assignee_changed', queue_id, tlp, status)
+            _run_playbooks_for_case(db, cid, 'assignee_changed', queue_id, tlp, status, severity)
         db.commit()
         return jsonify({"status": "success"})
 
@@ -3458,6 +3458,8 @@ def _dry_run_playbook(db, playbook_id, cid):
         skip_reasons.append("the case's TLP doesn't match the condition")
     if pb['condition_status'] and pb['condition_status'] != case['status']:
         skip_reasons.append("the case's status doesn't match the condition")
+    if pb['condition_severity'] and pb['condition_severity'] != case['severity']:
+        skip_reasons.append("the case's severity doesn't match the condition")
 
     actions = db.execute(
         "SELECT action_type, params, requires_approval FROM playbook_actions WHERE playbook_id = ? ORDER BY position", (playbook_id,)
@@ -3516,13 +3518,14 @@ def _execute_playbook_actions(db, cid, playbook_id, actions):
 # for this trigger whose optional condition filters are unset or satisfied; one
 # playbook's action failing doesn't stop another matching playbook from running, and
 # doesn't stop the rest of ITS OWN actions either (see _execute_playbook_actions).
-def _run_playbooks_for_case(db, cid, trigger_event, queue_id, tlp, status):
+def _run_playbooks_for_case(db, cid, trigger_event, queue_id, tlp, status, severity):
     playbooks = db.execute(
         "SELECT * FROM playbooks WHERE enabled = 1 AND trigger_event = ? "
         "AND (condition_queue_id IS NULL OR condition_queue_id = ?) "
         "AND (condition_tlp IS NULL OR condition_tlp = ?) "
-        "AND (condition_status IS NULL OR condition_status = ?)",
-        (trigger_event, queue_id, tlp, status)
+        "AND (condition_status IS NULL OR condition_status = ?) "
+        "AND (condition_severity IS NULL OR condition_severity = ?)",
+        (trigger_event, queue_id, tlp, status, severity)
     ).fetchall()
     for pb in playbooks:
         actions = db.execute("SELECT action_type, params, requires_approval FROM playbook_actions WHERE playbook_id = ? ORDER BY position", (pb['id'],)).fetchall()
@@ -3575,10 +3578,11 @@ def api_playbooks():
         return jsonify({'error': 'Condition queue not found'}), 400
     condition_tlp = (d.get('condition_tlp') or '').strip() or None
     condition_status = (d.get('condition_status') or '').strip() or None
+    condition_severity = (d.get('condition_severity') or '').strip() or None
     cur = db.execute(
-        "INSERT INTO playbooks (name, description, trigger_event, enabled, condition_queue_id, condition_tlp, condition_status, created_by) "
-        "VALUES (?, ?, ?, 1, ?, ?, ?, ?)",
-        (name, (d.get('description') or '').strip(), trigger_event, condition_queue_id, condition_tlp, condition_status, current_user.username)
+        "INSERT INTO playbooks (name, description, trigger_event, enabled, condition_queue_id, condition_tlp, condition_status, condition_severity, created_by) "
+        "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)",
+        (name, (d.get('description') or '').strip(), trigger_event, condition_queue_id, condition_tlp, condition_status, condition_severity, current_user.username)
     )
     pid = cur.lastrowid
     for i, a in enumerate(actions):
@@ -3629,9 +3633,10 @@ def api_playbook_detail(pid):
         return jsonify({'error': 'Condition queue not found'}), 400
     condition_tlp = (d.get('condition_tlp') or '').strip() or None
     condition_status = (d.get('condition_status') or '').strip() or None
+    condition_severity = (d.get('condition_severity') or '').strip() or None
     db.execute(
-        "UPDATE playbooks SET name = ?, description = ?, trigger_event = ?, condition_queue_id = ?, condition_tlp = ?, condition_status = ? WHERE id = ?",
-        (name, (d.get('description') or '').strip(), trigger_event, condition_queue_id, condition_tlp, condition_status, pid)
+        "UPDATE playbooks SET name = ?, description = ?, trigger_event = ?, condition_queue_id = ?, condition_tlp = ?, condition_status = ?, condition_severity = ? WHERE id = ?",
+        (name, (d.get('description') or '').strip(), trigger_event, condition_queue_id, condition_tlp, condition_status, condition_severity, pid)
     )
     db.execute("DELETE FROM playbook_actions WHERE playbook_id = ?", (pid,))
     for i, a in enumerate(actions):
@@ -3711,6 +3716,8 @@ def api_playbook_run(pid):
         skip_reasons.append("the case's TLP doesn't match the condition")
     if pb['condition_status'] and pb['condition_status'] != case['status']:
         skip_reasons.append("the case's status doesn't match the condition")
+    if pb['condition_severity'] and pb['condition_severity'] != case['severity']:
+        skip_reasons.append("the case's severity doesn't match the condition")
     if skip_reasons:
         return jsonify({'error': "This playbook wouldn't fire for this case: " + '; '.join(skip_reasons)}), 400
 
@@ -5017,6 +5024,23 @@ def migrate_alerts_geoip_columns():
     except Exception:
         pass
 
+def migrate_alerts_mitre_column():
+    # Comma-joined MITRE technique IDs (same convention as sigma_rules.compliance_tags
+    # and ti_entities.techniques), stamped once by sigma_engine.py at alert-creation
+    # time from the triggering rule's own tags -- an alert can now be queried/filtered
+    # by technique directly, without joining back to sigma_rules and re-parsing its
+    # rule_yaml. The heuristic detection path in api_ingest has no Sigma rule behind it
+    # (no tags to draw from), so those alerts simply keep this column NULL/empty.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(alerts)").fetchall()}
+        if 'mitre_techniques' not in cols:
+            conn.execute("ALTER TABLE alerts ADD COLUMN mitre_techniques TEXT")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_sigma_rules_columns():
     # sigma_rules originally had no provenance columns — rules bulk-imported from SigmaHQ
     # and rules hand-written in the editor were indistinguishable. ALTER TABLE catches
@@ -5572,6 +5596,9 @@ def migrate_playbook_approvals():
         cols = {row[1] for row in conn.execute("PRAGMA table_info(playbook_actions)").fetchall()}
         if 'requires_approval' not in cols:
             conn.execute("ALTER TABLE playbook_actions ADD COLUMN requires_approval INTEGER NOT NULL DEFAULT 0")
+        pb_cols = {row[1] for row in conn.execute("PRAGMA table_info(playbooks)").fetchall()}
+        if 'condition_severity' not in pb_cols:
+            conn.execute("ALTER TABLE playbooks ADD COLUMN condition_severity TEXT")
         conn.execute('''CREATE TABLE IF NOT EXISTS playbook_approvals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             playbook_id INTEGER NOT NULL,
@@ -8402,6 +8429,7 @@ migrate_report_history_case_id()
 migrate_log_search_indexes()
 migrate_alerts_triage()
 migrate_alerts_geoip_columns()
+migrate_alerts_mitre_column()
 migrate_saved_searches()
 migrate_warninglists()
 migrate_ioc_sightings()

@@ -2,6 +2,7 @@ import os, json, re, time, sqlite3, requests, datetime
 from notifications import notify_if_configured
 from warninglists import filter_warninglisted_ips
 from geoip import lookup_country
+from mitre_attack import techniques_for_tags
 from dataclasses import dataclass, field as dc_field
 from sigma.collection import SigmaCollection
 from sigma.backends.sqlite import sqliteBackend
@@ -93,6 +94,20 @@ _LEVEL_RE = re.compile(r'^level:\s*([^\n\r]+)', re.MULTILINE)
 def _extract_level(rule_yaml):
     m = _LEVEL_RE.search(rule_yaml or '')
     return m.group(1).strip().strip('"\'').capitalize() if m else None
+
+# Same tag-block regex app.py's _get_rules_cache() uses to feed the MITRE coverage
+# heatmap -- duplicated here rather than imported, since that function lives in a
+# Flask-app-scoped module this standalone detection-engine process doesn't otherwise
+# depend on. Extracts the raw 'attack.txxxx'-style tag strings; techniques_for_tags()
+# (mitre_attack.py) resolves those to real technique IDs, dropping tactic-only tags.
+_TAGS_BLOCK_RE = re.compile(r'^tags:\s*\n((\s+-\s*[^\n\r]+\n?)+)', re.MULTILINE)
+
+def _extract_mitre_technique_ids(rule_yaml):
+    m = _TAGS_BLOCK_RE.search(rule_yaml or '')
+    if not m:
+        return ''
+    tags = [t.strip().strip('- ') for t in m.group(1).split('\n') if t.strip()]
+    return ','.join(t['id'] for t in techniques_for_tags(tags))
 
 def _exclusion_matches(excl, row):
     # Exclusions are defined against the same field vocabulary as the guided rule
@@ -382,6 +397,7 @@ def run_detection_cycle():
     cursor.execute(f"CREATE TEMP VIEW recent_events AS SELECT * FROM live_logs WHERE id > {last_id} AND id <= {current_max}")
     rules = cursor.execute("SELECT id, title, rule_yaml, severity_override, auto_case, auto_case_template_id FROM sigma_rules WHERE enabled = 1").fetchall()
     rule_titles = {r['id']: r['title'] for r in rules}
+    rule_mitre = {r['id']: _extract_mitre_technique_ids(r['rule_yaml']) for r in rules}
     rule_autocase = {r['id']: r['auto_case_template_id'] for r in rules if r['auto_case']}
     rule_uses_ioc_placeholder = {
         r['id']: {kind: placeholder in r['rule_yaml'] for kind, placeholder, *_ in _IOC_KINDS}
@@ -480,9 +496,9 @@ def run_detection_cycle():
             else:
                 country_code, country_name = lookup_country(source_ip)
                 cursor.execute(
-                    "INSERT INTO alerts (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app, occurrence_count, last_seen, country_code, country_name) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)",
-                    (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app, g['count'], country_code, country_name)
+                    "INSERT INTO alerts (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app, occurrence_count, last_seen, country_code, country_name, mitre_techniques) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)",
+                    (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app, g['count'], country_code, country_name, rule_mitre.get(rule_id, ''))
                 )
                 new_alert_id = cursor.lastrowid
                 _record_ioc_sightings(cursor, rule_id, host, source_ip, destination_ip, file_hash, query_name,
