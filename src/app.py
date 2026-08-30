@@ -1258,7 +1258,7 @@ def _entity_row_to_dict(r):
 
 def _get_ti_entities(db):
     return [_entity_row_to_dict(r) for r in db.execute(
-        "SELECT id, entity_type, name, aliases, description, techniques, source, "
+        "SELECT id, entity_type, name, aliases, description, techniques, source, confidence, attribution_note, "
         "(SELECT COUNT(*) FROM ti_relationships WHERE entity_id = ti_entities.id) as linked_count "
         "FROM ti_entities ORDER BY name"
     ).fetchall()]
@@ -1381,6 +1381,10 @@ def _attach_actor_sightings(db, actors):
         a['sightings'] = sightings[:25]
         del a['stix_ids']
 
+# Empty ('') means "not assessed yet", same pass-through-when-empty convention as case
+# TLP/PAP -- distinct from an explicit low-confidence tier.
+TI_ENTITY_CONFIDENCE_VALUES = ('confirmed', 'probable', 'possible')
+
 @app.route('/api/ti/entities', methods=['GET', 'POST'])
 @login_required
 def api_ti_entities():
@@ -1394,14 +1398,18 @@ def api_ti_entities():
     entity_type = (d.get('entity_type') or '').strip()
     if not name or not entity_type:
         return jsonify({'error': 'name and entity_type are required'}), 400
+    confidence = (d.get('confidence') or '').strip()
+    if confidence and confidence not in TI_ENTITY_CONFIDENCE_VALUES:
+        return jsonify({'error': f"confidence must be empty (not set) or one of {', '.join(TI_ENTITY_CONFIDENCE_VALUES)}"}), 400
     if db.execute("SELECT 1 FROM ti_entities WHERE name = ?", (name,)).fetchone():
         return jsonify({'error': f'An entity named "{name}" already exists'}), 400
     aliases = ','.join(a.strip() for a in (d.get('aliases') or '').split(',') if a.strip())
     techniques = ','.join(t.strip() for t in (d.get('techniques') or '').split(',') if t.strip())
     db.execute(
-        "INSERT INTO ti_entities (entity_type, name, aliases, description, techniques, source, created_by) "
-        "VALUES (?, ?, ?, ?, ?, 'admin', ?)",
-        (entity_type, name, aliases, (d.get('description') or '').strip(), techniques, current_user.username)
+        "INSERT INTO ti_entities (entity_type, name, aliases, description, techniques, source, created_by, confidence, attribution_note) "
+        "VALUES (?, ?, ?, ?, ?, 'admin', ?, ?, ?)",
+        (entity_type, name, aliases, (d.get('description') or '').strip(), techniques, current_user.username,
+         confidence, (d.get('attribution_note') or '').strip())
     )
     db.commit()
     _ACTOR_SUMMARY_CACHE.clear()
@@ -1430,13 +1438,18 @@ def api_ti_entity_detail_admin(eid):
     entity_type = (d.get('entity_type') or '').strip()
     if not name or not entity_type:
         return jsonify({'error': 'name and entity_type are required'}), 400
+    confidence = (d.get('confidence') or '').strip()
+    if confidence and confidence not in TI_ENTITY_CONFIDENCE_VALUES:
+        return jsonify({'error': f"confidence must be empty (not set) or one of {', '.join(TI_ENTITY_CONFIDENCE_VALUES)}"}), 400
     if db.execute("SELECT 1 FROM ti_entities WHERE name = ? AND id != ?", (name, eid)).fetchone():
         return jsonify({'error': f'An entity named "{name}" already exists'}), 400
     aliases = ','.join(a.strip() for a in (d.get('aliases') or '').split(',') if a.strip())
     techniques = ','.join(t.strip() for t in (d.get('techniques') or '').split(',') if t.strip())
     db.execute(
-        "UPDATE ti_entities SET entity_type = ?, name = ?, aliases = ?, description = ?, techniques = ? WHERE id = ?",
-        (entity_type, name, aliases, (d.get('description') or '').strip(), techniques, eid)
+        "UPDATE ti_entities SET entity_type = ?, name = ?, aliases = ?, description = ?, techniques = ?, "
+        "confidence = ?, attribution_note = ? WHERE id = ?",
+        (entity_type, name, aliases, (d.get('description') or '').strip(), techniques,
+         confidence, (d.get('attribution_note') or '').strip(), eid)
     )
     db.commit()
     _ACTOR_SUMMARY_CACHE.clear()
@@ -1455,7 +1468,8 @@ def api_ti_entity_full_detail(eid):
 
     db = get_db()
     row = db.execute(
-        "SELECT id, entity_type, name, aliases, description, techniques, source FROM ti_entities WHERE id = ?", (eid,)
+        "SELECT id, entity_type, name, aliases, description, techniques, source, confidence, attribution_note "
+        "FROM ti_entities WHERE id = ?", (eid,)
     ).fetchone()
     if not row:
         return jsonify({'error': 'Entity not found'}), 404
@@ -6783,6 +6797,24 @@ def migrate_ti_entities():
     except Exception:
         pass
 
+def migrate_ti_entities_confidence():
+    # Same "empty means not assessed yet" convention as case TLP/PAP -- confidence
+    # defaults to '' (not a specific tier), distinct from an explicit low-confidence
+    # assessment. attribution_note is a free-text citation ("per Mandiant M-Trends
+    # 2024") since a single curated source list can't cover every analyst's own
+    # sourcing.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(ti_entities)").fetchall()}
+        if 'confidence' not in cols:
+            conn.execute("ALTER TABLE ti_entities ADD COLUMN confidence TEXT NOT NULL DEFAULT ''")
+        if 'attribution_note' not in cols:
+            conn.execute("ALTER TABLE ti_entities ADD COLUMN attribution_note TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_live_logs_ip_columns():
     # source_ip/destination_ip were added to schema.sql at some point but no migration
     # ever backfilled them onto already-deployed databases, and no ingest path ever
@@ -9428,6 +9460,7 @@ migrate_sigma_rules_original_yaml()
 migrate_seed_ioc_correlation_rule()
 migrate_enrichment_results()
 migrate_ti_entities()
+migrate_ti_entities_confidence()
 
 try:
     # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every

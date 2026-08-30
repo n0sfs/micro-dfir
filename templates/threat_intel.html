@@ -258,12 +258,13 @@
                                     <th>Aliases</th>
                                     <th>Techniques</th>
                                     <th>Source</th>
+                                    <th>Confidence</th>
                                     <th title="How many indicators/cases/alerts are manually linked to this entity in this environment">Linked</th>
                                     <th style="width:110px;">Actions</th>
                                 </tr>
                             </thead>
                             <tbody id="entitiesTableBody">
-                                <tr><td colspan="7" class="text-center text-muted py-3">Loading...</td></tr>
+                                <tr><td colspan="8" class="text-center text-muted py-3">Loading...</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -466,6 +467,21 @@
         <div class="mb-3">
           <label class="form-label">MITRE ATT&amp;CK Technique IDs <span class="text-muted small">(comma-separated, e.g. 1566.001,1059.001)</span></label>
           <input type="text" id="entityTechniques" class="form-control bg-dark text-light border-secondary" placeholder="1566.001, 1059.001">
+        </div>
+        <div class="row g-2 mb-3">
+          <div class="col-md-5">
+            <label class="form-label">Confidence <span class="text-muted small">(optional)</span></label>
+            <select id="entityConfidence" class="form-select bg-dark text-light border-secondary">
+              <option value="">Not assessed</option>
+              <option value="confirmed">Confirmed</option>
+              <option value="probable">Probable</option>
+              <option value="possible">Possible</option>
+            </select>
+          </div>
+          <div class="col-md-7">
+            <label class="form-label">Attribution Note <span class="text-muted small">(optional)</span></label>
+            <input type="text" id="entityAttributionNote" class="form-control bg-dark text-light border-secondary" placeholder="e.g. per Mandiant M-Trends 2024">
+          </div>
         </div>
         <div id="entityModalError" class="text-danger small" style="display:none;"></div>
       </div>
@@ -1495,6 +1511,12 @@ function entityTypeBadge(type) {
     return `<span class="badge ${map[type] || 'bg-secondary'}">${escHtml(type || '')}</span>`;
 }
 
+function confidenceBadge(confidence) {
+    if (!confidence) return '<span class="text-muted small">Not assessed</span>';
+    const map = {confirmed: 'bg-success', probable: 'bg-info text-dark', possible: 'bg-secondary'};
+    return `<span class="badge ${map[confidence] || 'bg-secondary'}">${escHtml(confidence)}</span>`;
+}
+
 function loadEntities() {
     fetch('/api/ti/entities').then(r => r.json()).then(entities => {
         allEntities = entities;
@@ -1505,7 +1527,7 @@ function loadEntities() {
 function renderEntitiesTable(entities) {
     const tbody = document.getElementById('entitiesTableBody');
     if (!entities.length) {
-        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No entities yet.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-3">No entities yet.</td></tr>';
         return;
     }
     const isAdmin = hasPermission('threatintel.manage');
@@ -1516,6 +1538,7 @@ function renderEntitiesTable(entities) {
             <td class="text-muted small">${escHtml((e.aliases || []).join(', ')) || '—'}</td>
             <td class="text-muted small">${(e.techniques || []).map(t => `<span class="badge bg-secondary me-1">T${escHtml(t)}</span>`).join('') || '—'}</td>
             <td><span class="badge ${e.source === 'admin' ? 'bg-info text-dark' : 'bg-secondary'}">${escHtml(e.source)}</span></td>
+            <td title="${escHtml(e.attribution_note || '')}">${confidenceBadge(e.confidence)}</td>
             <td>${e.linked_count > 0 ? `<span class="badge bg-info text-dark">${e.linked_count}</span>` : '<span class="text-muted small">0</span>'}</td>
             <td class="text-nowrap">
                 ${isAdmin ? `
@@ -1548,6 +1571,8 @@ function openEntityModal(entity) {
     document.getElementById('entityAliases').value = entity ? (entity.aliases || []).join(', ') : '';
     document.getElementById('entityDescription').value = entity ? (entity.description || '') : '';
     document.getElementById('entityTechniques').value = entity ? (entity.techniques || []).join(', ') : '';
+    document.getElementById('entityConfidence').value = entity ? (entity.confidence || '') : '';
+    document.getElementById('entityAttributionNote').value = entity ? (entity.attribution_note || '') : '';
     document.querySelector('#entityModal .modal-title').innerText = entity ? 'Edit Entity' : 'Add Entity';
     entityModal.show();
 }
@@ -1560,6 +1585,8 @@ async function saveEntity() {
         aliases: document.getElementById('entityAliases').value.trim(),
         description: document.getElementById('entityDescription').value.trim(),
         techniques: document.getElementById('entityTechniques').value.trim(),
+        confidence: document.getElementById('entityConfidence').value,
+        attribution_note: document.getElementById('entityAttributionNote').value.trim(),
     };
     const url = editingEntityId ? `/api/ti/entities/${editingEntityId}` : '/api/ti/entities';
     const method = editingEntityId ? 'PUT' : 'POST';
@@ -1698,6 +1725,9 @@ async function openEntityDetail(id) {
         const e = await res.json();
         if (!res.ok) { document.getElementById('entityDetailBody').innerHTML = `<span class="text-danger">${escHtml(e.error || 'Failed to load entity.')}</span>`; return; }
         document.getElementById('entityDetailTitle').innerHTML = `${escHtml(e.name)} ${entityTypeBadge(e.entity_type)}`;
+        const attributionLine = e.confidence || e.attribution_note
+            ? `<div class="small mb-2">${confidenceBadge(e.confidence)}${e.attribution_note ? ` <span class="text-muted">— ${escHtml(e.attribution_note)}</span>` : ''}</div>`
+            : '';
         const iocRows = (e.matched_iocs || []).map(i => `
             <tr>
                 <td class="font-monospace small">${escHtml(i.pattern)}</td>
@@ -1708,6 +1738,7 @@ async function openEntityDetail(id) {
         const relRows = (e.relationships || []).map(r => relationshipRow(r, e.id)).join('');
         document.getElementById('entityDetailBody').innerHTML = `
             ${(e.aliases || []).length ? `<div class="text-muted small mb-2">aka ${escHtml(e.aliases.join(', '))}</div>` : ''}
+            ${attributionLine}
             <p class="small">${escHtml(e.description || '')}</p>
             <div class="mb-3">
                 ${(e.techniques || []).map(t => `<span class="badge bg-secondary me-1 mb-1" title="${escHtml(t.tactic_label)}">T${escHtml(t.id)}${t.name ? ' — ' + escHtml(t.name) : ''}</span>`).join('') || '<span class="text-muted small">No techniques listed.</span>'}
