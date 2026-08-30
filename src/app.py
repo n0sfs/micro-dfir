@@ -1689,14 +1689,85 @@ def _normalize_rule_status(raw):
 
 # Extracts a single-line "key: value" metadata field from raw Sigma rule YAML without
 # a full YAML parse (this whole block trades correctness for speed across thousands of
-# cached rules). Anchored to the start of a line (^, MULTILINE) so a nested/indented
-# field that merely ends in the same word -- e.g. a detection field named
-# ResponseStatus: or release_date: -- can't be mistaken for the real top-level
-# metadata key, and trailing inline comments (# ...) are excluded from the captured
-# value rather than becoming part of it.
+# cached rules). `^` (MULTILINE) still anchors to the start of A line, so a field that
+# merely ENDS in the same word -- e.g. ResponseStatus: or release_date: -- can't be
+# mistaken for a real `status:`/`date:` (exact key-boundary match), and trailing inline
+# comments (# ...) are excluded from the captured value. Deliberately allows leading
+# indentation (`\s*`) -- product/service/category live nested under Sigma's `logsource:`
+# block, never at column 0, so anchoring to column 0 (the original form of this regex)
+# silently returned None for every one of those three fields on every real rule. The one
+# residual risk this reintroduces: a `detection:` selector field that happens to be named
+# identically to a metadata key (e.g. a log field literally called `product`) could
+# false-match `re.search`'s first hit -- accepted because `logsource:` conventionally
+# precedes `detection:` in Sigma rule ordering, so the real metadata field wins in
+# practice, and this is the same class of tradeoff already implicit in this function.
 def _extract_yaml_field(key, text):
-    m = re.search(rf'^{key}:\s*([^\n\r#]+)', text, re.MULTILINE)
+    m = re.search(rf'^\s*{key}:\s*([^\n\r#]+)', text, re.MULTILINE)
     return m.group(1).strip().strip("'\"") if m else None
+
+# Sigma's logsource.product/service vocabulary mapped to the live_logs.app values this
+# appliance's Vector pipeline (config/vector.toml) actually tags ingested events with --
+# curated once by hand against real ingestion, not a live sync (same "confirmed once,
+# committed as a fixed list" pattern as src/warninglists.py). A (product, service) combo
+# not listed here means "unknown" (this table hasn't been extended for it), NOT "absent"
+# -- extending coverage means editing this dict directly.
+SIGMA_LOGSOURCE_INGESTED_APPS = {
+    ('windows', 'sysmon'): {'sysmon'},
+    ('windows', 'security'): {'security'},
+    ('windows', 'system'): {'system'},
+    ('windows', 'application'): {'application'},
+    ('windows', 'powershell'): {'powershell'},
+    ('windows', 'powershell-classic'): {'powershell'},
+    ('windows', 'windefend'): {'windows defender'},
+    ('windows', None): {'sysmon', 'security', 'system', 'application', 'powershell', 'windows defender'},
+    ('linux', 'auditd'): set(),
+    ('linux', 'syslog'): set(),
+    ('linux', None): {'systemd', 'sshd', 'kernel', 'cron', 'dbus-daemon', 'systemd-logind', 'wpa_supplicant', 'fwupd'},
+    ('aws', None): set(),
+    ('azure', None): set(),
+    ('gcp', None): set(),
+    ('okta', None): set(),
+    ('m365', None): set(),
+    ('github', None): set(),
+}
+
+_INGESTED_APPS_CACHE = {}
+_INGESTED_APPS_CACHE_TTL = 300  # seconds -- same TTL-cache shape as _ACTOR_SUMMARY_CACHE
+
+def _get_ingested_apps(db):
+    """Lowercased set of every distinct live_logs.app value ever ingested -- an
+    index-only scan on idx_live_logs_app, cheap even at millions of rows. This IS the
+    "what's actually flowing into this appliance" registry; no separate log-source
+    catalog needs to be invented."""
+    import time
+    now = time.time()
+    cached = _INGESTED_APPS_CACHE.get('data')
+    if cached is not None and (now - _INGESTED_APPS_CACHE.get('time', 0)) < _INGESTED_APPS_CACHE_TTL:
+        return cached
+    apps = {row[0].strip().lower() for row in db.execute(
+        "SELECT DISTINCT app FROM live_logs WHERE app IS NOT NULL"
+    ).fetchall() if row[0]}
+    _INGESTED_APPS_CACHE['data'] = apps
+    _INGESTED_APPS_CACHE['time'] = now
+    return apps
+
+def _rule_log_source_ingestible(product, service, ingested_apps):
+    """True/False when SIGMA_LOGSOURCE_INGESTED_APPS has a definite answer for this
+    (product, service) combo; None when the rule has no product at all (e.g. a
+    correlation-only rule) or the combo isn't in our curated table yet -- None is
+    deliberately treated as "unknown", never surfaced as a gap."""
+    if not product:
+        return None
+    product = product.strip().lower()
+    service = service.strip().lower() if service else None
+    expected = SIGMA_LOGSOURCE_INGESTED_APPS.get((product, service))
+    if expected is None:
+        expected = SIGMA_LOGSOURCE_INGESTED_APPS.get((product, None))
+    if expected is None:
+        return None
+    if not expected:
+        return False
+    return bool(expected & ingested_apps)
 
 def _get_rules_cache(db):
     """Returns the rules_out list used by both /api/rules and /api/mitre/coverage,
@@ -1705,6 +1776,8 @@ def _get_rules_cache(db):
     import time
     if RULES_CACHE is not None and (time.time() - RULES_CACHE_TIME) < RULES_CACHE_TTL:
         return RULES_CACHE
+
+    ingested_apps = _get_ingested_apps(db)
 
     import re
     from mitre_attack import techniques_for_tags
@@ -1717,7 +1790,10 @@ def _get_rules_cache(db):
         ry = r['rule_yaml']
         try:
             cat = _extract_yaml_field('category', ry) or 'unknown'
-            platform = (_extract_yaml_field('product', ry) or 'Global').title()
+            raw_product = _extract_yaml_field('product', ry)
+            raw_service = _extract_yaml_field('service', ry)
+            platform = (raw_product or 'Global').title()
+            log_source_ingestible = _rule_log_source_ingestible(raw_product, raw_service, ingested_apps)
 
             t_match = re.search(r'^tags:\s*\n((\s+-\s*[^\n\r]+\n?)+)', ry, re.MULTILINE)
             tags = [t.strip().strip('- ') for t in t_match.group(1).split('\n') if t.strip()] if t_match else []
@@ -1740,6 +1816,7 @@ def _get_rules_cache(db):
         except Exception:
             rule_type, platform, cat, tags = "Generic", "Global", "unknown", []
             level, status, rule_date = "medium", "unknown", None
+            log_source_ingestible = None
 
         rules_out.append({
             "id": rid,
@@ -1752,6 +1829,7 @@ def _get_rules_cache(db):
             "mitre_techniques": techniques_for_tags(tags),
             "level": level,
             "status": status,
+            "log_source_ingestible": log_source_ingestible,
             "source": r['source'] or 'sigma',
             "cloned_from": r['cloned_from'],
             "created_by": r['created_by'],
@@ -1940,17 +2018,28 @@ def _build_mitre_coverage(rules, validated, actor_techniques):
     for the drill-down to show as a footnote, rather than adding a 5th tier.
     Every curated technique appears even at zero coverage (so the grid shows
     gaps, not just hits); any technique tag found in a rule but missing from
-    the curated table is still counted, under 'unmapped'."""
+    the curated table is still counted, under 'unmapped'. Each 'active'-tier
+    technique also carries 'log_source_gap': True when every one of its
+    enabled rules needs a log source this appliance doesn't actually ingest
+    (see SIGMA_LOGSOURCE_INGESTED_APPS/_get_ingested_apps) -- again not a 5th
+    tier, just a flag on top of 'active' for "looks covered, may never fire"."""
     from mitre_attack import TACTICS, TACTIC_LABELS, TECHNIQUES, _display_id
 
     enabled_counts = {}
     disabled_counts = {}
+    # True once at least one enabled rule mapped to this (tactic, tid) has a log source
+    # that's ingestible or of unknown ingestibility -- absence of a True entry here means
+    # EVERY enabled rule is a confirmed non-ingestible log source (see log_source_gap
+    # below). Tracked independent of rules_by_tech's 25-row cap so a technique with more
+    # than 25 mapped rules still gets an accurate answer.
+    enabled_log_source_ok = {}
     rules_by_tech = {}
     unmapped = {}
     for r in rules:
         for tech in r['mitre_techniques']:
             rule_ref = {'id': r['id'], 'title': r['title'], 'enabled': r['enabled'],
-                        'level': r['level'], 'status': r['status']}
+                        'level': r['level'], 'status': r['status'],
+                        'log_source_ingestible': r.get('log_source_ingestible')}
             if tech['tactic'] == 'unmapped':
                 entry = unmapped.setdefault(tech['id'], {'id': tech['id'], 'name': None, 'count': 0})
                 if r['enabled']:
@@ -1959,6 +2048,8 @@ def _build_mitre_coverage(rules, validated, actor_techniques):
             key = (tech['tactic'], tech['id'])
             if r['enabled']:
                 enabled_counts[key] = enabled_counts.get(key, 0) + 1
+                if r.get('log_source_ingestible') is not False:
+                    enabled_log_source_ok[key] = True
             else:
                 disabled_counts[key] = disabled_counts.get(key, 0) + 1
             bucket = rules_by_tech.setdefault(tech['id'], [])
@@ -1991,11 +2082,16 @@ def _build_mitre_coverage(rules, validated, actor_techniques):
             else:
                 tier = 'validated'
             tier_totals[tier] += 1
+            # Only meaningful for 'active' -- 'gap'/'inactive' are already flagged their
+            # own way, and 'validated' means a real alert already proved the log source
+            # works regardless of what this static mapping says.
+            log_source_gap = tier == 'active' and not enabled_log_source_ok.get((tactic, tid), False)
             techs.append({
                 'id': tid, 'name': name, 'count': enabled_n,
                 'disabled_count': disabled_n, 'validated_count': validated_n,
                 'tier': tier, 'rules': rules_by_tech.get(tid, []),
                 'threat_actors': actor_techniques.get(tid, []) if tier == 'gap' else [],
+                'log_source_gap': log_source_gap,
             })
         techs.sort(key=lambda x: (-x['count'], x['id']))
         tactics_out.append({
@@ -2020,6 +2116,21 @@ def api_mitre_coverage():
     validated = _get_validated_technique_counts(db, days)
     actor_techniques = _build_actor_technique_index(db)
     return jsonify(_build_mitre_coverage(rules, validated, actor_techniques))
+
+@app.route('/api/mitre/coverage/history', methods=['GET'])
+@login_required
+def api_mitre_coverage_history():
+    # Backed by coverage_snapshots, written once a day by the cron-invoked
+    # src/coverage_snapshot.py (see update.sh) -- coverage itself is always computed
+    # live elsewhere; this is the one place a trend over time exists.
+    days = request.args.get('days', 90, type=int)
+    rows = get_db().execute(
+        "SELECT snapshot_date, coverage_pct, techniques_total, gap_count, inactive_count, "
+        "active_count, validated_count FROM coverage_snapshots "
+        "WHERE snapshot_date >= date('now', ?) ORDER BY snapshot_date",
+        (f'-{days} days',)
+    ).fetchall()
+    return jsonify({'snapshots': [dict(r) for r in rows]})
 
 @app.route('/api/rules/<int:rid>', methods=['GET', 'PUT', 'DELETE'])
 @login_required
@@ -6297,6 +6408,27 @@ def migrate_ioc_sightings_alert_id():
     except Exception:
         pass
 
+def migrate_coverage_snapshots():
+    # One row per day, written by the cron-invoked src/coverage_snapshot.py (see
+    # update.sh) -- coverage itself is always computed live everywhere else; this is
+    # the only place a trend over time exists, backing the Coverage tab's history chart.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS coverage_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_date DATE NOT NULL UNIQUE,
+            techniques_total INTEGER NOT NULL,
+            gap_count INTEGER NOT NULL,
+            inactive_count INTEGER NOT NULL,
+            active_count INTEGER NOT NULL,
+            validated_count INTEGER NOT NULL,
+            coverage_pct REAL NOT NULL
+        )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 # The __IOC_..._LIST__ correlation mechanism (see sigma_engine.py) is a capability, not
 # an active rule -- nothing alerts on it until some rule actually references one of the
 # placeholders. Seeded once (matched by title, so a user who deletes/edits it doesn't
@@ -9036,6 +9168,7 @@ migrate_saved_searches()
 migrate_warninglists()
 migrate_ioc_sightings()
 migrate_ioc_sightings_alert_id()
+migrate_coverage_snapshots()
 migrate_seed_ioc_correlation_rule()
 migrate_enrichment_results()
 migrate_ti_entities()

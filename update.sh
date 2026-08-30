@@ -37,6 +37,11 @@ fi
 echo "[*] Ensuring the log archiving cron job is scheduled..."
 (crontab -l 2>/dev/null | grep -v "archive_logs.py"; echo "0 4 * * * $SOC_DIR/venv/bin/python3 $SOC_DIR/src/archive_logs.py >> /var/log/microdfir-archive.log 2>&1") | crontab -
 
+echo "[*] Ensuring the coverage snapshot cron job is scheduled..."
+(crontab -l 2>/dev/null | grep -v "coverage_snapshot.py"; echo "30 3 * * * $SOC_DIR/venv/bin/python3 $SOC_DIR/src/coverage_snapshot.py >> /var/log/microdfir-coverage.log 2>&1") | crontab -
+echo "[*] Recording a coverage snapshot now instead of waiting for tonight's cron run..."
+venv/bin/python src/coverage_snapshot.py || true
+
 # Report scheduling moved from this script's own hardcoded crontab line to a
 # Settings-page-configurable one (Settings > Reports > Schedule), applied live by
 # app.py whenever an admin saves it. An existing host's crontab still has the OLD
