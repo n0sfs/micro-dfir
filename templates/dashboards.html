@@ -629,23 +629,81 @@ function renderCasesWidget(container, widgetId, config) {
     }).catch(err => { container.innerHTML = `<p class="text-danger small mb-0">Error loading cases: ${escHtml(String(err))}</p>`; });
 }
 
+// Field list mirrors dashboard.html's #fieldKey select (the Log Search page's Basic
+// Field Filter) -- excludes the handful of rarer fields only reachable there via the
+// custom field manager, which is out of scope for a compact widget.
+const WIDGET_LOG_BASIC_FIELDS = [
+    { value: 'username', label: 'User' }, { value: 'host', label: 'Host' },
+    { value: 'event_id', label: 'Event ID' }, { value: 'source_ip', label: 'Src IP' },
+    { value: 'destination_ip', label: 'Dest IP' }, { value: 'message', label: 'Message' },
+    { value: 'process_image', label: 'Process Image' }, { value: 'command_line', label: 'Command Line' },
+    { value: 'parent_image', label: 'Parent Image' }, { value: 'parent_command_line', label: 'Parent Command Line' },
+    { value: 'original_file_name', label: 'Original File Name' },
+];
+
 function renderLogSearchWidget(container, widgetId, config) {
     container.innerHTML = `
-        <div class="input-group input-group-sm mb-2">
-            <input type="text" class="form-control bg-dark text-light border-secondary widget-log-q" placeholder="Search recent logs...">
-            <button class="btn btn-outline-secondary widget-log-search-btn" type="button"><i class="fa-solid fa-magnifying-glass"></i></button>
+        <div class="btn-group btn-group-sm mb-2 widget-log-mode-group" role="group">
+            <button type="button" class="btn btn-outline-secondary active widget-log-mode-btn" data-mode="advanced">Advanced</button>
+            <button type="button" class="btn btn-outline-secondary widget-log-mode-btn" data-mode="basic">Basic</button>
+        </div>
+        <div class="widget-log-advanced">
+            <div class="input-group input-group-sm mb-2">
+                <input type="text" class="form-control bg-dark text-light border-secondary widget-log-q" placeholder='host:X -term "phrase" severity:High'>
+                <button class="btn btn-outline-secondary widget-log-search-btn" type="button" title="Search"><i class="fa-solid fa-magnifying-glass"></i></button>
+            </div>
+        </div>
+        <div class="widget-log-basic" style="display:none;">
+            <div class="input-group input-group-sm mb-2">
+                <select class="form-select bg-dark text-light border-secondary widget-log-field" style="max-width:120px;">
+                    <option value="">Field&hellip;</option>
+                    ${WIDGET_LOG_BASIC_FIELDS.map(f => `<option value="${f.value}">${escHtml(f.label)}</option>`).join('')}
+                </select>
+                <select class="form-select bg-dark text-light border-secondary widget-log-op" style="max-width:90px;">
+                    <option value="contains" selected>contains</option>
+                    <option value="equals">=</option>
+                    <option value="not_equals">!=</option>
+                    <option value="starts_with">starts</option>
+                    <option value="ends_with">ends</option>
+                    <option value="gt">&gt;</option>
+                    <option value="lt">&lt;</option>
+                </select>
+                <input type="text" class="form-control bg-dark text-light border-secondary widget-log-val" placeholder="Value&hellip;">
+                <button class="btn btn-outline-secondary widget-log-search-btn" type="button" title="Search"><i class="fa-solid fa-magnifying-glass"></i></button>
+            </div>
         </div>
         <div class="widget-log-results"></div>`;
-    const input = container.querySelector('.widget-log-q');
+    const advancedInput = container.querySelector('.widget-log-q');
+    const fieldSelect = container.querySelector('.widget-log-field');
+    const opSelect = container.querySelector('.widget-log-op');
+    const valInput = container.querySelector('.widget-log-val');
     const results = container.querySelector('.widget-log-results');
+    let mode = 'advanced';
+
+    container.querySelectorAll('.widget-log-mode-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            mode = btn.dataset.mode;
+            container.querySelectorAll('.widget-log-mode-btn').forEach(b => b.classList.toggle('active', b === btn));
+            container.querySelector('.widget-log-advanced').style.display = mode === 'advanced' ? '' : 'none';
+            container.querySelector('.widget-log-basic').style.display = mode === 'basic' ? '' : 'none';
+            runSearch();
+        });
+    });
+
     // A user-typed search is real search activity and stays audited server-side like
     // any other Log Search query -- poll=1 (which suppresses that audit entry) is
     // reserved for a widget's own unattended timer refresh, and this widget doesn't
     // run one by default (see the app_log_search registry note below).
     const runSearch = () => {
-        const q = input.value.trim();
         results.innerHTML = '<p class="text-muted small mb-0">Loading&hellip;</p>';
-        const params = new URLSearchParams({ q, range: config.range || '24h', limit: config.limit || 10 });
+        const params = new URLSearchParams({ range: config.range || '24h', limit: config.limit || 10 });
+        if (mode === 'advanced') {
+            params.set('q', advancedInput.value.trim());
+        } else if (fieldSelect.value && valInput.value.trim()) {
+            params.set('fieldKey', fieldSelect.value);
+            params.set('fieldOp', opSelect.value);
+            params.set('fieldVal', valInput.value.trim());
+        }
         fetch(`/api/logs/search?${params}`).then(r => r.json()).then(d => {
             const logs = d.logs || [];
             if (!logs.length) { results.innerHTML = '<p class="text-muted small mb-0">No matching logs.</p>'; return; }
@@ -661,8 +719,9 @@ function renderLogSearchWidget(container, widgetId, config) {
                 </table>`;
         }).catch(err => { results.innerHTML = `<p class="text-danger small mb-0">Error: ${escHtml(String(err))}</p>`; });
     };
-    container.querySelector('.widget-log-search-btn').addEventListener('click', runSearch);
-    input.addEventListener('keyup', (e) => { if (e.key === 'Enter') runSearch(); });
+    container.querySelectorAll('.widget-log-search-btn').forEach(btn => btn.addEventListener('click', runSearch));
+    advancedInput.addEventListener('keyup', (e) => { if (e.key === 'Enter') runSearch(); });
+    valInput.addEventListener('keyup', (e) => { if (e.key === 'Enter') runSearch(); });
     runSearch(); // shows recent logs by default, even before the user types a query
 }
 
