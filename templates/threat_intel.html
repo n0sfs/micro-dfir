@@ -103,21 +103,16 @@
                 <div class="card-header"><i class="fa-solid fa-magnifying-glass-arrow-right me-2"></i>Quick IOC Lookup</div>
                 <div class="card-body">
                     <div class="d-flex flex-wrap gap-2 align-items-center">
-                        <input type="text" id="iocLookupInput" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:420px;" placeholder="IP, domain, URL, or file hash..." onkeyup="if(event.key === 'Enter') runIocLookup()">
-                        <button type="button" class="btn btn-sm btn-primary" onclick="runIocLookup()"><i class="fa-solid fa-search me-1"></i>Check</button>
+                        <input type="text" id="iocLookupInput" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:340px;" placeholder="IP, domain, URL, or file hash..." onkeyup="if(event.key === 'Enter') runIocLookup()">
+                        <select id="iocLookupSource" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;" onchange="onIocSourceChange()">
+                            <option value="">All Feeds (local match)</option>
+                        </select>
+                        <button type="button" id="iocLookupBtn" class="btn btn-sm btn-primary" onclick="runIocLookup()"><i class="fa-solid fa-search me-1"></i>Check</button>
                         <button type="button" id="iocEnrichBtn" class="btn btn-sm btn-outline-info" style="display:none;" onclick="runIocEnrich()"><i class="fa-solid fa-flask me-1"></i>Enrich</button>
                         <span id="iocLookupResult" class="small"></span>
                     </div>
                     <div id="iocEnrichResults" class="mt-2 small" style="display:none;"></div>
-                    <div class="form-text text-muted">Exact-match check against the local IOC set synced from your Threat Feeds below — not a live external lookup. "Enrich" queries free-tier external sources (Shodan InternetDB, AbuseIPDB) on demand, cached 24h.</div>
-                    {% if has_permission('threatintel.manage') %}
-                    <div class="d-flex flex-wrap gap-2 align-items-center mt-3 pt-2 border-top border-secondary">
-                        <label class="form-label small text-muted mb-0">AbuseIPDB API Key</label>
-                        <input type="password" id="abuseipdbKeyInput" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:280px;" placeholder="Leave blank to keep existing">
-                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="saveEnrichmentSettings()"><i class="fa-solid fa-floppy-disk me-1"></i>Save</button>
-                        <span id="enrichSettingsMsg" class="small text-muted"></span>
-                    </div>
-                    {% endif %}
+                    <div class="form-text text-muted" id="iocLookupHint">Exact-match check against the local IOC set synced from your Threat Feeds below — not a live external lookup. "Enrich" queries free-tier external sources (Shodan InternetDB, AbuseIPDB) on demand, cached 24h. Pick a specific source above to check or verify against just that one.</div>
                 </div>
             </div>
 
@@ -146,6 +141,20 @@
                             </thead>
                             <tbody id="feedsTableBody">
                                 <tr><td colspan="9" class="text-center text-muted py-4">Loading feeds...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card bg-dark border-secondary mb-4">
+                <div class="card-header"><i class="fa-solid fa-flask me-2"></i>Live Enrichment Sources <span class="text-muted small fw-normal">— on-demand, one query per lookup, not synced into the local IOC set</span></div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-dark table-hover mb-0 align-middle">
+                            <thead><tr><th class="ps-3">Name</th><th>Applies To</th><th>Status</th><th>Key</th></tr></thead>
+                            <tbody id="analyzersTableBody">
+                                <tr><td colspan="4" class="text-center text-muted py-4">Loading...</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -1132,6 +1141,7 @@ function loadFeeds() {
             allFeeds = feeds;
             updateSharedStats();
             populateIocFilterMenus();
+            populateIocSourceSelect();
 
             const tbody = document.getElementById('feedsTableBody');
             if (feeds.length === 0) {
@@ -1177,22 +1187,53 @@ let lastLookupValue = '';
 let lastLookupIocType = '';
 const _IPV4_SHAPE_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
 
+function onIocSourceChange() {
+    document.getElementById('iocLookupResult').innerHTML = '';
+    document.getElementById('iocEnrichResults').style.display = 'none';
+    document.getElementById('iocEnrichBtn').style.display = 'none';
+}
+
 async function runIocLookup() {
     const input = document.getElementById('iocLookupInput');
     const resultEl = document.getElementById('iocLookupResult');
     const enrichBtn = document.getElementById('iocEnrichBtn');
+    const sourceVal = document.getElementById('iocLookupSource').value; // '' = all feeds, 'live:<key>' = one analyzer, else = a feed id
     const ioc = input.value.trim();
     document.getElementById('iocEnrichResults').style.display = 'none';
     if (!ioc) { resultEl.innerHTML = '<span class="text-muted">Enter a value to check.</span>'; enrichBtn.style.display = 'none'; return; }
     resultEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+    lastLookupValue = ioc;
+    lastLookupIocType = _IPV4_SHAPE_RE.test(ioc) ? 'ip' : '';
+
+    if (sourceVal.startsWith('live:')) {
+        // A specific live source was picked -- Check IS the verify action here, no
+        // separate Enrich step needed (that button stays hidden for this mode).
+        enrichBtn.style.display = 'none';
+        try {
+            const res = await fetch('/api/ti/enrich', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({value: ioc, ioc_type: lastLookupIocType, source: sourceVal.slice(5)})
+            });
+            const data = await res.json();
+            if (!res.ok || !data.results) { resultEl.innerHTML = `<span class="text-danger">${escHtml(data.message || data.error || 'Lookup failed.')}</span>`; return; }
+            if (!data.results.length) { resultEl.innerHTML = `<span class="text-muted">${escHtml(data.message || 'This source does not apply to this value.')}</span>`; return; }
+            const r = data.results[0];
+            resultEl.innerHTML = `${enrichVerdictBadge(r.verdict)} <span class="small">${escHtml(r.summary)}${r.cached ? ` <span class="text-muted">(cached, ${escHtml(r.fetched_at || '')})</span>` : ''}</span>`;
+        } catch (e) {
+            resultEl.innerHTML = `<span class="text-danger">Error: ${escHtml(String(e))}</span>`;
+        }
+        return;
+    }
+
+    // Local exact-match lookup -- across every feed, or scoped to one specific feed.
+    const feedId = sourceVal ? parseInt(sourceVal, 10) : null;
     try {
-        const res = await fetch('/api/ti/lookup', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ioc})});
+        const body = feedId ? {ioc, feed_id: feedId} : {ioc};
+        const res = await fetch('/api/ti/lookup', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
         const data = await res.json();
         if (!res.ok) { resultEl.innerHTML = `<span class="text-danger">${escHtml(data.message || 'Lookup failed.')}</span>`; enrichBtn.style.display = 'none'; return; }
-        lastLookupValue = ioc;
-        lastLookupIocType = _IPV4_SHAPE_RE.test(ioc) ? 'ip' : '';
         if (data.status === 'clean') {
-            resultEl.innerHTML = '<span class="text-success"><i class="fa-solid fa-circle-check me-1"></i>No match in the local IOC set.</span>';
+            resultEl.innerHTML = `<span class="text-success"><i class="fa-solid fa-circle-check me-1"></i>No match${feedId ? ' in that feed.' : ' in the local IOC set.'}</span>`;
         } else if (data.status === 'revoked') {
             resultEl.innerHTML = `<span class="text-muted"><i class="fa-solid fa-circle-minus me-1"></i>Matches ${data.matches.length} revoked/inactive indicator(s) only.</span>`;
             lastLookupIocType = data.matches[0].ioc_type || lastLookupIocType;
@@ -1239,22 +1280,26 @@ async function runIocEnrich() {
     }
 }
 
-async function saveEnrichmentSettings() {
-    const msg = document.getElementById('enrichSettingsMsg');
-    const key = document.getElementById('abuseipdbKeyInput').value;
+// Only 'abuseipdb' requires a key today (see analyzers.py's ANALYZERS) -- mapping its
+// analyzer key to the settings blob's key name here rather than changing
+// /api/settings/enrichment's shape for a single caller.
+const ANALYZER_SETTINGS_KEY = { abuseipdb: 'abuseipdb_api_key' };
+
+async function saveAnalyzerKey(analyzerKey) {
+    const input = document.getElementById(`analyzerKeyInput_${analyzerKey}`);
+    const settingsKey = ANALYZER_SETTINGS_KEY[analyzerKey];
+    if (!input || !settingsKey) return;
     try {
         const res = await fetch('/api/settings/enrichment', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({abuseipdb_api_key: key})
+            body: JSON.stringify({[settingsKey]: input.value})
         });
         const data = await res.json();
-        if (!res.ok) { msg.className = 'small text-danger'; msg.innerText = data.error || 'Failed to save.'; return; }
-        msg.className = 'small text-success';
-        msg.innerText = 'Saved.';
-        document.getElementById('abuseipdbKeyInput').value = '';
-        loadEnrichmentSettings();
+        if (!res.ok) { toast(data.error || 'Failed to save key.', 'danger'); return; }
+        toast('Key saved.', 'success');
+        loadAnalyzers();
     } catch (e) {
-        msg.className = 'small text-danger'; msg.innerText = 'Error: ' + e;
+        toast('Error saving key: ' + e, 'danger');
     }
 }
 
@@ -1314,8 +1359,8 @@ function saveIocRetentionPolicy() {
 }
 
 function loadEnrichmentSettings() {
-    const input = document.getElementById('abuseipdbKeyInput');
-    if (!input) return;  // non-admin: the section isn't rendered
+    const input = document.getElementById('analyzerKeyInput_abuseipdb');
+    if (!input) return;  // non-admin, or the analyzers table hasn't rendered yet
     fetch('/api/settings/enrichment').then(r => r.json()).then(data => {
         // Pre-fill with the masked PLACEHOLDER VALUE (not just a hint in .placeholder) --
         // same convention as the alert-notifications SMTP password field. This is what
@@ -1325,6 +1370,50 @@ function loadEnrichmentSettings() {
         input.value = data.abuseipdb_api_key || '';
         input.placeholder = data.abuseipdb_api_key ? '' : 'Not configured';
     }).catch(err => console.error('Error loading enrichment settings:', err));
+}
+
+let allAnalyzers = [];
+
+function loadAnalyzers() {
+    fetch('/api/ti/analyzers').then(r => r.json()).then(analyzers => {
+        allAnalyzers = analyzers;
+        const isAdmin = hasPermission('threatintel.manage');
+        document.getElementById('analyzersTableBody').innerHTML = analyzers.map(a => `
+            <tr>
+                <td class="ps-3"><strong>${escHtml(a.label)}</strong></td>
+                <td class="text-muted small">${escHtml(a.ioc_types.join(', '))}</td>
+                <td>${a.configured ? '<span class="badge bg-success">Ready</span>' : '<span class="badge bg-secondary">Not configured</span>'}</td>
+                <td>${!a.requires_key ? '<span class="text-muted small">No key needed</span>' : (isAdmin ? `
+                    <div class="d-flex gap-1 align-items-center">
+                        <input type="password" id="analyzerKeyInput_${a.key}" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:200px;" placeholder="Not configured">
+                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="saveAnalyzerKey('${a.key}')" title="Save key"><i class="fa-solid fa-floppy-disk"></i></button>
+                    </div>
+                ` : `<span class="text-muted small">${a.configured ? 'Configured' : 'Not configured'}</span>`)}</td>
+            </tr>
+        `).join('');
+        loadEnrichmentSettings();
+        populateIocSourceSelect();
+    }).catch(err => console.error('Error loading analyzers:', err));
+}
+
+// Quick IOC Lookup's source picker draws on both allFeeds (loadFeeds) and allAnalyzers
+// (loadAnalyzers) -- called from both since either fetch can land first; whichever is
+// still empty just contributes no options yet until its own load completes.
+function populateIocSourceSelect() {
+    const sel = document.getElementById('iocLookupSource');
+    if (!sel) return;
+    const prevValue = sel.value;
+    let html = '<option value="">All Feeds (local match)</option>';
+    if (allFeeds && allFeeds.length) {
+        html += '<optgroup label="Specific Feed">' + allFeeds.map(f => `<option value="${f.id}">${escHtml(f.name)}</option>`).join('') + '</optgroup>';
+    }
+    if (allAnalyzers && allAnalyzers.length) {
+        html += '<optgroup label="Live Lookup">' + allAnalyzers.map(a =>
+            `<option value="live:${a.key}">${escHtml(a.label)}${a.requires_key && !a.configured ? ' (not configured)' : ''}</option>`
+        ).join('') + '</optgroup>';
+    }
+    sel.innerHTML = html;
+    if ([...sel.options].some(o => o.value === prevValue)) sel.value = prevValue;
 }
 
 // ---- Entities (Tier 3 Track A) ----
@@ -1749,7 +1838,7 @@ updateHuntStats();
 loadFeeds();
 loadEntities();
 loadWarninglists();
-loadEnrichmentSettings();
+loadAnalyzers();
 loadIocRetentionSettings();
 loadIocs();
 loadIocFacets();
