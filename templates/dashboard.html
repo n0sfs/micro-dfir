@@ -188,6 +188,20 @@
         </div>
     </div>
 
+    <div class="col-md-2">
+        <label class="form-label text-muted small mb-1 fw-bold">Type</label>
+        <div class="dropdown">
+            <button class="btn btn-sm bg-dark text-light border-secondary text-start d-flex justify-content-between align-items-center dropdown-toggle w-100" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" title="Search all row types, or just Logs / Alerts / Anomalies">
+                <span id="typeFilterLabel" class="text-truncate">All Types</span>
+            </button>
+            <ul class="dropdown-menu dropdown-menu-dark shadow">
+                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input type-chk" type="checkbox" value="log" id="type_log" onchange="updateFilters()"><label class="form-check-label w-100" for="type_log">Logs</label></div></li>
+                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input type-chk" type="checkbox" value="alert" id="type_alert" onchange="updateFilters()"><label class="form-check-label w-100" for="type_alert">Alerts</label></div></li>
+                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input type-chk" type="checkbox" value="anomaly" id="type_anomaly" onchange="updateFilters()"><label class="form-check-label w-100" for="type_anomaly">Anomalies</label></div></li>
+            </ul>
+        </div>
+    </div>
+
     <div class="col-md-3">
         <label for="timeRangeBtn" class="form-label text-muted small mb-1 fw-bold">Time Window</label>
         <div class="dropdown">
@@ -1422,10 +1436,11 @@ function buildLogQueryParams(opts) {
     let q = showAdvanced ? document.getElementById('searchQuery').value : '';
     let app = Array.from(document.querySelectorAll('.app-chk:checked')).map(c=>c.value).join(',');
     let sev = Array.from(document.querySelectorAll('.sev-chk:checked')).map(c=>c.value).join(',');
+    let type = Array.from(document.querySelectorAll('.type-chk:checked')).map(c=>c.value).join(',');
     let fieldKey = showBasic ? document.getElementById('fieldKey').value : '';
     let fieldOp = showBasic ? document.getElementById('fieldOp').value : 'contains';
     let fieldVal = showBasic ? document.getElementById('fieldVal').value : '';
-    let params = `q=${encodeURIComponent(q)}&${timeRangeQuery()}&app=${encodeURIComponent(app)}&severity=${encodeURIComponent(sev)}&fieldKey=${encodeURIComponent(fieldKey)}&fieldOp=${encodeURIComponent(fieldOp)}&fieldVal=${encodeURIComponent(fieldVal)}${includeArchiveParam()}`;
+    let params = `q=${encodeURIComponent(q)}&${timeRangeQuery()}&app=${encodeURIComponent(app)}&severity=${encodeURIComponent(sev)}&types=${encodeURIComponent(type)}&fieldKey=${encodeURIComponent(fieldKey)}&fieldOp=${encodeURIComponent(fieldOp)}&fieldVal=${encodeURIComponent(fieldVal)}${includeArchiveParam()}`;
     params += `&sort=${encodeURIComponent(logSortState.col)}&dir=${encodeURIComponent(logSortState.dir)}`;
     if (opts.auto) params += '&poll=1';
     return params;
@@ -1750,6 +1765,7 @@ function collectSearchFilterState() {
         q: document.getElementById('searchQuery').value,
         app: Array.from(document.querySelectorAll('.app-chk:checked')).map(c => c.value),
         severity: Array.from(document.querySelectorAll('.sev-chk:checked')).map(c => c.value),
+        type: Array.from(document.querySelectorAll('.type-chk:checked')).map(c => c.value),
         fieldKey: document.getElementById('fieldKey').value,
         fieldOp: document.getElementById('fieldOp').value,
         fieldVal: document.getElementById('fieldVal').value,
@@ -1768,6 +1784,7 @@ function applySearchFilterState(params) {
     document.getElementById('searchQuery').value = params.q || '';
     document.querySelectorAll('.app-chk').forEach(c => { c.checked = (params.app || []).includes(c.value); });
     document.querySelectorAll('.sev-chk').forEach(c => { c.checked = (params.severity || []).includes(c.value); });
+    document.querySelectorAll('.type-chk').forEach(c => { c.checked = (params.type || []).includes(c.value); });
     document.getElementById('fieldKey').value = params.fieldKey || '';
     document.getElementById('fieldOp').value = params.fieldOp || 'contains';
     document.getElementById('fieldVal').value = params.fieldVal || '';
@@ -1984,12 +2001,17 @@ function deleteField(key) {
     renderFieldList();
 }
 
+const TYPE_FILTER_LABELS = { log: 'Logs', alert: 'Alerts', anomaly: 'Anomalies' };
+
 function updateFilters() {
     let apps = Array.from(document.querySelectorAll('.app-chk:checked')).map(c => c.value);
     document.getElementById('appFilterLabel').innerText = apps.length > 0 ? apps.join(', ') : 'All Apps';
 
     let sevs = Array.from(document.querySelectorAll('.sev-chk:checked')).map(c => c.value);
     document.getElementById('sevFilterLabel').innerText = sevs.length > 0 ? sevs.join(', ') : 'Sev';
+
+    let types = Array.from(document.querySelectorAll('.type-chk:checked')).map(c => c.value);
+    document.getElementById('typeFilterLabel').innerText = types.length > 0 ? types.map(t => TYPE_FILTER_LABELS[t] || t).join(', ') : 'All Types';
 
     if (typeof loadDashboardData === 'function') { loadDashboardData(); }
 }
