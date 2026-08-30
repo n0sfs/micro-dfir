@@ -1399,6 +1399,9 @@ def api_ti_entity_relationship_add(eid):
         return jsonify({'error': f"target_type must be one of {', '.join(sorted(TI_RELATIONSHIP_TARGET_TYPES))}"}), 400
     if not target_id:
         return jsonify({'error': 'target_id is required'}), 400
+    if target_type == 'case' and target_id.isdigit():
+        err = _require_open_case(db, int(target_id))
+        if err: return err
     if db.execute(
         "SELECT 1 FROM ti_relationships WHERE entity_id = ? AND target_type = ? AND target_id = ?",
         (eid, target_type, target_id)
@@ -1416,8 +1419,12 @@ def api_ti_entity_relationship_add(eid):
 @login_required
 def api_ti_entity_relationship_delete(eid, rid):
     db = get_db()
-    if not db.execute("SELECT 1 FROM ti_relationships WHERE id = ? AND entity_id = ?", (rid, eid)).fetchone():
+    rel = db.execute("SELECT target_type, target_id FROM ti_relationships WHERE id = ? AND entity_id = ?", (rid, eid)).fetchone()
+    if not rel:
         return jsonify({'error': 'Relationship not found'}), 404
+    if rel['target_type'] == 'case' and rel['target_id'].isdigit():
+        err = _require_open_case(db, int(rel['target_id']))
+        if err: return err
     db.execute("DELETE FROM ti_relationships WHERE id = ?", (rid,))
     db.commit()
     log_audit('ti_relationship_delete', 'ti_entity', eid, str(rid))
@@ -2656,6 +2663,17 @@ def _log_case_event(db, cid, event_type, detail=None):
         (cid, actor, event_type, detail)
     )
 
+# Closed = the formal administrative closing (read-only, still reopenable if new
+# evidence surfaces) -- see the case-detail PUT handler below for the one path that's
+# still allowed to write to a closed case (leaving 'closed' in that same request).
+def _require_open_case(db, cid):
+    case = db.execute("SELECT status FROM cases WHERE id = ?", (cid,)).fetchone()
+    if not case:
+        return jsonify({"error": "Case not found"}), 404
+    if case['status'] == 'closed':
+        return jsonify({"error": "This case is closed. Reopen it (change Status) to make changes."}), 403
+    return None
+
 @app.route('/api/case-queues', methods=['GET', 'POST'])
 @login_required
 def api_case_queues():
@@ -2900,6 +2918,10 @@ def api_case_detail(cid):
             return jsonify({"error": f"workflow_state must be one of {', '.join(CASE_WORKFLOW_STATES)}"}), 400
         if queue_id and not db.execute("SELECT 1 FROM case_queues WHERE id = ?", (queue_id,)).fetchone():
             return jsonify({"error": "Queue not found"}), 400
+        # Closed cases are read-only -- the one exception is this same request also
+        # leaving 'closed' (a reopen), which is allowed to carry other field changes too.
+        if case['status'] == 'closed' and status == 'closed':
+            return jsonify({"error": "This case is closed. Reopen it (change Status) before making changes."}), 403
         closed_at = case['closed_at']
         if status == 'closed' and case['status'] != 'closed':
             # UTC, not local time -- must match created_at's SQLite CURRENT_TIMESTAMP
@@ -2975,8 +2997,8 @@ def api_case_detail(cid):
 @login_required
 def api_case_add_item(cid):
     db = get_db()
-    if not db.execute("SELECT 1 FROM cases WHERE id = ?", (cid,)).fetchone():
-        return jsonify({"error": "Case not found"}), 404
+    err = _require_open_case(db, cid)
+    if err: return err
     data = request.get_json() or {}
     item_type = data.get('item_type')
     item_id = data.get('item_id')
@@ -2998,6 +3020,8 @@ def api_case_add_item(cid):
 @login_required
 def api_case_remove_item(cid, item_row_id):
     db = get_db()
+    err = _require_open_case(db, cid)
+    if err: return err
     item = db.execute("SELECT item_type, item_id FROM case_items WHERE id = ? AND case_id = ?", (item_row_id, cid)).fetchone()
     if not item:
         return jsonify({"error": "Case item not found"}), 404
@@ -3010,8 +3034,8 @@ def api_case_remove_item(cid, item_row_id):
 @login_required
 def api_case_add_asset(cid):
     db = get_db()
-    if not db.execute("SELECT 1 FROM cases WHERE id = ?", (cid,)).fetchone():
-        return jsonify({"error": "Case not found"}), 404
+    err = _require_open_case(db, cid)
+    if err: return err
     data = request.get_json() or {}
     host = (data.get('host') or '').strip()
     if not host:
@@ -3035,6 +3059,8 @@ def api_case_add_asset(cid):
 @login_required
 def api_case_asset_detail(cid, asset_id):
     db = get_db()
+    err = _require_open_case(db, cid)
+    if err: return err
     asset = db.execute("SELECT * FROM case_assets WHERE id = ? AND case_id = ?", (asset_id, cid)).fetchone()
     if not asset:
         return jsonify({"error": "Case asset not found"}), 404
@@ -3072,8 +3098,8 @@ CASE_IOC_TYPES = ('ip', 'domain', 'hash', 'url')
 @login_required
 def api_case_add_ioc(cid):
     db = get_db()
-    if not db.execute("SELECT 1 FROM cases WHERE id = ?", (cid,)).fetchone():
-        return jsonify({"error": "Case not found"}), 404
+    err = _require_open_case(db, cid)
+    if err: return err
     data = request.get_json() or {}
     ioc_type = (data.get('ioc_type') or '').strip()
     value = (data.get('value') or '').strip()
@@ -3096,6 +3122,8 @@ def api_case_add_ioc(cid):
 @login_required
 def api_case_ioc_detail(cid, ioc_id):
     db = get_db()
+    err = _require_open_case(db, cid)
+    if err: return err
     ioc = db.execute("SELECT * FROM case_iocs WHERE id = ? AND case_id = ?", (ioc_id, cid)).fetchone()
     if not ioc:
         return jsonify({"error": "Case indicator not found"}), 404
@@ -3108,8 +3136,8 @@ def api_case_ioc_detail(cid, ioc_id):
 @login_required
 def api_case_add_task(cid):
     db = get_db()
-    if not db.execute("SELECT 1 FROM cases WHERE id = ?", (cid,)).fetchone():
-        return jsonify({"error": "Case not found"}), 404
+    err = _require_open_case(db, cid)
+    if err: return err
     title = ((request.get_json() or {}).get('title') or '').strip()
     if not title:
         return jsonify({"error": "Task title is required"}), 400
@@ -3126,6 +3154,8 @@ def api_case_add_task(cid):
 @login_required
 def api_case_task_detail(cid, tid):
     db = get_db()
+    err = _require_open_case(db, cid)
+    if err: return err
     task = db.execute("SELECT * FROM case_tasks WHERE id = ? AND case_id = ?", (tid, cid)).fetchone()
     if not task:
         return jsonify({"error": "Task not found"}), 404
@@ -3152,8 +3182,8 @@ def api_case_task_detail(cid, tid):
 @login_required
 def api_case_add_note(cid):
     db = get_db()
-    if not db.execute("SELECT 1 FROM cases WHERE id = ?", (cid,)).fetchone():
-        return jsonify({"error": "Case not found"}), 404
+    err = _require_open_case(db, cid)
+    if err: return err
     text = ((request.get_json() or {}).get('text') or '').strip()
     if not text:
         return jsonify({"error": "Note text is required"}), 400
@@ -3285,8 +3315,8 @@ def _run_case_analysis(db, cid, entity_type, entity_id):
 @login_required
 def api_case_analyze(cid):
     db = get_db()
-    if not db.execute("SELECT 1 FROM cases WHERE id = ?", (cid,)).fetchone():
-        return jsonify({"error": "Case not found"}), 404
+    err = _require_open_case(db, cid)
+    if err: return err
     d = request.get_json() or {}
     entity_type = (d.get('entity_type') or '').strip()
     entity_id = (d.get('entity_id') or '').strip()
@@ -5642,6 +5672,20 @@ DEFAULT_HOME_WIDGETS = [
     ('chart_top_risk_entities', 6, 2, 6, 5),
 ]
 
+# Tier 3's own default -- leans into what that tier owns beyond Tier 1/2 (hunting,
+# detection-rule tuning signal, UEBA/risk visibility, MITRE coverage) while still
+# surfacing Alerts/Cases for triage oversight. See migrate_role_default_dashboard_v2().
+DEFAULT_SENIOR_ANALYST_WIDGETS = [
+    ('app_threat_hunter', 0, 0, 4, 4),
+    ('chart_top_anomaly_rules', 4, 0, 4, 4),
+    ('chart_top_risk_entities', 8, 0, 4, 4),
+    ('chart_risk_trend', 0, 4, 8, 4),
+    ('chart_case_workload', 8, 4, 4, 4),
+    ('chart_mitre_coverage', 0, 8, 12, 5),
+    ('app_alerts', 0, 13, 6, 5),
+    ('app_cases', 6, 13, 6, 5),
+]
+
 def migrate_dashboards():
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
@@ -5679,6 +5723,16 @@ def migrate_dashboards():
             cur = conn.execute("INSERT INTO dashboards (name, created_by) VALUES ('Home', 'system')")
             did = cur.lastrowid
             for widget_type, x, y, w, h in DEFAULT_HOME_WIDGETS:
+                conn.execute(
+                    "INSERT INTO dashboard_widgets (dashboard_id, widget_type, x, y, w, h) VALUES (?, ?, ?, ?, ?, ?)",
+                    (did, widget_type, x, y, w, h)
+                )
+
+        sa_row = conn.execute("SELECT id FROM dashboards WHERE name = 'Senior Analyst'").fetchone()
+        if not sa_row:
+            cur = conn.execute("INSERT INTO dashboards (name, created_by) VALUES ('Senior Analyst', 'system')")
+            did = cur.lastrowid
+            for widget_type, x, y, w, h in DEFAULT_SENIOR_ANALYST_WIDGETS:
                 conn.execute(
                     "INSERT INTO dashboard_widgets (dashboard_id, widget_type, x, y, w, h) VALUES (?, ?, ?, ?, ?, ?)",
                     (did, widget_type, x, y, w, h)
@@ -5773,6 +5827,36 @@ def migrate_role_default_dashboard():
                 "WHERE slug IN ('analyst','senior_analyst','admin') AND default_dashboard_id IS NULL",
                 (home_row[0],)
             )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# Re-points the 3 built-in roles from the generic 'Home' seed to tier-specific
+# dashboards -- 'analyst' reuses the existing hand-built 'Analyst Triage' dashboard
+# rather than a redundant new one; 'senior_analyst' gets the new seeded dashboard;
+# 'admin' moves to 'Overview' (already built for the fleet-wide/leadership view an
+# admin wants). Only touches a role that's still on NULL or still on the exact 'Home'
+# id -- i.e. untouched since migrate_role_default_dashboard() ran -- so a real
+# customization made via Settings in between is never clobbered.
+def migrate_role_default_dashboard_v2():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        home_row = conn.execute("SELECT id FROM dashboards WHERE name = 'Home'").fetchone()
+        home_id = home_row['id'] if home_row else None
+
+        def repoint(slug, dashboard_name):
+            target = conn.execute("SELECT id FROM dashboards WHERE name = ?", (dashboard_name,)).fetchone()
+            if not target:
+                return
+            conn.execute(
+                "UPDATE roles SET default_dashboard_id = ? "
+                "WHERE slug = ? AND (default_dashboard_id IS NULL OR default_dashboard_id = ?)",
+                (target['id'], slug, home_id)
+            )
+        repoint('admin', 'Overview')
+        repoint('analyst', 'Analyst Triage')
+        repoint('senior_analyst', 'Senior Analyst')
         conn.commit()
         conn.close()
     except Exception:
@@ -8702,6 +8786,7 @@ migrate_dashboards()
 migrate_role_casing()
 migrate_role_permissions()
 migrate_role_default_dashboard()
+migrate_role_default_dashboard_v2()
 migrate_playbooks()
 migrate_playbook_secrets()
 migrate_playbook_approvals()
