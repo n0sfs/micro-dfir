@@ -334,7 +334,8 @@ function renderMitreCoverageWidget(container, widgetId, config) {
     container.innerHTML = `
         <div class="mitre-grid"></div>
         <div class="small text-muted mt-2 widget-unmapped" style="display:none;"></div>
-        <p class="text-muted small text-center mb-0 py-3 widget-empty" style="display:none;">No enabled rules carry MITRE ATT&CK tags yet.</p>`;
+        <p class="text-muted small text-center mb-0 py-3 widget-empty" style="display:none;">No enabled rules carry MITRE ATT&CK tags yet.</p>
+        <div class="text-end mt-2"><a href="/siem?tab=coverage" class="small">View full coverage <i class="fa-solid fa-arrow-right"></i></a></div>`;
     const grid = container.querySelector('.mitre-grid');
     const unmappedEl = container.querySelector('.widget-unmapped');
     const emptyEl = container.querySelector('.widget-empty');

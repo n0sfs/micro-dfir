@@ -1853,31 +1853,86 @@ def api_rules_validate_selected():
             results.append({'id': rid, 'title': row['title'], 'ok': False, 'error': f'Rule failed to parse or convert: {e}'})
     return jsonify({'window_days': days, 'results': results})
 
-def _build_mitre_coverage(rules):
-    """Aggregates MITRE technique coverage across enabled rules (each a dict
-    with 'enabled' and 'mitre_techniques', matching _get_rules_cache()'s
-    shape), grouped by tactic. Every curated technique appears even at zero
-    coverage (so the heatmap shows gaps, not just hits); any technique tag
-    found in a rule but missing from the curated table is still counted,
-    under 'unmapped'."""
+def _get_validated_technique_counts(db, days):
+    """technique_id -> count of alerts in the last `days` whose triggering
+    rule was tagged for that technique. Reads alerts.mitre_techniques
+    (stamped by sigma_engine.py's alert-creation path using the same
+    tag-extraction as techniques_for_tags()) -- historically accurate even
+    if the rule's tags changed or the rule was deleted since. This is the
+    one signal in the DB that distinguishes "a rule is enabled for this
+    technique" from "this technique was actually detected" -- previously
+    written but never read anywhere."""
+    counts = {}
+    rows = db.execute(
+        "SELECT mitre_techniques FROM alerts WHERE timestamp >= datetime('now', ?) "
+        "AND mitre_techniques IS NOT NULL AND mitre_techniques != ''",
+        (f'-{days} days',)
+    ).fetchall()
+    for r in rows:
+        for tid in (r['mitre_techniques'] or '').split(','):
+            tid = tid.strip()
+            if tid:
+                counts[tid] = counts.get(tid, 0) + 1
+    return counts
+
+def _build_actor_technique_index(db):
+    """technique_id -> [{id, name}] of threat/malware entities in the TI
+    catalog known to use that technique, for cross-referencing against
+    coverage gaps (a known adversary uses this technique and there's zero
+    rule coverage for it -- the actionable prioritization signal)."""
+    index = {}
+    for e in _get_ti_entities(db):
+        for tid in e['techniques']:
+            index.setdefault(tid, []).append({'id': e['id'], 'name': e['name']})
+    return index
+
+def _build_mitre_coverage(rules, validated, actor_techniques):
+    """Aggregates MITRE technique coverage across all rules (each a dict with
+    'id', 'title', 'enabled', 'level', 'status' and 'mitre_techniques',
+    matching _get_rules_cache()'s shape), grouped by tactic, into 4 tiers per
+    technique:
+      gap       - no rule mapped at all
+      inactive  - rule(s) mapped, all currently disabled
+      active    - an enabled rule exists, hasn't produced a validated alert
+      validated - an enabled rule's alert actually fired (see `validated`,
+                  from _get_validated_technique_counts)
+    A rule that fired historically and was since disabled still lands in
+    'inactive' -- its historical validated_count is kept on the technique
+    for the drill-down to show as a footnote, rather than adding a 5th tier.
+    Every curated technique appears even at zero coverage (so the grid shows
+    gaps, not just hits); any technique tag found in a rule but missing from
+    the curated table is still counted, under 'unmapped'."""
     from mitre_attack import TACTICS, TACTIC_LABELS, TECHNIQUES, _display_id
 
-    counts = {}
+    enabled_counts = {}
+    disabled_counts = {}
+    rules_by_tech = {}
     unmapped = {}
     for r in rules:
-        if not r['enabled']:
-            continue
         for tech in r['mitre_techniques']:
+            rule_ref = {'id': r['id'], 'title': r['title'], 'enabled': r['enabled'],
+                        'level': r['level'], 'status': r['status']}
             if tech['tactic'] == 'unmapped':
                 entry = unmapped.setdefault(tech['id'], {'id': tech['id'], 'name': None, 'count': 0})
-                entry['count'] += 1
+                if r['enabled']:
+                    entry['count'] += 1
+                continue
+            key = (tech['tactic'], tech['id'])
+            if r['enabled']:
+                enabled_counts[key] = enabled_counts.get(key, 0) + 1
             else:
-                counts[(tech['tactic'], tech['id'])] = counts.get((tech['tactic'], tech['id']), 0) + 1
+                disabled_counts[key] = disabled_counts.get(key, 0) + 1
+            bucket = rules_by_tech.setdefault(tech['id'], [])
+            if len(bucket) < 25:
+                bucket.append(rule_ref)
+            elif len(bucket) == 25:
+                bucket.append({'more': True})
 
     seen_ids = set()
     tactics_out = []
     for tactic in TACTICS:
         techs = []
+        tier_totals = {'gap': 0, 'inactive': 0, 'active': 0, 'validated': 0}
         for key, (name, t) in TECHNIQUES.items():
             if t != tactic:
                 continue
@@ -1885,13 +1940,31 @@ def _build_mitre_coverage(rules):
             if tid in seen_ids:
                 continue
             seen_ids.add(tid)
-            techs.append({'id': tid, 'name': name, 'count': counts.get((tactic, tid), 0)})
+            enabled_n = enabled_counts.get((tactic, tid), 0)
+            disabled_n = disabled_counts.get((tactic, tid), 0)
+            validated_n = validated.get(tid, 0)
+            if enabled_n == 0 and disabled_n == 0:
+                tier = 'gap'
+            elif enabled_n == 0:
+                tier = 'inactive'
+            elif validated_n == 0:
+                tier = 'active'
+            else:
+                tier = 'validated'
+            tier_totals[tier] += 1
+            techs.append({
+                'id': tid, 'name': name, 'count': enabled_n,
+                'disabled_count': disabled_n, 'validated_count': validated_n,
+                'tier': tier, 'rules': rules_by_tech.get(tid, []),
+                'threat_actors': actor_techniques.get(tid, []) if tier == 'gap' else [],
+            })
         techs.sort(key=lambda x: (-x['count'], x['id']))
         tactics_out.append({
             'tactic': tactic, 'label': TACTIC_LABELS[tactic],
             'techniques': techs,
-            'covered': sum(1 for x in techs if x['count'] > 0),
+            'covered': sum(1 for x in techs if x['tier'] in ('active', 'validated')),
             'total': len(techs),
+            'tiers': tier_totals,
         })
 
     return {
@@ -1902,7 +1975,12 @@ def _build_mitre_coverage(rules):
 @app.route('/api/mitre/coverage', methods=['GET'])
 @login_required
 def api_mitre_coverage():
-    return jsonify(_build_mitre_coverage(_get_rules_cache(get_db())))
+    db = get_db()
+    days = _dashboard_window_days(request)
+    rules = _get_rules_cache(db)
+    validated = _get_validated_technique_counts(db, days)
+    actor_techniques = _build_actor_technique_index(db)
+    return jsonify(_build_mitre_coverage(rules, validated, actor_techniques))
 
 @app.route('/api/rules/<int:rid>', methods=['GET', 'PUT', 'DELETE'])
 @login_required
