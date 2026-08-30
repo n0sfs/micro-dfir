@@ -1016,6 +1016,8 @@ def api_ti_feeds():
         return jsonify({'error': 'TAXII feeds require a discovery_url and collection_id'}), 400
     if feed_type == 'otx' and not d.get('api_key'):
         return jsonify({'error': 'OTX feeds require an API key'}), 400
+    if feed_type == 'malwarebazaar' and not d.get('api_key'):
+        return jsonify({'error': 'MalwareBazaar now requires a free Auth-Key (get one at https://auth.abuse.ch/)'}), 400
     if feed_type == 'misp' and not d.get('discovery_url'):
         return jsonify({'error': 'MISP feeds require a feed base URL (the directory containing manifest.json)'}), 400
     db.execute(
