@@ -5105,7 +5105,15 @@ def migrate_ti_feeds():
         # asked isn't this migration's call to make.
         conn.execute("INSERT OR IGNORE INTO ti_feeds (id, name, feed_type, enabled) VALUES (2, 'URLhaus Recent Malicious URLs (Public)', 'urlhaus', 0)")
         conn.execute("INSERT OR IGNORE INTO ti_feeds (id, name, feed_type, enabled) VALUES (3, 'Feodo Tracker Botnet C2 IPs (Public)', 'feodotracker', 0)")
-        conn.execute("INSERT OR IGNORE INTO ti_feeds (id, name, feed_type, enabled) VALUES (4, 'Tor Exit Nodes (Public)', 'tor_exit', 0)")
+        # Not a fixed id like the three above -- those are safe only because they've
+        # claimed ids 1-3 since this table's very first row ever, before a user could
+        # add a custom feed of their own. Added later, id 4 has no such guarantee (a
+        # real deployment can easily have already auto-assigned it to a user's own
+        # feed by now), so this checks by feed_type and lets AUTOINCREMENT pick
+        # whatever id is actually free instead of risking a silent INSERT OR IGNORE
+        # no-op against an unrelated row that happens to already own id 4.
+        if not conn.execute("SELECT 1 FROM ti_feeds WHERE feed_type = 'tor_exit'").fetchone():
+            conn.execute("INSERT INTO ti_feeds (name, feed_type, enabled) VALUES ('Tor Exit Nodes (Public)', 'tor_exit', 0)")
         conn.commit()
         conn.close()
     except Exception:
