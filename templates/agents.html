@@ -166,19 +166,13 @@
 
                     <div id="consoleActionsWrap" class="disabled">
                         <label class="form-label small text-muted mb-1 fw-bold">Response Actions</label>
+                        <div class="mb-2">
+                            <div class="input-group input-group-sm">
+                                <select id="consoleActionSelect" class="form-select form-select-sm bg-dark text-light border-secondary"></select>
+                                <button type="button" class="btn btn-outline-primary" id="consoleActionRunBtn" onclick="consoleRunSelectedAction()"><i class="fa-solid fa-play me-1"></i>Run</button>
+                            </div>
+                        </div>
                         <div class="d-grid gap-2 mb-2">
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-permission="edr.command.advanced" onclick="consoleRun('list_processes')"><i class="fa-solid fa-list me-2"></i>List Processes</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-permission="edr.command.basic" onclick="consoleShowParamForm('kill_process')"><i class="fa-solid fa-skull me-2"></i>Kill Process (PID)</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-permission="edr.command.advanced" onclick="consoleShowParamForm('collect_file')"><i class="fa-solid fa-file-arrow-down me-2"></i>Collect File</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-permission="edr.command.basic" onclick="consoleRun('collect_triage')"><i class="fa-solid fa-microscope me-2"></i>Triage Collection</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-permission="edr.command.advanced" onclick="consoleRun('persistence_sweep')"><i class="fa-solid fa-clock-rotate-left me-2"></i>Persistence Sweep</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-permission="edr.command.advanced" onclick="consoleRun('ioc_sweep')"><i class="fa-solid fa-magnifying-glass me-2"></i>IOC Hash Sweep</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-permission="edr.command.advanced" onclick="consoleRun('string_sweep')"><i class="fa-solid fa-font me-2"></i>String Sweep</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="windows" data-permission="edr.command.advanced" onclick="consoleRun('collect_browser_artifacts')"><i class="fa-solid fa-globe me-2"></i>Browser Artifacts</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="windows" data-permission="edr.command.advanced" onclick="consoleRun('collect_forensic_timestamps')"><i class="fa-solid fa-stopwatch me-2"></i>Forensic Timestamps</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="windows" data-permission="edr.command.advanced" onclick="consoleRun('collect_recent_file_changes')"><i class="fa-solid fa-clock-rotate-left me-2"></i>Recent File Changes</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="windows" data-permission="edr.command.advanced" onclick="consoleRun('collect_live_forensics')"><i class="fa-solid fa-magnifying-glass-chart me-2"></i>Live Forensic Triage</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="linux" data-permission="edr.command.advanced" onclick="consoleRun('collect_ssh_artifacts')"><i class="fa-solid fa-key me-2"></i>SSH Artifacts</button>
                             <button type="button" class="btn btn-sm btn-outline-warning console-action-btn" data-permission="edr.command.basic" onclick="consoleRun('isolate_host', {}, 'Isolate this host from the network? Only traffic to/from this SOC server will be allowed.')"><i class="fa-solid fa-network-wired me-2"></i>Isolate Host</button>
                             <button type="button" class="btn btn-sm btn-outline-success console-action-btn" data-permission="edr.command.basic" onclick="consoleRun('restore_network', {}, 'Restore normal network connectivity on this host?')"><i class="fa-solid fa-wifi me-2"></i>Restore Network</button>
                             <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="linux" data-permission="edr.command.advanced" onclick="consoleRun('enable_exec_auditing')"><i class="fa-solid fa-shield-halved me-2"></i>Enable Exec Auditing</button>
@@ -301,6 +295,7 @@ document.addEventListener("DOMContentLoaded", function() {
 
     loadUniqueEndpoints();
     loadCommandHistory();
+    renderConsoleActionSelect();
     renderConsoleFavSelect();
     initEndpointFilterDropdowns();
     loadFimPaths();
@@ -868,6 +863,48 @@ const CONSOLE_ACTION_DISPLAY = {
     }
 };
 
+// Everything below Isolate Host in the console is a one-off, higher-stakes action
+// (network isolation, agent lifecycle) that stays a dedicated button; everything
+// above it is a collection/investigation action, consolidated into one dropdown so
+// the panel doesn't read as a wall of buttons.
+const CONSOLE_DROPDOWN_ACTIONS = [
+    { value: 'list_processes', label: 'List Processes', permission: 'edr.command.advanced' },
+    { value: 'kill_process', label: 'Kill Process (PID)', permission: 'edr.command.basic', needsParams: true },
+    { value: 'collect_file', label: 'Collect File', permission: 'edr.command.advanced', needsParams: true },
+    { value: 'collect_triage', label: 'Triage Collection', permission: 'edr.command.basic' },
+    { value: 'persistence_sweep', label: 'Persistence Sweep', permission: 'edr.command.advanced' },
+    { value: 'ioc_sweep', label: 'IOC Hash Sweep', permission: 'edr.command.advanced' },
+    { value: 'string_sweep', label: 'String Sweep', permission: 'edr.command.advanced' },
+    { value: 'collect_browser_artifacts', label: 'Browser Artifacts', permission: 'edr.command.advanced', osOnly: 'windows' },
+    { value: 'collect_forensic_timestamps', label: 'Forensic Timestamps', permission: 'edr.command.advanced', osOnly: 'windows' },
+    { value: 'collect_recent_file_changes', label: 'Recent File Changes', permission: 'edr.command.advanced', osOnly: 'windows' },
+    { value: 'collect_live_forensics', label: 'Live Forensic Triage', permission: 'edr.command.advanced', osOnly: 'windows' },
+    { value: 'collect_ssh_artifacts', label: 'SSH Artifacts', permission: 'edr.command.advanced', osOnly: 'linux' },
+];
+
+function renderConsoleActionSelect() {
+    const sel = document.getElementById('consoleActionSelect');
+    const os = consoleSelectedOS();
+    const previous = sel.value;
+    const available = CONSOLE_DROPDOWN_ACTIONS.filter(a => (!a.osOnly || a.osOnly === os) && hasPermission(a.permission));
+    sel.innerHTML = available.map(a => `<option value="${a.value}">${escHtml(a.label)}</option>`).join('')
+        || '<option value="">No actions available</option>';
+    if (available.some(a => a.value === previous)) sel.value = previous;
+    const runBtn = document.getElementById('consoleActionRunBtn');
+    if (runBtn) runBtn.disabled = available.length === 0;
+}
+
+function consoleRunSelectedAction() {
+    const value = document.getElementById('consoleActionSelect').value;
+    const action = CONSOLE_DROPDOWN_ACTIONS.find(a => a.value === value);
+    if (!action) return;
+    if (action.needsParams) {
+        consoleShowParamForm(action.value);
+    } else {
+        consoleRun(action.value);
+    }
+}
+
 function consoleSelectedOS() {
     const dev = allEndpoints.find(e => e.hostname === consoleSelectedHost);
     return (dev && dev.os === 'linux') ? 'linux' : 'windows';
@@ -932,6 +969,7 @@ function onConsoleHostChange() {
     document.querySelectorAll('.console-action-btn[data-permission]').forEach(btn => {
         if (!hasPermission(btn.dataset.permission)) btn.style.display = 'none';
     });
+    renderConsoleActionSelect();
     renderConsoleFavSelect();
     renderConsoleTerminal();
 }
