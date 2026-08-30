@@ -280,13 +280,19 @@
                                 </div>
                                 <div class="border border-secondary rounded p-2 bg-black" style="max-height: 300px; overflow-y: auto;">
                                     {% for category, files in yara_files_by_category.items()|sort %}
-                                    <div class="text-uppercase text-muted small fw-bold mt-2 mb-1">{{ category }}</div>
-                                    {% for rf in files %}
-                                    <div class="form-check">
-                                        <input class="form-check-input rule-checkbox" type="checkbox" name="selected_rules" value="{{ rf }}" id="rule-{{ loop.index0 }}-{{ category }}" checked onchange="updateHuntStats()">
-                                        <label class="form-check-label text-light small" for="rule-{{ loop.index0 }}-{{ category }}">{{ rf.split('/')[-1] }}</label>
-                                    </div>
-                                    {% endfor %}
+                                    <details class="mb-1">
+                                        <summary class="text-uppercase text-muted small fw-bold mt-2 mb-1" style="cursor:pointer;">{{ category }} ({{ files|length }})</summary>
+                                        <div class="ms-3">
+                                        {% for rf in files %}
+                                        <div class="form-check">
+                                            <input class="form-check-input rule-checkbox" type="checkbox" name="selected_rules" value="{{ rf }}" id="rule-{{ loop.index0 }}-{{ category }}" checked onchange="updateHuntStats()">
+                                            <label class="form-check-label text-light small" for="rule-{{ loop.index0 }}-{{ category }}"{% if yara_file_descriptions.get(rf) %} title="{{ yara_file_descriptions[rf] }}"{% endif %}>
+                                                {{ rf.split('/')[-1] }}{% if yara_file_descriptions.get(rf) %}<span class="text-muted"> — {{ yara_file_descriptions[rf] | truncate(70) }}</span>{% endif %}
+                                            </label>
+                                        </div>
+                                        {% endfor %}
+                                        </div>
+                                    </details>
                                     {% else %}
                                     <span class="text-muted small">No YARA rules found under rules/yara_imported.</span>
                                     {% endfor %}
