@@ -230,8 +230,8 @@ def _record_ioc_sightings(cursor, rule_id, host, source_ip, destination_ip, file
         ).fetchall()
         for row in rows:
             cursor.execute(
-                "INSERT INTO ioc_sightings (stix_id, source, log_ref) VALUES (?, ?, ?)",
-                (row['stix_id'], f"alert:{rule_title}", f"alert_id={alert_id}, host={host}")
+                "INSERT INTO ioc_sightings (stix_id, source, log_ref, alert_id) VALUES (?, ?, ?, ?)",
+                (row['stix_id'], f"alert:{rule_title}", f"alert_id={alert_id}, host={host}", alert_id)
             )
 
 # Only called for a genuinely NEW alert row (the caller's `existing` branch above skips

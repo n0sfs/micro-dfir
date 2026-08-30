@@ -1227,24 +1227,30 @@ def _get_ti_entities(db):
     ).fetchall()]
 
 def _build_actor_summary(rows, entities):
-    """Cross-references IOC (name, description) rows against the DB-backed entity set
-    (ti_entities, seeded from src/threat_actors.py's curated ACTORS list but now
-    admin-editable) -- purely informational, surfaced next to the MITRE coverage
-    heatmap so an analyst can see which known actors the currently-synced feed data
-    implicates and which techniques they're commonly associated with. `rows` is any
-    iterable of objects with ['name']/['description'] keys (a sqlite3.Row list or
-    plain dicts); `entities` is the list _get_ti_entities() returns."""
+    """Cross-references IOC (name, description, stix_id) rows against the DB-backed
+    entity set (ti_entities, seeded from src/threat_actors.py's curated ACTORS list
+    but now admin-editable) -- purely informational, surfaced next to the MITRE
+    coverage heatmap so an analyst can see which known actors the currently-synced
+    feed data implicates and which techniques they're commonly associated with.
+    `rows` is any iterable of objects with ['name']/['description']/['stix_id'] keys
+    (a sqlite3.Row list or plain dicts); `entities` is the list _get_ti_entities()
+    returns. `stix_ids` on each returned entry is consumed by the caller
+    (api_ti_actor_summary) to look up real ioc_sightings against just this actor's
+    matched IOCs, then stripped before the response is sent -- it's an internal
+    join key, not something the frontend needs."""
     from threat_actors import build_index, find_entity_context
     from mitre_attack import lookup as mitre_lookup, TACTIC_LABELS
 
     index = build_index(entities)
-    matched = {}  # entity name -> {entity, ioc_count}
+    matched = {}  # entity name -> {entity, ioc_count, stix_ids}
     for r in rows:
         entity = find_entity_context(r['name'], index) or find_entity_context(r['description'], index)
         if not entity:
             continue
-        entry = matched.setdefault(entity['name'], {'entity': entity, 'ioc_count': 0})
+        entry = matched.setdefault(entity['name'], {'entity': entity, 'ioc_count': 0, 'stix_ids': set()})
         entry['ioc_count'] += 1
+        if r['stix_id']:
+            entry['stix_ids'].add(r['stix_id'])
 
     out = []
     for name, entry in matched.items():
@@ -1256,7 +1262,7 @@ def _build_actor_summary(rows, entities):
         out.append({
             'id': entity.get('id'), 'name': name, 'aliases': entity['aliases'], 'type': entity['entity_type'],
             'description': entity['description'], 'ioc_count': entry['ioc_count'],
-            'techniques': techniques,
+            'techniques': techniques, 'stix_ids': sorted(entry['stix_ids']),
         })
     out.sort(key=lambda a: -a['ioc_count'])
     return out
@@ -1295,15 +1301,48 @@ def api_ti_actor_summary():
         like = f"%{n.lower()}%"
         cond_params.extend([like, like])
     rows = db.execute(
-        f"SELECT name, description FROM "
-        f"(SELECT name, description FROM stix_indicators WHERE revoked = 0 ORDER BY inserted_at DESC LIMIT ?) "
+        f"SELECT name, description, stix_id FROM "
+        f"(SELECT name, description, stix_id FROM stix_indicators WHERE revoked = 0 ORDER BY inserted_at DESC LIMIT ?) "
         f"WHERE ({' OR '.join(conditions)})",
         [_ACTOR_SUMMARY_SCAN_LIMIT] + cond_params
     ).fetchall()
     result = _build_actor_summary(rows, entities)
+    _attach_actor_sightings(db, result)
     _ACTOR_SUMMARY_CACHE['data'] = result
     _ACTOR_SUMMARY_CACHE['time'] = now
     return jsonify({'actors': result})
+
+def _attach_actor_sightings(db, actors):
+    """Mutates each actor dict in place: replaces the internal 'stix_ids' join key
+    with a real 'sighting_count' + capped 'sightings' list, drawn from ioc_sightings
+    -- "this IOC was actually observed in our environment" evidence, distinct from
+    (and easy to conflate with) ioc_count, which only measures how many IOCs in the
+    synced feed catalog matched this actor's name/aliases. Bounded to the stix_ids
+    that actually matched an actor (never a full-table scan) and capped per actor at
+    25 rows (matching this session's established capping convention for drill-downs)
+    since a widely-seen IOC could otherwise return hundreds of rows to one widget."""
+    all_stix_ids = sorted({sid for a in actors for sid in a['stix_ids']})
+    sightings_by_stix = {}
+    if all_stix_ids:
+        placeholders = ','.join('?' * len(all_stix_ids))
+        for row in db.execute(
+            f"SELECT s.stix_id, s.seen_at, s.alert_id, al.severity, al.message, al.host, "
+            f"COALESCE(sr.title, al.rule_name, 'YARA / Custom Rule Match') as rule_title "
+            f"FROM ioc_sightings s LEFT JOIN alerts al ON al.id = s.alert_id "
+            f"LEFT JOIN sigma_rules sr ON al.rule_id = sr.id "
+            f"WHERE s.stix_id IN ({placeholders}) ORDER BY s.seen_at DESC",
+            all_stix_ids
+        ).fetchall():
+            sightings_by_stix.setdefault(row['stix_id'], []).append(dict(row))
+
+    for a in actors:
+        sightings = []
+        for sid in a['stix_ids']:
+            sightings.extend(sightings_by_stix.get(sid, []))
+        sightings.sort(key=lambda s: s['seen_at'] or '', reverse=True)
+        a['sighting_count'] = len(sightings)
+        a['sightings'] = sightings[:25]
+        del a['stix_ids']
 
 @app.route('/api/ti/entities', methods=['GET', 'POST'])
 @login_required
@@ -6235,6 +6274,29 @@ def migrate_ioc_sightings():
     except Exception:
         pass
 
+def migrate_ioc_sightings_alert_id():
+    # log_ref was always a free-text "alert_id=N, host=..." string (sigma_engine.py's
+    # _record_ioc_sightings) -- fine for a human reading it, useless for a query. This
+    # adds a real column so the actor-summary widget can join sightings back to their
+    # alert's severity/message/host directly instead of regex-parsing log_ref at read
+    # time. Backfilled from existing rows' log_ref so historical sightings recorded
+    # before this column existed don't lose their alert linkage.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(ioc_sightings)").fetchall()}
+        if 'alert_id' not in cols:
+            conn.execute("ALTER TABLE ioc_sightings ADD COLUMN alert_id INTEGER")
+            for rid, log_ref in conn.execute(
+                "SELECT id, log_ref FROM ioc_sightings WHERE log_ref LIKE 'alert_id=%'"
+            ).fetchall():
+                m = re.match(r'alert_id=(\d+)', log_ref or '')
+                if m:
+                    conn.execute("UPDATE ioc_sightings SET alert_id = ? WHERE id = ?", (int(m.group(1)), rid))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 # The __IOC_..._LIST__ correlation mechanism (see sigma_engine.py) is a capability, not
 # an active rule -- nothing alerts on it until some rule actually references one of the
 # placeholders. Seeded once (matched by title, so a user who deletes/edits it doesn't
@@ -8973,6 +9035,7 @@ migrate_alerts_mitre_column()
 migrate_saved_searches()
 migrate_warninglists()
 migrate_ioc_sightings()
+migrate_ioc_sightings_alert_id()
 migrate_seed_ioc_correlation_rule()
 migrate_enrichment_results()
 migrate_ti_entities()
