@@ -641,11 +641,79 @@ const WIDGET_LOG_BASIC_FIELDS = [
     { value: 'original_file_name', label: 'Original File Name' },
 ];
 
+// Time Window presets -- keys mirror app.py's _RANGE_DELTAS exactly.
+const WIDGET_LOG_RANGE_PRESETS = ['5m', '15m', '30m', '1h', '4h', '12h', '24h', '3d', '7d', '30d', 'all'];
+const WIDGET_LOG_RANGE_LABELS = {
+    '5m': 'Last 5m', '15m': 'Last 15m', '30m': 'Last 30m', '1h': 'Last 1h', '4h': 'Last 4h',
+    '12h': 'Last 12h', '24h': 'Last 24h', '3d': 'Last 3d', '7d': 'Last 7d', '30d': 'Last 30d', 'all': 'All Time',
+};
+
+// Ported from dashboard.html's own LOG_TABLE_COLUMNS -- same 15 columns, same 9
+// on-by-default, same fixed on-screen order regardless of pick order. Shares the
+// full page's own 'microdfir_search_columns' localStorage key below (a personal
+// display preference, not per-widget config, so it stays consistent everywhere).
+const LOG_TABLE_COLUMNS = [
+    { key: 'time', label: 'Time', default: true },
+    { key: 'type', label: 'Type', default: true },
+    { key: 'severity', label: 'Sev', default: true },
+    { key: 'host', label: 'Host', default: true },
+    { key: 'app', label: 'App', default: true },
+    { key: 'event_id', label: 'Event ID', default: true },
+    { key: 'username', label: 'User', default: true },
+    { key: 'source_ip', label: 'Src IP', default: true },
+    { key: 'destination_ip', label: 'Dest IP', default: false },
+    { key: 'message', label: 'Message', default: true },
+    { key: 'process_image', label: 'Process Image', default: false },
+    { key: 'command_line', label: 'Command Line', default: false },
+    { key: 'parent_image', label: 'Parent Image', default: false },
+    { key: 'parent_command_line', label: 'Parent Command Line', default: false },
+    { key: 'original_file_name', label: 'Original File Name', default: false },
+];
+const SORTABLE_LOG_COLUMNS = {
+    time: 'timestamp', type: 'log_type', severity: 'severity', host: 'host', app: 'app',
+    event_id: 'event_id', username: 'username', source_ip: 'source_ip', destination_ip: 'destination_ip',
+};
+
+function loadWidgetLogColumnPrefs() {
+    try {
+        const saved = JSON.parse(localStorage.getItem('microdfir_search_columns') || 'null');
+        if (Array.isArray(saved) && saved.length) return saved.filter(k => LOG_TABLE_COLUMNS.some(c => c.key === k));
+    } catch (e) {}
+    return LOG_TABLE_COLUMNS.filter(c => c.default).map(c => c.key);
+}
+function saveWidgetLogColumnPrefs(keys) {
+    try { localStorage.setItem('microdfir_search_columns', JSON.stringify(keys)); } catch (e) {}
+}
+
 function renderLogSearchWidget(container, widgetId, config) {
     container.innerHTML = `
-        <div class="btn-group btn-group-sm mb-2 widget-log-mode-group" role="group">
-            <button type="button" class="btn btn-outline-secondary active widget-log-mode-btn" data-mode="advanced">Advanced</button>
-            <button type="button" class="btn btn-outline-secondary widget-log-mode-btn" data-mode="basic">Basic</button>
+        <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+            <div class="btn-group btn-group-sm widget-log-mode-group" role="group">
+                <button type="button" class="btn btn-outline-secondary active widget-log-mode-btn" data-mode="advanced">Advanced</button>
+                <button type="button" class="btn btn-outline-secondary widget-log-mode-btn" data-mode="basic">Basic</button>
+            </div>
+            <div class="dropdown">
+                <button class="btn btn-sm btn-outline-secondary dropdown-toggle widget-log-timerange-btn" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside">
+                    <i class="fa-solid fa-clock me-1"></i><span class="widget-log-timerange-label">Last 24h</span>
+                </button>
+                <div class="dropdown-menu dropdown-menu-dark shadow p-2" style="min-width:260px;">
+                    <div class="small text-muted fw-bold mb-1">Quick Ranges</div>
+                    <div class="d-flex flex-wrap gap-1 mb-2">
+                        ${WIDGET_LOG_RANGE_PRESETS.map(r => `<button type="button" class="btn btn-sm btn-outline-secondary widget-log-preset-btn" data-range="${r}">${escHtml(r === 'all' ? 'All' : r)}</button>`).join('')}
+                    </div>
+                    <hr class="border-secondary my-2">
+                    <div class="small text-muted fw-bold mb-1">Custom Range</div>
+                    <label class="form-label small mb-1">Start</label>
+                    <input type="datetime-local" class="form-control form-control-sm bg-dark text-light border-secondary mb-1 widget-log-custom-start">
+                    <label class="form-label small mb-1">End</label>
+                    <input type="datetime-local" class="form-control form-control-sm bg-dark text-light border-secondary mb-2 widget-log-custom-end">
+                    <button type="button" class="btn btn-sm btn-primary w-100 widget-log-apply-custom">Apply Custom Range</button>
+                </div>
+            </div>
+            <div class="form-check form-switch mb-0">
+                <input class="form-check-input widget-log-archive" type="checkbox">
+                <label class="form-check-label small text-muted">Archived</label>
+            </div>
         </div>
         <div class="widget-log-advanced">
             <div class="input-group input-group-sm mb-2">
@@ -672,56 +740,269 @@ function renderLogSearchWidget(container, widgetId, config) {
                 <button class="btn btn-outline-secondary widget-log-search-btn" type="button" title="Search"><i class="fa-solid fa-magnifying-glass"></i></button>
             </div>
         </div>
+        <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
+            <div class="dropdown">
+                <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-bookmark me-1"></i>Saved</button>
+                <ul class="dropdown-menu dropdown-menu-dark shadow p-2 widget-log-saved-menu" style="min-width:220px; max-height:280px; overflow-y:auto;"></ul>
+            </div>
+            <div class="dropdown">
+                <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-table-columns me-1"></i>Columns</button>
+                <ul class="dropdown-menu dropdown-menu-dark shadow widget-log-columns-menu" style="min-width:200px; max-height:280px; overflow-y:auto;"></ul>
+            </div>
+            <button class="btn btn-sm btn-outline-success widget-log-export-csv" type="button" title="Export current filtered logs to CSV"><i class="fa-solid fa-file-excel me-1"></i>CSV</button>
+            <button class="btn btn-sm btn-outline-info widget-log-export-json" type="button" title="Export current filtered logs to JSON"><i class="fa-solid fa-file-code me-1"></i>JSON</button>
+        </div>
+        <div class="widget-log-saved-note small text-muted mb-1" style="display:none;"></div>
         <div class="widget-log-results"></div>`;
+
     const advancedInput = container.querySelector('.widget-log-q');
     const fieldSelect = container.querySelector('.widget-log-field');
     const opSelect = container.querySelector('.widget-log-op');
     const valInput = container.querySelector('.widget-log-val');
+    const archiveChk = container.querySelector('.widget-log-archive');
+    const rangeLabel = container.querySelector('.widget-log-timerange-label');
+    const customStart = container.querySelector('.widget-log-custom-start');
+    const customEnd = container.querySelector('.widget-log-custom-end');
+    const savedMenu = container.querySelector('.widget-log-saved-menu');
+    const columnsMenu = container.querySelector('.widget-log-columns-menu');
+    const savedNote = container.querySelector('.widget-log-saved-note');
     const results = container.querySelector('.widget-log-results');
-    let mode = 'advanced';
 
-    container.querySelectorAll('.widget-log-mode-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            mode = btn.dataset.mode;
-            container.querySelectorAll('.widget-log-mode-btn').forEach(b => b.classList.toggle('active', b === btn));
-            container.querySelector('.widget-log-advanced').style.display = mode === 'advanced' ? '' : 'none';
-            container.querySelector('.widget-log-basic').style.display = mode === 'basic' ? '' : 'none';
-            runSearch();
-        });
-    });
+    // Per-instance state -- deliberately NOT page-global (unlike dashboard.html's
+    // timeRangeState/logSortState), so multiple Log Search widgets across different
+    // dashboards never collide. app/severity have no UI here (out of scope for this
+    // compact widget) but still round-trip through a loaded Saved Search so results
+    // stay correct even when the widget itself can't edit them (see the note below).
+    let state = {
+        mode: 'advanced', range: config.range || '24h', start: '', end: '',
+        sort: 'timestamp', dir: 'desc', app: [], severity: [],
+    };
+    let currentLogs = [];
+    let savedSearches = [];
+
+    function setRangeLabel() {
+        rangeLabel.innerText = state.range === 'custom'
+            ? `${state.start || '…'} → ${state.end || '…'}`
+            : (WIDGET_LOG_RANGE_LABELS[state.range] || state.range);
+    }
+    function markActivePreset() {
+        container.querySelectorAll('.widget-log-preset-btn').forEach(b => b.classList.toggle('active', b.dataset.range === state.range));
+    }
 
     // A user-typed search is real search activity and stays audited server-side like
     // any other Log Search query -- poll=1 (which suppresses that audit entry) is
     // reserved for a widget's own unattended timer refresh, and this widget doesn't
     // run one by default (see the app_log_search registry note below).
-    const runSearch = () => {
-        results.innerHTML = '<p class="text-muted small mb-0">Loading&hellip;</p>';
-        const params = new URLSearchParams({ range: config.range || '24h', limit: config.limit || 10 });
-        if (mode === 'advanced') {
+    function buildParams(opts) {
+        opts = opts || {};
+        const params = new URLSearchParams();
+        if (state.mode === 'advanced') {
             params.set('q', advancedInput.value.trim());
         } else if (fieldSelect.value && valInput.value.trim()) {
             params.set('fieldKey', fieldSelect.value);
             params.set('fieldOp', opSelect.value);
             params.set('fieldVal', valInput.value.trim());
         }
-        fetch(`/api/logs/search?${params}`).then(r => r.json()).then(d => {
-            const logs = d.logs || [];
-            if (!logs.length) { results.innerHTML = '<p class="text-muted small mb-0">No matching logs.</p>'; return; }
-            results.innerHTML = `
-                <table class="table table-dark table-sm align-middle mb-0">
-                    <thead><tr><th>Time</th><th>Host</th><th>Message</th></tr></thead>
-                    <tbody>${logs.map(l => `
-                        <tr>
-                            <td class="small text-nowrap">${escHtml(l.time)}</td>
-                            <td class="small">${escHtml(l.host || '—')}</td>
-                            <td class="small text-truncate" style="max-width:220px;" title="${escHtml(l.message || '')}">${escHtml(l.message || '')}</td>
-                        </tr>`).join('')}</tbody>
-                </table>`;
+        if (state.range === 'custom') {
+            params.set('range', 'custom');
+            params.set('start', state.start);
+            params.set('end', state.end);
+        } else {
+            params.set('range', state.range);
+        }
+        if (state.app.length) params.set('app', state.app.join(','));
+        if (state.severity.length) params.set('severity', state.severity.join(','));
+        if (archiveChk.checked) params.set('include_archive', '1');
+        params.set('sort', state.sort);
+        params.set('dir', state.dir);
+        params.set('limit', config.limit || 50);
+        if (opts.auto) params.set('poll', '1');
+        return params;
+    }
+
+    function activeColumns() {
+        const keys = loadWidgetLogColumnPrefs();
+        return LOG_TABLE_COLUMNS.filter(c => keys.includes(c.key));
+    }
+
+    function renderResultsTable(logs) {
+        const cols = activeColumns();
+        if (!logs.length) { results.innerHTML = '<p class="text-muted small mb-0">No matching logs.</p>'; return; }
+        const head = cols.map(c => {
+            const sortCol = SORTABLE_LOG_COLUMNS[c.key];
+            if (!sortCol) return `<th>${escHtml(c.label)}</th>`;
+            const active = state.sort === sortCol;
+            const arrow = active ? (state.dir === 'asc' ? ' ▲' : ' ▼') : '';
+            return `<th class="widget-log-sort-th" style="cursor:pointer;" data-sort-col="${sortCol}" title="Sort by ${escHtml(c.label)}">${escHtml(c.label)}${arrow}</th>`;
+        }).join('');
+        const rows = logs.map(l => `<tr>${cols.map(c => {
+            let cell;
+            if (c.key === 'severity') cell = severityBadgeWidget(l.severity);
+            else if (c.key === 'message') cell = `<span class="text-truncate d-inline-block" style="max-width:280px;" title="${escHtml(l.message || '')}">${escHtml(l.message || '')}</span>`;
+            else cell = escHtml(l[c.key] != null ? l[c.key] : '');
+            return `<td class="small ${c.key === 'time' || c.key === 'host' ? 'text-nowrap' : ''}">${cell}</td>`;
+        }).join('')}</tr>`).join('');
+        results.innerHTML = `
+            <table class="table table-dark table-sm align-middle mb-0">
+                <thead><tr>${head}</tr></thead>
+                <tbody>${rows}</tbody>
+            </table>`;
+        results.querySelectorAll('.widget-log-sort-th').forEach(th => {
+            th.addEventListener('click', () => {
+                const col = th.dataset.sortCol;
+                state.dir = (state.sort === col) ? (state.dir === 'asc' ? 'desc' : 'asc') : (col === 'timestamp' ? 'desc' : 'asc');
+                state.sort = col;
+                runSearch();
+            });
+        });
+    }
+
+    function runSearch() {
+        results.innerHTML = '<p class="text-muted small mb-0">Loading&hellip;</p>';
+        fetch(`/api/logs/search?${buildParams()}`).then(r => r.json()).then(d => {
+            currentLogs = d.logs || [];
+            renderResultsTable(currentLogs);
         }).catch(err => { results.innerHTML = `<p class="text-danger small mb-0">Error: ${escHtml(String(err))}</p>`; });
-    };
+    }
+
+    // ---- Time Window ----
+    container.querySelectorAll('.widget-log-preset-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            state = { ...state, range: btn.dataset.range, start: '', end: '' };
+            setRangeLabel(); markActivePreset(); runSearch();
+        });
+    });
+    container.querySelector('.widget-log-apply-custom').addEventListener('click', () => {
+        const start = customStart.value, end = customEnd.value;
+        if (!start && !end) { toast('Pick at least a start or end date/time.', 'warning'); return; }
+        if (start && end && start > end) { toast('Start must be before end.', 'warning'); return; }
+        state = { ...state, range: 'custom', start, end };
+        setRangeLabel(); markActivePreset(); runSearch();
+    });
+    archiveChk.addEventListener('change', runSearch);
+    setRangeLabel(); markActivePreset();
+
+    // ---- Search mode toggle ----
+    container.querySelectorAll('.widget-log-mode-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            state.mode = btn.dataset.mode;
+            container.querySelectorAll('.widget-log-mode-btn').forEach(b => b.classList.toggle('active', b === btn));
+            container.querySelector('.widget-log-advanced').style.display = state.mode === 'advanced' ? '' : 'none';
+            container.querySelector('.widget-log-basic').style.display = state.mode === 'basic' ? '' : 'none';
+            runSearch();
+        });
+    });
     container.querySelectorAll('.widget-log-search-btn').forEach(btn => btn.addEventListener('click', runSearch));
     advancedInput.addEventListener('keyup', (e) => { if (e.key === 'Enter') runSearch(); });
     valInput.addEventListener('keyup', (e) => { if (e.key === 'Enter') runSearch(); });
+
+    // ---- Columns ----
+    function renderColumnsMenu() {
+        const active = loadWidgetLogColumnPrefs();
+        columnsMenu.innerHTML = LOG_TABLE_COLUMNS.map(c => `
+            <li class="px-2 py-1"><div class="form-check">
+                <input class="form-check-input widget-log-col-chk" type="checkbox" value="${c.key}" id="wlcol_${widgetId}_${c.key}" ${active.includes(c.key) ? 'checked' : ''}>
+                <label class="form-check-label small w-100" for="wlcol_${widgetId}_${c.key}">${escHtml(c.label)}</label>
+            </div></li>`).join('');
+        columnsMenu.querySelectorAll('.widget-log-col-chk').forEach(chk => {
+            chk.addEventListener('change', () => {
+                let keys = Array.from(columnsMenu.querySelectorAll('.widget-log-col-chk:checked')).map(c => c.value);
+                if (!keys.length) { keys = ['message']; chk.checked = chk.value === 'message'; } // never collapse to zero columns
+                saveWidgetLogColumnPrefs(keys);
+                renderResultsTable(currentLogs);
+            });
+        });
+    }
+    renderColumnsMenu();
+
+    // ---- Saved Searches (shared server-side with the full Log Search page) ----
+    function collectFilterState() {
+        return {
+            q: advancedInput.value, app: state.app, severity: state.severity,
+            fieldKey: fieldSelect.value, fieldOp: opSelect.value, fieldVal: valInput.value,
+            range: state.range, start: state.start, end: state.end,
+            includeArchive: archiveChk.checked, sort: state.sort, dir: state.dir,
+            showAdvanced: state.mode === 'advanced', showBasic: state.mode === 'basic',
+        };
+    }
+    function applyFilterState(params) {
+        advancedInput.value = params.q || '';
+        fieldSelect.value = params.fieldKey || '';
+        opSelect.value = params.fieldOp || 'contains';
+        valInput.value = params.fieldVal || '';
+        state.app = params.app || [];
+        state.severity = params.severity || [];
+        state.range = params.range || '24h'; state.start = params.start || ''; state.end = params.end || '';
+        archiveChk.checked = !!params.includeArchive;
+        state.sort = params.sort || 'timestamp'; state.dir = params.dir || 'desc';
+        state.mode = (params.showAdvanced !== undefined ? !!params.showAdvanced : !!params.q) ? 'advanced' : 'basic';
+        container.querySelectorAll('.widget-log-mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === state.mode));
+        container.querySelector('.widget-log-advanced').style.display = state.mode === 'advanced' ? '' : 'none';
+        container.querySelector('.widget-log-basic').style.display = state.mode === 'basic' ? '' : 'none';
+        setRangeLabel(); markActivePreset();
+        if (state.app.length || state.severity.length) {
+            const bits = [];
+            if (state.app.length) bits.push(`App=${state.app.join(',')}`);
+            if (state.severity.length) bits.push(`Severity=${state.severity.join(',')}`);
+            savedNote.innerText = `This saved search also filters by ${bits.join(', ')} (not editable here).`;
+            savedNote.style.display = '';
+        } else {
+            savedNote.style.display = 'none';
+        }
+        runSearch();
+    }
+    function renderSavedMenu() {
+        const listPart = savedSearches.length
+            ? savedSearches.map(s => `
+                <li class="d-flex align-items-center justify-content-between px-2 py-1">
+                    <a href="#" class="text-light small text-truncate widget-log-saved-load" style="max-width:150px;" title="${escHtml(s.name)}" data-id="${s.id}">${escHtml(s.name)}</a>
+                    <button type="button" class="btn btn-sm btn-outline-danger py-0 px-1 widget-log-saved-delete" data-id="${s.id}"><i class="fa-solid fa-trash"></i></button>
+                </li>`).join('')
+            : `<li class="text-muted small px-2">No saved searches yet.</li>`;
+        savedMenu.innerHTML = `
+            <li><button type="button" class="btn btn-sm btn-outline-primary w-100 mb-2 widget-log-save-current"><i class="fa-solid fa-plus me-1"></i>Save Current Search</button></li>
+            <li><hr class="dropdown-divider border-secondary"></li>
+            ${listPart}`;
+        savedMenu.querySelector('.widget-log-save-current').addEventListener('click', saveCurrentSearch);
+        savedMenu.querySelectorAll('.widget-log-saved-load').forEach(a => a.addEventListener('click', (e) => {
+            e.preventDefault();
+            const s = savedSearches.find(x => x.id === Number(a.dataset.id));
+            if (!s) return;
+            try { applyFilterState(JSON.parse(s.query_params)); } catch (err) { toast('Saved search data is corrupted.', 'danger'); }
+        }));
+        savedMenu.querySelectorAll('.widget-log-saved-delete').forEach(btn => btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (!(await confirmDialog('Delete this saved search?', { title: 'Delete saved search', danger: true, confirmLabel: 'Delete' }))) return;
+            fetch(`/api/saved-searches/${btn.dataset.id}`, { method: 'DELETE' }).then(() => loadSavedSearches())
+                .catch(err => toast('Error deleting saved search: ' + err, 'danger'));
+        }));
+    }
+    function loadSavedSearches() {
+        fetch('/api/saved-searches').then(r => r.json()).then(data => { savedSearches = data || []; renderSavedMenu(); })
+            .catch(err => console.error('Error loading saved searches:', err));
+    }
+    function saveCurrentSearch() {
+        const name = prompt('Name this saved search:');
+        if (!name || !name.trim()) return;
+        fetch('/api/saved-searches', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name.trim(), query_params: collectFilterState() }),
+        }).then(r => r.json().then(data => ({ ok: r.ok, data }))).then(({ ok, data }) => {
+            if (ok) loadSavedSearches(); else toast('Error saving search: ' + (data.error || 'unknown'), 'danger');
+        }).catch(err => toast('Error saving search: ' + err, 'danger'));
+    }
+    loadSavedSearches();
+
+    // ---- Export CSV / JSON ----
+    container.querySelector('.widget-log-export-csv').addEventListener('click', () => {
+        window.location.href = `/api/logs/export?${buildParams()}`;
+    });
+    container.querySelector('.widget-log-export-json').addEventListener('click', () => {
+        const params = buildParams();
+        params.set('format', 'json');
+        window.location.href = `/api/logs/export?${params}`;
+    });
+
     runSearch(); // shows recent logs by default, even before the user types a query
 }
 
@@ -869,7 +1150,7 @@ const WIDGET_REGISTRY = {
     // App widgets (Batch 2) -- compact live embeds, all reusing existing endpoints.
     app_alerts:        { label: 'Alerts', icon: 'fa-triangle-exclamation', category: 'app', defaultW: 4, defaultH: 5, render: renderAlertsWidget },
     app_cases:         { label: 'Cases', icon: 'fa-folder-open', category: 'app', defaultW: 4, defaultH: 5, render: renderCasesWidget },
-    app_log_search:    { label: 'Log Search', icon: 'fa-magnifying-glass-chart', category: 'app', defaultW: 6, defaultH: 5, render: renderLogSearchWidget },
+    app_log_search:    { label: 'Log Search', icon: 'fa-magnifying-glass-chart', category: 'app', defaultW: 12, defaultH: 9, render: renderLogSearchWidget },
     app_threat_hunter: { label: 'Threat Hunter', icon: 'fa-magnifying-glass-arrow-right', category: 'app', defaultW: 4, defaultH: 3, render: renderThreatHunterWidget },
     app_edr_actions:   { label: 'EDR Response Actions', icon: 'fa-laptop-medical', category: 'app', defaultW: 6, defaultH: 5, render: renderEdrActionsWidget },
 };
