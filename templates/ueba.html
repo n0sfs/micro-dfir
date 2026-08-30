@@ -168,6 +168,7 @@
                         <option value="off_hours_activity">Off-Hours Activity</option>
                         <option value="rare_process_population">Rare Process (Fleet-Wide)</option>
                         <option value="multi_signal_convergence">Multi-Signal Convergence</option>
+                        <option value="sequence_chain_progression">Sequence Chain Progression</option>
                     </select>
                 </div>
             </div>
@@ -240,6 +241,14 @@
                         <span class="text-muted small">distinct signal types within</span>
                         <input type="number" id="cfgConvergenceWindowHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="168" step="1" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         <span class="text-muted small">hours <span class="text-muted">(one weak signal alone isn't much -- several different ones close together is)</span></span>
+                    </div>
+                    <div class="form-check form-switch mt-2 d-flex align-items-center flex-wrap gap-2">
+                        <div>
+                            <input class="form-check-input" type="checkbox" id="cfgSequenceChainEnabled" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
+                            <label class="form-check-label small" for="cfgSequenceChainEnabled">Award escalating points as an entity progresses through an ordered Custom Alert Rule sequence, within</label>
+                        </div>
+                        <input type="number" id="cfgSequenceChainWindowHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="168" step="1" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
+                        <span class="text-muted small">hours <span class="text-muted">(sequences are defined per-rule in Anomaly Tuning -- give matching rules the same sequence name and increasing stage numbers)</span></span>
                     </div>
                     <div class="form-check form-switch mt-2 d-flex align-items-center flex-wrap gap-2">
                         <div>
@@ -408,6 +417,7 @@
                                     <th>Entity</th>
                                     <th class="th-label" style="cursor:pointer;" onclick="arToggleSort('points')">Points <i class="fa-solid fa-sort sort-ic" id="sortIc-ar-points"></i></th>
                                     <th>First-Time Bonus</th>
+                                    <th>Sequence</th>
                                     <th class="th-label" style="cursor:pointer;" onclick="arToggleSort('matches_7d')">Matches (7d) <i class="fa-solid fa-sort sort-ic" id="sortIc-ar-matches_7d"></i></th>
                                     <th class="th-label" style="cursor:pointer;" onclick="arToggleSort('matches_30d')">Matches (30d) <i class="fa-solid fa-sort sort-ic" id="sortIc-ar-matches_30d"></i></th>
                                     <th class="th-label" style="cursor:pointer;" onclick="arToggleSort('last_matched')">Last Matched <i class="fa-solid fa-sort sort-ic" id="sortIc-ar-last_matched"></i></th>
@@ -415,7 +425,7 @@
                                     <th style="width:90px;"></th>
                                 </tr>
                             </thead>
-                            <tbody id="anomalyRulesTableBody"><tr><td colspan="11" class="text-center text-muted py-4">Loading…</td></tr></tbody>
+                            <tbody id="anomalyRulesTableBody"><tr><td colspan="12" class="text-center text-muted py-4">Loading…</td></tr></tbody>
                         </table>
                     </div>
                 </div>
@@ -518,6 +528,16 @@
             <div class="col-md-4">
                 <label class="form-label small text-muted mb-1">First-Time Bonus (optional)</label>
                 <input type="number" id="arBonus" class="form-control form-control-sm bg-dark text-light border-secondary" min="0" step="1" placeholder="none">
+            </div>
+        </div>
+        <div class="row g-3 mt-1">
+            <div class="col-md-6">
+                <label class="form-label small text-muted mb-1">Sequence Name (optional) <i class="fa-solid fa-circle-info text-muted" title="Give two or more rules the same Sequence Name and increasing Stage numbers to define an ordered progression -- see Sequence Chain Progression in Risk Scoring config."></i></label>
+                <input type="text" id="arSequenceName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. lateral-movement-chain">
+            </div>
+            <div class="col-md-6">
+                <label class="form-label small text-muted mb-1">Sequence Stage (required if Sequence Name is set)</label>
+                <input type="number" id="arSequenceStage" class="form-control form-control-sm bg-dark text-light border-secondary" min="1" max="20" step="1" placeholder="e.g. 2">
             </div>
         </div>
         <div id="arError" class="text-danger small mt-3" style="display:none;"></div>
@@ -935,6 +955,7 @@ const DYNAMIC_SCORING_FIELDS = [
         {k: 'off_hours_activity', label: 'Off-Hours Activity', desc: 'Added when a host or user\'s activity at a given hour-of-day and day-of-week exceeds its own historical baseline for that specific hour/day combination (or an overall baseline, if there isn\'t enough same-hour-of-week history yet) -- a stable recurring pattern (e.g. always active Friday 11pm) is not penalized, only a genuine deviation from it.'},
         {k: 'rare_process_population', label: 'Rare Process (Fleet-Wide)', desc: 'Added when a host runs a process that\'s rare across the whole fleet (seen on very few hosts total), independent of that host\'s own baseline.'},
         {k: 'multi_signal_convergence', label: 'Multi-Signal Convergence', desc: 'Added when an entity triggers several distinct signal types (a mix of alerts and/or UEBA indicators) within a short window -- corroboration across different detection mechanisms is a stronger signal than any one alone.'},
+        {k: 'sequence_chain_progression', label: 'Sequence Chain Progression (per stage)', desc: 'Multiplied by (stage - 1) and added each time an entity progresses to a new stage of an admin-defined ordered Custom Alert Rule sequence (see Anomaly Tuning) -- reaching a later stage of a real attack chain is a stronger signal than reaching an earlier one, so this escalates rather than staying flat.'},
     ]},
     { group: 'Score Tiers (thresholds)',
       desc: 'The minimum summed score (over the Scoring Window above) an entity needs to reach each risk tier -- these are the Low/Medium/High/Critical badges shown throughout the UI. E.g. with High = 50, any entity whose current score reaches 50 is labeled High risk until its score drops back below that threshold.',
@@ -1052,6 +1073,7 @@ const INSIGHTS_MODEL_LABELS = {
     process_lineage: 'Suspicious Process Lineage', off_hours_activity: 'Off-Hours Activity',
     rare_process_population: 'Rare Process (Fleet-Wide)',
     multi_signal_convergence: 'Multi-Signal Convergence',
+    sequence_chain_progression: 'Sequence Chain Progression',
 };
 const DOW_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -1205,6 +1227,8 @@ function loadUebaConfig() {
             document.getElementById('cfgConvergenceEnabled').checked = !!cfg.convergence_enabled;
             document.getElementById('cfgConvergenceMinIndicators').value = cfg.convergence_min_indicators;
             document.getElementById('cfgConvergenceWindowHours').value = cfg.convergence_window_hours;
+            document.getElementById('cfgSequenceChainEnabled').checked = !!cfg.sequence_chain_enabled;
+            document.getElementById('cfgSequenceChainWindowHours').value = cfg.sequence_chain_window_hours;
             document.getElementById('cfgPriorityEnabled').checked = !!cfg.priority_enabled;
             document.getElementById('cfgPriorityWindowDays').value = cfg.priority_window_days;
             document.getElementById('cfgPriorityHalfLifeHours').value = cfg.priority_half_life_hours;
@@ -1247,6 +1271,8 @@ function saveUebaConfig() {
         convergence_enabled: document.getElementById('cfgConvergenceEnabled').checked,
         convergence_min_indicators: parseInt(document.getElementById('cfgConvergenceMinIndicators').value, 10),
         convergence_window_hours: parseInt(document.getElementById('cfgConvergenceWindowHours').value, 10),
+        sequence_chain_enabled: document.getElementById('cfgSequenceChainEnabled').checked,
+        sequence_chain_window_hours: parseInt(document.getElementById('cfgSequenceChainWindowHours').value, 10),
         priority_enabled: document.getElementById('cfgPriorityEnabled').checked,
         priority_window_days: parseInt(document.getElementById('cfgPriorityWindowDays').value, 10),
         priority_half_life_hours: parseFloat(document.getElementById('cfgPriorityHalfLifeHours').value),
@@ -1534,7 +1560,7 @@ function arRenderTable(rows) {
     const tbody = document.getElementById('anomalyRulesTableBody');
     document.getElementById('arRowCountLabel').innerText = `${rows.length} of ${anomalyRulesData.length} rules`;
     if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted py-4">No rules match this filter.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="12" class="text-center text-muted py-4">No rules match this filter.</td></tr>';
         return;
     }
     tbody.innerHTML = rows.map(r => `<tr>
@@ -1544,6 +1570,7 @@ function arRenderTable(rows) {
         <td class="small">${entityTypeBadge(r.entity_type)}${escHtml(r.entity_field)}</td>
         <td>${r.points}</td>
         <td class="small text-muted">${r.first_time_bonus_points ?? '—'}</td>
+        <td class="small text-muted">${r.sequence_name ? `<span class="badge bg-secondary">${escHtml(r.sequence_name)} · stage ${r.sequence_stage}</span>` : '—'}</td>
         <td>${r.matches_7d}</td>
         <td>${r.matches_30d}</td>
         <td class="small text-muted">${r.last_matched ? escHtml(r.last_matched) : '—'}</td>
@@ -1587,12 +1614,16 @@ function openAnomalyRuleModal(rule) {
     document.getElementById('arEntityField').value = rule ? rule.entity_field : document.getElementById('arEntityField').value;
     document.getElementById('arPoints').value = rule ? rule.points : '10';
     document.getElementById('arBonus').value = (rule && rule.first_time_bonus_points != null) ? rule.first_time_bonus_points : '';
+    document.getElementById('arSequenceName').value = (rule && rule.sequence_name) ? rule.sequence_name : '';
+    document.getElementById('arSequenceStage').value = (rule && rule.sequence_stage != null) ? rule.sequence_stage : '';
     document.getElementById('arError').style.display = 'none';
     new bootstrap.Modal(document.getElementById('anomalyRuleModal')).show();
 }
 
 function saveAnomalyRuleModal() {
     const bonusRaw = document.getElementById('arBonus').value.trim();
+    const seqNameRaw = document.getElementById('arSequenceName').value.trim();
+    const seqStageRaw = document.getElementById('arSequenceStage').value.trim();
     const conditions = arConditions.map(c => ({ field: c.field, operator: c.operator, value: String(c.value || '').trim(), logic: c.logic || 'AND' }));
     const payload = {
         name: document.getElementById('arName').value.trim(),
@@ -1602,11 +1633,15 @@ function saveAnomalyRuleModal() {
         entity_type: document.getElementById('arEntityField').value === 'host' ? 'host' : 'user',
         points: parseInt(document.getElementById('arPoints').value, 10),
         first_time_bonus_points: bonusRaw === '' ? null : parseInt(bonusRaw, 10),
+        sequence_name: seqNameRaw === '' ? null : seqNameRaw,
+        sequence_stage: seqStageRaw === '' ? null : parseInt(seqStageRaw, 10),
     };
     const errBox = document.getElementById('arError');
     errBox.style.display = 'none';
     if (!payload.name) { errBox.innerText = 'Name is required.'; errBox.style.display = 'block'; return; }
     if (!payload.conditions.length || payload.conditions.some(c => !c.value)) { errBox.innerText = 'Every condition needs a value.'; errBox.style.display = 'block'; return; }
+    if (payload.sequence_name && payload.sequence_stage === null) { errBox.innerText = 'Sequence Stage is required when Sequence Name is set.'; errBox.style.display = 'block'; return; }
+    if (payload.sequence_stage !== null && !payload.sequence_name) { errBox.innerText = 'Sequence Name is required when Sequence Stage is set.'; errBox.style.display = 'block'; return; }
     const url = arEditingId ? `/api/ueba/anomaly-rules/${arEditingId}` : '/api/ueba/anomaly-rules';
     const method = arEditingId ? 'PUT' : 'POST';
     fetch(url, {
