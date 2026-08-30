@@ -22,9 +22,28 @@
         case is created, or its status, queue, or assignee changes. Scope a playbook to a specific
         queue, TLP, or status, then chain together actions (apply a case template, add a
         task/note, set queue, run host/user analysis, or post to a webhook/Slack) that run in
-        order every time it fires.
+        order every time it fires. Any action can be flagged "Requires approval" -- instead of
+        running immediately, it's queued below until someone approves or rejects it. Use "Run Now"
+        on a playbook to fire it on demand against a specific case, instead of waiting for its trigger.
     </div>
 </div>
+
+{% if has_permission('soar.playbooks.manage') %}
+<div class="card bg-dark border-secondary mb-3" id="pendingApprovalsCard" style="display:none;">
+    <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+        <span><i class="fa-solid fa-hourglass-half me-2"></i>Pending Approvals</span>
+        <span class="badge bg-warning text-dark" id="pendingApprovalsCount">0</span>
+    </div>
+    <div class="table-responsive">
+        <table class="table table-dark table-sm align-middle mb-0">
+            <thead><tr>
+                <th class="ps-3">Requested</th><th>Playbook</th><th>Case</th><th>Action</th><th class="text-end pe-3"></th>
+            </tr></thead>
+            <tbody id="pendingApprovalsTableBody"></tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
 
 <div class="card bg-dark border-secondary">
     <div class="table-responsive">
@@ -121,20 +140,25 @@
     </div>
 </div>
 
-<!-- Test Playbook modal (dry run -- previews what the playbook would do against a real case, no changes made) -->
+<!-- Test / Run Playbook modal -- "Run Test" (dry run) previews what the playbook would
+     do against a real case with no changes made; "Run Now" executes it for real
+     (subject to the same approval gating a triggered run gets), so an analyst can
+     backfill a playbook's actions onto an existing case instead of only ever waiting
+     for its trigger event. -->
 <div class="modal fade" id="playbookTestModal" tabindex="-1">
     <div class="modal-dialog modal-lg modal-dialog-scrollable">
         <div class="modal-content bg-dark text-light border-secondary">
             <div class="modal-header border-secondary">
-                <h5 class="modal-title" id="playbookTestModalTitle">Test Playbook</h5>
+                <h5 class="modal-title" id="playbookTestModalTitle">Test / Run Playbook</h5>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
                 <input type="hidden" id="testPbId">
-                <p class="text-muted small">Pick a real case to test this playbook against. Nothing is changed -- this only previews what each action would do.</p>
+                <p class="text-muted small">Pick a real case. "Run Test" previews what each action would do with nothing changed; "Run Now" executes the playbook for real against that case, right now.</p>
                 <div class="d-flex gap-2 mb-3">
                     <select id="testPbCaseId" class="form-select form-select-sm bg-dark text-light border-secondary"><option value="">Select a case&hellip;</option></select>
                     <button type="button" class="btn btn-sm btn-outline-primary text-nowrap" onclick="runPlaybookTest()"><i class="fa-solid fa-flask me-1"></i>Run Test</button>
+                    <button type="button" class="btn btn-sm btn-outline-success text-nowrap" id="runPlaybookNowBtn" onclick="runPlaybookNow()"><i class="fa-solid fa-play me-1"></i>Run Now</button>
                 </div>
                 <div id="playbookTestResult"></div>
             </div>
@@ -384,7 +408,7 @@ function actionParamsFieldsHtml(seq, actionType, params) {
     }
 }
 
-function addPlaybookActionRow(actionType, params) {
+function addPlaybookActionRow(actionType, params, requiresApproval) {
     const seq = pbActionSeq++;
     const list = document.getElementById('pbActionsList');
     const div = document.createElement('div');
@@ -393,9 +417,13 @@ function addPlaybookActionRow(actionType, params) {
     const chosenType = actionType || 'add_note';
     div.innerHTML = `
         <div style="width:180px;">
-            <select class="form-select form-select-sm bg-dark text-light border-secondary" id="pbActType_${seq}" onchange="onPlaybookActionTypeChange(${seq})">
+            <select class="form-select form-select-sm bg-dark text-light border-secondary mb-1" id="pbActType_${seq}" onchange="onPlaybookActionTypeChange(${seq})">
                 ${Object.entries(ACTION_LABELS).map(([k, label]) => `<option value="${k}" ${k === chosenType ? 'selected' : ''}>${label}</option>`).join('')}
             </select>
+            <div class="form-check form-check-sm">
+                <input class="form-check-input" type="checkbox" id="pbActApproval_${seq}" ${requiresApproval ? 'checked' : ''}>
+                <label class="form-check-label small text-muted" for="pbActApproval_${seq}" title="Queue this action for a human to approve instead of running it immediately">Requires approval</label>
+            </div>
         </div>
         <div class="flex-grow-1" id="pbActParams_${seq}"></div>
         <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove" onclick="document.getElementById('pbActionRow_${seq}').remove()"><i class="fa-solid fa-xmark"></i></button>
@@ -412,6 +440,7 @@ function onPlaybookActionTypeChange(seq) {
 function collectActionRow(row) {
     const seq = row.id.split('_')[1];
     const actionType = document.getElementById(`pbActType_${seq}`).value;
+    const requiresApproval = document.getElementById(`pbActApproval_${seq}`).checked;
     const getVal = (name) => { const el = document.getElementById(`pbActParam_${seq}_${name}`); return el ? el.value.trim() : ''; };
     const params = {};
     switch (actionType) {
@@ -435,7 +464,7 @@ function collectActionRow(row) {
             break;
         }
     }
-    return { action_type: actionType, params };
+    return { action_type: actionType, params, requires_approval: requiresApproval };
 }
 
 async function showPlaybookModal() {
@@ -469,7 +498,7 @@ async function editPlaybook(pid) {
     if (!caseTemplatesForPb.length) await loadTemplatesForPlaybooks();
     if (!allPlaybookSecrets.length) await loadPlaybookSecretsList();
     populatePbConditionSelects(p);
-    (p.actions.length ? p.actions : [{ action_type: 'add_note', params: {} }]).forEach(a => addPlaybookActionRow(a.action_type, a.params));
+    (p.actions.length ? p.actions : [{ action_type: 'add_note', params: {} }]).forEach(a => addPlaybookActionRow(a.action_type, a.params, a.requires_approval));
     if (!playbookModal) playbookModal = new bootstrap.Modal(document.getElementById('playbookModal'));
     playbookModal.show();
 }
@@ -524,7 +553,7 @@ function showPlaybookRuns(pid, name) {
             <tr>
                 <td class="text-nowrap small">${escHtml(r.triggered_at)}</td>
                 <td class="small">${r.case_title ? `<a href="/cases?case=${r.case_id}">${escHtml(r.case_title)}</a>` : '<span class="text-muted">(deleted)</span>'}</td>
-                <td>${r.status === 'success' ? '<span class="badge bg-success">Success</span>' : '<span class="badge bg-warning text-dark">Partial</span>'}</td>
+                <td>${r.status === 'success' ? '<span class="badge bg-success">Success</span>' : r.status === 'pending_approval' ? '<span class="badge bg-info text-dark">Pending Approval</span>' : '<span class="badge bg-warning text-dark">Partial</span>'}</td>
                 <td class="small">${escHtml(r.detail)}</td>
             </tr>
         `).join('');
@@ -543,9 +572,10 @@ function loadCasesForPlaybookTest() {
 }
 
 async function showPlaybookTestModal(pid, name) {
-    document.getElementById('playbookTestModalTitle').innerText = `Test Playbook — ${name}`;
+    document.getElementById('playbookTestModalTitle').innerText = `Test / Run Playbook — ${name}`;
     document.getElementById('testPbId').value = pid;
     document.getElementById('playbookTestResult').innerHTML = '';
+    document.getElementById('runPlaybookNowBtn').style.display = CAN_MANAGE_PLAYBOOKS ? '' : 'none';
     if (!allCasesForPbTest.length) await loadCasesForPlaybookTest();
     const sel = document.getElementById('testPbCaseId');
     sel.innerHTML = '<option value="">Select a case&hellip;</option>' + allCasesForPbTest.map(c => `<option value="${c.id}">${escHtml(c.title)}</option>`).join('');
@@ -577,8 +607,73 @@ function runPlaybookTest() {
         .catch(err => { resultEl.innerHTML = `<p class="text-danger small mb-0">Error: ${err}</p>`; });
 }
 
+// Executes for real -- same approval-gating an ordinary triggered run gets (an action
+// marked "Requires approval" is queued in Pending Approvals instead of running), and
+// the same playbook_runs/case-timeline bookkeeping. Confirmed up front since, unlike
+// Run Test, this one actually does things.
+async function runPlaybookNow() {
+    const pid = document.getElementById('testPbId').value;
+    const caseId = document.getElementById('testPbCaseId').value;
+    const resultEl = document.getElementById('playbookTestResult');
+    if (!caseId) { resultEl.innerHTML = '<p class="text-danger small mb-0">Select a case first.</p>'; return; }
+    const caseTitle = (allCasesForPbTest.find(c => String(c.id) === String(caseId)) || {}).title || `case #${caseId}`;
+    if (!(await confirmDialog(`Run this playbook against "${caseTitle}" right now? This executes its actions for real.`, {title: 'Run playbook now', danger: true, confirmLabel: 'Run Now'}))) return;
+    resultEl.innerHTML = '<p class="text-muted small mb-0"><i class="fa-solid fa-spinner fa-spin me-1"></i>Running&hellip;</p>';
+    fetch(`/api/playbooks/${pid}/run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ case_id: parseInt(caseId, 10) }) })
+        .then(r => r.json().then(data => ({ ok: r.ok, data })))
+        .then(({ ok, data }) => {
+            if (!ok) { resultEl.innerHTML = `<p class="text-danger small mb-0">${escHtml(data.error || 'Run failed.')}</p>`; return; }
+            const cls = data.run_status === 'success' ? 'alert-success' : (data.run_status === 'pending_approval' ? 'alert-warning' : 'alert-secondary');
+            const icon = data.run_status === 'success' ? 'fa-check' : (data.run_status === 'pending_approval' ? 'fa-hourglass-half' : 'fa-triangle-exclamation');
+            resultEl.innerHTML = `<div class="alert ${cls} py-2 px-3 mb-2 small"><i class="fa-solid ${icon} me-1"></i>Ran — ${escHtml(data.detail)}</div>`;
+            loadPlaybooks();
+            loadPendingApprovals();
+            toast('Playbook run complete.', 'success');
+        })
+        .catch(err => { resultEl.innerHTML = `<p class="text-danger small mb-0">Error: ${err}</p>`; });
+}
+
+// Pending Approvals -- actions a playbook queued instead of running, because they were
+// flagged "Requires approval" on the action row. Approve executes that one action for
+// real (through the same _run_playbook_action every other action runs through) and
+// logs it to the case timeline; reject just records the decision, nothing runs.
+function loadPendingApprovals() {
+    if (!CAN_MANAGE_PLAYBOOKS) return;
+    fetch('/api/playbook-approvals?status=pending').then(r => r.json()).then(rows => {
+        const card = document.getElementById('pendingApprovalsCard');
+        const tbody = document.getElementById('pendingApprovalsTableBody');
+        document.getElementById('pendingApprovalsCount').innerText = rows.length;
+        card.style.display = rows.length ? '' : 'none';
+        tbody.innerHTML = rows.map(a => `
+            <tr>
+                <td class="ps-3 text-nowrap small">${escHtml(a.requested_at)}</td>
+                <td class="small">${escHtml(a.playbook_name || `#${a.playbook_id}`)}</td>
+                <td class="small">${a.case_title ? `<a href="/cases?case=${a.case_id}">${escHtml(a.case_title)}</a>` : '<span class="text-muted">(deleted)</span>'}</td>
+                <td class="small"><span class="badge bg-secondary me-1">${escHtml(ACTION_LABELS[a.action_type] || a.action_type)}</span>${escHtml(JSON.stringify(a.params))}</td>
+                <td class="text-end pe-3 text-nowrap">
+                    <button type="button" class="btn btn-sm btn-outline-success py-0 px-2 me-1" title="Approve and run" onclick="decideApproval(${a.id}, 'approve')"><i class="fa-solid fa-check"></i></button>
+                    <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Reject" onclick="decideApproval(${a.id}, 'reject')"><i class="fa-solid fa-xmark"></i></button>
+                </td>
+            </tr>
+        `).join('');
+    }).catch(err => console.error('Error loading pending approvals:', err));
+}
+
+async function decideApproval(approvalId, decision) {
+    if (decision === 'approve' && !(await confirmDialog('Approve and run this action now?', {title: 'Approve action', confirmLabel: 'Approve'}))) return;
+    if (decision === 'reject' && !(await confirmDialog('Reject this action? It will not run.', {title: 'Reject action', danger: true, confirmLabel: 'Reject'}))) return;
+    fetch(`/api/playbook-approvals/${approvalId}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({decision})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (!ok) { toast(data.error || 'Failed to decide.', 'danger'); return; }
+        toast(decision === 'approve' ? 'Action approved and run.' : 'Action rejected.', 'success');
+        loadPendingApprovals();
+    }).catch(err => toast('Error: ' + err, 'danger'));
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     loadPlaybooks();
+    loadPendingApprovals();
 });
 </script>
 {% endblock %}

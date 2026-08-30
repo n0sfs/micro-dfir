@@ -1,6 +1,7 @@
 import os, json, re, time, sqlite3, requests, datetime
 from notifications import notify_if_configured
 from warninglists import filter_warninglisted_ips
+from geoip import lookup_country
 from dataclasses import dataclass, field as dc_field
 from sigma.collection import SigmaCollection
 from sigma.backends.sqlite import sqliteBackend
@@ -477,10 +478,11 @@ def run_detection_cycle():
                     (g['count'], event_id, message, source_ip, destination_ip, log_event_id, log_app, severity, existing['id'])
                 )
             else:
+                country_code, country_name = lookup_country(source_ip)
                 cursor.execute(
-                    "INSERT INTO alerts (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app, occurrence_count, last_seen) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
-                    (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app, g['count'])
+                    "INSERT INTO alerts (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app, occurrence_count, last_seen, country_code, country_name) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)",
+                    (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app, g['count'], country_code, country_name)
                 )
                 new_alert_id = cursor.lastrowid
                 _record_ioc_sightings(cursor, rule_id, host, source_ip, destination_ip, file_hash, query_name,

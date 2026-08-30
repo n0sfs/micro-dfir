@@ -562,9 +562,11 @@ def api_ingest():
                         (msg, alert_sev, existing['id'])
                     )
                 else:
+                    from geoip import lookup_country
+                    country_code, country_name = lookup_country(sip)
                     db.execute(
-                        "INSERT INTO alerts (timestamp, rule_name, severity, host, message, username, source_ip, occurrence_count, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
-                        (ts, triggered_rule, alert_sev, hst, msg, usr, sip, ts)
+                        "INSERT INTO alerts (timestamp, rule_name, severity, host, message, username, source_ip, occurrence_count, last_seen, country_code, country_name) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+                        (ts, triggered_rule, alert_sev, hst, msg, usr, sip, ts, country_code, country_name)
                     )
                     # Same "only a brand-new alert notifies" rule as sigma_engine.py's path --
                     # a re-firing heuristic within the dedup window hits the `existing` branch
@@ -2785,7 +2787,8 @@ def api_cases():
 def _case_item_summary(db, item_type, item_id):
     if item_type == 'alert':
         r = db.execute(
-            "SELECT a.timestamp, a.severity, a.host, a.username, a.source_ip, COALESCE(s.title, a.rule_name, 'Custom/YARA Rule') as label, a.message "
+            "SELECT a.timestamp, a.severity, a.host, a.username, a.source_ip, COALESCE(s.title, a.rule_name, 'Custom/YARA Rule') as label, a.message, "
+            "a.country_code, a.country_name "
             "FROM alerts a LEFT JOIN sigma_rules s ON a.rule_id = s.id WHERE a.id = ?", (item_id,)
         ).fetchone()
     elif item_type == 'command_result':
@@ -2817,11 +2820,16 @@ def _case_item_summary(db, item_type, item_id):
     if not r:
         return None
     summary = dict(r)
-    if summary.get('source_ip'):
+    # An alert row already carries its own country_code/country_name, stamped once at
+    # creation time (see migrate_alerts_geoip_columns) -- only fall back to an on-demand
+    # lookup for a pre-migration alert row (columns present but NULL) or a non-alert item
+    # type (command_result/ueba_event), neither of which has geoip columns of its own.
+    if not summary.get('country_code') and summary.get('source_ip'):
         from geoip import lookup_country
         summary['country_code'], summary['country_name'] = lookup_country(summary['source_ip'])
     else:
-        summary['country_code'] = summary['country_name'] = None
+        summary.setdefault('country_code', None)
+        summary.setdefault('country_name', None)
     return summary
 
 @app.route('/api/cases/<int:cid>', methods=['GET', 'PUT', 'DELETE'])
@@ -2936,7 +2944,10 @@ def api_case_detail(cid):
         "SELECT ca.id, ca.host, ca.compromise_status, ca.related_indicator, ca.notes, ca.added_by, ca.added_at, a.criticality "
         "FROM case_assets ca LEFT JOIN assets a ON a.host = ca.host WHERE ca.case_id = ? ORDER BY ca.added_at", (cid,)
     ).fetchall()]
-    return jsonify({**dict(case), 'items': items_out, 'tasks': tasks, 'events': events, 'assets': case_assets})
+    case_iocs = [dict(i) for i in db.execute(
+        "SELECT id, ioc_type, value, notes, added_by, added_at FROM case_iocs WHERE case_id = ? ORDER BY added_at", (cid,)
+    ).fetchall()]
+    return jsonify({**dict(case), 'items': items_out, 'tasks': tasks, 'events': events, 'assets': case_assets, 'iocs': case_iocs})
 
 @app.route('/api/cases/<int:cid>/items', methods=['POST'])
 @login_required
@@ -3027,6 +3038,49 @@ def api_case_asset_detail(cid, asset_id):
         _log_case_event(db, cid, 'asset_status_change', f"{asset['host']} → {status}")
     db.commit()
     return jsonify({"status": "success"})
+
+# Structured observables (hash/domain/IP/URL) a case is built around -- distinct from
+# Case Assets (which tracks implicated HOSTS with a compromise-status judgment call).
+# An IOC here is a raw indicator value with no host attached: something to check
+# against the local Threat Intel set (/api/ti/lookup) and pivot from, not something
+# with a compromise-status lifecycle of its own.
+CASE_IOC_TYPES = ('ip', 'domain', 'hash', 'url')
+
+@app.route('/api/cases/<int:cid>/iocs', methods=['POST'])
+@login_required
+def api_case_add_ioc(cid):
+    db = get_db()
+    if not db.execute("SELECT 1 FROM cases WHERE id = ?", (cid,)).fetchone():
+        return jsonify({"error": "Case not found"}), 404
+    data = request.get_json() or {}
+    ioc_type = (data.get('ioc_type') or '').strip()
+    value = (data.get('value') or '').strip()
+    if ioc_type not in CASE_IOC_TYPES:
+        return jsonify({"error": f"ioc_type must be one of {', '.join(CASE_IOC_TYPES)}"}), 400
+    if not value:
+        return jsonify({"error": "value is required"}), 400
+    if db.execute("SELECT 1 FROM case_iocs WHERE case_id = ? AND ioc_type = ? AND value = ?", (cid, ioc_type, value)).fetchone():
+        return jsonify({"error": "That indicator is already tracked in this case"}), 400
+    notes = (data.get('notes') or '').strip() or None
+    db.execute(
+        "INSERT INTO case_iocs (case_id, ioc_type, value, notes, added_by) VALUES (?, ?, ?, ?, ?)",
+        (cid, ioc_type, value, notes, current_user.username)
+    )
+    _log_case_event(db, cid, 'ioc_added', f"{ioc_type}: {value}")
+    db.commit()
+    return jsonify({"status": "success"})
+
+@app.route('/api/cases/<int:cid>/iocs/<int:ioc_id>', methods=['DELETE'])
+@login_required
+def api_case_ioc_detail(cid, ioc_id):
+    db = get_db()
+    ioc = db.execute("SELECT * FROM case_iocs WHERE id = ? AND case_id = ?", (ioc_id, cid)).fetchone()
+    if not ioc:
+        return jsonify({"error": "Case indicator not found"}), 404
+    db.execute("DELETE FROM case_iocs WHERE id = ?", (ioc_id,))
+    _log_case_event(db, cid, 'ioc_removed', f"{ioc['ioc_type']}: {ioc['value']}")
+    db.commit()
+    return jsonify({"ok": 1})
 
 @app.route('/api/cases/<int:cid>/tasks', methods=['POST'])
 @login_required
@@ -3225,6 +3279,7 @@ def api_case_analyze(cid):
 # ---- Playbooks (SOAR) ----
 PLAYBOOK_TRIGGERS = ('case_created', 'status_changed', 'queue_changed', 'assignee_changed')
 PLAYBOOK_ACTION_TYPES = ('apply_template', 'add_task', 'add_note', 'set_queue', 'analyze_entity', 'send_webhook', 'send_slack')
+PLAYBOOK_APPROVAL_STATUSES = ('pending', 'approved', 'rejected')
 
 def _fill_playbook_template(text, cid, case_row):
     # Deliberately plain string substitution, not a real template engine -- the
@@ -3405,13 +3460,15 @@ def _dry_run_playbook(db, playbook_id, cid):
         skip_reasons.append("the case's status doesn't match the condition")
 
     actions = db.execute(
-        "SELECT action_type, params FROM playbook_actions WHERE playbook_id = ? ORDER BY position", (playbook_id,)
+        "SELECT action_type, params, requires_approval FROM playbook_actions WHERE playbook_id = ? ORDER BY position", (playbook_id,)
     ).fetchall()
     previews = []
     for a in actions:
         try:
             action_params = json.loads(a['params']) if a['params'] else {}
             result = _run_playbook_action(db, cid, a['action_type'], action_params, dry_run=True)
+            if a['requires_approval']:
+                result = f"[requires approval] {result}"
         except Exception as e:
             result = f"would fail: {e}"
         previews.append({'action_type': a['action_type'], 'result': result})
@@ -3423,14 +3480,42 @@ def _dry_run_playbook(db, playbook_id, cid):
         'actions': previews,
     }
 
+# Shared by every REAL (non-dry-run) execution path -- a triggered run
+# (_run_playbooks_for_case) and a manual "Run Now" (api_playbook_run) both go through
+# this so the approval-gate behavior can't drift between the two. An action flagged
+# requires_approval is never executed here: it's queued in playbook_approvals and the
+# loop moves on to the next action (same "one action's outcome doesn't stop the rest"
+# isolation _run_playbook_action's own try/except already gives ordinary failures).
+def _execute_playbook_actions(db, cid, playbook_id, actions):
+    results = []
+    overall_status = 'success'
+    for a in actions:
+        action_params = json.loads(a['params']) if a['params'] else {}
+        if a['requires_approval']:
+            db.execute(
+                "INSERT INTO playbook_approvals (playbook_id, case_id, action_type, params) VALUES (?, ?, ?, ?)",
+                (playbook_id, cid, a['action_type'], json.dumps(action_params))
+            )
+            results.append(f"{a['action_type']}: queued for approval")
+            if overall_status == 'success':
+                overall_status = 'pending_approval'
+            continue
+        try:
+            result = _run_playbook_action(db, cid, a['action_type'], action_params)
+            results.append(f"{a['action_type']}: {result}")
+        except Exception as e:
+            results.append(f"{a['action_type']}: FAILED ({e})")
+            overall_status = 'partial'
+    detail = '; '.join(results) if results else 'no actions configured'
+    return detail, overall_status
+
 # The one call site every trigger point (case create, status/queue/assignee change)
 # routes through. queue_id/tlp/status are the case's state AFTER whatever change just
 # happened -- passed in directly rather than re-queried, since every call site already
 # has them as local variables from computing what to write. Matches ANY enabled playbook
 # for this trigger whose optional condition filters are unset or satisfied; one
 # playbook's action failing doesn't stop another matching playbook from running, and
-# doesn't stop the rest of ITS OWN actions either (see _run_playbook_action's per-action
-# try/except below).
+# doesn't stop the rest of ITS OWN actions either (see _execute_playbook_actions).
 def _run_playbooks_for_case(db, cid, trigger_event, queue_id, tlp, status):
     playbooks = db.execute(
         "SELECT * FROM playbooks WHERE enabled = 1 AND trigger_event = ? "
@@ -3440,18 +3525,8 @@ def _run_playbooks_for_case(db, cid, trigger_event, queue_id, tlp, status):
         (trigger_event, queue_id, tlp, status)
     ).fetchall()
     for pb in playbooks:
-        actions = db.execute("SELECT action_type, params FROM playbook_actions WHERE playbook_id = ? ORDER BY position", (pb['id'],)).fetchall()
-        results = []
-        overall_status = 'success'
-        for a in actions:
-            try:
-                action_params = json.loads(a['params']) if a['params'] else {}
-                result = _run_playbook_action(db, cid, a['action_type'], action_params)
-                results.append(f"{a['action_type']}: {result}")
-            except Exception as e:
-                results.append(f"{a['action_type']}: FAILED ({e})")
-                overall_status = 'partial'
-        detail = '; '.join(results) if results else 'no actions configured'
+        actions = db.execute("SELECT action_type, params, requires_approval FROM playbook_actions WHERE playbook_id = ? ORDER BY position", (pb['id'],)).fetchall()
+        detail, overall_status = _execute_playbook_actions(db, cid, pb['id'], actions)
         db.execute(
             "INSERT INTO playbook_runs (playbook_id, case_id, status, detail) VALUES (?, ?, ?, ?)",
             (pb['id'], cid, overall_status, detail)
@@ -3471,7 +3546,7 @@ def api_playbooks():
         out = []
         for r in rows:
             actions = [dict(a) for a in db.execute(
-                "SELECT id, action_type, params, position FROM playbook_actions WHERE playbook_id = ? ORDER BY position", (r['id'],)
+                "SELECT id, action_type, params, position, requires_approval FROM playbook_actions WHERE playbook_id = ? ORDER BY position", (r['id'],)
             ).fetchall()]
             for a in actions:
                 a['params'] = json.loads(a['params']) if a['params'] else {}
@@ -3507,8 +3582,8 @@ def api_playbooks():
     )
     pid = cur.lastrowid
     for i, a in enumerate(actions):
-        db.execute("INSERT INTO playbook_actions (playbook_id, position, action_type, params) VALUES (?, ?, ?, ?)",
-                   (pid, i, a['action_type'], json.dumps(a.get('params') or {})))
+        db.execute("INSERT INTO playbook_actions (playbook_id, position, action_type, params, requires_approval) VALUES (?, ?, ?, ?, ?)",
+                   (pid, i, a['action_type'], json.dumps(a.get('params') or {}), 1 if a.get('requires_approval') else 0))
     db.commit()
     log_audit('playbook_create', 'playbook', name)
     return jsonify({'status': 'success', 'id': pid})
@@ -3560,8 +3635,8 @@ def api_playbook_detail(pid):
     )
     db.execute("DELETE FROM playbook_actions WHERE playbook_id = ?", (pid,))
     for i, a in enumerate(actions):
-        db.execute("INSERT INTO playbook_actions (playbook_id, position, action_type, params) VALUES (?, ?, ?, ?)",
-                   (pid, i, a['action_type'], json.dumps(a.get('params') or {})))
+        db.execute("INSERT INTO playbook_actions (playbook_id, position, action_type, params, requires_approval) VALUES (?, ?, ?, ?, ?)",
+                   (pid, i, a['action_type'], json.dumps(a.get('params') or {}), 1 if a.get('requires_approval') else 0))
     db.commit()
     log_audit('playbook_update', 'playbook', name)
     return jsonify({'status': 'success'})
@@ -3602,6 +3677,117 @@ def api_playbook_dry_run(pid):
     if result is None:
         return jsonify({'error': 'Playbook or case not found'}), 404
     return jsonify(result)
+
+# Manual "Run Now" -- lets an analyst fire a playbook against a specific case on demand
+# (backfill tasks/notes onto an existing case, re-send a webhook) instead of only ever
+# waiting for its trigger event. Same condition check as _dry_run_playbook (a playbook
+# whose own filters don't match the chosen case is refused, not silently skipped) but
+# executes for real through _execute_playbook_actions -- same approval-gating and same
+# playbook_runs/case-timeline bookkeeping a triggered run gets, so a run's origin
+# (trigger vs. manual) doesn't change what gets recorded. Gated the same as editing a
+# playbook: this causes real side effects (task/note writes, outbound webhooks).
+@app.route('/api/playbooks/<int:pid>/run', methods=['POST'])
+@login_required
+def api_playbook_run(pid):
+    err = require_permission('soar.playbooks.manage')
+    if err: return err
+    db = get_db()
+    case_id = (request.json or {}).get('case_id')
+    if not case_id:
+        return jsonify({'error': 'case_id is required'}), 400
+    pb = db.execute("SELECT * FROM playbooks WHERE id = ?", (pid,)).fetchone()
+    if not pb:
+        return jsonify({'error': 'Playbook not found'}), 404
+    case = db.execute("SELECT * FROM cases WHERE id = ?", (case_id,)).fetchone()
+    if not case:
+        return jsonify({'error': 'Case not found'}), 404
+
+    skip_reasons = []
+    if not pb['enabled']:
+        skip_reasons.append('the playbook is disabled')
+    if pb['condition_queue_id'] and pb['condition_queue_id'] != case['queue_id']:
+        skip_reasons.append("the case's queue doesn't match the condition")
+    if pb['condition_tlp'] and pb['condition_tlp'] != case['tlp']:
+        skip_reasons.append("the case's TLP doesn't match the condition")
+    if pb['condition_status'] and pb['condition_status'] != case['status']:
+        skip_reasons.append("the case's status doesn't match the condition")
+    if skip_reasons:
+        return jsonify({'error': "This playbook wouldn't fire for this case: " + '; '.join(skip_reasons)}), 400
+
+    actions = db.execute("SELECT action_type, params, requires_approval FROM playbook_actions WHERE playbook_id = ? ORDER BY position", (pid,)).fetchall()
+    detail, overall_status = _execute_playbook_actions(db, case_id, pid, actions)
+    db.execute(
+        "INSERT INTO playbook_runs (playbook_id, case_id, status, detail) VALUES (?, ?, ?, ?)",
+        (pid, case_id, overall_status, detail)
+    )
+    _log_case_event(db, case_id, 'playbook_run', f"{pb['name']} (run manually): {detail}")
+    db.commit()
+    return jsonify({'status': 'success', 'run_status': overall_status, 'detail': detail})
+
+@app.route('/api/playbook-approvals', methods=['GET'])
+@login_required
+def api_playbook_approvals():
+    db = get_db()
+    status = request.args.get('status') or 'pending'
+    if status not in PLAYBOOK_APPROVAL_STATUSES:
+        return jsonify({'error': f"status must be one of {', '.join(PLAYBOOK_APPROVAL_STATUSES)}"}), 400
+    rows = db.execute(
+        "SELECT pa.id, pa.playbook_id, p.name as playbook_name, pa.case_id, c.title as case_title, "
+        "pa.action_type, pa.params, pa.status, pa.requested_at, pa.decided_by, pa.decided_at "
+        "FROM playbook_approvals pa "
+        "LEFT JOIN playbooks p ON p.id = pa.playbook_id "
+        "LEFT JOIN cases c ON c.id = pa.case_id "
+        "WHERE pa.status = ? ORDER BY pa.requested_at DESC",
+        (status,)
+    ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d['params'] = json.loads(d['params']) if d['params'] else {}
+        out.append(d)
+    return jsonify(out)
+
+# Approve executes the ONE gated action for real (through the same _run_playbook_action
+# every other action in this app runs through) and logs it to the case timeline;
+# reject just records the decision and never executes anything. Neither path re-checks
+# the playbook's trigger conditions -- an approval is a decision about this one queued
+# action, not a re-evaluation of whether the playbook should have fired at all.
+@app.route('/api/playbook-approvals/<int:approval_id>', methods=['PUT'])
+@login_required
+def api_playbook_approval_decide(approval_id):
+    err = require_permission('soar.playbooks.manage')
+    if err: return err
+    db = get_db()
+    approval = db.execute("SELECT * FROM playbook_approvals WHERE id = ?", (approval_id,)).fetchone()
+    if not approval:
+        return jsonify({'error': 'Approval not found'}), 404
+    if approval['status'] != 'pending':
+        return jsonify({'error': f"This approval was already {approval['status']}"}), 400
+    decision = (request.json or {}).get('decision')
+    if decision not in ('approve', 'reject'):
+        return jsonify({'error': "decision must be 'approve' or 'reject'"}), 400
+
+    pb = db.execute("SELECT name FROM playbooks WHERE id = ?", (approval['playbook_id'],)).fetchone()
+    playbook_name = pb['name'] if pb else f"playbook #{approval['playbook_id']}"
+    if decision == 'approve':
+        params = json.loads(approval['params']) if approval['params'] else {}
+        try:
+            result = _run_playbook_action(db, approval['case_id'], approval['action_type'], params)
+        except Exception as e:
+            result = f"FAILED ({e})"
+        _log_case_event(db, approval['case_id'], 'playbook_action_approved', f"{playbook_name} — {approval['action_type']}: {result}")
+        db.execute(
+            "UPDATE playbook_approvals SET status = 'approved', decided_by = ?, decided_at = datetime('now') WHERE id = ?",
+            (current_user.username, approval_id)
+        )
+    else:
+        _log_case_event(db, approval['case_id'], 'playbook_action_rejected', f"{playbook_name} — {approval['action_type']}")
+        db.execute(
+            "UPDATE playbook_approvals SET status = 'rejected', decided_by = ?, decided_at = datetime('now') WHERE id = ?",
+            (current_user.username, approval_id)
+        )
+    db.commit()
+    return jsonify({'status': 'success'})
 
 # Named secrets for playbook send_webhook/send_slack actions, so a live webhook/Slack
 # URL doesn't have to be typed as a literal, visible-to-anyone-who-opens-the-playbook
@@ -4812,6 +4998,25 @@ def migrate_alerts_triage():
     except Exception:
         pass
 
+def migrate_alerts_geoip_columns():
+    # Stamped once at alert-creation time (both alert-insert paths: the inline
+    # heuristic path in api_ingest and sigma_engine.py's rule pipeline) instead of the
+    # every-render on-demand geoip.lookup_country() call this used to require in the
+    # case-item summary, log search response, and top-countries chart -- those three
+    # read sites now prefer these columns and only fall back to a live lookup for a
+    # row created before this migration (where the columns are still NULL).
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(alerts)").fetchall()}
+        if 'country_code' not in cols:
+            conn.execute("ALTER TABLE alerts ADD COLUMN country_code TEXT")
+        if 'country_name' not in cols:
+            conn.execute("ALTER TABLE alerts ADD COLUMN country_name TEXT")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_sigma_rules_columns():
     # sigma_rules originally had no provenance columns — rules bulk-imported from SigmaHQ
     # and rules hand-written in the editor were indistinguishable. ALTER TABLE catches
@@ -5126,6 +5331,28 @@ def migrate_case_severity():
     except Exception:
         pass
 
+# A case's structured observables (hash/domain/IP/URL) -- distinct from case_assets
+# (implicated HOSTS with a compromise-status lifecycle). See CASE_IOC_TYPES' comment
+# for why these are kept as separate concepts rather than folded together.
+def migrate_case_iocs():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS case_iocs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id INTEGER NOT NULL,
+            ioc_type TEXT NOT NULL,
+            value TEXT NOT NULL,
+            notes TEXT,
+            added_by TEXT,
+            added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(case_id, ioc_type, value)
+        )''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_case_iocs_case ON case_iocs(case_id)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 # widget_type -> {} for now (validation only -- rendering is entirely client-side,
 # see WIDGET_REGISTRY in dashboards.html). The 5 app_* keys (Alerts/Cases/Log Search/
 # Threat Hunter/EDR Response Actions) land in a later batch as a purely additive diff
@@ -5327,6 +5554,36 @@ def migrate_playbook_secrets():
             created_by TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# Approval gate for individual playbook actions -- an action flagged requires_approval
+# on the playbook editor is queued here instead of executing immediately, whether the
+# playbook fired from a real trigger (_run_playbooks_for_case) or a manual "Run Now"
+# (api_playbook_run). Deliberately generic (any action type can be gated, not just a
+# hypothetical future EDR one) since even send_webhook/send_slack are real external
+# side effects worth pausing on. See the SOAR research: this is the prerequisite for
+# ever safely wiring a playbook to something like isolate_host later -- not built here.
+def migrate_playbook_approvals():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(playbook_actions)").fetchall()}
+        if 'requires_approval' not in cols:
+            conn.execute("ALTER TABLE playbook_actions ADD COLUMN requires_approval INTEGER NOT NULL DEFAULT 0")
+        conn.execute('''CREATE TABLE IF NOT EXISTS playbook_approvals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            playbook_id INTEGER NOT NULL,
+            case_id INTEGER NOT NULL,
+            action_type TEXT NOT NULL,
+            params TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            decided_by TEXT,
+            decided_at DATETIME
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_playbook_approvals_status ON playbook_approvals(status)')
         conn.commit()
         conn.close()
     except Exception:
@@ -8117,11 +8374,13 @@ migrate_case_upgrade()
 migrate_case_queues()
 migrate_case_assets()
 migrate_case_severity()
+migrate_case_iocs()
 migrate_dashboards()
 migrate_role_casing()
 migrate_role_permissions()
 migrate_playbooks()
 migrate_playbook_secrets()
+migrate_playbook_approvals()
 migrate_live_logs_archive()
 migrate_fim_paths()
 migrate_ueba_priority_scores()
@@ -8142,6 +8401,7 @@ migrate_report_history()
 migrate_report_history_case_id()
 migrate_log_search_indexes()
 migrate_alerts_triage()
+migrate_alerts_geoip_columns()
 migrate_saved_searches()
 migrate_warninglists()
 migrate_ioc_sightings()
