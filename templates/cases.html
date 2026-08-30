@@ -326,6 +326,66 @@ function caseAssetRow(a) {
         </tr>`;
 }
 
+const IOC_TYPE_LABELS = { hash: 'Hash', domain: 'Domain', ip: 'IP', url: 'URL' };
+function iocTypeBadge(t) { return `<span class="badge bg-secondary">${escHtml(IOC_TYPE_LABELS[t] || t)}</span>`; }
+
+function caseIocRow(i) {
+    return `
+        <tr id="iocRow${i.id}">
+            <td>${iocTypeBadge(i.ioc_type)}</td>
+            <td class="small font-monospace">${escHtml(i.value)}</td>
+            <td class="small text-muted">${escHtml(i.notes || '')}</td>
+            <td class="small" id="iocResult${i.id}"></td>
+            <td class="text-end text-nowrap">
+                <button type="button" class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="Check against the local Threat Intel set" onclick="checkCaseIoc(${i.id}, '${escJs(i.value)}')"><i class="fa-solid fa-magnifying-glass"></i></button>
+                <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove indicator" onclick="removeCaseIoc(${i.id})"><i class="fa-solid fa-xmark"></i></button>
+            </td>
+        </tr>`;
+}
+
+function checkCaseIoc(iocId, value) {
+    const cell = document.getElementById(`iocResult${iocId}`);
+    cell.innerHTML = '<span class="text-muted">Checking&hellip;</span>';
+    fetch('/api/ti/lookup', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ioc: value})
+    }).then(r => r.json()).then(data => {
+        if (data.status === 'malicious') {
+            const corrob = data.corroboration_count > 1 ? ` (${data.corroboration_count} feeds)` : '';
+            cell.innerHTML = `<span class="badge bg-danger">Malicious${corrob}</span>`;
+        } else if (data.status === 'revoked') {
+            cell.innerHTML = '<span class="badge bg-secondary">Revoked match</span>';
+        } else if (data.status === 'clean') {
+            cell.innerHTML = '<span class="badge bg-success">No match</span>';
+        } else {
+            cell.innerHTML = '<span class="text-danger small">Error</span>';
+        }
+    }).catch(err => { cell.innerHTML = '<span class="text-danger small">Error</span>'; console.error(err); });
+}
+
+function addCaseIoc() {
+    const ioc_type = document.getElementById('newIocType').value;
+    const valueEl = document.getElementById('newIocValue');
+    const value = valueEl.value.trim();
+    const notes = document.getElementById('newIocNotes').value.trim();
+    const errBox = document.getElementById('newIocError');
+    errBox.style.display = 'none';
+    if (!value) { errBox.innerText = 'Value is required.'; errBox.style.display = 'block'; return; }
+    fetch(`/api/cases/${activeCaseId}/iocs`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ioc_type, value, notes})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (!ok) { errBox.innerText = data.error || 'Failed to add indicator.'; errBox.style.display = 'block'; return; }
+        openCaseDetail(activeCaseId);
+    }).catch(err => { errBox.innerText = 'Error: ' + err; errBox.style.display = 'block'; });
+}
+
+async function removeCaseIoc(iocId) {
+    if (!(await confirmDialog('Remove this indicator from the case?', {title: 'Remove indicator', danger: true, confirmLabel: 'Remove'}))) return;
+    fetch(`/api/cases/${activeCaseId}/iocs/${iocId}`, {method: 'DELETE'})
+        .then(() => openCaseDetail(activeCaseId))
+        .catch(err => toast('Error removing indicator: ' + err, 'danger'));
+}
+
 // Mirrors agents.html's queueCommand() (same /api/agent/commands endpoint, same
 // confirmDialog + toast pattern) -- duplicated locally rather than shared, matching
 // this codebase's existing per-file convention, since the two templates don't share a
@@ -638,10 +698,14 @@ function caseEventLabel(e) {
         template_applied: `Template applied: ${escHtml(e.detail)}`,
         note: escHtml(e.detail),
         playbook_run: `<i class="fa-solid fa-robot me-1"></i>${escHtml(e.detail)}`,
+        playbook_action_approved: `<i class="fa-solid fa-check text-success me-1"></i>Approved: ${escHtml(e.detail)}`,
+        playbook_action_rejected: `<i class="fa-solid fa-xmark text-danger me-1"></i>Rejected: ${escHtml(e.detail)}`,
         analysis: (e.detail || '').split('\n')[0] || 'Analysis',
         asset_added: `Asset added: <strong>${escHtml(e.detail)}</strong>`,
         asset_status_change: `Asset status changed: ${escHtml(e.detail)}`,
         asset_removed: `Asset removed: <strong>${escHtml(e.detail)}</strong>`,
+        ioc_added: `Indicator added: <strong>${escHtml(e.detail)}</strong>`,
+        ioc_removed: `Indicator removed: <strong>${escHtml(e.detail)}</strong>`,
     };
     return map[e.event_type] || escHtml(e.event_type);
 }
@@ -822,6 +886,36 @@ function loadAndRenderCaseDetail(cid) {
                             </div>
                             <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="addCaseAsset()"><i class="fa-solid fa-plus me-1"></i>Add Asset</button>
                             <div id="newAssetError" class="text-danger small mt-1" style="display:none;"></div>
+                        </div>
+                    </div>
+                    <div class="card bg-dark border-secondary mb-3">
+                        <div class="card-header border-secondary">Indicators <span class="text-muted small">— hashes, domains, IPs, and URLs tied to this case; Check runs each against the local Threat Intel set</span></div>
+                        <div class="card-body">
+                            ${c.iocs.length ? `
+                            <div class="table-responsive mb-2">
+                                <table class="table table-dark table-sm align-middle mb-0">
+                                    <thead><tr><th>Type</th><th>Value</th><th>Notes</th><th></th><th></th></tr></thead>
+                                    <tbody>${c.iocs.map(caseIocRow).join('')}</tbody>
+                                </table>
+                            </div>` : '<p class="text-muted small mb-2">No indicators tracked yet.</p>'}
+                            <div class="row g-2">
+                                <div class="col-3">
+                                    <select id="newIocType" class="form-select form-select-sm bg-dark text-light border-secondary">
+                                        <option value="hash">Hash</option>
+                                        <option value="domain">Domain</option>
+                                        <option value="ip">IP</option>
+                                        <option value="url">URL</option>
+                                    </select>
+                                </div>
+                                <div class="col-4">
+                                    <input type="text" id="newIocValue" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Value">
+                                </div>
+                                <div class="col-5">
+                                    <input type="text" id="newIocNotes" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Notes (optional)">
+                                </div>
+                            </div>
+                            <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="addCaseIoc()"><i class="fa-solid fa-plus me-1"></i>Add Indicator</button>
+                            <div id="newIocError" class="text-danger small mt-1" style="display:none;"></div>
                         </div>
                     </div>
                     <div class="card bg-dark border-secondary mb-3">
