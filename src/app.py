@@ -5842,6 +5842,7 @@ def migrate_role_default_dashboard():
 def migrate_role_default_dashboard_v2():
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.row_factory = sqlite3.Row
         home_row = conn.execute("SELECT id FROM dashboards WHERE name = 'Home'").fetchone()
         home_id = home_row['id'] if home_row else None
 
