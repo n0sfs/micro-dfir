@@ -877,6 +877,15 @@ def threat_intel():
                     yara_files.append(os.path.relpath(os.path.join(root, file_name), yara_dir))
     yara_files.sort()
     yara_files_set = set(yara_files)
+    # Grouped purely for display (identify where the rules came from) -- the flat
+    # yara_files list above stays the actual POST-time validation allowlist. Category
+    # is the rule's subdirectory under rules/yara_imported/ (a checkout of the
+    # community Yara-Rules/rules GitHub project); files with no subdirectory fall
+    # back to 'Other'.
+    yara_files_by_category = {}
+    for rf in yara_files:
+        category = rf.split(os.sep)[0] if os.sep in rf else 'Other'
+        yara_files_by_category.setdefault(category, []).append(rf)
 
     if request.method == 'POST' and yara_available:
         active_tab = 'hunt'
@@ -915,7 +924,10 @@ def threat_intel():
                 else:
                     flash(f"Scanned {file.filename} against {compiled_rules} active rules.", "info")
 
-    return render_template('threat_intel.html', matches=matches, yara_files=yara_files, active_tab=active_tab, current_user=current_user)
+    return render_template(
+        'threat_intel.html', matches=matches, yara_files=yara_files,
+        yara_files_by_category=yara_files_by_category, active_tab=active_tab, current_user=current_user
+    )
 
 TI_FEED_TYPES = ('taxii', 'threatfox', 'otx', 'urlhaus', 'feodotracker', 'yaraify', 'misp', 'sslbl', 'spamhaus_drop', 'tor_exit', 'malwarebazaar', 'csv')
 
@@ -1176,7 +1188,9 @@ def _entity_row_to_dict(r):
 
 def _get_ti_entities(db):
     return [_entity_row_to_dict(r) for r in db.execute(
-        "SELECT id, entity_type, name, aliases, description, techniques, source FROM ti_entities ORDER BY name"
+        "SELECT id, entity_type, name, aliases, description, techniques, source, "
+        "(SELECT COUNT(*) FROM ti_relationships WHERE entity_id = ti_entities.id) as linked_count "
+        "FROM ti_entities ORDER BY name"
     ).fetchall()]
 
 def _build_actor_summary(rows, entities):
@@ -5091,6 +5105,7 @@ def migrate_ti_feeds():
         # asked isn't this migration's call to make.
         conn.execute("INSERT OR IGNORE INTO ti_feeds (id, name, feed_type, enabled) VALUES (2, 'URLhaus Recent Malicious URLs (Public)', 'urlhaus', 0)")
         conn.execute("INSERT OR IGNORE INTO ti_feeds (id, name, feed_type, enabled) VALUES (3, 'Feodo Tracker Botnet C2 IPs (Public)', 'feodotracker', 0)")
+        conn.execute("INSERT OR IGNORE INTO ti_feeds (id, name, feed_type, enabled) VALUES (4, 'Tor Exit Nodes (Public)', 'tor_exit', 0)")
         conn.commit()
         conn.close()
     except Exception:
