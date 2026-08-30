@@ -196,6 +196,7 @@ let allCases = [];
 let allQueues = [];
 let caseFilter = 'all';
 let activeCaseId = null;
+let activeCaseClosed = false;
 let newCaseModal, manageQueuesModal;
 // Fleet-wide SLA target (hours) and known EDR-enrolled hosts -- both loaded once at
 // page init (see DOMContentLoaded below) and reused across every case detail render
@@ -309,13 +310,13 @@ function caseAssetEdrActions(a) {
         <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Kill a process (PID)" ${offline ? 'disabled' : ''} onclick="caseKillProcess('${escJs(a.host)}')"><i class="fa-solid fa-skull-crossbones"></i></button>`;
 }
 
-function caseAssetRow(a) {
+function caseAssetRow(a, isClosed) {
     return `
         <tr>
             <td class="small fw-bold">${escHtml(a.host)}</td>
             <td>${criticalityBadge(a.criticality)}</td>
             <td>
-                <select class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" onchange="updateCaseAssetStatus(${a.id}, this.value)">
+                <select class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" onchange="updateCaseAssetStatus(${a.id}, this.value)" ${isClosed ? 'disabled' : ''}>
                     <option value="suspected" ${a.compromise_status === 'suspected' ? 'selected' : ''}>Suspected</option>
                     <option value="confirmed" ${a.compromise_status === 'confirmed' ? 'selected' : ''}>Confirmed</option>
                     <option value="cleared" ${a.compromise_status === 'cleared' ? 'selected' : ''}>Cleared</option>
@@ -324,14 +325,14 @@ function caseAssetRow(a) {
             <td class="small">${escHtml(a.related_indicator || '')}</td>
             <td class="small text-muted">${escHtml(a.notes || '')}</td>
             <td class="text-nowrap">${caseAssetEdrActions(a)}</td>
-            <td class="text-end"><button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove asset" onclick="removeCaseAsset(${a.id})"><i class="fa-solid fa-xmark"></i></button></td>
+            <td class="text-end"><button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove asset" onclick="removeCaseAsset(${a.id})" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-xmark"></i></button></td>
         </tr>`;
 }
 
 const IOC_TYPE_LABELS = { hash: 'Hash', domain: 'Domain', ip: 'IP', url: 'URL' };
 function iocTypeBadge(t) { return `<span class="badge bg-secondary">${escHtml(IOC_TYPE_LABELS[t] || t)}</span>`; }
 
-function caseIocRow(i) {
+function caseIocRow(i, isClosed) {
     return `
         <tr id="iocRow${i.id}">
             <td>${iocTypeBadge(i.ioc_type)}</td>
@@ -340,7 +341,7 @@ function caseIocRow(i) {
             <td class="small" id="iocResult${i.id}"></td>
             <td class="text-end text-nowrap">
                 <button type="button" class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="Check against the local Threat Intel set" onclick="checkCaseIoc(${i.id}, '${escJs(i.value)}')"><i class="fa-solid fa-magnifying-glass"></i></button>
-                <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove indicator" onclick="removeCaseIoc(${i.id})"><i class="fa-solid fa-xmark"></i></button>
+                <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove indicator" onclick="removeCaseIoc(${i.id})" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-xmark"></i></button>
             </td>
         </tr>`;
 }
@@ -674,21 +675,21 @@ function itemSummaryLine(item) {
            `<span class="small">${escHtml((s.message || '').slice(0, 200))}</span>`;
 }
 
-function taskRow(t) {
+function taskRow(t, isClosed) {
     const done = t.status === 'done';
     return `
         <div class="d-flex align-items-center border border-secondary rounded p-2 mb-1">
-            <input type="checkbox" class="form-check-input me-2" ${done ? 'checked' : ''} onchange="toggleCaseTask(${t.id}, '${t.status}')">
+            <input type="checkbox" class="form-check-input me-2" ${done ? 'checked' : ''} onchange="toggleCaseTask(${t.id}, '${t.status}')" ${isClosed ? 'disabled' : ''}>
             <span class="flex-grow-1 ${done ? 'text-decoration-line-through text-muted' : ''}">${escHtml(t.title)}</span>
             ${t.assignee ? `<span class="badge bg-secondary me-2">${escHtml(t.assignee)}</span>` : ''}
-            <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove task" onclick="deleteCaseTask(${t.id})"><i class="fa-solid fa-xmark"></i></button>
+            <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove task" onclick="deleteCaseTask(${t.id})" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-xmark"></i></button>
         </div>`;
 }
 
 function caseEventLabel(e) {
     const map = {
         created: 'Case created',
-        status_change: `Status changed to <strong>${escHtml(e.detail)}</strong>`,
+        status_change: e.detail === 'open' ? 'Case reopened' : (e.detail === 'closed' ? 'Case closed' : `Status changed to <strong>${escHtml(e.detail)}</strong>`),
         assignee_change: `Assignee changed to <strong>${escHtml(e.detail)}</strong>`,
         tlp_change: `TLP changed to <strong>${e.detail ? escHtml(e.detail.toUpperCase()) : 'Not set'}</strong>`,
         pap_change: `PAP changed to <strong>${e.detail ? escHtml(e.detail.toUpperCase()) : 'Not set'}</strong>`,
@@ -772,6 +773,8 @@ window.addEventListener('popstate', () => {
 function loadAndRenderCaseDetail(cid) {
     fetch(`/api/cases/${cid}`).then(r => r.json()).then(c => {
         if (!c || c.error) { toast((c && c.error) || 'Case not found.', 'danger'); backToList(); return; }
+        const isClosed = c.status === 'closed';
+        activeCaseClosed = isClosed;
         document.getElementById('caseDetailTitleHeading').innerHTML = `<i class="fa-solid fa-folder-open me-2"></i>${escHtml(c.title)}`;
         document.getElementById('caseDetailBody').innerHTML = `
             <div class="row g-3">
@@ -779,10 +782,11 @@ function loadAndRenderCaseDetail(cid) {
                     <div class="card bg-dark border-secondary mb-3">
                         <div class="card-body">
                             <div id="caseSlaTimersWrap">${renderCaseSlaTimers(c)}</div>
+                            ${isClosed ? '<div class="alert alert-secondary py-2 small mb-2"><i class="fa-solid fa-lock me-1"></i>This case is closed and read-only. Change Status below to reopen it.</div>' : ''}
                             <div class="row g-2 mb-2">
                                 <div class="col-md-8">
                                     <label class="form-label small text-muted mb-1">Title</label>
-                                    <input type="text" id="editCaseTitle" class="form-control bg-dark text-light border-secondary" value="${escHtml(c.title)}">
+                                    <input type="text" id="editCaseTitle" class="form-control bg-dark text-light border-secondary" value="${escHtml(c.title)}" ${isClosed ? 'disabled' : ''}>
                                 </div>
                                 <div class="col-md-4">
                                     <label class="form-label small text-muted mb-1">Status</label>
@@ -796,23 +800,23 @@ function loadAndRenderCaseDetail(cid) {
                                 </div>
                                 <div class="col-md-4">
                                     <label class="form-label small text-muted mb-1">Assignee</label>
-                                    <input type="text" id="editCaseAssignee" class="form-control bg-dark text-light border-secondary" value="${escHtml(c.assignee || '')}">
+                                    <input type="text" id="editCaseAssignee" class="form-control bg-dark text-light border-secondary" value="${escHtml(c.assignee || '')}" ${isClosed ? 'disabled' : ''}>
                                 </div>
                                 <div class="col-md-4">
                                     <label class="form-label small text-muted mb-1">Queue</label>
-                                    <select id="editCaseQueue" class="form-select bg-dark text-light border-secondary"></select>
+                                    <select id="editCaseQueue" class="form-select bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}></select>
                                 </div>
                                 <div class="col-md-4">
                                     <label class="form-label small text-muted mb-1">TLP</label>
-                                    <select id="editCaseTlp" class="form-select bg-dark text-light border-secondary"></select>
+                                    <select id="editCaseTlp" class="form-select bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}></select>
                                 </div>
                                 <div class="col-md-4">
                                     <label class="form-label small text-muted mb-1">PAP</label>
-                                    <select id="editCasePap" class="form-select bg-dark text-light border-secondary"></select>
+                                    <select id="editCasePap" class="form-select bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}></select>
                                 </div>
                                 <div class="col-md-4">
                                     <label class="form-label small text-muted mb-1">Severity</label>
-                                    <select id="editCaseSeverity" class="form-select bg-dark text-light border-secondary">
+                                    <select id="editCaseSeverity" class="form-select bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}>
                                         <option value="critical" ${c.severity === 'critical' ? 'selected' : ''}>Critical</option>
                                         <option value="high" ${c.severity === 'high' ? 'selected' : ''}>High</option>
                                         <option value="medium" ${!c.severity || c.severity === 'medium' ? 'selected' : ''}>Medium</option>
@@ -825,7 +829,7 @@ function loadAndRenderCaseDetail(cid) {
                                 </div>
                                 <div class="col-12">
                                     <label class="form-label small text-muted mb-1">Description</label>
-                                    <textarea id="editCaseDescription" class="form-control bg-dark text-light border-secondary" rows="3">${escHtml(c.description || '')}</textarea>
+                                    <textarea id="editCaseDescription" class="form-control bg-dark text-light border-secondary" rows="3" ${isClosed ? 'disabled' : ''}>${escHtml(c.description || '')}</textarea>
                                 </div>
                             </div>
                             <button type="button" class="btn btn-sm btn-outline-primary" onclick="saveCaseDetail()"><i class="fa-solid fa-floppy-disk me-1"></i>Save</button>
@@ -835,10 +839,10 @@ function loadAndRenderCaseDetail(cid) {
                     <div class="card bg-dark border-secondary mb-3">
                         <div class="card-header border-secondary">Tasks (${c.tasks.filter(t => t.status === 'done').length}/${c.tasks.length})</div>
                         <div class="card-body">
-                            <div id="caseTasksList">${c.tasks.length ? c.tasks.map(taskRow).join('') : '<p class="text-muted small mb-2">No tasks yet.</p>'}</div>
+                            <div id="caseTasksList">${c.tasks.length ? c.tasks.map(t => taskRow(t, isClosed)).join('') : '<p class="text-muted small mb-2">No tasks yet.</p>'}</div>
                             <div class="d-flex gap-2 mt-2">
-                                <input type="text" id="newCaseTaskInput" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Add a task..." onkeyup="if(event.key === 'Enter') addCaseTask()">
-                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addCaseTask()"><i class="fa-solid fa-plus"></i></button>
+                                <input type="text" id="newCaseTaskInput" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Add a task..." onkeyup="if(event.key === 'Enter') addCaseTask()" ${isClosed ? 'disabled' : ''}>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addCaseTask()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-plus"></i></button>
                             </div>
                         </div>
                     </div>
@@ -850,7 +854,7 @@ function loadAndRenderCaseDetail(cid) {
                             ${c.items.length ? c.items.map(it => `
                                 <div class="d-flex justify-content-between align-items-start border border-secondary rounded p-2 mb-2">
                                     <div>${itemSummaryLine(it)}</div>
-                                    <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2 ms-2" title="Remove from case" onclick="removeCaseItem(${it.id})"><i class="fa-solid fa-xmark"></i></button>
+                                    <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2 ms-2" title="Remove from case" onclick="removeCaseItem(${it.id})" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-xmark"></i></button>
                                 </div>
                             `).join('') : '<p class="text-muted small mb-0">No items added yet.</p>'}
                         </div>
@@ -866,25 +870,25 @@ function loadAndRenderCaseDetail(cid) {
                             <div class="table-responsive mb-2">
                                 <table class="table table-dark table-sm align-middle mb-0">
                                     <thead><tr><th>Host</th><th>Criticality</th><th>Status</th><th>Indicator</th><th>Notes</th><th>EDR</th><th></th></tr></thead>
-                                    <tbody>${c.assets.map(caseAssetRow).join('')}</tbody>
+                                    <tbody>${c.assets.map(a => caseAssetRow(a, isClosed)).join('')}</tbody>
                                 </table>
                             </div>` : '<p class="text-muted small mb-2">No assets tracked yet.</p>'}
                             <div class="row g-2">
                                 <div class="col-4">
-                                    <input type="text" id="newAssetHost" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Host, e.g. WKS-04">
+                                    <input type="text" id="newAssetHost" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Host, e.g. WKS-04" ${isClosed ? 'disabled' : ''}>
                                 </div>
                                 <div class="col-3">
-                                    <select id="newAssetStatus" class="form-select form-select-sm bg-dark text-light border-secondary">
+                                    <select id="newAssetStatus" class="form-select form-select-sm bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}>
                                         <option value="suspected">Suspected</option>
                                         <option value="confirmed">Confirmed</option>
                                         <option value="cleared">Cleared</option>
                                     </select>
                                 </div>
                                 <div class="col-5">
-                                    <input type="text" id="newAssetIndicator" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Related indicator (optional)">
+                                    <input type="text" id="newAssetIndicator" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Related indicator (optional)" ${isClosed ? 'disabled' : ''}>
                                 </div>
                             </div>
-                            <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="addCaseAsset()"><i class="fa-solid fa-plus me-1"></i>Add Asset</button>
+                            <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="addCaseAsset()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-plus me-1"></i>Add Asset</button>
                             <div id="newAssetError" class="text-danger small mt-1" style="display:none;"></div>
                         </div>
                     </div>
@@ -895,12 +899,12 @@ function loadAndRenderCaseDetail(cid) {
                             <div class="table-responsive mb-2">
                                 <table class="table table-dark table-sm align-middle mb-0">
                                     <thead><tr><th>Type</th><th>Value</th><th>Notes</th><th></th><th></th></tr></thead>
-                                    <tbody>${c.iocs.map(caseIocRow).join('')}</tbody>
+                                    <tbody>${c.iocs.map(i => caseIocRow(i, isClosed)).join('')}</tbody>
                                 </table>
                             </div>` : '<p class="text-muted small mb-2">No indicators tracked yet.</p>'}
                             <div class="row g-2">
                                 <div class="col-3">
-                                    <select id="newIocType" class="form-select form-select-sm bg-dark text-light border-secondary">
+                                    <select id="newIocType" class="form-select form-select-sm bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}>
                                         <option value="hash">Hash</option>
                                         <option value="domain">Domain</option>
                                         <option value="ip">IP</option>
@@ -908,13 +912,13 @@ function loadAndRenderCaseDetail(cid) {
                                     </select>
                                 </div>
                                 <div class="col-4">
-                                    <input type="text" id="newIocValue" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Value">
+                                    <input type="text" id="newIocValue" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Value" ${isClosed ? 'disabled' : ''}>
                                 </div>
                                 <div class="col-5">
-                                    <input type="text" id="newIocNotes" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Notes (optional)">
+                                    <input type="text" id="newIocNotes" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Notes (optional)" ${isClosed ? 'disabled' : ''}>
                                 </div>
                             </div>
-                            <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="addCaseIoc()"><i class="fa-solid fa-plus me-1"></i>Add Indicator</button>
+                            <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="addCaseIoc()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-plus me-1"></i>Add Indicator</button>
                             <div id="newIocError" class="text-danger small mt-1" style="display:none;"></div>
                         </div>
                     </div>
@@ -922,12 +926,12 @@ function loadAndRenderCaseDetail(cid) {
                         <div class="card-header border-secondary">Analyze Host / User <span class="text-muted small">— alerts, UEBA activity, risk score, and IOC enrichment over the Risk Scoring window, posted to the timeline</span></div>
                         <div class="card-body">
                             <div class="d-flex gap-2 flex-wrap">
-                                <select id="analyzeEntityType" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:110px;">
+                                <select id="analyzeEntityType" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:110px;" ${isClosed ? 'disabled' : ''}>
                                     <option value="host">Host</option>
                                     <option value="user">User</option>
                                 </select>
-                                <input type="text" id="analyzeEntityId" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:180px;" placeholder="e.g. WKS-04">
-                                <button type="button" class="btn btn-sm btn-outline-primary" id="analyzeBtn" onclick="analyzeCaseEntity()"><i class="fa-solid fa-magnifying-glass-chart me-1"></i>Analyze</button>
+                                <input type="text" id="analyzeEntityId" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:180px;" placeholder="e.g. WKS-04" ${isClosed ? 'disabled' : ''}>
+                                <button type="button" class="btn btn-sm btn-outline-primary" id="analyzeBtn" onclick="analyzeCaseEntity()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-magnifying-glass-chart me-1"></i>Analyze</button>
                             </div>
                             <div id="analyzeMsg" class="small mt-2" style="display:none;"></div>
                         </div>
@@ -946,8 +950,8 @@ function loadAndRenderCaseDetail(cid) {
                         <div class="card-header border-secondary">Timeline</div>
                         <div class="card-body">
                             <div class="d-flex gap-2 mb-3">
-                                <input type="text" id="newCaseNoteInput" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Add a note..." onkeyup="if(event.key === 'Enter') addCaseNote()">
-                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addCaseNote()"><i class="fa-solid fa-plus"></i></button>
+                                <input type="text" id="newCaseNoteInput" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Add a note..." onkeyup="if(event.key === 'Enter') addCaseNote()" ${isClosed ? 'disabled' : ''}>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addCaseNote()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-plus"></i></button>
                             </div>
                             <div style="max-height:400px; overflow-y:auto;">
                                 ${c.events.length ? c.events.map(eventRow).join('') : '<p class="text-muted small">No timeline events yet.</p>'}
@@ -1090,11 +1094,11 @@ function renderLinkToEntityControl() {
         const options = (entities || []).map(e => `<option value="${e.id}">${escHtml(e.name)}</option>`).join('');
         wrap.innerHTML = `
             <div class="d-flex align-items-center gap-2 flex-wrap">
-                <select id="linkEntitySelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;">
+                <select id="linkEntitySelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;" ${activeCaseClosed ? 'disabled' : ''}>
                     <option value="">Link to entity…</option>
                     ${options}
                 </select>
-                <button type="button" class="btn btn-sm btn-outline-primary" onclick="linkToEntity()"><i class="fa-solid fa-link me-1"></i>Link</button>
+                <button type="button" class="btn btn-sm btn-outline-primary" onclick="linkToEntity()" ${activeCaseClosed ? 'disabled' : ''}><i class="fa-solid fa-link me-1"></i>Link</button>
             </div>
             <div id="linkToEntityMsg" class="small mt-1" style="display:none;"></div>
         `;
