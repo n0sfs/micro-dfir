@@ -81,7 +81,15 @@
                                             </div>
                                         </div>
                                     </th>
-                                    <th title="How many times this indicator has actually matched our own environment (via the IOC-IP correlation), not just how many times it's been seen in the feed">Sightings</th>
+                                    <th class="ioc-th" title="How many times this indicator has actually matched our own environment (via the IOC-IP correlation), not just how many times it's been seen in the feed">
+                                        <div class="d-flex align-items-center justify-content-between">
+                                            <span>Sightings</span>
+                                            <div class="dropdown">
+                                                <button type="button" class="th-icon-btn" id="filterBtnSightings" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                                <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuSightings" style="min-width:150px;"></div>
+                                            </div>
+                                        </div>
+                                    </th>
                                     <th></th>
                                 </tr>
                             </thead>
@@ -288,18 +296,19 @@
                             </div>
                             <div class="mb-3">
                                 <label class="form-label text-info fw-bold">Active Rules ({{ yara_files|length }} loaded)</label>
-                                <div class="text-muted small mb-2"><i class="fa-solid fa-circle-info me-1"></i>Community rules from the <a href="https://github.com/Yara-Rules/rules" target="_blank" rel="noopener" class="text-muted">Yara-Rules/rules</a> project, organized by category below.</div>
+                                <div class="text-muted small mb-2"><i class="fa-solid fa-circle-info me-1"></i>Community rules from the <a href="https://github.com/Yara-Rules/rules" target="_blank" rel="noopener" class="text-muted">Yara-Rules/rules</a> project are organized by category below. YARAify-synced rules aren't (that feed's bulk export is a flat file drop with no folder taxonomy or reliable naming convention to group by) — use the search box to find one instead.</div>
+                                <input type="text" id="yaraRuleSearch" class="form-control form-control-sm bg-dark text-light border-secondary mb-2" placeholder="Search rule names or descriptions..." oninput="filterYaraRules()">
                                 <div class="d-flex justify-content-between mb-2">
                                     <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAll(true)">Select All</button>
                                     <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAll(false)">Clear</button>
                                 </div>
-                                <div class="border border-secondary rounded p-2 bg-black" style="max-height: 300px; overflow-y: auto;">
+                                <div class="border border-secondary rounded p-2 bg-black" id="yaraRuleList" style="max-height: 300px; overflow-y: auto;">
                                     {% for category, files in yara_files_by_category.items()|sort %}
-                                    <details class="mb-1">
+                                    <details class="mb-1 yara-cat-group">
                                         <summary class="text-uppercase text-muted small fw-bold mt-2 mb-1" style="cursor:pointer;">{{ category }} ({{ files|length }})</summary>
                                         <div class="ms-3">
                                         {% for rf in files %}
-                                        <div class="form-check">
+                                        <div class="form-check yara-rule-row" data-search="{{ (rf.split('/')[-1] ~ ' ' ~ (yara_file_descriptions.get(rf) or ''))|lower }}">
                                             <input class="form-check-input rule-checkbox" type="checkbox" name="selected_rules" value="{{ rf }}" id="rule-{{ loop.index0 }}-{{ category }}" checked onchange="updateHuntStats()">
                                             <label class="form-check-label text-light small" for="rule-{{ loop.index0 }}-{{ category }}"{% if yara_file_descriptions.get(rf) %} title="{{ yara_file_descriptions[rf] }}"{% endif %}>
                                                 {{ rf.split('/')[-1] }}{% if yara_file_descriptions.get(rf) %}<span class="text-muted"> — {{ yara_file_descriptions[rf] | truncate(70) }}</span>{% endif %}
@@ -661,6 +670,26 @@ function updateHuntStats() {
 function toggleSelectAll(select) {
     document.querySelectorAll('.rule-checkbox').forEach(cb => cb.checked = select);
     updateHuntStats();
+}
+
+// Categories only exist for the community Yara-Rules/rules project (real curated
+// folders) -- YARAify's synced rules are a flat bulk export with no usable grouping
+// signal (checked: ~77% of its filenames don't even share a common prefix with any
+// other file), so a search box is the actual fix for "find one rule in a big list"
+// there, not fabricated categories. Auto-expands any category containing a match so
+// results aren't hidden inside a still-collapsed <details>.
+function filterYaraRules() {
+    const q = document.getElementById('yaraRuleSearch').value.trim().toLowerCase();
+    document.querySelectorAll('#yaraRuleList .yara-cat-group').forEach(group => {
+        let anyVisible = false;
+        group.querySelectorAll('.yara-rule-row').forEach(row => {
+            const match = !q || row.dataset.search.includes(q);
+            row.style.display = match ? '' : 'none';
+            if (match) anyVisible = true;
+        });
+        group.style.display = anyVisible ? '' : 'none';
+        if (q) { if (anyVisible) group.open = true; } else { group.open = false; }
+    });
 }
 
 // ---- YARA Scanning: File Scan vs IOC Hash Sweep mode ----
@@ -1846,7 +1875,7 @@ async function toggleWarninglistEnabled(id, checked) {
 // page fetched via `limit`, so filtering only what's already loaded would silently
 // miss matches outside the current page. Same combined-AND-conditions pattern as the
 // feeds/rules tables elsewhere in this app.
-let iocFilters = { type: [], feed_id: [], status: [] };
+let iocFilters = { type: [], feed_id: [], status: [], sightings: [] };
 
 function buildIocFilterMenu(menuId, colKey, options) {
     const menu = document.getElementById(menuId);
@@ -1883,9 +1912,9 @@ function toggleIocFilter(colKey, value, checked) {
 }
 
 function clearIocFilters() {
-    iocFilters = { type: [], feed_id: [], status: [] };
+    iocFilters = { type: [], feed_id: [], status: [], sightings: [] };
     document.getElementById('iocSearch').value = '';
-    ['type', 'feed_id', 'status'].forEach(updateIocFilterButtonState);
+    ['type', 'feed_id', 'status', 'sightings'].forEach(updateIocFilterButtonState);
     populateIocFilterMenus();
     loadIocFacets();
     loadIocs();
@@ -1894,6 +1923,7 @@ function clearIocFilters() {
 function populateIocFilterMenus() {
     buildIocFilterMenu('filterMenuFeed_id', 'feed_id', allFeeds.map(f => ({ value: f.id, label: f.name })));
     buildIocFilterMenu('filterMenuStatus', 'status', [{ value: '0', label: 'Active' }, { value: '1', label: 'Revoked' }]);
+    buildIocFilterMenu('filterMenuSightings', 'sightings', [{ value: 'has', label: 'Has sightings' }, { value: 'none', label: 'No sightings' }]);
 }
 
 function loadIocFacets() {
@@ -1925,12 +1955,13 @@ function loadIocs() {
     if (iocFilters.type.length) params.set('type', iocFilters.type.join(','));
     if (iocFilters.feed_id.length) params.set('feed_id', iocFilters.feed_id.join(','));
     if (iocFilters.status.length) params.set('status', iocFilters.status.join(','));
+    if (iocFilters.sightings.length) params.set('sightings', iocFilters.sightings.join(','));
     fetch(`/api/ti/iocs?${params.toString()}`)
         .then(r => r.json())
         .then(data => {
             iocTotal = data.total ?? 0;
             updateSharedStats();
-            const filtered = q || iocFilters.type.length || iocFilters.feed_id.length || iocFilters.status.length;
+            const filtered = q || iocFilters.type.length || iocFilters.feed_id.length || iocFilters.status.length || iocFilters.sightings.length;
             document.getElementById('iocCountLabel').innerText = filtered
                 ? `Showing ${data.iocs.length} of ${data.total} matching indicators`
                 : `Showing ${data.iocs.length} of ${data.total} indicators`;
