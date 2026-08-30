@@ -74,17 +74,32 @@
                     </div>
                     <div class="col-md-6">
                         <label class="form-label small text-muted mb-1">Trigger Event</label>
-                        <select id="pbTrigger" class="form-select bg-dark text-light border-secondary">
+                        <select id="pbTrigger" class="form-select bg-dark text-light border-secondary" onchange="onPlaybookTriggerChange()">
                             <option value="case_created">Case created</option>
                             <option value="status_changed">Status changed</option>
                             <option value="queue_changed">Queue changed</option>
                             <option value="assignee_changed">Assignee changed</option>
+                            <option value="scheduled">Scheduled (sweeps matching cases on an interval)</option>
                         </select>
                     </div>
                 </div>
                 <div class="mb-2">
                     <label class="form-label small text-muted mb-1">Description (optional)</label>
                     <input type="text" id="pbDescription" class="form-control bg-dark text-light border-secondary">
+                </div>
+                <div class="row g-2 mb-2" id="pbScheduleRow" style="display:none;">
+                    <div class="col-md-6">
+                        <label class="form-label small text-muted mb-1">Run every&hellip; (minutes)</label>
+                        <input type="number" id="pbScheduleInterval" min="1" class="form-control bg-dark text-light border-secondary" placeholder="e.g. 60 for hourly">
+                        <div class="form-text text-muted">Conditions below select WHICH open cases get swept each time, instead of checking one case at fire time.</div>
+                    </div>
+                </div>
+                <div class="row g-2 mb-2">
+                    <div class="col-md-6">
+                        <label class="form-label small text-muted mb-1">Max runs / hour (optional)</label>
+                        <input type="number" id="pbMaxRunsPerHour" min="1" class="form-control bg-dark text-light border-secondary" placeholder="No limit">
+                        <div class="form-text text-muted">Auto-disables the playbook if it's tripped -- a runaway-automation guardrail, not a normal throttle.</div>
+                    </div>
                 </div>
                 <div class="row g-2 mb-3">
                     <div class="col-md-3">
@@ -227,13 +242,20 @@ let playbookModal, playbookRunsModal, secretsModal;
 
 const TRIGGER_LABELS = {
     case_created: 'Case created', status_changed: 'Status changed',
-    queue_changed: 'Queue changed', assignee_changed: 'Assignee changed'
+    queue_changed: 'Queue changed', assignee_changed: 'Assignee changed',
+    scheduled: 'Scheduled'
 };
 const ACTION_LABELS = {
     apply_template: 'Apply case template', add_task: 'Add task', add_note: 'Add note',
     set_queue: 'Set queue', analyze_entity: 'Analyze entity', send_webhook: 'Send webhook',
-    send_slack: 'Send Slack message'
+    send_slack: 'Send Slack message', isolate_host: 'Isolate confirmed hosts (EDR)'
 };
+
+// Action types that always require approval -- the checkbox is forced on and disabled
+// for these in the editor, matching PLAYBOOK_ACTION_TYPES_ALWAYS_GATED server-side
+// (which re-forces it regardless of what's submitted, so this is a UI hint, not the
+// actual enforcement point).
+const ACTION_TYPES_ALWAYS_GATED = ['isolate_host'];
 
 function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -415,6 +437,8 @@ function actionParamsFieldsHtml(seq, actionType, params) {
             return urlSourceSelectHtml(seq, 'webhook_url', params.webhook_url_secret) +
                 `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_webhook_url" placeholder="Slack incoming webhook URL" value="${escHtml(params.webhook_url || '')}" style="${params.webhook_url_secret ? 'display:none;' : ''}">
                 <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_message" placeholder="Message (optional -- case_id/case_title/status/tlp/pap placeholders supported)" value="${escHtml(params.message || '')}">`;
+        case 'isolate_host':
+            return `<div class="small text-muted">No params -- isolates every Case Asset marked <strong>Confirmed</strong> compromised when this action runs. Always requires approval.</div>`;
         default:
             return '';
     }
@@ -442,11 +466,24 @@ function addPlaybookActionRow(actionType, params, requiresApproval) {
     `;
     list.appendChild(div);
     document.getElementById(`pbActParams_${seq}`).innerHTML = actionParamsFieldsHtml(seq, chosenType, params);
+    syncApprovalCheckboxGating(seq, chosenType);
+}
+
+// Forces "Requires approval" on and locks the checkbox for an always-gated action type
+// (isolate_host) -- purely a UI hint matching the server's own forced enforcement
+// (PLAYBOOK_ACTION_TYPES_ALWAYS_GATED re-applies this regardless of what's submitted),
+// so an admin can't be misled into thinking they've turned approval off for one.
+function syncApprovalCheckboxGating(seq, actionType) {
+    const box = document.getElementById(`pbActApproval_${seq}`);
+    const alwaysGated = ACTION_TYPES_ALWAYS_GATED.includes(actionType);
+    box.disabled = alwaysGated;
+    if (alwaysGated) box.checked = true;
 }
 
 function onPlaybookActionTypeChange(seq) {
     const actionType = document.getElementById(`pbActType_${seq}`).value;
     document.getElementById(`pbActParams_${seq}`).innerHTML = actionParamsFieldsHtml(seq, actionType, {});
+    syncApprovalCheckboxGating(seq, actionType);
 }
 
 function collectActionRow(row) {
@@ -479,14 +516,23 @@ function collectActionRow(row) {
     return { action_type: actionType, params, requires_approval: requiresApproval };
 }
 
+// Shows/hides the schedule-interval field -- only meaningful (and only validated
+// server-side) when the trigger itself is 'scheduled'.
+function onPlaybookTriggerChange() {
+    document.getElementById('pbScheduleRow').style.display = document.getElementById('pbTrigger').value === 'scheduled' ? '' : 'none';
+}
+
 async function showPlaybookModal() {
     document.getElementById('playbookModalTitle').innerText = 'New Playbook';
     document.getElementById('pbId').value = '';
     document.getElementById('pbName').value = '';
     document.getElementById('pbDescription').value = '';
     document.getElementById('pbTrigger').value = 'case_created';
+    document.getElementById('pbScheduleInterval').value = '';
+    document.getElementById('pbMaxRunsPerHour').value = '';
     document.getElementById('pbError').style.display = 'none';
     document.getElementById('pbActionsList').innerHTML = '';
+    onPlaybookTriggerChange();
     if (!allQueuesForPb.length) await loadQueuesForPlaybooks();
     if (!caseTemplatesForPb.length) await loadTemplatesForPlaybooks();
     if (!allPlaybookSecrets.length) await loadPlaybookSecretsList();
@@ -504,8 +550,11 @@ async function editPlaybook(pid) {
     document.getElementById('pbName').value = p.name;
     document.getElementById('pbDescription').value = p.description || '';
     document.getElementById('pbTrigger').value = p.trigger_event;
+    document.getElementById('pbScheduleInterval').value = p.schedule_interval_minutes || '';
+    document.getElementById('pbMaxRunsPerHour').value = p.max_runs_per_hour || '';
     document.getElementById('pbError').style.display = 'none';
     document.getElementById('pbActionsList').innerHTML = '';
+    onPlaybookTriggerChange();
     if (!allQueuesForPb.length) await loadQueuesForPlaybooks();
     if (!caseTemplatesForPb.length) await loadTemplatesForPlaybooks();
     if (!allPlaybookSecrets.length) await loadPlaybookSecretsList();
@@ -529,10 +578,15 @@ function savePlaybook() {
         condition_tlp: document.getElementById('pbCondTlp').value || null,
         condition_status: document.getElementById('pbCondStatus').value || null,
         condition_severity: document.getElementById('pbCondSeverity').value || null,
+        max_runs_per_hour: document.getElementById('pbMaxRunsPerHour').value || null,
+        schedule_interval_minutes: document.getElementById('pbScheduleInterval').value || null,
         actions
     };
     if (!payload.name) { errBox.innerText = 'Name is required.'; errBox.style.display = 'block'; return; }
     if (!actions.length) { errBox.innerText = 'At least one action is required.'; errBox.style.display = 'block'; return; }
+    if (payload.trigger_event === 'scheduled' && !payload.schedule_interval_minutes) {
+        errBox.innerText = 'Scheduled playbooks require a schedule interval (in minutes).'; errBox.style.display = 'block'; return;
+    }
     const url = pid ? `/api/playbooks/${pid}` : '/api/playbooks';
     const method = pid ? 'PUT' : 'POST';
     fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
