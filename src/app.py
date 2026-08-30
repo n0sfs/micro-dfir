@@ -1783,7 +1783,7 @@ def _get_rules_cache(db):
     from mitre_attack import techniques_for_tags
     rules_out = []
     for r in db.execute(
-        "SELECT id, title, rule_yaml, enabled, source, cloned_from, created_by, created_at, updated_by, updated_at, compliance_tags "
+        "SELECT id, title, rule_yaml, original_yaml, enabled, source, cloned_from, created_by, created_at, updated_by, updated_at, compliance_tags "
         "FROM sigma_rules ORDER BY id DESC"
     ).fetchall():
         rid = r['id']
@@ -1830,6 +1830,7 @@ def _get_rules_cache(db):
             "level": level,
             "status": status,
             "log_source_ingestible": log_source_ingestible,
+            "is_modified": bool(r['original_yaml']) and ry != r['original_yaml'],
             "source": r['source'] or 'sigma',
             "cloned_from": r['cloned_from'],
             "created_by": r['created_by'],
@@ -2139,7 +2140,7 @@ def api_rule_detail(rid):
 
     if request.method == 'GET':
         r = db.execute(
-            "SELECT id, title, rule_yaml, enabled, source, cloned_from, created_by, created_at, updated_by, updated_at, compliance_tags "
+            "SELECT id, title, rule_yaml, original_yaml, enabled, source, cloned_from, created_by, created_at, updated_by, updated_at, compliance_tags "
             "FROM sigma_rules WHERE id = ?", (rid,)
         ).fetchone()
         if not r:
@@ -2160,13 +2161,13 @@ def api_rule_detail(rid):
         log_audit('rule_delete', 'rule', rid, title_row['title'] if title_row else None)
         return jsonify({"ok": 1})
 
-    # PUT — update an existing rule's title/YAML. Sigma-sourced rules are read-only;
-    # they must be cloned into a custom rule before they can be edited.
+    # PUT — update an existing rule's title/YAML. Sigma-sourced rules are directly
+    # editable too (Revert to Default, POST /api/rules/<id>/revert, is the safety net
+    # if an edit needs undoing) -- Clone remains available separately for forking off
+    # a fully independent rule.
     existing = db.execute("SELECT rule_yaml, source FROM sigma_rules WHERE id = ?", (rid,)).fetchone()
     if not existing:
         return jsonify({"error": "Rule not found"}), 404
-    if existing['source'] == 'sigma':
-        return jsonify({"error": "Sigma-sourced rules are read-only. Clone this rule to create an editable custom copy."}), 403
 
     import yaml
     ry = (request.get_json() or {}).get('rule_yaml', '')
@@ -2205,6 +2206,36 @@ def api_rule_clone(rid):
     db.commit()
     invalidate_rules_cache()
     return jsonify({"status": "success", "id": cur.lastrowid})
+
+@app.route('/api/rules/<int:rid>/revert', methods=['POST'])
+@login_required
+def api_rule_revert(rid):
+    err = require_permission('rules.manage')
+    if err: return err
+    db = get_db()
+    r = db.execute("SELECT title, rule_yaml, original_yaml FROM sigma_rules WHERE id = ?", (rid,)).fetchone()
+    if not r:
+        return jsonify({"error": "Rule not found"}), 404
+    if not r['original_yaml']:
+        return jsonify({"error": "No default content recorded for this rule."}), 400
+    if r['rule_yaml'] == r['original_yaml']:
+        return jsonify({"error": "This rule already matches its default content."}), 400
+    import yaml
+    parsed = yaml.safe_load(r['original_yaml'])
+    t = parsed.get('title', r['title']) if isinstance(parsed, dict) else r['title']
+    # A revert IS an edit -- log it the same way PUT does, so the existing
+    # history/diff viewer shows exactly when and by whom a rule was reverted.
+    db.execute(
+        "INSERT INTO sigma_rule_history (rule_id, changed_by, old_yaml, new_yaml) VALUES (?, ?, ?, ?)",
+        (rid, current_user.username, r['rule_yaml'], r['original_yaml'])
+    )
+    db.execute(
+        "UPDATE sigma_rules SET title = ?, rule_yaml = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (t, r['original_yaml'], current_user.username, rid)
+    )
+    db.commit()
+    invalidate_rules_cache()
+    return jsonify({"status": "success"})
 
 @app.route('/api/rules/<int:rid>/history', methods=['GET'])
 @login_required
@@ -6429,6 +6460,24 @@ def migrate_coverage_snapshots():
     except Exception:
         pass
 
+def migrate_sigma_rules_original_yaml():
+    # No pristine copy of a Sigma-sourced rule was ever kept before this --
+    # _run_sigmahq_import() silently overwrote rule_yaml in place on every upstream
+    # change. Backfilling original_yaml from each row's CURRENT rule_yaml is the
+    # honest best-effort baseline: for a rule already locally modified before this
+    # column existed, its current (modified) content becomes its new "default" going
+    # forward -- there's no way to recover the true original after the fact.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(sigma_rules)").fetchall()}
+        if 'original_yaml' not in cols:
+            conn.execute("ALTER TABLE sigma_rules ADD COLUMN original_yaml TEXT")
+            conn.execute("UPDATE sigma_rules SET original_yaml = rule_yaml WHERE source = 'sigma'")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 # The __IOC_..._LIST__ correlation mechanism (see sigma_engine.py) is a capability, not
 # an active rule -- nothing alerts on it until some rule actually references one of the
 # placeholders. Seeded once (matched by title, so a user who deletes/edits it doesn't
@@ -7082,19 +7131,25 @@ def _run_sigmahq_import():
                     title = parsed['title']
                     uuid_ = parsed.get('id')
                     existing = conn.execute(
-                        "SELECT id, rule_yaml FROM sigma_rules WHERE sigma_uuid = ?", (uuid_,)
+                        "SELECT id, rule_yaml, original_yaml FROM sigma_rules WHERE sigma_uuid = ?", (uuid_,)
                     ).fetchone() if uuid_ else None
                     if existing:
-                        if existing['rule_yaml'] != ry:
+                        # Sigma rules are directly editable now (Revert to Default is the
+                        # safety net) -- a rule whose live content has diverged from its
+                        # recorded default has real local edits an import must never
+                        # silently clobber. Only rules still matching their own baseline
+                        # get updated (and their baseline moves forward with them), same
+                        # as this route's original "update if upstream differs" behavior.
+                        if existing['rule_yaml'] == existing['original_yaml'] and existing['rule_yaml'] != ry:
                             conn.execute(
-                                "UPDATE sigma_rules SET title = ?, rule_yaml = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                                (title, ry, existing['id'])
+                                "UPDATE sigma_rules SET title = ?, rule_yaml = ?, original_yaml = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                                (title, ry, ry, existing['id'])
                             )
                             stats['updated'] += 1
                     else:
                         conn.execute(
-                            "INSERT INTO sigma_rules (title, rule_yaml, enabled, source, sigma_uuid, created_at) VALUES (?, ?, 0, 'sigma', ?, CURRENT_TIMESTAMP)",
-                            (title, ry, uuid_)
+                            "INSERT INTO sigma_rules (title, rule_yaml, original_yaml, enabled, source, sigma_uuid, created_at) VALUES (?, ?, ?, 0, 'sigma', ?, CURRENT_TIMESTAMP)",
+                            (title, ry, ry, uuid_)
                         )
                         stats['inserted'] += 1
                 except Exception:
@@ -9169,6 +9224,7 @@ migrate_warninglists()
 migrate_ioc_sightings()
 migrate_ioc_sightings_alert_id()
 migrate_coverage_snapshots()
+migrate_sigma_rules_original_yaml()
 migrate_seed_ioc_correlation_rule()
 migrate_enrichment_results()
 migrate_ti_entities()
