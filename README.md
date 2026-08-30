@@ -12,8 +12,16 @@ A Complete Edge Security Appliance integrating:
 
 ## Access control
 
-Every user account has one role, ranked as a strict escalation ladder (each tier
-inherits everything below it) rather than independent capability grants:
+Access is governed by named permissions, not a fixed rank ladder — a role is
+just a set of permission keys drawn from a ~21-key registry spanning every
+gated app area (Cases, Log Search, Detection Rules, UEBA, Threat Intel,
+EDR/Agents, SOAR, Settings). Admins manage roles from Settings > Security >
+User Groups: view what each role can access, edit any role's permissions, or
+create an entirely new custom role (e.g. a "Threat Intel Analyst" role scoped
+to only `threatintel.manage`).
+
+Three built-in roles ship out of the box and can't be deleted, though their
+permissions can still be edited:
 
 | Role | Tier | Can do |
 |---|---|---|
@@ -21,7 +29,12 @@ inherits everything below it) rather than independent capability grants:
 | `senior_analyst` | Tier 3 | Everything above, plus hunting (YARA/IOC/string sweeps), detection rule tuning, UEBA model config, threat intel feed/entity management, SOAR playbook authoring, case deletion, and the full EDR response console (including free-text commands). |
 | `admin` | Admin | Everything above, plus user management, network/TLS/system settings, backups, retention, playbook secrets, and the audit log. |
 
-Enforcement is server-side (`require_role()` in `src/app.py`, checked against
-`ROLE_RANK`) on every mutating/sensitive route; the UI's `roleAtLeast()` helper
-(`templates/base.html`) mirrors those checks only to hide controls a lower tier
-couldn't use anyway.
+The built-in `admin` role can never lose the two permissions that manage
+users and roles themselves, so the system can't be locked out of its own
+administration.
+
+Enforcement is server-side (`require_permission(key)` in `src/app.py`,
+checked against each role's row in `role_permissions`) on every
+mutating/sensitive route; the UI's `hasPermission(key)` helper
+(`templates/base.html`) mirrors those checks only to hide controls a user's
+role couldn't use anyway.
