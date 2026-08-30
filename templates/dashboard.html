@@ -29,6 +29,54 @@
     #tuningTable .th-label:hover{color:var(--text-primary);}
     #tuningTable .sort-ic{font-size:.66rem; margin-left:3px; color:var(--text-muted);}
     #tuningTable .sort-ic.active-sort{color:var(--accent);}
+
+    /* ===== Coverage tab ===== */
+    .cov-hero{display:flex; flex-wrap:wrap; gap:28px; align-items:center;}
+    .cov-score-block{display:flex; align-items:center; gap:16px; padding-right:28px; border-right:1px solid var(--border);}
+    .cov-score-ring{position:relative; width:88px; height:88px; flex-shrink:0;}
+    .cov-score-ring svg{width:100%; height:100%; transform:rotate(-90deg);}
+    .cov-score-ring circle{fill:none; stroke-width:8;}
+    .cov-score-ring .track{stroke:var(--bg-inset);}
+    .cov-score-ring .fill{stroke:var(--accent); stroke-linecap:round; transition:stroke-dashoffset .4s ease;}
+    .cov-score-value{position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:1.35rem; font-weight:700; color:var(--text-primary); font-variant-numeric:tabular-nums;}
+    .cov-score-meta{display:flex; flex-direction:column; gap:4px;}
+    .cov-score-label{font-size:.72rem; text-transform:uppercase; letter-spacing:.05em; color:var(--text-muted); font-weight:700;}
+    .cov-score-delta{font-size:.8rem; font-weight:600;}
+    .cov-score-delta.up{color:var(--success);}
+    .cov-score-delta.down{color:var(--danger);}
+    .cov-score-delta.flat{color:var(--text-muted);}
+    .cov-chip-row{display:flex; gap:10px; flex-wrap:wrap; flex:1;}
+    .cov-chip{display:flex; align-items:center; gap:8px; padding:9px 16px; border-radius:999px; background:var(--bg-card-alt); border:1px solid var(--border); font-size:.82rem;}
+    .cov-chip .dot{width:9px; height:9px; border-radius:50%; flex-shrink:0;}
+    .cov-chip .num{font-weight:700; font-variant-numeric:tabular-nums; color:var(--text-primary);}
+    .cov-chip .lbl{color:var(--text-secondary);}
+    .cov-dot-gap{background:var(--text-muted);}
+    .cov-dot-inactive{background:var(--warning);}
+    .cov-dot-active{background:var(--info);}
+    .cov-dot-validated{background:var(--success);}
+
+    .cov-matrix{display:flex; gap:12px; overflow-x:auto; padding-bottom:8px;}
+    .cov-col{min-width:216px; flex:0 0 216px; background:var(--bg-card-alt); border:1px solid var(--border); border-radius:var(--radius); padding:14px;}
+    .cov-col-title{font-size:.72rem; text-transform:uppercase; letter-spacing:.05em; color:var(--text-secondary); font-weight:700; margin-bottom:2px;}
+    .cov-col-sub{font-size:.7rem; color:var(--text-muted); margin-bottom:8px;}
+    .cov-bar{display:flex; height:6px; border-radius:3px; overflow:hidden; background:var(--bg-inset); margin-bottom:10px;}
+    .cov-bar span{height:100%;}
+    .cov-bar .bar-gap{background:var(--border-light);}
+    .cov-bar .bar-inactive{background:var(--warning);}
+    .cov-bar .bar-active{background:var(--info);}
+    .cov-bar .bar-validated{background:var(--success);}
+    .cov-cells{display:flex; flex-direction:column; gap:4px; max-height:280px; overflow-y:auto;}
+    .cov-cell{display:flex; align-items:center; justify-content:space-between; gap:6px; padding:6px 9px; border-radius:6px; font-size:.74rem; cursor:pointer; border:1px solid transparent; transition:transform .08s ease, border-color .08s ease;}
+    .cov-cell:hover{transform:translateX(2px);}
+    .cov-cell-name{white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:500;}
+    .cov-cell-id{font-family:var(--font-mono); font-size:.62rem; opacity:.7; flex-shrink:0;}
+    .cov-cell .fa-triangle-exclamation, .cov-cell .fa-plug-circle-xmark{font-size:.68rem; margin-left:3px;}
+    .tier-gap{background:var(--bg-inset); color:var(--text-muted);}
+    .tier-inactive{background:color-mix(in srgb, var(--warning) 16%, transparent); color:var(--warning);}
+    .tier-active{background:color-mix(in srgb, var(--info) 18%, transparent); color:var(--info); font-weight:600;}
+    .tier-validated{background:color-mix(in srgb, var(--success) 20%, transparent); color:var(--success); font-weight:700;}
+    .cov-legend{display:flex; flex-wrap:wrap; gap:16px; align-items:center; font-size:.76rem; color:var(--text-secondary);}
+    .cov-legend .swatch{display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:5px; vertical-align:middle;}
 </style>
 
 <div class="page-header">
@@ -621,16 +669,33 @@
 <div id="paneCoverage" style="display: {{ 'block' if active_tab == 'coverage' else 'none' }};">
 <div class="card shadow-sm border-secondary bg-dark text-light mb-4">
     <div class="card-header border-secondary">
-        <h5 class="mb-0 text-info"><i class="fa-solid fa-chart-line"></i> Coverage Over Time</h5>
+        <h5 class="mb-0 text-info"><i class="fa-solid fa-shield-halved"></i> Coverage Score</h5>
+        <div class="text-muted small">How much of the curated MITRE ATT&amp;CK technique set is actively or validated-covered right now.</div>
     </div>
     <div class="card-body">
+        <div class="cov-hero mb-3" id="coverageHero">
+            <div class="cov-score-block">
+                <div class="cov-score-ring">
+                    <svg viewBox="0 0 88 88">
+                        <circle class="track" cx="44" cy="44" r="38"></circle>
+                        <circle class="fill" id="covScoreRingFill" cx="44" cy="44" r="38" stroke-dasharray="238.76" stroke-dashoffset="238.76"></circle>
+                    </svg>
+                    <div class="cov-score-value" id="covScoreValue">—</div>
+                </div>
+                <div class="cov-score-meta">
+                    <div class="cov-score-label">Overall Coverage</div>
+                    <div class="cov-score-delta flat" id="covScoreDelta">—</div>
+                </div>
+            </div>
+            <div class="cov-chip-row" id="coverageChips"></div>
+        </div>
         <div id="coverageHistoryEmpty" class="text-muted small text-center py-4" style="display:none;">History builds up daily starting today — check back tomorrow to see a trend.</div>
-        <div style="height:200px;"><canvas id="coverageHistoryChart"></canvas></div>
+        <div style="height:170px;"><canvas id="coverageHistoryChart"></canvas></div>
     </div>
 </div>
 <div class="card shadow-sm border-secondary bg-dark text-light mb-4">
-    <div class="card-header border-secondary d-flex justify-content-between align-items-center">
-        <h5 class="mb-0 text-info"><i class="fa-solid fa-diagram-project"></i> MITRE ATT&amp;CK Detection Coverage</h5>
+    <div class="card-header border-secondary d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <h5 class="mb-0 text-info"><i class="fa-solid fa-diagram-project"></i> Technique Coverage by Tactic</h5>
         <select id="coverageRange" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" onchange="loadCoverageTab()">
             <option value="7d">Last 7 days</option>
             <option value="30d" selected>Last 30 days</option>
@@ -638,14 +703,14 @@
         </select>
     </div>
     <div class="card-body">
-        <div class="text-muted small mb-3">
-            <span class="badge me-1" style="background:#3a3f4b;">&nbsp;&nbsp;</span> Gap — no rule mapped
-            <span class="badge me-1 ms-3" style="background:#664d0322;color:#ffc107;">&nbsp;&nbsp;</span> Inactive — mapped rule(s) disabled
-            <span class="badge me-1 ms-3" style="background:#0dcaf033;color:#0dcaf0;">&nbsp;&nbsp;</span> Active — enabled, not yet validated
-            <span class="badge me-1 ms-3" style="background:#19875433;color:#19a35a;">&nbsp;&nbsp;</span> Validated — enabled rule has fired
-            <span class="ms-3"><i class="fa-solid fa-plug-circle-xmark text-warning"></i> No matching log source ingested — enabled, but its rule(s) need data this appliance doesn't collect</span>
+        <div class="cov-legend mb-3">
+            <span><span class="swatch tier-gap"></span>Gap — no rule mapped</span>
+            <span><span class="swatch tier-inactive"></span>Inactive — mapped rule(s) disabled</span>
+            <span><span class="swatch tier-active"></span>Active — enabled, not yet validated</span>
+            <span><span class="swatch tier-validated"></span>Validated — enabled rule has fired</span>
+            <span><i class="fa-solid fa-plug-circle-xmark text-warning"></i> No matching log source ingested</span>
         </div>
-        <div id="coverageGrid" class="d-flex flex-wrap gap-3">
+        <div id="coverageGrid" class="cov-matrix">
             <div class="text-center text-muted py-4 w-100">Loading…</div>
         </div>
     </div>
@@ -3618,13 +3683,17 @@ function renderReportHistory() {
 // COVERAGE TAB
 // =====================================================================
 let coverageData = null;
+let coverageHistorySnapshots = [];
 
-const COVERAGE_TIER_STYLE = {
-    gap:       'background:#3a3f4b; color:#adb5bd;',
-    inactive:  'background:#664d0322; color:#ffc107;',
-    active:    'background:#0dcaf033; color:#0dcaf0; font-weight:600;',
-    validated: 'background:#19875433; color:#19a35a; font-weight:700;',
-};
+// tier -> {label, dotClass, barClass, cellClass} -- one source of truth for every
+// place a tier needs a color (chips, mini bars, cells, drilldown badge).
+const COVERAGE_TIERS = [
+    { key: 'validated', label: 'Validated', dot: 'cov-dot-validated', bar: 'bar-validated', cell: 'tier-validated' },
+    { key: 'active',    label: 'Active',    dot: 'cov-dot-active',    bar: 'bar-active',    cell: 'tier-active' },
+    { key: 'inactive',  label: 'Inactive',  dot: 'cov-dot-inactive',  bar: 'bar-inactive',  cell: 'tier-inactive' },
+    { key: 'gap',       label: 'Gap',       dot: 'cov-dot-gap',       bar: 'bar-gap',       cell: 'tier-gap' },
+];
+const COVERAGE_TIER_CELL_CLASS = Object.fromEntries(COVERAGE_TIERS.map(t => [t.key, t.cell]));
 
 let coverageHistoryChart = null;
 
@@ -3635,7 +3704,9 @@ function initCoverageTab() {
 
 function loadCoverageHistory() {
     fetch('/api/mitre/coverage/history?days=90').then(r => r.json()).then(d => {
-        renderCoverageHistoryChart(d.snapshots || []);
+        coverageHistorySnapshots = d.snapshots || [];
+        renderCoverageHistoryChart(coverageHistorySnapshots);
+        renderCoverageHero();
     }).catch(err => console.error('Error loading coverage history:', err));
 }
 
@@ -3657,12 +3728,13 @@ function renderCoverageHistoryChart(snapshots) {
             datasets: [{
                 label: 'Coverage %',
                 data: snapshots.map(s => s.coverage_pct),
-                borderColor: '#19a35a',
-                backgroundColor: 'rgba(25, 163, 90, 0.1)',
+                borderColor: '#22c55e',
+                backgroundColor: 'rgba(34, 197, 94, 0.12)',
                 borderWidth: 2,
                 fill: true,
-                tension: 0.2,
-                pointRadius: 2
+                tension: 0.25,
+                pointRadius: 2,
+                pointBackgroundColor: '#22c55e'
             }]
         },
         options: {
@@ -3674,30 +3746,16 @@ function renderCoverageHistoryChart(snapshots) {
             },
             scales: {
                 x: {
-                    grid: { color: '#2b2f33' },
-                    ticks: { color: '#adb5bd', font: { size: 10 }, maxTicksLimit: 12 }
+                    grid: { color: '#232a35' },
+                    ticks: { color: '#5e6b7d', font: { size: 10 }, maxTicksLimit: 12 }
                 },
                 y: {
-                    grid: { color: '#2b2f33' },
-                    ticks: { color: '#adb5bd', font: { size: 10 }, callback: v => v + '%' },
+                    grid: { color: '#232a35' },
+                    ticks: { color: '#5e6b7d', font: { size: 10 }, callback: v => v + '%' },
                     beginAtZero: true, max: 100
                 }
             }
         }
-    });
-}
-
-function loadCoverageTab() {
-    const range = document.getElementById('coverageRange').value;
-    document.getElementById('coverageGrid').innerHTML = '<div class="text-center text-muted py-4 w-100">Loading…</div>';
-    fetch(`/api/mitre/coverage?range=${range}`).then(r => r.json()).then(d => {
-        coverageData = d;
-        renderCoverageGrid(d);
-        renderCoverageGaps(d);
-        updateSharedStats('coverage');
-    }).catch(err => {
-        document.getElementById('coverageGrid').innerHTML = '<div class="text-center text-danger py-4 w-100">Error loading coverage data.</div>';
-        console.error('Error loading MITRE coverage:', err);
     });
 }
 
@@ -3710,11 +3768,51 @@ function coverageTierTotals() {
     return totals;
 }
 
-function coverageTierBadge(tiers) {
-    return `<span class="text-success" title="Validated">${tiers.validated}</span> `
-         + `<span class="text-info" title="Active">${tiers.active}</span> `
-         + `<span class="text-warning" title="Inactive">${tiers.inactive}</span> `
-         + `<span class="text-muted" title="Gap">${tiers.gap}</span>`;
+// Circumference of the score ring's r=38 circle (2 * PI * 38), matching the SVG markup.
+const COV_RING_CIRC = 238.76;
+
+function renderCoverageHero() {
+    const totals = coverageTierTotals();
+    const total = totals.gap + totals.inactive + totals.active + totals.validated;
+    const pct = total ? (totals.active + totals.validated) / total * 100 : 0;
+
+    document.getElementById('covScoreValue').textContent = total ? `${pct.toFixed(0)}%` : '—';
+    document.getElementById('covScoreRingFill').style.strokeDashoffset = total ? COV_RING_CIRC * (1 - pct / 100) : COV_RING_CIRC;
+
+    const deltaEl = document.getElementById('covScoreDelta');
+    if (!coverageHistorySnapshots.length || !total) {
+        deltaEl.textContent = coverageHistorySnapshots.length ? '' : 'Tracking starts today';
+        deltaEl.className = 'cov-score-delta flat';
+    } else {
+        const baseline = coverageHistorySnapshots[0];
+        const delta = pct - baseline.coverage_pct;
+        if (Math.abs(delta) < 0.05) {
+            deltaEl.textContent = `No change since ${escHtml(baseline.snapshot_date)}`;
+            deltaEl.className = 'cov-score-delta flat';
+        } else {
+            deltaEl.innerHTML = `<i class="fa-solid fa-arrow-${delta > 0 ? 'up' : 'down'} me-1"></i>${Math.abs(delta).toFixed(1)}pt ${delta > 0 ? 'gain' : 'drop'} since ${escHtml(baseline.snapshot_date)}`;
+            deltaEl.className = 'cov-score-delta ' + (delta > 0 ? 'up' : 'down');
+        }
+    }
+
+    document.getElementById('coverageChips').innerHTML = COVERAGE_TIERS.map(t => `
+        <div class="cov-chip"><span class="dot ${t.dot}"></span><span class="num">${totals[t.key]}</span><span class="lbl">${t.label}</span></div>
+    `).join('');
+}
+
+function loadCoverageTab() {
+    const range = document.getElementById('coverageRange').value;
+    document.getElementById('coverageGrid').innerHTML = '<div class="text-center text-muted py-4 w-100">Loading…</div>';
+    fetch(`/api/mitre/coverage?range=${range}`).then(r => r.json()).then(d => {
+        coverageData = d;
+        renderCoverageGrid(d);
+        renderCoverageGaps(d);
+        renderCoverageHero();
+        updateSharedStats('coverage');
+    }).catch(err => {
+        document.getElementById('coverageGrid').innerHTML = '<div class="text-center text-danger py-4 w-100">Error loading coverage data.</div>';
+        console.error('Error loading MITRE coverage:', err);
+    });
 }
 
 function renderCoverageGrid(d) {
@@ -3723,17 +3821,29 @@ function renderCoverageGrid(d) {
         grid.innerHTML = '<div class="text-center text-muted py-4 w-100">No technique data available.</div>';
         return;
     }
-    grid.innerHTML = d.tactics.map(t => `
-        <div class="bg-black border border-secondary rounded p-2" style="width: 220px;">
-            <div class="text-uppercase text-muted small fw-bold mb-1">${escHtml(t.label)}</div>
-            <div class="small mb-2">${coverageTierBadge(t.tiers)}</div>
-            <div style="max-height: 260px; overflow-y: auto;">
+    grid.innerHTML = d.tactics.map(t => {
+        const total = t.total || 1;
+        const bar = COVERAGE_TIERS.map(ct => {
+            const n = t.tiers[ct.key] || 0;
+            return n ? `<span class="${ct.bar}" style="width:${(n / total * 100).toFixed(2)}%" title="${n} ${ct.label}"></span>` : '';
+        }).join('');
+        return `
+        <div class="cov-col">
+            <div class="cov-col-title">${escHtml(t.label)}</div>
+            <div class="cov-col-sub">${t.total} technique${t.total === 1 ? '' : 's'}</div>
+            <div class="cov-bar">${bar}</div>
+            <div class="cov-cells">
                 ${t.techniques.map(tech => `
-                <div class="mb-1 px-2 py-1 rounded small" style="cursor:pointer; ${COVERAGE_TIER_STYLE[tech.tier]}" onclick="openCoverageDrilldown('${escHtml(t.tactic)}','${escHtml(tech.id)}')" title="T${escHtml(tech.id)} ${escHtml(tech.name || '')}">
-                    T${escHtml(tech.id)}${tech.threat_actors && tech.threat_actors.length ? ' <i class="fa-solid fa-triangle-exclamation text-warning" title="A known threat actor/malware uses this technique"></i>' : ''}${tech.log_source_gap ? ' <i class="fa-solid fa-plug-circle-xmark text-warning" title="Enabled, but its rule(s) need a log source this appliance does not ingest"></i>' : ''}
+                <div class="cov-cell ${COVERAGE_TIER_CELL_CLASS[tech.tier]}" onclick="openCoverageDrilldown('${escHtml(t.tactic)}','${escHtml(tech.id)}')" title="T${escHtml(tech.id)} ${escHtml(tech.name || '')}">
+                    <span class="cov-cell-name">${escHtml(tech.name || ('T' + tech.id))}</span>
+                    <span class="d-flex align-items-center flex-shrink-0">
+                        ${tech.threat_actors && tech.threat_actors.length ? '<i class="fa-solid fa-triangle-exclamation text-warning" title="A known threat actor/malware uses this technique"></i>' : ''}${tech.log_source_gap ? '<i class="fa-solid fa-plug-circle-xmark text-warning" title="Enabled, but its rule(s) need a log source this appliance does not ingest"></i>' : ''}
+                        <span class="cov-cell-id ms-1">T${escHtml(tech.id)}</span>
+                    </span>
                 </div>`).join('')}
             </div>
-        </div>`).join('');
+        </div>`;
+    }).join('');
 }
 
 function renderCoverageGaps(d) {
@@ -3767,7 +3877,7 @@ function openCoverageDrilldown(tactic, techId) {
     if (!tech) return;
 
     document.getElementById('coverageDrilldownTitle').innerHTML =
-        `T${escHtml(tech.id)} ${escHtml(tech.name || '')} <span class="badge ms-2" style="${COVERAGE_TIER_STYLE[tech.tier]}">${tech.tier}</span>`;
+        `T${escHtml(tech.id)} ${escHtml(tech.name || '')} <span class="badge ms-2 ${COVERAGE_TIER_CELL_CLASS[tech.tier]}">${tech.tier}</span>`;
 
     let html = `<div class="text-muted small mb-3">${t.label} · ${tech.count} enabled rule${tech.count === 1 ? '' : 's'}, ${tech.disabled_count} disabled, ${tech.validated_count} alert${tech.validated_count === 1 ? '' : 's'} in the selected range</div>`;
 
