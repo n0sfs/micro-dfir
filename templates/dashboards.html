@@ -97,6 +97,19 @@
         </div>
     </div>
 </div>
+
+<!-- Actor sightings modal (Known Threat Actors widget) -->
+<div class="modal fade" id="actorSightingsModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content bg-dark border-secondary text-light">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title" id="actorSightingsTitle"></h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="actorSightingsBody"></div>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -373,6 +386,10 @@ function actorTypeBadge(type) {
     return `<span class="badge ${map[type] || 'bg-secondary'}">${escHtml(type)}</span>`;
 }
 
+// Keyed by widgetId (a dashboard can show this widget more than once) so the
+// sightings modal can look up the actor it was opened for without a second fetch.
+let ACTOR_SUMMARY_DATA = {};
+
 function renderActorSummaryWidget(container, widgetId, config) {
     container.innerHTML = `
         <div class="row g-2 widget-grid"></div>
@@ -380,6 +397,7 @@ function renderActorSummaryWidget(container, widgetId, config) {
     const grid = container.querySelector('.widget-grid');
     const empty = container.querySelector('.widget-empty');
     fetch('/api/ti/actor-summary').then(r => r.json()).then(d => {
+        ACTOR_SUMMARY_DATA[widgetId] = d.actors;
         if (!d.actors.length) {
             grid.innerHTML = '';
             empty.style.display = 'block';
@@ -396,7 +414,10 @@ function renderActorSummaryWidget(container, widgetId, config) {
                     </div>
                     ${a.aliases.length ? `<div class="text-muted small mb-1">aka ${escHtml(a.aliases.join(', '))}</div>` : ''}
                     <div class="small text-secondary mb-2">${escHtml(a.description)}</div>
-                    <div class="small mb-1"><span class="badge bg-secondary">${a.ioc_count} matching IOC${a.ioc_count === 1 ? '' : 's'}</span></div>
+                    <div class="small mb-1 d-flex align-items-center gap-1 flex-wrap">
+                        <span class="badge bg-secondary" title="IOCs in the currently-synced feed matching this actor's name/aliases -- catalog data, not evidence it was seen here">${a.ioc_count} IOC${a.ioc_count === 1 ? '' : 's'} in feed</span>
+                        <span class="badge ${a.sighting_count > 0 ? 'bg-danger' : 'bg-secondary'}" style="${a.sighting_count > 0 ? 'cursor:pointer;' : ''}" title="${a.sighting_count > 0 ? 'Times these IOCs were actually observed in this environment -- click to view' : 'Not observed in this environment yet'}" onclick="${a.sighting_count > 0 ? `event.preventDefault(); event.stopPropagation(); openActorSightingsModal(${widgetId}, ${a.id});` : ''}">${a.sighting_count} sighting${a.sighting_count === 1 ? '' : 's'} here</span>
+                    </div>
                     <div class="small">
                         ${a.techniques.map(t => `<span class="badge bg-secondary me-1 mb-1" title="${escHtml(t.tactic_label)}">T${escHtml(t.id)}</span>`).join('')}
                     </div>
@@ -404,6 +425,34 @@ function renderActorSummaryWidget(container, widgetId, config) {
                 </a>
             </div>`).join('');
     }).catch(err => console.error('Error loading actor summary:', err));
+}
+
+function openActorSightingsModal(widgetId, actorId) {
+    const actors = ACTOR_SUMMARY_DATA[widgetId] || [];
+    const actor = actors.find(a => a.id === actorId);
+    if (!actor) return;
+    document.getElementById('actorSightingsTitle').textContent = `Sightings — ${actor.name}`;
+    let html;
+    if (!actor.sightings.length) {
+        html = '<p class="text-muted small mb-0">No sightings recorded in this environment yet.</p>';
+    } else {
+        html = '<div class="table-responsive"><table class="table table-dark table-hover table-sm align-middle">'
+            + '<thead><tr><th>Seen</th><th>Host</th><th>Rule / Alert</th><th>Severity</th><th>Message</th></tr></thead><tbody>'
+            + actor.sightings.map(s => `
+                <tr>
+                    <td class="small text-muted text-nowrap">${escHtml(s.seen_at || '')}</td>
+                    <td class="small">${escHtml(s.host || '—')}</td>
+                    <td class="small">${escHtml(s.rule_title || '—')}</td>
+                    <td>${severityBadgeWidget(s.severity)}</td>
+                    <td class="small text-truncate" style="max-width:320px;" title="${escHtml(s.message || '')}">${escHtml(s.message || '—')}</td>
+                </tr>`).join('')
+            + '</tbody></table></div>';
+        if (actor.sighting_count > actor.sightings.length) {
+            html += `<div class="text-muted small">+${actor.sighting_count - actor.sightings.length} more not shown</div>`;
+        }
+    }
+    document.getElementById('actorSightingsBody').innerHTML = html;
+    new bootstrap.Modal(document.getElementById('actorSightingsModal')).show();
 }
 
 // A concise, human-scale duration for a stat tile -- 45m / 3.2h / 2.1d, not a raw
