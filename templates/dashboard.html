@@ -805,7 +805,7 @@
       </div>
       <div class="modal-body">
         <div id="ruleMetaBox" class="small text-muted mb-2" style="display:none;"></div>
-        <div id="ruleReadonlyNotice" class="alert alert-secondary py-2 small" style="display:none;"><i class="fa-solid fa-lock me-1"></i>Sigma-sourced rules are read-only. Clone this rule to create an editable custom copy.</div>
+        <div id="ruleReadonlyNotice" class="alert alert-info py-2 small" style="display:none;"><i class="fa-solid fa-circle-info me-1"></i>Editing this community Sigma rule directly. Use Revert to Default below if an edit needs undoing, or Clone to fork it into a fully independent rule instead.</div>
 
         <div id="ruleComplianceBox" class="mb-3" style="display:none;">
             <label class="form-label small text-muted mb-1">Compliance Frameworks <span class="text-muted">— manually tag which frameworks this detection helps satisfy</span></label>
@@ -902,7 +902,8 @@
       </div>
       <div class="modal-footer border-secondary">
         <button type="button" class="btn btn-outline-secondary me-auto" id="ruleHistoryBtn" style="display:none;" onclick="toggleHistory()"><i class="fa-solid fa-clock-rotate-left me-1"></i> View History</button>
-        <button type="button" class="btn btn-outline-warning" id="ruleCloneBtn" style="display:none;" onclick="cloneFromModal()"><i class="fa-solid fa-copy me-1"></i> Clone to Edit</button>
+        <button type="button" class="btn btn-outline-danger" id="ruleRevertBtn" style="display:none;" onclick="revertRule()"><i class="fa-solid fa-rotate-left me-1"></i> Revert to Default</button>
+        <button type="button" class="btn btn-outline-warning" id="ruleCloneBtn" style="display:none;" onclick="cloneFromModal()" title="Clone into a new independent rule"><i class="fa-solid fa-copy me-1"></i> Clone</button>
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
         <button type="button" class="btn btn-primary" id="ruleSaveBtn" onclick="saveRule()"><i class="fa-solid fa-floppy-disk me-1"></i> Save Rule</button>
       </div>
@@ -2874,6 +2875,7 @@ function renderTable(rules) {
             <td><input type="checkbox" class="form-check-input rule-cb bg-dark border-secondary" value="${rl.id}" onchange="updateSelection(this)"></td>
             <td>
                 <span class="badge ${rl.source === 'custom' ? 'bg-info text-dark' : 'bg-secondary'}" title="${rl.cloned_from ? 'Cloned from rule #' + rl.cloned_from : ''}">${rl.source === 'custom' ? 'Custom' : 'Sigma'}</span>
+                ${rl.is_modified ? '<span class="badge bg-warning text-dark ms-1" title="Edited from its default content -- open the rule to revert">Modified</span>' : ''}
             </td>
             <td title="${escAttr(rl.title)}">
                 <div class="fw-bold text-info text-truncate">${rl.title}</div>
@@ -3005,6 +3007,7 @@ async function openRuleModal(id) {
     document.getElementById('ruleHistoryBox').style.display = 'none';
     document.getElementById('ruleHistoryBtn').style.display = 'none';
     document.getElementById('ruleCloneBtn').style.display = 'none';
+    document.getElementById('ruleRevertBtn').style.display = 'none';
     document.getElementById('ruleSaveBtn').style.display = 'inline-block';
     document.getElementById('ruleEditorTabs').style.display = 'flex';
     document.getElementById('tabBtnBuilder').style.display = 'block';
@@ -3018,7 +3021,8 @@ async function openRuleModal(id) {
             editingRuleSource = data.source || 'sigma';
 
             const isSigma = editingRuleSource === 'sigma';
-            document.getElementById('ruleModalTitle').innerText = isSigma ? 'View Sigma Rule' : 'Edit Custom Rule';
+            const isModified = !!data.original_yaml && data.rule_yaml !== data.original_yaml;
+            document.getElementById('ruleModalTitle').innerText = isSigma ? 'Edit Sigma Rule' : 'Edit Custom Rule';
 
             const metaParts = [];
             metaParts.push(`Created by <strong>${data.created_by || 'unknown'}</strong> on ${fmtDT(data.created_at)}`);
@@ -3030,16 +3034,16 @@ async function openRuleModal(id) {
             document.getElementById('ruleComplianceBox').style.display = 'block';
             renderComplianceChecklist(data.compliance_tags);
 
+            document.getElementById('ruleCloneBtn').style.display = 'inline-block';
+            document.getElementById('ruleHistoryBtn').style.display = 'inline-block';
             if (isSigma) {
-                document.getElementById('ruleYamlInput').readOnly = true;
                 document.getElementById('ruleReadonlyNotice').style.display = 'block';
-                document.getElementById('ruleSaveBtn').style.display = 'none';
-                document.getElementById('ruleCloneBtn').style.display = 'inline-block';
-                // Sigma rules can't be edited or rebuilt — no point showing the builder tab.
+                // Sigma rules are edited as raw YAML only -- their content may use shapes
+                // the Guided Builder can't represent (matches how re-opening an existing
+                // custom rule already always starts on Raw YAML, just with no builder
+                // fallback at all here).
                 document.getElementById('ruleEditorTabs').style.display = 'none';
-            } else {
-                document.getElementById('ruleCloneBtn').style.display = 'inline-block';
-                document.getElementById('ruleHistoryBtn').style.display = 'inline-block';
+                document.getElementById('ruleRevertBtn').style.display = isModified ? 'inline-block' : 'none';
             }
             // Editing an existing rule always starts on Raw YAML — its content already exists
             // as YAML and may use syntax the guided builder can't represent; switching to the
@@ -3271,6 +3275,21 @@ async function doClone(id) {
         return null;
     }
     return data.id;
+}
+
+async function revertRule() {
+    if (!editingRuleId) return;
+    if (!(await confirmDialog('Revert this rule to its default content? Your edits will be lost.', {title: 'Revert to default', danger: true, confirmLabel: 'Revert'}))) return;
+    try {
+        const res = await fetch(`/api/rules/${editingRuleId}/revert`, { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) { toast(data.error || 'Failed to revert rule.', 'danger'); return; }
+        toast('Rule reverted to its default content.', 'success');
+        await ld();
+        openRuleModal(editingRuleId); // reload so the editor reflects the reverted content
+    } catch (e) {
+        toast('Error reverting rule: ' + e, 'danger');
+    }
 }
 
 async function cloneFromModal() {
