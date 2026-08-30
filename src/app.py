@@ -7280,64 +7280,23 @@ def agent_config():
 # incident needs all three in one searchable timeline, not three separate pages.
 # Every branch is normalized to the same column shape so the existing filter/search
 # logic (built for live_logs alone) works unchanged against the union.
-UNIFIED_LOGS_SQL = """(
-SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type,
+#
+# Kept as individual fragments (rather than one flat unioned string) so
+# api_logs_search/export_logs_csv can push WHERE+ORDER BY+LIMIT into each branch
+# separately -- see _build_optimized_log_query()'s comment for why. api_logs_timeline
+# still wants the flat, all-branches-always-unioned shape (it aggregates via its own
+# GROUP BY, not subject to the same cost), so UNIFIED_LOGS_SQL/_WITH_ARCHIVE stay
+# defined below, just derived from these same fragments instead of duplicating them.
+_LOG_BRANCH_SQL = """SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type,
        NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
        process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
        NULL as occurrence_count, NULL as last_seen, NULL as item_id, NULL as entity_type,
        NULL as status, NULL as assignee, file_hash, query_name
-FROM live_logs
-UNION ALL
-SELECT a.timestamp, a.severity,
-       COALESCE(a.host, 'UNKNOWN') as host,
-       COALESCE(s.title, a.rule_name, 'Custom/YARA Rule') as app,
-       '-' as event_id,
-       COALESCE(a.username, '-') as username,
-       a.source_ip as source_ip,
-       a.destination_ip as destination_ip,
-       COALESCE(a.message, '') as message,
-       'alert' as log_type,
-       a.rule_id as rule_id,
-       CASE WHEN a.rule_id IS NULL THEN 'heuristic' ELSE COALESCE(s.source, 'sigma') END as rule_source,
-       a.log_event_id as log_event_id,
-       a.log_app as log_app,
-       NULL as raw_json,
-       NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
-       a.occurrence_count as occurrence_count, a.last_seen as last_seen, a.id as item_id, NULL as entity_type,
-       a.status as status, a.assignee as assignee, NULL as file_hash, NULL as query_name
-FROM alerts a
-LEFT JOIN sigma_rules s ON a.rule_id = s.id
-UNION ALL
-SELECT timestamp, severity, hostname as host, 'UEBA Anomaly' as app, '-' as event_id, '-' as username,
-       NULL as source_ip, NULL as destination_ip, message, 'anomaly' as log_type,
-       NULL as rule_id, 'ueba' as rule_source, NULL as log_event_id, NULL as log_app, raw_json,
-       NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
-       NULL as occurrence_count, NULL as last_seen, id as item_id, entity_type,
-       NULL as status, NULL as assignee, NULL as file_hash, NULL as query_name
-FROM events
-WHERE app_name = 'duckdb_ueba'
-) AS unified_logs"""
+FROM live_logs"""
 
-# Same shape as UNIFIED_LOGS_SQL plus a 4th branch over live_logs_archive -- kept as a
-# separate constant rather than always unioning the archive in, so a normal Log Search
-# query (the default, and the vast majority of queries) never pays the archive table's
-# scan cost. Only used when the request explicitly opts in via include_archive=1.
-UNIFIED_LOGS_SQL_WITH_ARCHIVE = """(
-SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type,
-       NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
-       process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
-       NULL as occurrence_count, NULL as last_seen, NULL as item_id, NULL as entity_type,
-       NULL as status, NULL as assignee, file_hash, query_name
-FROM live_logs
-UNION ALL
-SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type,
-       NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
-       process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
-       NULL as occurrence_count, NULL as last_seen, NULL as item_id, NULL as entity_type,
-       NULL as status, NULL as assignee, file_hash, query_name
-FROM live_logs_archive
-UNION ALL
-SELECT a.timestamp, a.severity,
+_LOG_ARCHIVE_BRANCH_SQL = _LOG_BRANCH_SQL.replace("FROM live_logs", "FROM live_logs_archive")
+
+_ALERT_BRANCH_SQL = """SELECT a.timestamp, a.severity,
        COALESCE(a.host, 'UNKNOWN') as host,
        COALESCE(s.title, a.rule_name, 'Custom/YARA Rule') as app,
        '-' as event_id,
@@ -7355,17 +7314,25 @@ SELECT a.timestamp, a.severity,
        a.occurrence_count as occurrence_count, a.last_seen as last_seen, a.id as item_id, NULL as entity_type,
        a.status as status, a.assignee as assignee, NULL as file_hash, NULL as query_name
 FROM alerts a
-LEFT JOIN sigma_rules s ON a.rule_id = s.id
-UNION ALL
-SELECT timestamp, severity, hostname as host, 'UEBA Anomaly' as app, '-' as event_id, '-' as username,
+LEFT JOIN sigma_rules s ON a.rule_id = s.id"""
+
+_ANOMALY_BRANCH_SQL = """SELECT timestamp, severity, hostname as host, 'UEBA Anomaly' as app, '-' as event_id, '-' as username,
        NULL as source_ip, NULL as destination_ip, message, 'anomaly' as log_type,
        NULL as rule_id, 'ueba' as rule_source, NULL as log_event_id, NULL as log_app, raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
        NULL as occurrence_count, NULL as last_seen, id as item_id, entity_type,
        NULL as status, NULL as assignee, NULL as file_hash, NULL as query_name
 FROM events
-WHERE app_name = 'duckdb_ueba'
-) AS unified_logs"""
+WHERE app_name = 'duckdb_ueba'"""
+
+# (log_type, branch_sql) pairs, in the same branch order as the historical flat unions.
+LOG_TYPE_BRANCHES = [('log', _LOG_BRANCH_SQL), ('alert', _ALERT_BRANCH_SQL), ('anomaly', _ANOMALY_BRANCH_SQL)]
+LOG_TYPE_BRANCHES_WITH_ARCHIVE = [
+    ('log', _LOG_BRANCH_SQL), ('log', _LOG_ARCHIVE_BRANCH_SQL), ('alert', _ALERT_BRANCH_SQL), ('anomaly', _ANOMALY_BRANCH_SQL)
+]
+
+UNIFIED_LOGS_SQL = "(\n" + "\nUNION ALL\n".join(sql for _, sql in LOG_TYPE_BRANCHES) + "\n) AS unified_logs"
+UNIFIED_LOGS_SQL_WITH_ARCHIVE = "(\n" + "\nUNION ALL\n".join(sql for _, sql in LOG_TYPE_BRANCHES_WITH_ARCHIVE) + "\n) AS unified_logs"
 
 _RANGE_DELTAS = {
     '5m': ('minutes', 5), '15m': ('minutes', 15), '30m': ('minutes', 30),
@@ -7553,13 +7520,18 @@ def _parse_search_query(q):
         params.extend(clause_params)
     return f'({sql})', params
 
+# Factored out of _build_log_filters so the route handlers can also use it to skip
+# building/unioning a branch entirely when it's excluded, not just filter it out after.
+def _active_log_types(args):
+    return {t.strip() for t in args.get('types', '').split(',') if t.strip()}
+
 def _build_log_filters(args):
     import datetime
     q = args.get('q', '').lower()
     time_range = args.get('range', '24h')
     app_filter = args.get('app', '')
     severity_filter = args.get('severity', '')
-    type_filter = args.get('types', '')
+    active_types = _active_log_types(args)
     field_key = args.get('fieldKey', '')
     field_op = args.get('fieldOp', 'contains')
     field_val = args.get('fieldVal', '').lower()
@@ -7588,14 +7560,15 @@ def _build_log_filters(args):
             conditions.append(f"app IN ({','.join(['?']*len(apps))})")
             params.extend(apps)
 
-    if type_filter:
-        # log_type is one of 'log' / 'alert' / 'anomaly' -- the UEBA Timeline tab's
-        # event-type checkboxes (All Logs / Sigma & Custom Alerts / UEBA Alerts) drive
-        # this, same IN-list shape as the app/severity filters above.
-        types = [t.strip() for t in type_filter.split(',') if t.strip()]
-        if types:
-            conditions.append(f"log_type IN ({','.join(['?']*len(types))})")
-            params.extend(types)
+    if active_types:
+        # log_type is one of 'log' / 'alert' / 'anomaly' -- both the UEBA Timeline tab's
+        # event-type checkboxes and Log Search's own Type filter drive this, same IN-list
+        # shape as the app/severity filters above. Kept even though api_logs_search/
+        # export_logs_csv also skip excluded branches entirely (see LOG_TYPE_BRANCHES) --
+        # this is what api_logs_timeline (which unions every branch unconditionally) relies
+        # on, and it's a harmless no-op redundancy for the other two callers.
+        conditions.append(f"log_type IN ({','.join(['?']*len(active_types))})")
+        params.extend(active_types)
 
     if severity_filter:
         # Sigma/UEBA severities are Title-case (Critical/High/Medium), live_logs and the
@@ -7632,6 +7605,42 @@ def _build_log_filters(args):
 
     where_clause = (" WHERE " + " and ".join(conditions)) if conditions else ""
     return where_clause, params
+
+# Pushes WHERE + ORDER BY + LIMIT into EACH branch before unioning, instead of applying
+# them once after the union closes (the old SELECT * FROM (<union>) WHERE ... ORDER BY
+# ... LIMIT ? shape). SQLite has no per-branch-index-then-merge strategy for a UNION ALL
+# wrapped in an outer ORDER BY/LIMIT -- it has to gather every row matching the WHERE
+# from every branch into a temporary sorter, sort the ENTIRE matched set, and only then
+# trim to LIMIT. For a broad time range with no other filter that's most of live_logs.
+# Pushing LIMIT into each branch lets that branch's own timestamp index satisfy an
+# efficient top-K scan instead. This is exact, not an approximation: the global top-K
+# under any sort comparator is always a subset of each branch's own top-K under that
+# same comparator, so per-branch LIMIT can never drop a row that belonged in the result.
+def _build_optimized_log_query(branches, where_clause, where_params, sort_clause, limit):
+    # SQLite doesn't allow a bare "(SELECT ... LIMIT ?) UNION ALL (SELECT ... LIMIT ?)"
+    # -- parenthesizing an individual compound-select operand isn't valid syntax there
+    # (unlike Postgres). Each per-branch top-K query is wrapped as its own FROM
+    # subquery instead, so the outer UNION ALL operand is a plain, unparenthesized
+    # SELECT * FROM (...) with the ORDER BY/LIMIT safely nested inside.
+    per_branch_sql, all_params = [], []
+    for _, branch_sql in branches:
+        per_branch_sql.append(f"SELECT * FROM (SELECT * FROM ({branch_sql}) {where_clause} {sort_clause} LIMIT ?)")
+        all_params.extend(where_params)
+        all_params.append(limit)
+    merged = "(\n" + "\nUNION ALL\n".join(per_branch_sql) + "\n) AS unified_logs"
+    all_params.append(limit)
+    return f"SELECT * FROM {merged} {sort_clause} LIMIT ?", all_params
+
+# Per-branch COUNT(*), summed, rather than SELECT COUNT(*) FROM (<union>) WHERE ... --
+# same reasoning as _build_optimized_log_query: lets each branch's own index satisfy its
+# own filtered count instead of depending on whether SQLite's optimizer flattens the
+# union and pushes the WHERE down (a real but unconfirmable-without-EXPLAIN-QUERY-PLAN
+# question on the union-wrapped shape).
+def _count_log_rows(db, branches, where_clause, where_params):
+    return sum(
+        db.execute(f"SELECT COUNT(*) FROM ({branch_sql}) {where_clause}", where_params).fetchone()[0]
+        for _, branch_sql in branches
+    )
 
 # Shared by /api/logs/search and /api/logs/export's format=json path, so the two never
 # drift into different row shapes -- both consume the same sqlite3.Row list straight off
@@ -7702,9 +7711,15 @@ def api_logs_search():
     try:
         db = get_db()
         where_clause, params = _build_log_filters(request.args)
-        source_sql = UNIFIED_LOGS_SQL_WITH_ARCHIVE if request.args.get('include_archive') == '1' else UNIFIED_LOGS_SQL
+        active_types = _active_log_types(request.args)
+        branches = LOG_TYPE_BRANCHES_WITH_ARCHIVE if request.args.get('include_archive') == '1' else LOG_TYPE_BRANCHES
+        if active_types:
+            branches = [(t, sql) for t, sql in branches if t in active_types]
         sort_clause = _build_log_sort(request.args)
         limit = max(1, min(request.args.get('limit', 300, type=int) or 300, 2000))
+
+        if not branches:
+            return jsonify({'logs': [], 'count': 0, 'total_matches': 0})
 
         # Load More passes cursor_time (+ cursor_sort when not sorting by timestamp) from
         # the last row of the page it already has -- folded into the same WHERE as an
@@ -7723,8 +7738,9 @@ def api_logs_search():
         if request.args.get('skip_count') == '1':
             total_count = None
         else:
-            total_count = db.execute(f"SELECT COUNT(*) FROM {source_sql}{where_clause}", params).fetchone()[0]
-        rows = db.execute(f"SELECT * FROM {source_sql}{full_where} {sort_clause} LIMIT ?", full_params + [limit]).fetchall()
+            total_count = _count_log_rows(db, branches, where_clause, params)
+        query_sql, query_params = _build_optimized_log_query(branches, full_where, full_params, sort_clause, limit)
+        rows = db.execute(query_sql, query_params).fetchall()
         logs = _build_log_response_rows(rows)
 
         # `poll=1` marks an auto-refresh (UEBA Timeline's Live Streaming Mode), not a
@@ -7748,14 +7764,20 @@ def export_logs_csv():
     try:
         db = get_db()
         where_clause, params = _build_log_filters(request.args)
-        source_sql = UNIFIED_LOGS_SQL_WITH_ARCHIVE if request.args.get('include_archive') == '1' else UNIFIED_LOGS_SQL
+        active_types = _active_log_types(request.args)
+        branches = LOG_TYPE_BRANCHES_WITH_ARCHIVE if request.args.get('include_archive') == '1' else LOG_TYPE_BRANCHES
+        if active_types:
+            branches = [(t, sql) for t, sql in branches if t in active_types]
         sort_clause = _build_log_sort(request.args)
         export_format = 'json' if request.args.get('format') == 'json' else 'csv'
 
         # Increased export limit (10,000 records) for deep incident analysis.
-        query = f"SELECT * FROM {source_sql}{where_clause} {sort_clause} LIMIT 10000"
-        cursor = db.execute(query, params)
-        rows = cursor.fetchall()
+        if branches:
+            query, query_params = _build_optimized_log_query(branches, where_clause, params, sort_clause, 10000)
+            cursor = db.execute(query, query_params)
+            rows = cursor.fetchall()
+        else:
+            cursor, rows = None, []
 
         # Exports are always a deliberate action (unlike search, never auto-polled) --
         # data leaving the system is exactly the chain-of-custody moment worth recording.
@@ -7770,7 +7792,7 @@ def export_logs_csv():
                 headers={"Content-Disposition": "attachment;filename=micro_soc_complete_export.json"}
             )
 
-        column_names = [description[0] for description in cursor.description] if cursor.description else [
+        column_names = [description[0] for description in cursor.description] if cursor and cursor.description else [
             'timestamp', 'severity', 'host', 'app', 'event_id', 'username', 'source_ip', 'destination_ip', 'message', 'log_type'
         ]
 
