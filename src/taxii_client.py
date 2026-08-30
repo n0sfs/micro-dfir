@@ -158,6 +158,35 @@ def sync_threatfox(feed):
     conn.commit(); conn.close()
     return c
 
+# abuse.ch MalwareBazaar's "recent samples" endpoint -- unlike every other abuse.ch feed
+# here, this one is a POST with form data, not a plain GET (their API convention, not a
+# choice made here). query_status other than "ok" (e.g. "no_results") is a normal empty
+# response, not a failure -- only raise on an actual HTTP/network error above.
+def sync_malwarebazaar(feed):
+    res = requests.post(
+        "https://mb-api.abuse.ch/api/v1/",
+        data={"query": "get_recent", "selector": "100"},
+        headers=_abuse_ch_headers(feed), timeout=20
+    )
+    res.raise_for_status()
+    data = res.json()
+    conn = _connect(); c = 0
+    for e in (data.get("data") or []):
+        sha256 = e.get("sha256_hash")
+        if not sha256:
+            continue
+        stix_id = f"malwarebazaar--{sha256}"
+        malware = e.get("signature") or "Unknown"
+        name = f"{malware} (malware sample)"
+        desc = f"file_type={e.get('file_type')}, reporter={e.get('reporter')}"
+        conn.execute(
+            "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) VALUES (?, 'indicator', 'sha256_hash', ?, ?, ?, ?, 0, ?)",
+            (stix_id, name, desc, sha256, e.get("first_seen", ""), feed["id"])
+        )
+        c += 1
+    conn.commit(); conn.close()
+    return c
+
 # Response shape confirmed live against https://urlhaus.abuse.ch/downloads/json_recent/ :
 # a JSON object keyed by url_id, each value a one-element list of
 # {dateadded, url, url_status, last_online, threat, tags, urlhaus_link, reporter}.
@@ -489,6 +518,8 @@ def sync_feed(feed):
         return sync_spamhaus_drop(feed)
     elif feed["feed_type"] == "tor_exit":
         return sync_tor_exit(feed)
+    elif feed["feed_type"] == "malwarebazaar":
+        return sync_malwarebazaar(feed)
     elif feed["feed_type"] == "csv":
         # CSV feeds are a one-time snapshot uploaded through /api/ti/feeds/upload_csv —
         # there's no remote source to re-fetch from, so "Sync Now" / sync_all_feeds()

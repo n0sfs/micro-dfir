@@ -457,6 +457,7 @@
                 <option value="sslbl">SSLBL Malicious TLS Certificates (public)</option>
                 <option value="spamhaus_drop">Spamhaus DROP (hijacked netblocks, public)</option>
                 <option value="tor_exit">Tor Exit Node List (public)</option>
+                <option value="malwarebazaar">MalwareBazaar Recent Samples (public — API key optional)</option>
                 <option value="taxii">STIX / TAXII 2.1 Server</option>
                 <option value="csv">CSV File Upload</option>
             </select>
@@ -898,12 +899,12 @@ function initFeedModal() { if (!feedModal) feedModal = new bootstrap.Modal(docum
 
 // Feed types that need the API key field shown: TAXII servers can optionally use a
 // bearer token instead of basic auth, and OTX requires one outright.
-const FEED_TYPES_WITH_API_KEY = ['taxii', 'otx', 'yaraify', 'threatfox', 'urlhaus', 'feodotracker', 'sslbl'];
+const FEED_TYPES_WITH_API_KEY = ['taxii', 'otx', 'yaraify', 'threatfox', 'urlhaus', 'feodotracker', 'sslbl', 'malwarebazaar'];
 
 // These keep working with zero configuration (their legacy public export endpoints
 // need no auth) -- a key here only raises the rate limit / attributes requests to your
 // abuse.ch account instead of anonymous access, so it's optional, not required.
-const FEED_TYPES_WITH_OPTIONAL_API_KEY = ['threatfox', 'urlhaus', 'feodotracker', 'yaraify', 'sslbl'];
+const FEED_TYPES_WITH_OPTIONAL_API_KEY = ['threatfox', 'urlhaus', 'feodotracker', 'yaraify', 'sslbl', 'malwarebazaar'];
 
 // Feed types with a configurable base URL, and what that URL means for each.
 const FEED_TYPES_WITH_URL = ['taxii', 'misp'];
@@ -1063,7 +1064,8 @@ function statusBadge(status) {
 const FEED_TYPE_LABELS = {
     threatfox: 'ThreatFox', taxii: 'STIX/TAXII 2.1', otx: 'AlienVault OTX',
     urlhaus: 'URLhaus', feodotracker: 'Feodo Tracker', yaraify: 'YARAify', csv: 'CSV Upload',
-    misp: 'MISP-format Feed', sslbl: 'SSLBL Cert Blacklist', spamhaus_drop: 'Spamhaus DROP', tor_exit: 'Tor Exit List'
+    misp: 'MISP-format Feed', sslbl: 'SSLBL Cert Blacklist', spamhaus_drop: 'Spamhaus DROP', tor_exit: 'Tor Exit List',
+    malwarebazaar: 'MalwareBazaar'
 };
 const FEED_TYPE_SOURCES = {
     threatfox: 'threatfox.abuse.ch (public)', urlhaus: 'urlhaus.abuse.ch (public)',
@@ -1071,7 +1073,7 @@ const FEED_TYPE_SOURCES = {
     yaraify: 'yaraify.abuse.ch (public) — syncs YARA rule files, not IOCs',
     csv: 'Uploaded file (one-time snapshot)',
     sslbl: 'sslbl.abuse.ch (public)', spamhaus_drop: 'spamhaus.org/drop (public)',
-    tor_exit: 'check.torproject.org (public)'
+    tor_exit: 'check.torproject.org (public)', malwarebazaar: 'bazaar.abuse.ch (public) — recent malware samples'
 };
 
 function syncIntervalLabel(mins) {
