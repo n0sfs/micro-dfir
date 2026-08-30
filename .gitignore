@@ -25,3 +25,6 @@ agent_config.json
 # OS Specific
 .DS_Store
 Thumbs.db
+
+# Local Claude Code project instructions -- not for the public repo
+CLAUDE.md
