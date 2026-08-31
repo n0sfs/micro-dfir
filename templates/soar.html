@@ -1,44 +1,117 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-header d-flex justify-content-between align-items-start flex-wrap gap-2">
-    <div>
-        <h2><i class="fa-solid fa-robot me-2"></i>SOAR</h2>
-        <p>Automated response playbooks triggered by case lifecycle events or new alerts.</p>
-    </div>
-    <div class="d-flex gap-2">
-        {% if has_permission('soar.secrets.manage') %}
-        <button type="button" class="btn btn-outline-secondary" onclick="showSecretsModal()"><i class="fa-solid fa-key me-1"></i>Manage Secrets</button>
-        {% endif %}
-        {% if has_permission('soar.playbooks.manage') %}
-        <button type="button" class="btn btn-primary" onclick="showPlaybookModal()"><i class="fa-solid fa-plus me-1"></i>New Playbook</button>
-        {% endif %}
-    </div>
+<div class="page-header">
+    <h2><i class="fa-solid fa-robot me-2"></i>SOAR</h2>
+    <p>Automated response: playbooks, case templates, queues, and the shared action/notification config behind them.</p>
 </div>
 
-<div class="card bg-dark border-secondary mb-3">
-    <div class="card-body p-2 small text-muted">
-        <i class="fa-solid fa-circle-info me-1"></i>
-        Playbooks run automatically -- when a case is created (or its status, queue, or assignee
-        changes), when a new alert fires, or on a schedule. Scope a playbook to a specific queue,
-        TLP, status, or severity, then chain together actions (apply a case template, add a
-        task/note, set queue, run host/user analysis, email/webhook/Slack, or an EDR response)
-        that run in order every time it fires. Any case-scoped action can be flagged "Requires
-        approval" -- instead of running immediately, it's queued below until someone approves or
-        rejects it. Use "Run Now" on a playbook to fire it on demand against a specific case,
-        instead of waiting for its trigger.
-    </div>
-</div>
+<style>
+#soarTabs .nav-link{color:var(--text-muted); border-color:transparent; background:transparent;}
+#soarTabs .nav-link:hover{color:var(--text-secondary); border-color:transparent;}
+#soarTabs .nav-link.active{color:var(--text-primary); background-color:var(--bg-card-alt); border-color:var(--border) var(--border) var(--bg-card-alt);}
+</style>
 
-<!-- Notification Channels -- the shared Email/Webhook server config that backs every
-     send_email/send_webhook playbook action (case- and alert-scoped alike), relocated
-     here from Settings since it's now genuinely part of automation, not a standalone
-     toggle. Collapsed by default so it doesn't crowd out the playbook list. -->
-<div class="card bg-dark border-secondary mb-3">
-    <div class="card-header border-secondary" style="cursor:pointer;" onclick="toggleNotificationChannelsCard()">
-        <i class="fa-solid fa-tower-broadcast me-2"></i>Notification Channels
-        <i class="fa-solid fa-chevron-down float-end" id="notifChannelsChevron"></i>
+<div class="card bg-dark border-secondary">
+    <div class="card-header border-secondary p-0">
+        <ul class="nav nav-tabs border-0" id="soarTabs">
+            <li class="nav-item"><button type="button" class="nav-link active" id="tabBtnPlaybooks" onclick="switchSoarTab('playbooks')"><i class="fa-solid fa-robot me-2"></i>Playbooks</button></li>
+            {% if has_permission('cases.templates.manage') %}
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnCasetemplates" onclick="switchSoarTab('casetemplates')"><i class="fa-solid fa-list-check me-2"></i>Case Templates</button></li>
+            {% endif %}
+            {% if has_permission('cases.queues.manage') %}
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnQueues" onclick="switchSoarTab('queues')"><i class="fa-solid fa-inbox me-2"></i>Queues</button></li>
+            {% endif %}
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnActions" onclick="switchSoarTab('actions')"><i class="fa-solid fa-list me-2"></i>Actions</button></li>
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnNotifications" onclick="switchSoarTab('notifications')"><i class="fa-solid fa-tower-broadcast me-2"></i>Notifications</button></li>
+        </ul>
     </div>
-    <div id="paneNotificationChannels" style="display:none;">
+
+    <!-- Playbooks pane -->
+    <div id="panePlaybooks">
+        <div class="card-body">
+            <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+                <div class="small text-muted" style="max-width:820px;">
+                    <i class="fa-solid fa-circle-info me-1"></i>
+                    Playbooks run automatically -- when a case is created (or its status, queue, or
+                    assignee changes), when a new alert fires, or on a schedule. Scope a playbook to
+                    a specific queue, TLP, status, or severity, then chain together actions (apply a
+                    case template, add a task/note, set queue, run host/user analysis, email/webhook/
+                    Slack, or an EDR response) that run in order every time it fires. Any case-scoped
+                    action can be flagged "Requires approval" -- instead of running immediately, it's
+                    queued below until someone approves or rejects it. Use "Run Now" on a playbook to
+                    fire it on demand against a specific case, instead of waiting for its trigger.
+                </div>
+                <div class="d-flex gap-2 text-nowrap">
+                    {% if has_permission('soar.secrets.manage') %}
+                    <button type="button" class="btn btn-outline-secondary" onclick="showSecretsModal()"><i class="fa-solid fa-key me-1"></i>Manage Secrets</button>
+                    {% endif %}
+                    {% if has_permission('soar.playbooks.manage') %}
+                    <button type="button" class="btn btn-primary" onclick="showPlaybookModal()"><i class="fa-solid fa-plus me-1"></i>New Playbook</button>
+                    {% endif %}
+                </div>
+            </div>
+
+            {% if has_permission('soar.playbooks.manage') %}
+            <div class="card bg-dark border-secondary mb-3" id="pendingApprovalsCard" style="display:none;">
+                <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+                    <span><i class="fa-solid fa-hourglass-half me-2"></i>Pending Approvals</span>
+                    <span class="badge bg-warning text-dark" id="pendingApprovalsCount">0</span>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-dark table-sm align-middle mb-0">
+                        <thead><tr>
+                            <th class="ps-3">Requested</th><th>Playbook</th><th>Case</th><th>Action</th><th class="text-end pe-3"></th>
+                        </tr></thead>
+                        <tbody id="pendingApprovalsTableBody"></tbody>
+                    </table>
+                </div>
+            </div>
+            {% endif %}
+
+            <div class="card bg-dark border-secondary">
+                <div class="table-responsive">
+                    <table class="table table-dark table-sm align-middle mb-0">
+                        <thead><tr>
+                            <th class="ps-3">Name</th><th>Trigger</th><th>Conditions</th><th>Actions</th>
+                            <th>Runs</th><th>Enabled</th><th class="text-end pe-3"></th>
+                        </tr></thead>
+                        <tbody id="playbooksTableBody"><tr><td colspan="7" class="text-center text-muted py-4">Loading&hellip;</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {% if has_permission('cases.templates.manage') %}
+    <!-- Case Templates pane -->
+    <div id="paneCasetemplates" style="display:none;">
+        <div class="card-body">
+            <p class="text-muted small">Case Templates content goes here (Phase 4).</p>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if has_permission('cases.queues.manage') %}
+    <!-- Queues pane -->
+    <div id="paneQueues" style="display:none;">
+        <div class="card-body">
+            <p class="text-muted small">Queues content goes here (Phase 2).</p>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Actions pane -->
+    <div id="paneActions" style="display:none;">
+        <div class="card-body">
+            <p class="text-muted small">Actions catalog goes here (Phase 3).</p>
+        </div>
+    </div>
+
+    <!-- Notifications pane -- the shared Email/Webhook server config that backs every
+         send_email/send_webhook playbook action (case- and alert-scoped alike), relocated
+         here from Settings since it's now genuinely part of automation, not a standalone
+         toggle. -->
+    <div id="paneNotifications" style="display:none;">
         <div class="card-body">
             <p class="text-muted small mb-3">The shared Email (SMTP) and Webhook server config used by every <code>send_email</code>/<code>send_webhook</code> playbook action, and by the seeded "Legacy Alert Notifications" playbook below.</p>
             <div class="row g-4">
@@ -100,35 +173,6 @@
             {% endif %}
             <div id="notifMsg" class="mt-2 small" style="display:none;"></div>
         </div>
-    </div>
-</div>
-
-{% if has_permission('soar.playbooks.manage') %}
-<div class="card bg-dark border-secondary mb-3" id="pendingApprovalsCard" style="display:none;">
-    <div class="card-header border-secondary d-flex justify-content-between align-items-center">
-        <span><i class="fa-solid fa-hourglass-half me-2"></i>Pending Approvals</span>
-        <span class="badge bg-warning text-dark" id="pendingApprovalsCount">0</span>
-    </div>
-    <div class="table-responsive">
-        <table class="table table-dark table-sm align-middle mb-0">
-            <thead><tr>
-                <th class="ps-3">Requested</th><th>Playbook</th><th>Case</th><th>Action</th><th class="text-end pe-3"></th>
-            </tr></thead>
-            <tbody id="pendingApprovalsTableBody"></tbody>
-        </table>
-    </div>
-</div>
-{% endif %}
-
-<div class="card bg-dark border-secondary">
-    <div class="table-responsive">
-        <table class="table table-dark table-sm align-middle mb-0">
-            <thead><tr>
-                <th class="ps-3">Name</th><th>Trigger</th><th>Conditions</th><th>Actions</th>
-                <th>Runs</th><th>Enabled</th><th class="text-end pe-3"></th>
-            </tr></thead>
-            <tbody id="playbooksTableBody"><tr><td colspan="7" class="text-center text-muted py-4">Loading&hellip;</td></tr></tbody>
-        </table>
     </div>
 </div>
 
@@ -876,13 +920,26 @@ async function decideApproval(approvalId, decision) {
 // Notification Channels -- relocated from Settings unchanged (same route/permission,
 // same fields) since it's now the shared config send_email/send_webhook playbook
 // actions read from, not a standalone toggle.
-function toggleNotificationChannelsCard() {
-    const pane = document.getElementById('paneNotificationChannels');
-    const chevron = document.getElementById('notifChannelsChevron');
-    const show = pane.style.display === 'none';
-    pane.style.display = show ? 'block' : 'none';
-    chevron.classList.toggle('fa-chevron-down', !show);
-    chevron.classList.toggle('fa-chevron-up', show);
+// Same tab-switching shape as switchSettingsTab() in templates/settings.html --
+// tabBtn{Cap}/pane{Cap} id convention, graceful fallback to 'playbooks' when the
+// requested tab's elements aren't in the DOM (a permission-gated tab hidden for this
+// role), persisted across visits via localStorage.
+const SOAR_TAB_KEY = 'microdfir_soar_active_tab';
+const SOAR_TABS = ['playbooks', 'casetemplates', 'queues', 'actions', 'notifications'];
+
+function switchSoarTab(tab) {
+    if (!SOAR_TABS.includes(tab)) tab = 'playbooks';
+    let resolvedTab = tab;
+    SOAR_TABS.forEach(t => {
+        const cap = t.charAt(0).toUpperCase() + t.slice(1);
+        const btn = document.getElementById('tabBtn' + cap);
+        const pane = document.getElementById('pane' + cap);
+        if (!btn || !pane) { if (t === tab) resolvedTab = 'playbooks'; return; }
+        btn.classList.toggle('active', t === tab);
+        pane.style.display = (t === tab) ? 'block' : 'none';
+    });
+    if (resolvedTab !== tab) switchSoarTab(resolvedTab);
+    try { localStorage.setItem(SOAR_TAB_KEY, tab); } catch (e) {}
 }
 
 function loadAlertNotifications() {
@@ -965,6 +1022,9 @@ function testAlertNotifications() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+    let savedTab = 'playbooks';
+    try { savedTab = localStorage.getItem(SOAR_TAB_KEY) || 'playbooks'; } catch (e) {}
+    switchSoarTab(savedTab);
     loadPlaybooks();
     loadPendingApprovals();
     loadAlertNotifications();
