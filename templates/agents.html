@@ -55,7 +55,9 @@
         <ul class="nav nav-tabs border-0" id="agentsTabs">
             <li class="nav-item"><button type="button" class="nav-link active" id="tabBtnAgents" onclick="switchAgentsTab('agents')"><i class="fa-solid fa-laptop-medical me-2"></i>Agents</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnResponse" onclick="switchAgentsTab('response')"><i class="fa-solid fa-terminal me-2"></i>Response Actions</button></li>
+            {% if has_permission('settings.system.manage') %}
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnDeployment" onclick="switchAgentsTab('deployment')"><i class="fa-solid fa-box-archive me-2"></i>Deployment</button></li>
+            {% endif %}
         </ul>
     </div>
 
@@ -284,6 +286,7 @@
         </div>
     </div>
 
+    {% if has_permission('settings.system.manage') %}
     <!-- Deployment pane -->
     <div id="paneDeployment" style="display:none;">
         <div class="card-body p-3">
@@ -313,6 +316,7 @@
             <p class="text-muted small mt-3 mb-0"><i class="fa-solid fa-circle-info me-1"></i>Already-deployed agents can also be upgraded remotely from the Response Actions tab instead of reinstalling by hand.</p>
         </div>
     </div>
+    {% endif %}
 </div>
 
 <!-- Command Result Modal (for history rows) -->
@@ -359,10 +363,20 @@ const AGENTS_TABS = ['agents', 'response', 'deployment'];
 
 function switchAgentsTab(tab) {
     if (!AGENTS_TABS.includes(tab)) tab = 'agents';
+    // The Deployment tab/pane only exist in the DOM at all when Jinja rendered them
+    // (has_permission('settings.system.manage')) -- a stale localStorage value from a
+    // previous session (a role change, or a shared browser) could otherwise try to
+    // switch to a tab that was never rendered for this user and crash before the rest
+    // of page init runs.
+    const btn = document.getElementById('tabBtn' + tab.charAt(0).toUpperCase() + tab.slice(1));
+    if (!btn) { tab = 'agents'; }
     AGENTS_TABS.forEach(t => {
         const cap = t.charAt(0).toUpperCase() + t.slice(1);
-        document.getElementById('tabBtn' + cap).classList.toggle('active', t === tab);
-        document.getElementById('pane' + cap).style.display = (t === tab) ? 'block' : 'none';
+        const tabBtn = document.getElementById('tabBtn' + cap);
+        const pane = document.getElementById('pane' + cap);
+        if (!tabBtn || !pane) return;
+        tabBtn.classList.toggle('active', t === tab);
+        pane.style.display = (t === tab) ? 'block' : 'none';
     });
     try { localStorage.setItem(AGENTS_TAB_KEY, tab); } catch (e) {}
 }

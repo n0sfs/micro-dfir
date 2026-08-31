@@ -9999,6 +9999,12 @@ def api_agent_commands():
     db = get_db()
 
     if request.method == 'GET':
+        # Its own history table in templates/agents.html is rendered for every logged-in
+        # user with no gate -- that's UI-only. Command stdout/stderr can hold forensic
+        # collection output (USB history, browser artifacts) for any host, so reading it
+        # needs at least the same floor permission dispatching a Tier 1 EDR action does.
+        err = require_permission('edr.command.basic')
+        if err: return err
         hostname = request.args.get('hostname', '')
         label_filter = request.args.get('label', '')
         cmd_id = request.args.get('id', type=int)
