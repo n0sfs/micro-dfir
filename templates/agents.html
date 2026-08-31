@@ -77,7 +77,9 @@
             <div class="d-flex align-items-center gap-2">
                 <div id="bulkActionBar" class="d-flex align-items-center gap-2" style="display:none;">
                     <span class="text-muted small text-nowrap" id="bulkSelectedLabel"></span>
+                    {% if has_permission('settings.system.manage') %}
                     <button class="btn btn-outline-info btn-sm" onclick="bulkUpgradeSelected()"><i class="fa-solid fa-rotate me-1"></i> Upgrade Selected</button>
+                    {% endif %}
                     <button class="btn btn-outline-secondary btn-sm" onclick="clearEndpointSelection()"><i class="fa-solid fa-xmark me-1"></i> Clear</button>
                 </div>
                 <button class="btn btn-outline-secondary btn-sm" onclick="loadUniqueEndpoints()"><i class="fa-solid fa-rotate me-1"></i> Refresh List</button>
@@ -180,8 +182,8 @@
                             <button type="button" class="btn btn-sm btn-outline-success console-action-btn" data-permission="edr.command.basic" onclick="consoleRun('restore_network', {}, 'Restore normal network connectivity on this host?')"><i class="fa-solid fa-wifi me-2"></i>Restore Network</button>
                             <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="linux" data-permission="edr.command.advanced" onclick="consoleRun('enable_exec_auditing')"><i class="fa-solid fa-shield-halved me-2"></i>Enable Exec Auditing</button>
                             <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="linux" data-permission="edr.command.advanced" onclick="consoleRun('disable_exec_auditing')"><i class="fa-solid fa-shield me-2"></i>Disable Exec Auditing</button>
-                            <button type="button" class="btn btn-sm btn-outline-info console-action-btn" data-permission="edr.command.advanced" onclick="consoleUpgrade()"><i class="fa-solid fa-rotate me-2"></i>Upgrade Agent</button>
-                            <button type="button" class="btn btn-sm btn-outline-danger console-action-btn" data-permission="edr.agent.manage" onclick="consoleUninstall()"><i class="fa-solid fa-trash me-2"></i>Uninstall Agent</button>
+                            <button type="button" class="btn btn-sm btn-outline-info console-action-btn" data-permission="settings.system.manage" onclick="consoleUpgrade()"><i class="fa-solid fa-rotate me-2"></i>Upgrade Agent</button>
+                            <button type="button" class="btn btn-sm btn-outline-danger console-action-btn" data-permission="settings.system.manage" onclick="consoleUninstall()"><i class="fa-solid fa-trash me-2"></i>Uninstall Agent</button>
                             <button type="button" class="btn btn-sm btn-outline-warning console-action-btn" onclick="checkHostVulnerabilities()"><i class="fa-solid fa-bug me-2"></i>Check for Vulnerabilities</button>
                         </div>
 
@@ -251,7 +253,9 @@
                     <option value="string_sweep">YARA String Sweep</option>
                     <option value="yara_condition_sweep">YARA Condition Sweep</option>
                     <option value="collect_triage">Collect Triage</option>
+                    {% if has_permission('settings.system.manage') %}
                     <option value="upgrade">Upgrade Agent</option>
+                    {% endif %}
                 </select>
                 {% if has_permission('edr.command.advanced') %}
                 <button type="button" class="btn btn-sm btn-outline-primary" onclick="runGroupDispatch()"><i class="fa-solid fa-play me-1"></i>Run on Group</button>
@@ -418,6 +422,11 @@ function escHtml(str) {
     d.innerText = str == null ? '' : String(str);
     return d.innerHTML;
 }
+
+// Upgrade/uninstall are admin-only (settings.system.manage, same permission the
+// Deployment tab and its backend routes are gated behind) -- distinct from the rest of
+// "agent management" (group assignment, etc), which stays available at edr.agent.manage.
+const CAN_DEPLOY_AGENTS = hasPermission('settings.system.manage');
 
 // ---- File Integrity Monitoring ----
 const FIM_IS_ADMIN = hasPermission('edr.fim.manage');
@@ -832,9 +841,11 @@ function renderEndpoints() {
                             <button class="btn btn-sm btn-outline-primary py-0 px-2 dropdown-toggle" type="button" data-bs-toggle="dropdown">Respond</button>
                             <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
                                 <li><a class="dropdown-item text-primary" href="#" onclick="openInConsole(rowHost(this)); return false;"><i class="fa-solid fa-terminal me-2"></i>Interact in Console</a></li>
+                                ${CAN_DEPLOY_AGENTS ? `
                                 <li><hr class="dropdown-divider"></li>
                                 <li><a class="dropdown-item text-info" href="#" onclick="queueCommand(rowHost(this), 'upgrade', {}, 'Upgrade the MicroDFIR agent on this host to the latest version? It restarts itself automatically.'); return false;"><i class="fa-solid fa-rotate me-2"></i>Upgrade Agent</a></li>
                                 <li><a class="dropdown-item text-danger" href="#" onclick="removeEndpoint(rowHost(this)); return false;"><i class="fa-solid fa-trash me-2"></i>Uninstall Agent</a></li>
+                                ` : ''}
                             </ul>
                         </div>
                     </td>
