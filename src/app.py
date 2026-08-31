@@ -1933,6 +1933,115 @@ def api_compliance_coverage():
         'total_frameworks': len(frameworks),
     })
 
+def _extract_cvss(metrics):
+    # Prefer the newest CVSS version NVD has scored a CVE with -- v3.1 > v3.0 > v2.0.
+    # v2 metric entries carry baseSeverity as a sibling of cvssData (not nested inside
+    # it the way v3 entries do), so both locations are checked rather than assuming one.
+    for key in ('cvssMetricV31', 'cvssMetricV30', 'cvssMetricV2'):
+        entries = (metrics or {}).get(key) or []
+        if entries:
+            m = entries[0]
+            cvss_data = m.get('cvssData', {})
+            return cvss_data.get('baseScore'), (m.get('baseSeverity') or cvss_data.get('baseSeverity'))
+    return None, None
+
+def _sync_cve_feed(db):
+    # NVD's public CVE 2.0 API -- free, no API key needed at this request volume (one
+    # bounded pull, not a polling loop). Pulls CVEs *published* in the last 7 days
+    # (bounded window + resultsPerPage cap keeps this a predictable, cheap sync, not an
+    # unbounded historical backfill) and upserts them -- an already-stored CVE whose
+    # score/description NVD has since revised gets refreshed, not duplicated.
+    import urllib.request, json as _json
+    from datetime import timedelta
+    end = datetime.utcnow()
+    start = end - timedelta(days=7)
+    url = (
+        "https://services.nvd.nist.gov/rest/json/cves/2.0"
+        f"?resultsPerPage=200&pubStartDate={start.strftime('%Y-%m-%dT%H:%M:%S.000')}"
+        f"&pubEndDate={end.strftime('%Y-%m-%dT%H:%M:%S.000')}"
+    )
+    req = urllib.request.Request(url, headers={'User-Agent': 'micro-dfir/1.0'})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = _json.loads(resp.read().decode('utf-8'))
+    count = 0
+    for item in data.get('vulnerabilities', []):
+        cve = item.get('cve', {})
+        cve_id = cve.get('id')
+        if not cve_id:
+            continue
+        desc = next((d['value'] for d in cve.get('descriptions', []) if d.get('lang') == 'en'), '')
+        score, severity = _extract_cvss(cve.get('metrics', {}))
+        db.execute(
+            "INSERT INTO cve_records (cve_id, description, cvss_score, severity, published_date, last_modified, fetched_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, datetime('now')) "
+            "ON CONFLICT(cve_id) DO UPDATE SET description=excluded.description, cvss_score=excluded.cvss_score, "
+            "severity=excluded.severity, last_modified=excluded.last_modified, fetched_at=excluded.fetched_at",
+            (cve_id, desc, score, severity, cve.get('published'), cve.get('lastModified'))
+        )
+        count += 1
+    db.commit()
+    return count
+
+@app.route('/api/cve/records', methods=['GET'])
+@login_required
+def api_cve_records():
+    db = get_db()
+    conditions, params = [], []
+    q = (request.args.get('q') or '').strip()
+    if q:
+        conditions.append("(cve_id LIKE ? OR description LIKE ?)")
+        params.extend([f'%{q}%', f'%{q}%'])
+    severity = (request.args.get('severity') or '').strip().upper()
+    if severity:
+        conditions.append("UPPER(severity) = ?")
+        params.append(severity)
+    min_score = request.args.get('min_score', type=float)
+    if min_score is not None:
+        conditions.append("cvss_score >= ?")
+        params.append(min_score)
+    where_sql = ('WHERE ' + ' AND '.join(conditions)) if conditions else ''
+    try:
+        limit = min(int(request.args.get('limit', 100)), 500)
+    except (TypeError, ValueError):
+        limit = 100
+    total = db.execute(f"SELECT COUNT(*) AS c FROM cve_records {where_sql}", params).fetchone()['c']
+    rows = db.execute(
+        f"SELECT cve_id, description, cvss_score, severity, published_date, last_modified FROM cve_records "
+        f"{where_sql} ORDER BY published_date DESC LIMIT ?",
+        params + [limit]
+    ).fetchall()
+    return jsonify({'rows': [dict(r) for r in rows], 'total': total})
+
+@app.route('/api/cve/sync-status', methods=['GET'])
+@login_required
+def api_cve_sync_status():
+    import json
+    db = get_db()
+    row = db.execute("SELECT value FROM settings WHERE key = 'cve_feed_status'").fetchone()
+    status = json.loads(row['value']) if row and row['value'] else {}
+    total = db.execute("SELECT COUNT(*) AS c FROM cve_records").fetchone()['c']
+    return jsonify({**status, 'total_stored': total})
+
+@app.route('/api/cve/sync', methods=['POST'])
+@login_required
+def api_cve_sync():
+    import json
+    err = require_permission('threatintel.manage')
+    if err: return err
+    db = get_db()
+    now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        count = _sync_cve_feed(db)
+        status = {'last_sync': now, 'last_count': count, 'last_status': 'success', 'last_error': None}
+    except Exception as e:
+        status = {'last_sync': now, 'last_count': 0, 'last_status': 'error', 'last_error': str(e)}
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('cve_feed_status', ?)", (json.dumps(status),))
+    db.commit()
+    log_audit('cve_feed_sync', 'cve_feed', None, f"status={status['last_status']}, count={status['last_count']}")
+    if status['last_status'] == 'error':
+        return jsonify({'error': status['last_error']}), 502
+    return jsonify(status)
+
 def invalidate_rules_cache():
     global RULES_CACHE, TUNING_CACHE
     RULES_CACHE = None
@@ -7152,6 +7261,31 @@ def migrate_agent_groups():
     except Exception:
         pass
 
+def migrate_cve_records():
+    # A dedicated table, not a new stix_indicators/ti_feeds row shape -- a CVE record
+    # (a vulnerability in a piece of software, identified by ID/CVSS/affected product)
+    # is a fundamentally different kind of record than an IOC (an indicator seen in
+    # traffic/files, identified by pattern/type), even though both are "threat intel" in
+    # the loose sense. Forcing it into stix_indicators' pattern-matching shape would be
+    # a real schema misfit, not just reuse.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS cve_records (
+            cve_id TEXT PRIMARY KEY,
+            description TEXT,
+            cvss_score REAL,
+            severity TEXT,
+            published_date TEXT,
+            last_modified TEXT,
+            fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cve_records_severity ON cve_records(severity)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cve_records_published ON cve_records(published_date)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_ueba_entities():
     # UEBA originally modeled hosts only, with a fixed 'HIGH' severity and no way to
     # quiet a legitimately bursty entity. Adds: entity_type on events (host vs user,
@@ -9862,6 +9996,7 @@ migrate_live_logs_hash_dns_columns()
 migrate_agent_versions()
 migrate_agent_tokens()
 migrate_agent_groups()
+migrate_cve_records()
 migrate_audit_log()
 migrate_risk_scoring()
 migrate_anomaly_rules()
