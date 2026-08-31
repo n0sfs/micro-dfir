@@ -2005,7 +2005,7 @@ def _get_rules_cache(db):
     from mitre_attack import techniques_for_tags
     rules_out = []
     for r in db.execute(
-        "SELECT id, title, rule_yaml, original_yaml, enabled, source, cloned_from, created_by, created_at, updated_by, updated_at, compliance_tags "
+        "SELECT id, title, rule_yaml, original_yaml, upstream_yaml, enabled, source, cloned_from, created_by, created_at, updated_by, updated_at, compliance_tags "
         "FROM sigma_rules ORDER BY id DESC"
     ).fetchall():
         rid = r['id']
@@ -2053,6 +2053,12 @@ def _get_rules_cache(db):
             "status": status,
             "log_source_ingestible": log_source_ingestible,
             "is_modified": bool(r['original_yaml']) and ry != r['original_yaml'],
+            # Only meaningful for a modified rule -- SigmaHQ's content has moved past the
+            # baseline this rule was locally edited from, so a straight Revert would land
+            # on stale content too. upstream_yaml is None until an import run has touched
+            # a modified rule at least once (see migrate_sigma_rules_upstream_yaml).
+            "upstream_drifted": bool(r['original_yaml']) and ry != r['original_yaml']
+                                 and bool(r['upstream_yaml']) and r['upstream_yaml'] != r['original_yaml'],
             "source": r['source'] or 'sigma',
             "cloned_from": r['cloned_from'],
             "created_by": r['created_by'],
@@ -2362,7 +2368,7 @@ def api_rule_detail(rid):
 
     if request.method == 'GET':
         r = db.execute(
-            "SELECT id, title, rule_yaml, original_yaml, enabled, source, cloned_from, created_by, created_at, updated_by, updated_at, compliance_tags "
+            "SELECT id, title, rule_yaml, original_yaml, upstream_yaml, enabled, source, cloned_from, created_by, created_at, updated_by, updated_at, compliance_tags "
             "FROM sigma_rules WHERE id = ?", (rid,)
         ).fetchone()
         if not r:
@@ -2508,7 +2514,7 @@ def api_rules_import_sigmahq():
     except Exception as e:
         return jsonify({"error": f"Import failed: {e}"}), 500
     invalidate_rules_cache()
-    log_audit('sigmahq_import', 'rule', None, f"inserted={stats['inserted']}, updated={stats['updated']}, skipped={stats['skipped']}, errors={stats['errors']}")
+    log_audit('sigmahq_import', 'rule', None, f"inserted={stats['inserted']}, updated={stats['updated']}, skipped={stats['skipped']}, errors={stats['errors']}, upstream_drift={stats['upstream_drift']}")
     return jsonify({"status": "success", **stats})
 
 @app.route('/api/rules/<int:rid>/toggle', methods=['PUT'])
@@ -6707,6 +6713,22 @@ def migrate_sigma_rules_original_yaml():
     except Exception:
         pass
 
+def migrate_sigma_rules_upstream_yaml():
+    # Tracks the latest fetched SigmaHQ content for a rule the user has locally
+    # modified -- _run_sigmahq_import() no longer overwrites rule_yaml/original_yaml
+    # for a modified rule (that would silently clobber the edit), so without this
+    # there'd be no way to tell "upstream has changed since you customized this" from
+    # "upstream is unchanged". NULL until the next import run touches this rule.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(sigma_rules)").fetchall()}
+        if 'upstream_yaml' not in cols:
+            conn.execute("ALTER TABLE sigma_rules ADD COLUMN upstream_yaml TEXT")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 # The __IOC_..._LIST__ correlation mechanism (see sigma_engine.py) is a capability, not
 # an active rule -- nothing alerts on it until some rule actually references one of the
 # placeholders. Seeded once (matched by title, so a user who deletes/edits it doesn't
@@ -7363,7 +7385,7 @@ def _run_sigmahq_import():
     import urllib.request, zipfile, tempfile, shutil, socket, sqlite3
     import yaml as _yaml
     t = tempfile.mkdtemp()
-    stats = {'inserted': 0, 'updated': 0, 'skipped': 0, 'errors': 0}
+    stats = {'inserted': 0, 'updated': 0, 'skipped': 0, 'errors': 0, 'upstream_drift': 0}
     try:
         zp = os.path.join(t, "sigma.zip")
         old_timeout = socket.getdefaulttimeout()
@@ -7406,6 +7428,14 @@ def _run_sigmahq_import():
                                 (title, ry, ry, existing['id'])
                             )
                             stats['updated'] += 1
+                        elif existing['rule_yaml'] != existing['original_yaml']:
+                            # Locally modified -- rule_yaml/original_yaml are left untouched
+                            # above, but the latest fetched content is tracked separately so
+                            # the "upstream has drifted from your edit's baseline" indicator
+                            # can compare it against original_yaml without a live fetch.
+                            conn.execute("UPDATE sigma_rules SET upstream_yaml = ? WHERE id = ?", (ry, existing['id']))
+                            if ry != existing['original_yaml']:
+                                stats['upstream_drift'] += 1
                     else:
                         conn.execute(
                             "INSERT INTO sigma_rules (title, rule_yaml, original_yaml, enabled, source, sigma_uuid, created_at) VALUES (?, ?, ?, 0, 'sigma', ?, CURRENT_TIMESTAMP)",
@@ -9485,6 +9515,7 @@ migrate_ioc_sightings()
 migrate_ioc_sightings_alert_id()
 migrate_coverage_snapshots()
 migrate_sigma_rules_original_yaml()
+migrate_sigma_rules_upstream_yaml()
 migrate_seed_ioc_correlation_rule()
 migrate_enrichment_results()
 migrate_ti_entities()
