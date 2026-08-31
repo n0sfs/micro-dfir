@@ -4283,8 +4283,12 @@ def _run_scheduled_agent_sweeps(db):
     # Online or Idle hosts only (same 300s freshness window agent_checkins() uses) --
     # a host that's actually gone (uninstalled, powered off) has nothing to gain from a
     # queued command it will never come back to pick up, and this keeps the queue from
-    # silently piling up stale commands for decommissioned endpoints.
-    cutoff = (now - timedelta(seconds=300)).strftime('%Y-%m-%d %H:%M:%S')
+    # silently piling up stale commands for decommissioned endpoints. agent_polls.timestamp
+    # is written with local server time (datetime.datetime.now() in the poll route), NOT
+    # UTC -- comparing it against a UTC cutoff here would silently misjudge every host's
+    # freshness by the server's UTC offset, so this cutoff deliberately uses local time
+    # too even though `now`/last_run above are UTC (self-consistent with each other).
+    cutoff = (datetime.now() - timedelta(seconds=300)).strftime('%Y-%m-%d %H:%M:%S')
     hosts = db.execute(
         "SELECT user_agent as hostname, os FROM agent_polls "
         "WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY ip_address) AND timestamp >= ?",
