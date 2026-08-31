@@ -2628,9 +2628,25 @@ def _build_mitre_coverage(rules, validated, actor_techniques):
             'tiers': tier_totals,
         })
 
+    # Two deliberately separate headline numbers, not one blended percentage:
+    #   - Coverage (tactics_out's per-tactic 'covered', already active+validated) answers
+    #     "how much of ATT&CK do we have an enabled rule mapped to" -- the broader,
+    #     higher number, since 'active' only needs an enabled rule, not a fired one.
+    #   - Detection is the stricter one: how much has actually been PROVEN by a real
+    #     alert firing (validated), not just theoretically wired up. A technique whose
+    #     only enabled rule has a confirmed-non-ingestible log source (log_source_gap)
+    #     can never reach validated by construction, so this number is naturally honest
+    #     about rules that look covered but can't actually fire.
+    total_techniques = sum(t['total'] for t in tactics_out)
+    total_validated = sum(t['tiers']['validated'] for t in tactics_out)
+    detection_score = round(total_validated / total_techniques * 100, 1) if total_techniques else 0.0
+
     return {
         'tactics': tactics_out,
         'unmapped': sorted(unmapped.values(), key=lambda x: -x['count']),
+        'detection_score': detection_score,
+        'total_techniques': total_techniques,
+        'total_validated': total_validated,
     }
 
 @app.route('/api/mitre/coverage', methods=['GET'])
