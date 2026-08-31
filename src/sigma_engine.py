@@ -1,5 +1,5 @@
 import os, json, re, time, sqlite3, requests, datetime
-from notifications import notify_if_configured
+import soar_alerts
 from warninglists import filter_warninglisted_ips
 from geoip import lookup_country
 from mitre_attack import techniques_for_tags
@@ -206,7 +206,7 @@ def _get_ioc_domain_values(cursor):
 # correlation that exists today, so this is the only place a genuine "observed in our
 # environment" event can currently be derived from. Only called for brand-new alerts
 # (not re-occurrences within the 15-minute dedup window), mirroring the same
-# once-per-burst restraint already applied to notify_if_configured() below.
+# once-per-burst restraint already applied to run_playbooks_for_alert() below.
 def _record_ioc_sightings(cursor, rule_id, host, source_ip, destination_ip, file_hash, query_name,
                            alert_id, rule_title, rule_uses_ioc_placeholder):
     used = rule_uses_ioc_placeholder.get(rule_id)
@@ -512,8 +512,15 @@ def run_detection_cycle():
                 # Only a brand-new alert notifies, not a re-occurrence within the same
                 # 15-minute dedup window (the `existing` branch above) -- otherwise a noisy
                 # rule would re-notify every cycle it keeps matching instead of once per burst.
-                notify_if_configured(cursor, {
-                    'rule_title': rule_titles.get(rule_id, 'Custom/YARA Rule'),
+                # run_case_playbooks_fn is omitted (None) here: the case-scoped playbook
+                # engine (_run_playbooks_for_case) lives only in app.py, driven by Flask
+                # request-time case mutations -- this process is a standalone detection loop,
+                # not the case-management surface, same limitation _auto_create_case() above
+                # already has for the per-rule auto-case feature. An alert_created playbook's
+                # create_case action still creates the case and links the alert here; it just
+                # doesn't cascade into a case_created playbook from this process.
+                soar_alerts.run_playbooks_for_alert(cursor, {
+                    'id': new_alert_id, 'rule_title': rule_titles.get(rule_id, 'Custom/YARA Rule'),
                     'severity': severity, 'host': host, 'username': username,
                     'source_ip': source_ip, 'message': message,
                     'timestamp': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),

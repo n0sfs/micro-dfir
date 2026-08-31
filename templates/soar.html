@@ -3,7 +3,7 @@
 <div class="page-header d-flex justify-content-between align-items-start flex-wrap gap-2">
     <div>
         <h2><i class="fa-solid fa-robot me-2"></i>SOAR</h2>
-        <p>Automated response playbooks triggered by case lifecycle events.</p>
+        <p>Automated response playbooks triggered by case lifecycle events or new alerts.</p>
     </div>
     <div class="d-flex gap-2">
         {% if has_permission('soar.secrets.manage') %}
@@ -18,13 +18,88 @@
 <div class="card bg-dark border-secondary mb-3">
     <div class="card-body p-2 small text-muted">
         <i class="fa-solid fa-circle-info me-1"></i>
-        Playbooks run automatically, in the same request that fires their trigger event -- when a
-        case is created, or its status, queue, or assignee changes. Scope a playbook to a specific
-        queue, TLP, or status, then chain together actions (apply a case template, add a
-        task/note, set queue, run host/user analysis, or post to a webhook/Slack) that run in
-        order every time it fires. Any action can be flagged "Requires approval" -- instead of
-        running immediately, it's queued below until someone approves or rejects it. Use "Run Now"
-        on a playbook to fire it on demand against a specific case, instead of waiting for its trigger.
+        Playbooks run automatically -- when a case is created (or its status, queue, or assignee
+        changes), when a new alert fires, or on a schedule. Scope a playbook to a specific queue,
+        TLP, status, or severity, then chain together actions (apply a case template, add a
+        task/note, set queue, run host/user analysis, email/webhook/Slack, or an EDR response)
+        that run in order every time it fires. Any case-scoped action can be flagged "Requires
+        approval" -- instead of running immediately, it's queued below until someone approves or
+        rejects it. Use "Run Now" on a playbook to fire it on demand against a specific case,
+        instead of waiting for its trigger.
+    </div>
+</div>
+
+<!-- Notification Channels -- the shared Email/Webhook server config that backs every
+     send_email/send_webhook playbook action (case- and alert-scoped alike), relocated
+     here from Settings since it's now genuinely part of automation, not a standalone
+     toggle. Collapsed by default so it doesn't crowd out the playbook list. -->
+<div class="card bg-dark border-secondary mb-3">
+    <div class="card-header border-secondary" style="cursor:pointer;" onclick="toggleNotificationChannelsCard()">
+        <i class="fa-solid fa-tower-broadcast me-2"></i>Notification Channels
+        <i class="fa-solid fa-chevron-down float-end" id="notifChannelsChevron"></i>
+    </div>
+    <div id="paneNotificationChannels" style="display:none;">
+        <div class="card-body">
+            <p class="text-muted small mb-3">The shared Email (SMTP) and Webhook server config used by every <code>send_email</code>/<code>send_webhook</code> playbook action, and by the seeded "Legacy Alert Notifications" playbook below.</p>
+            <div class="row g-4">
+                <div class="col-md-6">
+                    <div class="form-check form-switch mb-2">
+                        <input class="form-check-input" type="checkbox" id="notifSmtpEnabled" {{ '' if has_permission('settings.notifications.manage') else 'disabled' }}>
+                        <label class="form-check-label fw-bold" for="notifSmtpEnabled">Email (SMTP)</label>
+                    </div>
+                    <div class="row g-2">
+                        <div class="col-8"><label class="form-label small text-muted mb-1">SMTP Host</label>
+                            <input type="text" id="notifSmtpHost" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="smtp.example.com" {{ '' if has_permission('settings.notifications.manage') else 'disabled' }}></div>
+                        <div class="col-4"><label class="form-label small text-muted mb-1">Port</label>
+                            <input type="number" id="notifSmtpPort" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="587" {{ '' if has_permission('settings.notifications.manage') else 'disabled' }}></div>
+                        <div class="col-12">
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="checkbox" id="notifSmtpTls" {{ '' if has_permission('settings.notifications.manage') else 'disabled' }}>
+                                <label class="form-check-label small" for="notifSmtpTls">Use STARTTLS</label>
+                            </div>
+                        </div>
+                        <div class="col-6"><label class="form-label small text-muted mb-1">Username</label>
+                            <input type="text" id="notifSmtpUser" class="form-control form-control-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.notifications.manage') else 'disabled' }}></div>
+                        <div class="col-6"><label class="form-label small text-muted mb-1">Password</label>
+                            <input type="password" id="notifSmtpPass" class="form-control form-control-sm bg-dark text-light border-secondary" autocomplete="new-password" {{ '' if has_permission('settings.notifications.manage') else 'disabled' }}></div>
+                        <div class="col-6"><label class="form-label small text-muted mb-1">From Address</label>
+                            <input type="text" id="notifSmtpFrom" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="micro-dfir@example.com" {{ '' if has_permission('settings.notifications.manage') else 'disabled' }}></div>
+                        <div class="col-6"><label class="form-label small text-muted mb-1">Default To (comma-separated)</label>
+                            <input type="text" id="notifSmtpTo" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="soc@example.com" {{ '' if has_permission('settings.notifications.manage') else 'disabled' }}></div>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="form-check form-switch mb-2">
+                        <input class="form-check-input" type="checkbox" id="notifWebhookEnabled" {{ '' if has_permission('settings.notifications.manage') else 'disabled' }}>
+                        <label class="form-check-label fw-bold" for="notifWebhookEnabled">Generic Webhook</label>
+                    </div>
+                    <label class="form-label small text-muted mb-1">Webhook URL</label>
+                    <input type="text" id="notifWebhookUrl" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="https://hooks.example.com/..." {{ '' if has_permission('settings.notifications.manage') else 'disabled' }}>
+                    <p class="text-muted small mt-1 mb-0">Used by the seeded Legacy Alert Notifications playbook's webhook action -- works as-is with Slack/Discord/Teams incoming-webhook URLs or any endpoint that accepts a JSON POST.</p>
+
+                    <hr class="border-secondary my-3">
+
+                    <label class="form-label small text-muted mb-1">Legacy Notification Severity Threshold</label>
+                    <select id="notifMinSeverity" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;" {{ '' if has_permission('settings.notifications.manage') else 'disabled' }}>
+                        <option value="Low">Low and above</option>
+                        <option value="Medium">Medium and above</option>
+                        <option value="High">High and above</option>
+                        <option value="Critical">Critical only</option>
+                    </select>
+                    <p class="text-muted small mt-1 mb-0">Only used by the seeded Legacy Alert Notifications playbook below -- build your own Alert created playbook for per-rule or additional-channel control.</p>
+                </div>
+            </div>
+
+            {% if has_permission('settings.notifications.manage') %}
+            <div class="mt-4 d-flex gap-2">
+                <button class="btn btn-outline-primary btn-sm" onclick="saveAlertNotifications()"><i class="fa-solid fa-save me-1"></i> Save</button>
+                <button class="btn btn-outline-secondary btn-sm" onclick="testAlertNotifications()"><i class="fa-solid fa-paper-plane me-1"></i> Send Test</button>
+            </div>
+            {% else %}
+            <p class="text-muted small mt-3 mb-0"><i class="fa-solid fa-lock me-1"></i>Tier 3 (Senior Analyst) or Admin role required to change notification channel settings.</p>
+            {% endif %}
+            <div id="notifMsg" class="mt-2 small" style="display:none;"></div>
+        </div>
     </div>
 </div>
 
@@ -80,6 +155,7 @@
                             <option value="queue_changed">Queue changed</option>
                             <option value="assignee_changed">Assignee changed</option>
                             <option value="scheduled">Scheduled (sweeps matching cases on an interval)</option>
+                            <option value="alert_created">Alert created</option>
                         </select>
                     </div>
                 </div>
@@ -102,15 +178,15 @@
                     </div>
                 </div>
                 <div class="row g-2 mb-3">
-                    <div class="col-md-3">
+                    <div class="col-md-3 pb-case-only-cond">
                         <label class="form-label small text-muted mb-1">Only if Queue is&hellip;</label>
                         <select id="pbCondQueue" class="form-select bg-dark text-light border-secondary"><option value="">Any queue</option></select>
                     </div>
-                    <div class="col-md-3">
+                    <div class="col-md-3 pb-case-only-cond">
                         <label class="form-label small text-muted mb-1">Only if TLP is&hellip;</label>
                         <select id="pbCondTlp" class="form-select bg-dark text-light border-secondary"><option value="">Any TLP</option></select>
                     </div>
-                    <div class="col-md-3">
+                    <div class="col-md-3 pb-case-only-cond">
                         <label class="form-label small text-muted mb-1">Only if Status is&hellip;</label>
                         <select id="pbCondStatus" class="form-select bg-dark text-light border-secondary">
                             <option value="">Any status</option>
@@ -119,7 +195,7 @@
                         </select>
                     </div>
                     <div class="col-md-3">
-                        <label class="form-label small text-muted mb-1">Only if Severity is&hellip;</label>
+                        <label class="form-label small text-muted mb-1" id="pbCondSeverityLabel">Only if Severity is&hellip;</label>
                         <select id="pbCondSeverity" class="form-select bg-dark text-light border-secondary">
                             <option value="">Any severity</option>
                             <option value="critical">Critical</option>
@@ -243,13 +319,24 @@ let playbookModal, playbookRunsModal, secretsModal;
 const TRIGGER_LABELS = {
     case_created: 'Case created', status_changed: 'Status changed',
     queue_changed: 'Queue changed', assignee_changed: 'Assignee changed',
-    scheduled: 'Scheduled'
+    scheduled: 'Scheduled', alert_created: 'Alert created'
 };
-const ACTION_LABELS = {
+// Playbooks are case-scoped except for alert_created, which has no case_id yet at fire
+// time -- it gets its own small, non-destructive action set (see soar_alerts.py)
+// instead of the case-shaped actions below. create_case is the bridge between them.
+const CASE_ACTION_LABELS = {
     apply_template: 'Apply case template', add_task: 'Add task', add_note: 'Add note',
-    set_queue: 'Set queue', analyze_entity: 'Analyze entity', send_webhook: 'Send webhook',
-    send_slack: 'Send Slack message', isolate_host: 'Isolate confirmed hosts (EDR)'
+    set_queue: 'Set queue', analyze_entity: 'Analyze entity', send_email: 'Send email',
+    send_webhook: 'Send webhook', send_slack: 'Send Slack message',
+    isolate_host: 'Isolate confirmed hosts (EDR)'
 };
+const ALERT_ACTION_LABELS = {
+    send_email: 'Send email', send_webhook: 'Send webhook', send_slack: 'Send Slack message',
+    create_case: 'Create a case from this alert'
+};
+function actionLabelsForTrigger(triggerEvent) {
+    return triggerEvent === 'alert_created' ? ALERT_ACTION_LABELS : CASE_ACTION_LABELS;
+}
 
 // Action types that always require approval -- the checkbox is forced on and disabled
 // for these in the editor, matching PLAYBOOK_ACTION_TYPES_ALWAYS_GATED server-side
@@ -345,7 +432,7 @@ function conditionSummary(p) {
     if (p.condition_queue_name) parts.push(`Queue: ${escHtml(p.condition_queue_name)}`);
     if (p.condition_tlp) parts.push(`TLP: ${escHtml(p.condition_tlp.toUpperCase())}`);
     if (p.condition_status) parts.push(`Status: ${escHtml(p.condition_status)}`);
-    if (p.condition_severity) parts.push(`Severity: ${escHtml(p.condition_severity.toUpperCase())}`);
+    if (p.condition_severity) parts.push(`Severity: ${escHtml(p.condition_severity.toUpperCase())}${p.trigger_event === 'alert_created' ? '+' : ''}`);
     return parts.length ? parts.map(x => `<span class="badge bg-secondary me-1">${x}</span>`).join('') : '<span class="text-muted">any</span>';
 }
 
@@ -429,6 +516,10 @@ function actionParamsFieldsHtml(seq, actionType, params) {
                 <option value="host" ${params.entity_type !== 'user' ? 'selected' : ''}>Host</option>
                 <option value="user" ${params.entity_type === 'user' ? 'selected' : ''}>User</option>
             </select>`;
+        case 'send_email':
+            return `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_to" placeholder="To (optional -- defaults to the Email channel's To address)" value="${escHtml(params.to || '')}">
+                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_subject" placeholder="Subject (optional -- case_id/case_title/status/tlp/pap placeholders supported)" value="${escHtml(params.subject || '')}">
+                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_body" placeholder="Body (optional -- same placeholders supported)" value="${escHtml(params.body || '')}">`;
         case 'send_webhook':
             return urlSourceSelectHtml(seq, 'url', params.url_secret) +
                 `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_url" placeholder="https://&hellip;" value="${escHtml(params.url || '')}" style="${params.url_secret ? 'display:none;' : ''}">
@@ -439,6 +530,8 @@ function actionParamsFieldsHtml(seq, actionType, params) {
                 <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_message" placeholder="Message (optional -- case_id/case_title/status/tlp/pap placeholders supported)" value="${escHtml(params.message || '')}">`;
         case 'isolate_host':
             return `<div class="small text-muted">No params -- isolates every Case Asset marked <strong>Confirmed</strong> compromised when this action runs. Always requires approval.</div>`;
+        case 'create_case':
+            return `<div class="small text-muted">No params -- creates a new case from the triggering alert (title/severity carried over) and links it, then runs any matching "Case created" playbooks against it.</div>`;
         default:
             return '';
     }
@@ -454,7 +547,7 @@ function addPlaybookActionRow(actionType, params, requiresApproval) {
     div.innerHTML = `
         <div style="width:180px;">
             <select class="form-select form-select-sm bg-dark text-light border-secondary mb-1" id="pbActType_${seq}" onchange="onPlaybookActionTypeChange(${seq})">
-                ${Object.entries(ACTION_LABELS).map(([k, label]) => `<option value="${k}" ${k === chosenType ? 'selected' : ''}>${label}</option>`).join('')}
+                ${Object.entries(actionLabelsForTrigger(document.getElementById('pbTrigger').value)).map(([k, label]) => `<option value="${k}" ${k === chosenType ? 'selected' : ''}>${label}</option>`).join('')}
             </select>
             <div class="form-check form-check-sm">
                 <input class="form-check-input" type="checkbox" id="pbActApproval_${seq}" ${requiresApproval ? 'checked' : ''}>
@@ -498,6 +591,11 @@ function collectActionRow(row) {
         case 'add_note': params.text = getVal('text'); break;
         case 'set_queue': params.queue_id = getVal('queue_id') ? parseInt(getVal('queue_id'), 10) : null; break;
         case 'analyze_entity': params.entity_type = getVal('entity_type'); break;
+        case 'send_email':
+            params.to = getVal('to');
+            params.subject = getVal('subject');
+            params.body = getVal('body');
+            break;
         case 'send_webhook': {
             const urlSecret = getVal('url_source');
             params.url_secret = urlSecret || null;
@@ -519,7 +617,14 @@ function collectActionRow(row) {
 // Shows/hides the schedule-interval field -- only meaningful (and only validated
 // server-side) when the trigger itself is 'scheduled'.
 function onPlaybookTriggerChange() {
-    document.getElementById('pbScheduleRow').style.display = document.getElementById('pbTrigger').value === 'scheduled' ? '' : 'none';
+    const trigger = document.getElementById('pbTrigger').value;
+    document.getElementById('pbScheduleRow').style.display = trigger === 'scheduled' ? '' : 'none';
+    // Alerts have no queue/TLP/status -- only Severity applies, and there it's a
+    // threshold ("this and above", matching the old notification behavior) rather than
+    // the exact match every other trigger uses.
+    const isAlert = trigger === 'alert_created';
+    document.querySelectorAll('.pb-case-only-cond').forEach(el => { el.style.display = isAlert ? 'none' : ''; });
+    document.getElementById('pbCondSeverityLabel').textContent = isAlert ? 'Only if Severity is at least…' : 'Only if Severity is…';
 }
 
 async function showPlaybookModal() {
@@ -609,7 +714,10 @@ function togglePlaybook(pid, enabled) {
 }
 
 function showPlaybookRuns(pid, name) {
+    const pb = allPlaybooks.find(p => p.id === pid);
+    const isAlertScoped = pb && pb.trigger_event === 'alert_created';
     document.getElementById('playbookRunsModalTitle').innerText = `Recent Runs — ${name}`;
+    document.querySelector('#playbookRunsModal thead tr').children[1].textContent = isAlertScoped ? 'Alert' : 'Case';
     document.getElementById('playbookRunsTableBody').innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">Loading&hellip;</td></tr>';
     if (!playbookRunsModal) playbookRunsModal = new bootstrap.Modal(document.getElementById('playbookRunsModal'));
     playbookRunsModal.show();
@@ -619,8 +727,10 @@ function showPlaybookRuns(pid, name) {
         tbody.innerHTML = runs.map(r => `
             <tr>
                 <td class="text-nowrap small">${escHtml(r.triggered_at)}</td>
-                <td class="small">${r.case_title ? `<a href="/cases?case=${r.case_id}">${escHtml(r.case_title)}</a>` : '<span class="text-muted">(deleted)</span>'}</td>
-                <td>${r.status === 'success' ? '<span class="badge bg-success">Success</span>' : r.status === 'pending_approval' ? '<span class="badge bg-info text-dark">Pending Approval</span>' : '<span class="badge bg-warning text-dark">Partial</span>'}</td>
+                <td class="small">${isAlertScoped
+                    ? (r.alert_id ? `[${escHtml(r.severity || '')}] ${escHtml(r.rule_title || r.rule_name || 'Alert')} on ${escHtml(r.host || '')}` : '<span class="text-muted">(deleted)</span>')
+                    : (r.case_title ? `<a href="/cases?case=${r.case_id}">${escHtml(r.case_title)}</a>` : '<span class="text-muted">(deleted)</span>')}</td>
+                <td>${r.status === 'success' ? '<span class="badge bg-success">Success</span>' : r.status === 'pending_approval' ? '<span class="badge bg-info text-dark">Pending Approval</span>' : r.status === 'rate_limited' ? '<span class="badge bg-danger">Rate Limited</span>' : '<span class="badge bg-warning text-dark">Partial</span>'}</td>
                 <td class="small">${escHtml(r.detail)}</td>
             </tr>
         `).join('');
@@ -665,7 +775,7 @@ function runPlaybookTest() {
                 : `<div class="alert alert-secondary py-2 px-3 mb-3 small"><i class="fa-solid fa-circle-xmark me-1"></i>Would NOT fire — ${data.skip_reasons.map(escHtml).join('; ')}</div>`;
             const actionsHtml = data.actions.map(a => `
                 <div class="d-flex gap-2 border border-secondary rounded p-2 mb-2">
-                    <span class="badge bg-secondary text-nowrap">${escHtml(ACTION_LABELS[a.action_type] || a.action_type)}</span>
+                    <span class="badge bg-secondary text-nowrap">${escHtml(CASE_ACTION_LABELS[a.action_type] || a.action_type)}</span>
                     <span class="small">${escHtml(a.result)}</span>
                 </div>
             `).join('');
@@ -716,7 +826,7 @@ function loadPendingApprovals() {
                 <td class="ps-3 text-nowrap small">${escHtml(a.requested_at)}</td>
                 <td class="small">${escHtml(a.playbook_name || `#${a.playbook_id}`)}</td>
                 <td class="small">${a.case_title ? `<a href="/cases?case=${a.case_id}">${escHtml(a.case_title)}</a>` : '<span class="text-muted">(deleted)</span>'}</td>
-                <td class="small"><span class="badge bg-secondary me-1">${escHtml(ACTION_LABELS[a.action_type] || a.action_type)}</span>${escHtml(JSON.stringify(a.params))}</td>
+                <td class="small"><span class="badge bg-secondary me-1">${escHtml(CASE_ACTION_LABELS[a.action_type] || a.action_type)}</span>${escHtml(JSON.stringify(a.params))}</td>
                 <td class="text-end pe-3 text-nowrap">
                     <button type="button" class="btn btn-sm btn-outline-success py-0 px-2 me-1" title="Approve and run" onclick="decideApproval(${a.id}, 'approve')"><i class="fa-solid fa-check"></i></button>
                     <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Reject" onclick="decideApproval(${a.id}, 'reject')"><i class="fa-solid fa-xmark"></i></button>
@@ -738,9 +848,101 @@ async function decideApproval(approvalId, decision) {
     }).catch(err => toast('Error: ' + err, 'danger'));
 }
 
+// Notification Channels -- relocated from Settings unchanged (same route/permission,
+// same fields) since it's now the shared config send_email/send_webhook playbook
+// actions read from, not a standalone toggle.
+function toggleNotificationChannelsCard() {
+    const pane = document.getElementById('paneNotificationChannels');
+    const chevron = document.getElementById('notifChannelsChevron');
+    const show = pane.style.display === 'none';
+    pane.style.display = show ? 'block' : 'none';
+    chevron.classList.toggle('fa-chevron-down', !show);
+    chevron.classList.toggle('fa-chevron-up', show);
+}
+
+function loadAlertNotifications() {
+    fetch('/api/settings/alert-notifications')
+        .then(r => r.json())
+        .then(cfg => {
+            document.getElementById('notifSmtpEnabled').checked = !!cfg.smtp_enabled;
+            document.getElementById('notifSmtpHost').value = cfg.smtp_host || '';
+            document.getElementById('notifSmtpPort').value = cfg.smtp_port || 587;
+            document.getElementById('notifSmtpTls').checked = cfg.smtp_use_tls !== false;
+            document.getElementById('notifSmtpUser').value = cfg.smtp_user || '';
+            // The server never sends the real password back -- only a placeholder if one
+            // is set (so the field visibly shows "something is configured") or blank if
+            // not. Leaving it as the placeholder on Save keeps the existing secret intact;
+            // typing anything else replaces it.
+            document.getElementById('notifSmtpPass').value = cfg.smtp_pass || '';
+            document.getElementById('notifSmtpFrom').value = cfg.smtp_from || '';
+            document.getElementById('notifSmtpTo').value = cfg.smtp_to || '';
+            document.getElementById('notifWebhookEnabled').checked = !!cfg.webhook_enabled;
+            document.getElementById('notifWebhookUrl').value = cfg.webhook_url || '';
+            document.getElementById('notifMinSeverity').value = cfg.min_severity || 'High';
+        })
+        .catch(e => console.log('Error loading alert notification settings:', e));
+}
+
+function collectAlertNotificationConfig() {
+    return {
+        smtp_enabled: document.getElementById('notifSmtpEnabled').checked,
+        smtp_host: document.getElementById('notifSmtpHost').value.trim(),
+        smtp_port: parseInt(document.getElementById('notifSmtpPort').value, 10) || 587,
+        smtp_use_tls: document.getElementById('notifSmtpTls').checked,
+        smtp_user: document.getElementById('notifSmtpUser').value.trim(),
+        smtp_pass: document.getElementById('notifSmtpPass').value,
+        smtp_from: document.getElementById('notifSmtpFrom').value.trim(),
+        smtp_to: document.getElementById('notifSmtpTo').value.trim(),
+        webhook_enabled: document.getElementById('notifWebhookEnabled').checked,
+        webhook_url: document.getElementById('notifWebhookUrl').value.trim(),
+        min_severity: document.getElementById('notifMinSeverity').value,
+    };
+}
+
+function saveAlertNotifications() {
+    const msg = document.getElementById('notifMsg');
+    fetch('/api/settings/alert-notifications', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(collectAlertNotificationConfig())
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        msg.style.display = 'block';
+        msg.className = 'mt-2 small ' + (ok ? 'text-success' : 'text-danger');
+        msg.innerHTML = ok ? '<i class="fa-solid fa-check-circle"></i> Notification settings saved.' : (data.error || 'Failed to save.');
+        if (ok) loadAlertNotifications(); // re-pull so the password field re-masks to the placeholder
+    }).catch(err => {
+        msg.style.display = 'block'; msg.className = 'mt-2 small text-danger'; msg.innerText = 'Error saving: ' + err;
+    });
+}
+
+function testAlertNotifications() {
+    const msg = document.getElementById('notifMsg');
+    msg.style.display = 'block'; msg.className = 'mt-2 small text-muted'; msg.innerText = 'Sending test notification…';
+    // Test against whatever is CURRENTLY SAVED (not the unsaved form) -- save first so
+    // a test reflects the config that will actually fire on the next real alert.
+    fetch('/api/settings/alert-notifications', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(collectAlertNotificationConfig())
+    }).then(() => fetch('/api/settings/alert-notifications/test', {method: 'POST'}))
+        .then(r => r.json().then(data => ({ok: r.ok, data})))
+        .then(({ok, data}) => {
+            if (!ok) {
+                msg.className = 'mt-2 small text-danger';
+                msg.innerText = data.error || 'Test failed.';
+                return;
+            }
+            const parts = [];
+            if ('email' in data) parts.push(`Email: ${data.email.ok ? 'sent' : 'failed (' + data.email.error + ')'}`);
+            if ('webhook' in data) parts.push(`Webhook: ${data.webhook.ok ? 'sent' : 'failed (' + data.webhook.error + ')'}`);
+            const anyFailed = Object.values(data).some(c => !c.ok);
+            msg.className = 'mt-2 small ' + (anyFailed ? 'text-warning' : 'text-success');
+            msg.innerText = parts.join(' · ') || 'No channel enabled.';
+            loadAlertNotifications();
+        })
+        .catch(err => { msg.className = 'mt-2 small text-danger'; msg.innerText = 'Error: ' + err; });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     loadPlaybooks();
     loadPendingApprovals();
+    loadAlertNotifications();
 });
 </script>
 {% endblock %}
