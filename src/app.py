@@ -9149,6 +9149,12 @@ from werkzeug.security import generate_password_hash
 @login_required
 def api_settings_metrics():
     from flask import jsonify
+    # Its own template pane is already gated behind settings.system.manage
+    # (templates/settings.html) -- that only hides the UI, so the route itself needs
+    # the same check or any logged-in user could curl host CPU/RAM/disk/DB-size
+    # directly.
+    err = require_permission('settings.system.manage')
+    if err: return err
     try:
         # CPU Usage (using top)
         cpu = subprocess.check_output("top -bn1 | grep 'Cpu(s)' | sed 's/.*, *\\([0-9.]*\\)%* id.*/\\1/' | awk '{print 100 - $1}'", shell=True).decode('utf-8').strip()
