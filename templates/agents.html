@@ -960,7 +960,7 @@ const CONSOLE_ACTION_DISPLAY = {
     linux: {
         list_processes: 'ps (list running processes)',
         collect_triage: 'Collect-Triage (processes, connections, cron/systemd autostart, users)',
-        persistence_sweep: 'Persistence-Sweep (user crontabs, full enabled-unit list, init.d, shell profiles, LD_PRELOAD -- diffed against the last run on this host)',
+        persistence_sweep: 'Persistence-Sweep (user crontabs, full enabled-unit list, init.d, shell profiles, LD_PRELOAD, kernel modules, root SUID/SGID binaries -- diffed against the last run on this host; plus hidden-process and promiscuous-interface rootcheck-style checks, re-reported every run)',
         ioc_sweep: 'IOC-Sweep (hash recent files in /tmp, /var/tmp, ~/Downloads against known-bad hashes)',
         string_sweep: 'String-Sweep (search recent files in /tmp, /var/tmp, ~/Downloads for known-bad YARA strings)',
         collect_ssh_artifacts: 'Collect-SSH-Artifacts (shell history, authorized_keys, known_hosts, all real users)',

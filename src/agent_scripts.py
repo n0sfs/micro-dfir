@@ -819,6 +819,32 @@ ld_out = run("grep -H LD_PRELOAD /etc/environment /etc/ld.so.preload 2>/dev/null
 if ld_out:
     current['ld_preload'] = ld_out
 
+# ---- Lightweight rootcheck-equivalent additions ----
+# A newly-loaded kernel module is worth a second look -- LKM-based rootkits typically
+# load as a module (even ones that later unlink themselves from /proc/modules to hide
+# still show up here on the sweep that catches them mid-load).
+for line in run("lsmod 2>/dev/null").splitlines()[1:]:
+    parts = line.split()
+    if parts:
+        current['kmod:%s' % parts[0]] = line.strip()
+
+# A NEW root-owned SUID/SGID binary appearing is a classic persistence/privesc trick --
+# bounded to common binary paths plus world-writable tmp dirs, not a full disk walk.
+for base in ('/usr/bin', '/usr/sbin', '/bin', '/sbin', '/usr/local/bin', '/usr/local/sbin', '/tmp', '/var/tmp'):
+    if os.path.isdir(base):
+        try:
+            names = os.listdir(base)
+        except Exception:
+            names = []
+        for name in names:
+            path = os.path.join(base, name)
+            try:
+                st = os.stat(path)
+                if (st.st_mode & 0o6000) and st.st_uid == 0:  # SUID or SGID, owned by root
+                    current['suid:%s' % path] = '%d:%d:%o' % (st.st_size, int(st.st_mtime), st.st_mode & 0o7777)
+            except Exception:
+                pass
+
 baseline = load_state()
 new_entries = {}
 changed_entries = {}
@@ -829,9 +855,36 @@ for k, v in current.items():
         changed_entries[k] = {'old': baseline[k], 'new': v}
 removed_keys = [k for k in baseline if k not in current]
 
+# Current-state checks, NOT run through the baseline diff above -- these must
+# re-report on every sweep while the condition holds (an interface left promiscuous
+# stays worth flagging every time, not just the first sweep that noticed it), unlike
+# the "new since last time" entries above.
+#
+# Hidden processes: a PID directory exists under /proc but never appears in `ps`
+# output -- many LKM rootkits hook the syscalls `ps` reads through to hide their own
+# process, but can't hide the /proc entry itself without much deeper (rarer) hooking.
+# Best-effort: a process that exits in the brief window between the two commands can
+# cause a false positive, so this is a lead to investigate, not a guaranteed finding.
+proc_pids = {p for p in os.listdir('/proc') if p.isdigit()}
+ps_pids = set(run("ps -eo pid --no-headers").split())
+hidden_processes = sorted(proc_pids - ps_pids, key=int)
+
+# Promiscuous interfaces: Linux sets the IFF_PROMISC flag (bit 0x100) in
+# /sys/class/net/<iface>/flags -- a classic packet-sniffer/MITM indicator.
+promiscuous_interfaces = []
+for iface_flags in glob.glob('/sys/class/net/*/flags'):
+    try:
+        with open(iface_flags) as f:
+            flags = int(f.read().strip(), 16)
+        if flags & 0x100:
+            promiscuous_interfaces.append(iface_flags.split('/')[-2])
+    except Exception:
+        pass
+
 print(json.dumps({
     'total_entries': len(current), 'new': new_entries, 'changed': changed_entries,
     'removed': removed_keys, 'first_run': (not baseline),
+    'hidden_processes': hidden_processes, 'promiscuous_interfaces': sorted(promiscuous_interfaces),
 }))
 
 save_state(current)
