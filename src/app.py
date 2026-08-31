@@ -1508,6 +1508,19 @@ def api_ti_entity_full_detail(eid):
                 del rd['description']  # internal confirmation input only, not part of the API shape
                 matched_iocs.append(rd)
 
+    # "Last seen active" = the most recent real ioc_sightings hit against this entity's
+    # own confirmed matched_iocs (not the coarser actor-summary widget's matching) --
+    # None means never observed in this environment, distinct from "no IOCs in feed".
+    last_seen_active = None
+    matched_stix_ids = [m['stix_id'] for m in matched_iocs]
+    if matched_stix_ids:
+        placeholders = ','.join('?' * len(matched_stix_ids))
+        row = db.execute(
+            f"SELECT MAX(seen_at) as last_seen FROM ioc_sightings WHERE stix_id IN ({placeholders})",
+            matched_stix_ids
+        ).fetchone()
+        last_seen_active = row['last_seen'] if row else None
+
     techniques = []
     for tid in entity['techniques']:
         tname, tactic = mitre_lookup(tid)
@@ -1531,7 +1544,7 @@ def api_ti_entity_full_detail(eid):
         (eid, str(eid))
     ).fetchall()]
 
-    return jsonify({**entity, 'techniques': techniques, 'matched_iocs': matched_iocs, 'relationships': relationships})
+    return jsonify({**entity, 'techniques': techniques, 'matched_iocs': matched_iocs, 'relationships': relationships, 'last_seen_active': last_seen_active})
 
 # A3: manual entity<->target links -- lets an analyst tie a specific alert/UEBA
 # event/case/IOC to an entity when the automatic name/alias regex match (used by

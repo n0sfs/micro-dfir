@@ -259,12 +259,13 @@
                                     <th>Techniques</th>
                                     <th>Source</th>
                                     <th>Confidence</th>
+                                    <th title="Most recent time an IOC matching this entity was actually observed in this environment (ioc_sightings) -- not just present in the synced feed catalog">Last Seen</th>
                                     <th title="How many indicators/cases/alerts are manually linked to this entity in this environment">Linked</th>
                                     <th style="width:110px;">Actions</th>
                                 </tr>
                             </thead>
                             <tbody id="entitiesTableBody">
-                                <tr><td colspan="8" class="text-center text-muted py-3">Loading...</td></tr>
+                                <tr><td colspan="9" class="text-center text-muted py-3">Loading...</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -1554,8 +1555,32 @@ function renderExternalRefs(text) {
     return `<h6 class="small text-uppercase text-muted mt-3">External References</h6><ul class="small mb-2 ps-3">${items}</ul>`;
 }
 
+function relativeTime(ts) {
+    if (!ts) return '';
+    const t = new Date(ts.replace(' ', 'T')).getTime();
+    if (isNaN(t)) return '';
+    const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (s < 60) return `${s}s ago`;
+    if (s < 3600) return `${Math.round(s / 60)}m ago`;
+    if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+    return `${Math.round(s / 86400)}d ago`;
+}
+
+// Keyed by entity id -> most recent ioc_sightings.seen_at, drawn from the same cached
+// actor-summary cross-reference the Dashboards widget uses (coarse name/alias matching,
+// not the entity detail page's stricter confirmed-match list) -- good enough for a table
+// column; the detail modal shows the precise per-entity figure from its own /detail call.
+let entityLastSeenById = {};
+
 function loadEntities() {
-    fetch('/api/ti/entities').then(r => r.json()).then(entities => {
+    Promise.all([
+        fetch('/api/ti/entities').then(r => r.json()),
+        fetch('/api/ti/actor-summary').then(r => r.json()).catch(() => ({actors: []})),
+    ]).then(([entities, summary]) => {
+        entityLastSeenById = {};
+        (summary.actors || []).forEach(a => {
+            if (a.sightings && a.sightings.length) entityLastSeenById[a.id] = a.sightings[0].seen_at;
+        });
         allEntities = entities;
         renderEntitiesTable(allEntities);
     }).catch(err => console.error('Error loading entities:', err));
@@ -1564,7 +1589,7 @@ function loadEntities() {
 function renderEntitiesTable(entities) {
     const tbody = document.getElementById('entitiesTableBody');
     if (!entities.length) {
-        tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-3">No entities yet.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-3">No entities yet.</td></tr>';
         return;
     }
     const isAdmin = hasPermission('threatintel.manage');
@@ -1576,6 +1601,7 @@ function renderEntitiesTable(entities) {
             <td class="text-muted small">${(e.techniques || []).map(t => `<span class="badge bg-secondary me-1">T${escHtml(t)}</span>`).join('') || '—'}</td>
             <td><span class="badge ${e.source === 'admin' ? 'bg-info text-dark' : 'bg-secondary'}">${escHtml(e.source)}</span></td>
             <td title="${escHtml(e.attribution_note || '')}">${confidenceBadge(e.confidence)}</td>
+            <td class="small" title="${escHtml(entityLastSeenById[e.id] || '')}">${entityLastSeenById[e.id] ? `<span class="badge bg-danger">${relativeTime(entityLastSeenById[e.id])}</span>` : '<span class="text-muted">Never</span>'}</td>
             <td>${e.linked_count > 0 ? `<span class="badge bg-info text-dark">${e.linked_count}</span>` : '<span class="text-muted small">0</span>'}</td>
             <td class="text-nowrap">
                 ${isAdmin ? `
@@ -1763,7 +1789,10 @@ async function openEntityDetail(id) {
         const res = await fetch(`/api/ti/entities/${id}/detail`);
         const e = await res.json();
         if (!res.ok) { document.getElementById('entityDetailBody').innerHTML = `<span class="text-danger">${escHtml(e.error || 'Failed to load entity.')}</span>`; return; }
-        document.getElementById('entityDetailTitle').innerHTML = `${escHtml(e.name)} ${entityTypeBadge(e.entity_type)}`;
+        document.getElementById('entityDetailTitle').innerHTML = `${escHtml(e.name)} ${entityTypeBadge(e.entity_type)}
+            ${e.last_seen_active
+                ? `<span class="badge bg-danger" title="${escHtml(e.last_seen_active)}">Last seen ${relativeTime(e.last_seen_active)}</span>`
+                : '<span class="badge bg-secondary" title="No ioc_sightings hit against this entity\'s matched indicators">Never seen here</span>'}`;
         const attributionLine = e.confidence || e.attribution_note
             ? `<div class="small mb-2">${confidenceBadge(e.confidence)}${e.attribution_note ? ` <span class="text-muted">— ${escHtml(e.attribution_note)}</span>` : ''}</div>`
             : '';
