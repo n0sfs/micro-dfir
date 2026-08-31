@@ -1618,5 +1618,154 @@ LINUX_TEMPLATES = {
     'disable_exec_auditing': (lambda params: disable_exec_auditing(), []),
 }
 
-TEMPLATES_BY_OS = {'windows': WINDOWS_TEMPLATES, 'linux': LINUX_TEMPLATES}
+# ---- macOS (bash) ----
+# Same shell-argument-passing shape as the Linux templates (no shell-quoting step
+# needed -- the whole script travels as one subprocess argument). Deliberately a
+# smaller core set than Windows/Linux for this first pass -- persistence sweep
+# (LaunchAgents/LaunchDaemons/cron differ enough from systemd/cron to deserve their own
+# careful design, not a rushed adaptation), software inventory, SCA hardening checks,
+# and the sweep/injection-indicator actions are real gaps left for a follow-up, not
+# silently dropped. NONE of this has been live-verified against a real Mac (no macOS
+# hardware available) -- verified only by real-execution unit tests on the pure-Python
+# pieces and structural/shellcheck-style validation on the bash. isolate_host/
+# restore_network in particular (pfctl anchor rules) is the piece most worth a careful
+# first live test before ever relying on it for a real incident.
+
+def list_processes_macos():
+    # BSD ps (macOS) has no GNU --sort/--no-headers -- -r sorts by %cpu descending
+    # directly; tail -n +2 drops the header line for output-shape parity with the
+    # Linux/Windows equivalents.
+    return "ps -Aceo pid,ppid,user,pcpu,pmem,etime,comm -r | tail -n +2 | head -100"
+
+def kill_process_macos(pid):
+    pid = int(pid)
+    return (
+        f'if kill -0 {pid} 2>/dev/null; then\n'
+        f'    kill -9 {pid} && echo "Process {pid} terminated." || echo "Failed to terminate PID {pid}."\n'
+        f'else\n'
+        f'    echo "Failed to terminate PID {pid}: no such process."\n'
+        f'fi'
+    )
+
+# pfctl anchor-based isolation -- same "dedicated ruleset, flush-and-remove on restore"
+# shape as the Linux agent's iptables chain, so restore can't leave stray rules behind
+# or clobber whatever pf rules already existed on the host. Uses `pfctl -a <anchor> -f -`
+# to load an ad-hoc anchor from stdin (works without needing an `anchor` line already
+# present in /etc/pf.conf) and `pfctl -e` to make sure pf itself is enabled -- NOT
+# live-verified against a real Mac; if this doesn't take effect as expected, `pfctl -s
+# rules -a microdfir/isolation` on the host is the first thing to check.
+_PF_ANCHOR = "microdfir/isolation"
+
+def isolate_host_macos(soc_ip):
+    if not _IPV4_RE.match(soc_ip):
+        raise ValueError(f"Invalid SOC IP address: {soc_ip!r}")
+    return f"""cat <<'PFRULES' | pfctl -a {_PF_ANCHOR} -f - 2>&1
+block all
+pass out quick proto tcp from any to {soc_ip}
+pass in quick proto tcp from {soc_ip} to any
+PFRULES
+pfctl -e 2>&1 | grep -v 'already enabled'
+echo "Host isolated (pfctl anchor {_PF_ANCHOR}). Only traffic to/from {soc_ip} is permitted."
+"""
+
+def restore_network_macos():
+    return f"""pfctl -a {_PF_ANCHOR} -F all 2>&1
+echo "Network isolation removed (pfctl anchor {_PF_ANCHOR} flushed)."
+"""
+
+def collect_triage_macos():
+    return r"""echo "=== Processes ==="
+ps -Aceo pid,ppid,user,pcpu,pmem,comm -r | head -60
+echo
+echo "=== Established Connections ==="
+netstat -an -p tcp 2>/dev/null | grep ESTABLISHED | head -60
+echo
+echo "=== LaunchAgents / LaunchDaemons (user + system) ==="
+for d in /Library/LaunchAgents /Library/LaunchDaemons ~/Library/LaunchAgents /System/Library/LaunchAgents /System/Library/LaunchDaemons; do
+    [ -d "$d" ] && echo "--$d--" && ls -1 "$d" 2>/dev/null
+done
+echo
+echo "=== Logged-in Users ==="
+who
+echo
+echo "=== Login Items Modified in the Last 7 Days ==="
+find /Library/LaunchAgents /Library/LaunchDaemons ~/Library/LaunchAgents -type f -mtime -7 2>/dev/null
+"""
+
+def collect_file_macos(path):
+    # Identical shape/escaping to collect_file_linux() -- a quoted heredoc delimiter
+    # disables all shell expansion, so the path only needs Python string-literal
+    # escaping, not bash escaping.
+    esc = path.replace('\\', '\\\\').replace("'", "\\'")
+    return f"""python3 - <<'PYEOF'
+import base64, hashlib, json, os
+p = '{esc}'
+if not os.path.isfile(p):
+    print(json.dumps({{'error': 'file not found'}}))
+else:
+    size = os.path.getsize(p)
+    if size > 4 * 1024 * 1024:
+        print(json.dumps({{'error': 'file too large (%d bytes, 4MB limit)' % size}}))
+    else:
+        with open(p, 'rb') as f:
+            data = f.read()
+        print(json.dumps({{'path': p, 'size': size, 'sha256': hashlib.sha256(data).hexdigest(), 'content_b64': base64.b64encode(data).decode()}}))
+PYEOF
+"""
+
+def quarantine_file_macos(path):
+    # Identical shape to quarantine_file_linux() -- chmod 000 is the real baseline
+    # (agent runs as root via the launchd plist, so this still blocks every OTHER
+    # account). chflags uchg (the BSD "user immutable" flag, macOS's closest analog to
+    # Linux's chattr +i) is attempted best-effort on top; not guaranteed to be honored
+    # depending on SIP/filesystem, so its real success is reported back rather than
+    # assumed, same honesty as the Linux chattr attempt.
+    esc = path.replace('\\', '\\\\').replace("'", "\\'")
+    return f"""python3 - <<'PYEOF'
+import hashlib, json, os, shutil, subprocess, datetime
+
+p = '{esc}'
+if not os.path.isfile(p):
+    print(json.dumps({{'error': 'file not found'}}))
+else:
+    h = hashlib.sha256()
+    with open(p, 'rb') as f:
+        for chunk in iter(lambda: f.read(65536), b''):
+            h.update(chunk)
+    sha256 = h.hexdigest()
+
+    qdir = '/usr/local/microdfir-agent/quarantine'
+    os.makedirs(qdir, exist_ok=True)
+    stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    dest_name = f'{{stamp}}_{{sha256[:16]}}_{{os.path.basename(p)}}.quarantined'
+    dest = os.path.join(qdir, dest_name)
+    try:
+        shutil.move(p, dest)
+        os.chmod(dest, 0o000)
+        immutable = False
+        try:
+            r = subprocess.run(['chflags', 'uchg', dest], capture_output=True, timeout=5)
+            immutable = (r.returncode == 0)
+        except Exception:
+            pass
+        manifest = {{'original_path': p, 'quarantined_path': dest, 'sha256': sha256, 'quarantined_at': stamp, 'immutable': immutable}}
+        with open(dest + '.manifest.json', 'w') as f:
+            json.dump(manifest, f)
+        print(json.dumps(manifest))
+    except Exception as e:
+        print(json.dumps({{'error': f'failed to quarantine: {{e}}'}}))
+PYEOF
+"""
+
+MACOS_TEMPLATES = {
+    'list_processes': (lambda params: list_processes_macos(), []),
+    'kill_process': (lambda params: kill_process_macos(params['pid']), ['pid']),
+    'isolate_host': (lambda params: isolate_host_macos(params['soc_ip']), ['soc_ip']),
+    'restore_network': (lambda params: restore_network_macos(), []),
+    'collect_triage': (lambda params: collect_triage_macos(), []),
+    'collect_file': (lambda params: collect_file_macos(params['path']), ['path']),
+    'quarantine_file': (lambda params: quarantine_file_macos(params['path']), ['path']),
+}
+
+TEMPLATES_BY_OS = {'windows': WINDOWS_TEMPLATES, 'linux': LINUX_TEMPLATES, 'macos': MACOS_TEMPLATES}
 TEMPLATES = WINDOWS_TEMPLATES  # back-compat alias
