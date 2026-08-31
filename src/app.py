@@ -7106,6 +7106,23 @@ def migrate_agent_tokens():
     except Exception:
         pass
 
+def migrate_agent_groups():
+    # Purely organizational (filtering/bulk-dispatch), not a config-inheritance system --
+    # FIM paths/interval and log channels stay genuinely global (see fim_paths, the
+    # settings-table fim_interval_seconds, and api_agent_channels), so a group here means
+    # "these hosts, together" for response-action fan-out, not "these hosts share a
+    # policy". agent_tokens is the closest thing to a one-row-per-enrolled-host identity
+    # table today (bound to a hostname on first check-in), so the group lives there.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(agent_tokens)").fetchall()}
+        if 'group_name' not in cols:
+            conn.execute("ALTER TABLE agent_tokens ADD COLUMN group_name TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_ueba_entities():
     # UEBA originally modeled hosts only, with a fixed 'HIGH' severity and no way to
     # quiet a legitimately bursty entity. Adds: entity_type on events (host vs user,
@@ -9323,8 +9340,22 @@ def agent_checkins():
                 "version": version,
                 "version_since": None,
                 "os": os_name,
+                "group": "",
                 "recent_polls": []
             })
+
+        if hostnames:
+            placeholders = ','.join('?' * len(hostnames))
+            # A host re-enrolled onto a new per-download token leaves its OLD agent_tokens
+            # row behind (still hostname-matched, just stale) -- ordering oldest-first so
+            # the most-recently-bound row's group_name is what survives the dict build below.
+            group_rows = db.execute(
+                f"SELECT hostname, group_name FROM agent_tokens WHERE hostname IN ({placeholders}) AND group_name != '' ORDER BY bound_at ASC",
+                hostnames
+            ).fetchall()
+            group_by_host = {gr['hostname']: gr['group_name'] for gr in group_rows}
+            for m in mapped:
+                m['group'] = group_by_host.get(m['hostname'], '')
 
         # Recent check-in timestamps per host, for the heartbeat sparkline on the Agents
         # page — one bulk query bounded to the last 2000 polls across the visible hosts,
@@ -9441,6 +9472,61 @@ def api_fim_path_detail(fid):
 # heavier hunt-flavored sweeps/collections) stays gated to Tier 3+ below.
 AGENT_COMMAND_TIER1_LABELS = {'isolate_host', 'restore_network', 'collect_triage', 'kill_process'}
 
+def _queue_agent_command(db, hostname, label, params, script_in, queued_by):
+    """Builds and queues one command for one host -- the exact per-host logic
+    api_agent_commands()'s POST branch always ran, now shared between the single-host
+    path and the group fan-out path below so a group dispatch behaves identically to
+    queuing the same command by hand to each member one at a time. Returns
+    (cmd_id, None) on success or (None, error_message) on failure -- never raises, so
+    one bad host in a group dispatch doesn't abort the rest."""
+    # Response actions are queued from the UI (not by the agent), so there's no
+    # X-Agent-OS header on this request — the target host's own last-reported OS
+    # decides which script flavor (PowerShell vs bash) gets built.
+    host_templates = agent_scripts.TEMPLATES_BY_OS[_get_host_os(db, hostname)]
+
+    if label == 'custom':
+        script = script_in or ''
+        if not script.strip():
+            return None, 'script is required for a custom command'
+    elif label in host_templates:
+        builder, required = host_templates[label]
+        if label == 'ioc_sweep':
+            # Always recomputed fresh at dispatch time, never client-supplied — a sweep
+            # queued today reflects whatever's in the IOC browser today, the same way
+            # sigma_engine.py's IOC-match rule condition recomputes its own IP list
+            # fresh every detection cycle rather than freezing it at some earlier point.
+            params['hashes'] = _get_live_ioc_sha256_hashes(db)
+            params['md5_hashes'] = _get_live_ioc_md5_hashes(db)
+            params['sha1_hashes'] = _get_live_ioc_sha1_hashes(db)
+        if label == 'string_sweep':
+            params['patterns'] = _get_live_yara_strings()
+        if label == 'isolate_host' and not params.get('soc_ip'):
+            s = {r[0]: r[1] for r in db.execute("SELECT key, value FROM settings").fetchall()}
+            soc_ip = s.get('ingest_bind_ip', '0.0.0.0')
+            if soc_ip == '0.0.0.0':
+                soc_ip = request.host.split(':')[0]
+            params['soc_ip'] = soc_ip
+        missing = [p for p in required if not params.get(p)]
+        if missing:
+            return None, f"Missing required parameter(s): {', '.join(missing)}"
+        try:
+            script = builder(params)
+        except Exception as e:
+            return None, f'Failed to build script: {e}'
+    elif label == 'upgrade':
+        # No script to build here — agent_config() recognizes this label specially and
+        # embeds the current agent source directly in the poll response, mirroring how
+        # 'uninstall' is handled.
+        script = ''
+    else:
+        return None, f'Unknown command label: {label}'
+
+    cur = db.execute(
+        "INSERT INTO agent_commands (hostname, label, script, queued_by) VALUES (?, ?, ?, ?)",
+        (hostname, label, script, queued_by)
+    )
+    return cur.lastrowid, None
+
 @app.route('/api/agent/commands', methods=['GET', 'POST'])
 @login_required
 def api_agent_commands():
@@ -9470,61 +9556,38 @@ def api_agent_commands():
 
     d = request.json or {}
     hostname = (d.get('hostname') or '').strip()
+    group_name = (d.get('group') or '').strip()
     label = d.get('label')
-    if not hostname or not label:
-        return jsonify({'error': 'hostname and label are required'}), 400
+    if not label or (not hostname and not group_name):
+        return jsonify({'error': 'hostname (or group) and label are required'}), 400
     err = require_permission('edr.command.basic' if label in AGENT_COMMAND_TIER1_LABELS else 'edr.command.advanced')
     if err: return err
 
-    # Response actions are queued from the UI (not by the agent), so there's no
-    # X-Agent-OS header on this request — the target host's own last-reported OS
-    # decides which script flavor (PowerShell vs bash) gets built.
-    host_templates = agent_scripts.TEMPLATES_BY_OS[_get_host_os(db, hostname)]
+    if group_name:
+        # Only hosts that have both a group assignment AND a live check-in history --
+        # a group can't dispatch to a host that no longer exists in agent_polls (already
+        # uninstalled/decommissioned), same "must actually be a known endpoint" guard
+        # the single-host path gets implicitly from the Agents page only ever listing
+        # real hosts.
+        hosts = [r['hostname'] for r in db.execute(
+            "SELECT DISTINCT a.hostname FROM agent_tokens a "
+            "WHERE a.group_name = ? AND a.hostname IN (SELECT user_agent FROM agent_polls)",
+            (group_name,)
+        ).fetchall()]
+        if not hosts:
+            return jsonify({'error': f'No known agents are in group "{group_name}"'}), 400
+        queued, failed = [], []
+        for h in hosts:
+            cmd_id, error = _queue_agent_command(db, h, label, dict(d.get('params') or {}), d.get('script'), current_user.username)
+            (failed if error else queued).append({'hostname': h, **({'error': error} if error else {'id': cmd_id})})
+        db.commit()
+        return jsonify({'status': 'success', 'queued': queued, 'failed': failed})
 
-    if label == 'custom':
-        script = d.get('script', '')
-        if not script.strip():
-            return jsonify({'error': 'script is required for a custom command'}), 400
-    elif label in host_templates:
-        builder, required = host_templates[label]
-        params = d.get('params', {}) or {}
-        if label == 'ioc_sweep':
-            # Always recomputed fresh at dispatch time, never client-supplied — a sweep
-            # queued today reflects whatever's in the IOC browser today, the same way
-            # sigma_engine.py's IOC-match rule condition recomputes its own IP list
-            # fresh every detection cycle rather than freezing it at some earlier point.
-            params['hashes'] = _get_live_ioc_sha256_hashes(db)
-            params['md5_hashes'] = _get_live_ioc_md5_hashes(db)
-            params['sha1_hashes'] = _get_live_ioc_sha1_hashes(db)
-        if label == 'string_sweep':
-            params['patterns'] = _get_live_yara_strings()
-        if label == 'isolate_host' and not params.get('soc_ip'):
-            s = {r[0]: r[1] for r in db.execute("SELECT key, value FROM settings").fetchall()}
-            soc_ip = s.get('ingest_bind_ip', '0.0.0.0')
-            if soc_ip == '0.0.0.0':
-                soc_ip = request.host.split(':')[0]
-            params['soc_ip'] = soc_ip
-        missing = [p for p in required if not params.get(p)]
-        if missing:
-            return jsonify({'error': f"Missing required parameter(s): {', '.join(missing)}"}), 400
-        try:
-            script = builder(params)
-        except Exception as e:
-            return jsonify({'error': f'Failed to build script: {e}'}), 400
-    elif label == 'upgrade':
-        # No script to build here — agent_config() recognizes this label specially and
-        # embeds the current agent source directly in the poll response, mirroring how
-        # 'uninstall' is handled.
-        script = ''
-    else:
-        return jsonify({'error': f'Unknown command label: {label}'}), 400
-
-    cur = db.execute(
-        "INSERT INTO agent_commands (hostname, label, script, queued_by) VALUES (?, ?, ?, ?)",
-        (hostname, label, script, current_user.username)
-    )
+    cmd_id, error = _queue_agent_command(db, hostname, label, d.get('params', {}) or {}, d.get('script'), current_user.username)
+    if error:
+        return jsonify({'error': error}), 400
     db.commit()
-    return jsonify({'status': 'success', 'id': cur.lastrowid})
+    return jsonify({'status': 'success', 'id': cmd_id})
 
 @app.route('/api/agent/result', methods=['POST'])
 def api_agent_result():
@@ -9574,6 +9637,36 @@ def api_agent_result():
                 (cmd['hostname'], message, json.dumps({'command_id': cmd_id, 'label': cmd['label'], 'hit_count': len(hits), 'detection_type': 'ioc_sweep_hit'}))
             )
     db.commit()
+    return jsonify({'status': 'success'})
+
+@app.route('/api/agent/groups', methods=['GET'])
+@login_required
+def api_agent_groups():
+    db = get_db()
+    rows = db.execute("SELECT DISTINCT group_name FROM agent_tokens WHERE group_name != '' ORDER BY group_name").fetchall()
+    return jsonify([r['group_name'] for r in rows])
+
+@app.route('/api/agent/<hostname>/group', methods=['PUT'])
+@login_required
+def api_agent_set_group(hostname):
+    err = require_permission('edr.agent.manage')
+    if err: return err
+    db = get_db()
+    group_name = ((request.json or {}).get('group_name') or '').strip()
+    # Requires an already-bound agent_tokens row (the common case -- see
+    # _validate_agent_auth, which binds one on a host's first check-in with a real
+    # per-download token). A host still running the legacy *shared* secret never gets a
+    # row at all (that auth path doesn't touch agent_tokens), and agent_tokens is keyed
+    # by TOKEN, not hostname -- fabricating a placeholder row here to work around that
+    # would leave an orphaned duplicate the day that host is re-downloaded onto a real
+    # token, silently splitting its group between two rows. Simplest honest fix: ask for
+    # a re-download/upgrade first, same as every other per-host feature already does.
+    existing = db.execute("SELECT rowid FROM agent_tokens WHERE hostname = ? ORDER BY bound_at DESC LIMIT 1", (hostname,)).fetchone()
+    if not existing:
+        return jsonify({'error': 'This agent has no per-agent token on file yet (still on the legacy shared secret). Re-download/upgrade it once, then grouping will work.'}), 400
+    db.execute("UPDATE agent_tokens SET group_name = ? WHERE rowid = ?", (group_name, existing['rowid']))
+    db.commit()
+    log_audit('agent_group_change', 'agent', hostname, f'group={group_name or "(none)"}')
     return jsonify({'status': 'success'})
 
 @app.route('/api/agent/<hostname>', methods=['DELETE'])
@@ -9635,6 +9728,7 @@ migrate_live_logs_process_columns()
 migrate_live_logs_hash_dns_columns()
 migrate_agent_versions()
 migrate_agent_tokens()
+migrate_agent_groups()
 migrate_audit_log()
 migrate_risk_scoring()
 migrate_anomaly_rules()
