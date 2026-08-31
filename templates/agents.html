@@ -295,7 +295,8 @@
                     <h6 class="text-info fw-bold">SOC Secret Token (Ingestion API)</h6>
                     <p class="text-muted small">Used by Vector and deployed log forwarders to authenticate against the ingestion API.</p>
                     <div class="input-group mb-3">
-                        <input type="text" class="form-control bg-dark text-light border-secondary" id="socToken" value="{{ soc_token }}">
+                        <input type="password" class="form-control bg-dark text-light border-secondary" id="socToken" value="{{ soc_token }}">
+                        <button class="btn btn-outline-secondary" type="button" onclick="toggleSocTokenVisibility()" title="Show/hide"><i class="fa-solid fa-eye" id="socTokenEyeIcon"></i></button>
                         <button class="btn btn-outline-warning" type="button" onclick="generateToken()"><i class="fa-solid fa-key me-1"></i> Generate New</button>
                     </div>
                     <button class="btn btn-outline-primary btn-sm" onclick="saveToken()"><i class="fa-solid fa-lock me-1"></i> Save Ingestion Token</button>
@@ -303,24 +304,47 @@
             </div>
 
             <p class="text-muted small mb-3">Download pre-configured agent scripts embedded with your current SOC secret and server IP, or manage local background services.</p>
-            <div class="mb-4">
-                <a href="/api/agent/download/windows" class="btn btn-outline-success btn-sm me-2"><i class="fa-brands fa-windows me-1"></i> Download Windows Agent (.zip)</a>
-                <a href="/api/agent/download/linux" class="btn btn-outline-info btn-sm me-2"><i class="fa-brands fa-linux me-1"></i> Download Linux Agent (.tar.gz)</a>
-                <a href="/api/agent/download/macos" class="btn btn-outline-light btn-sm"><i class="fa-brands fa-apple me-1"></i> Download macOS Agent (.tar.gz)</a>
+
+            <div class="card bg-black border-secondary mb-3">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                        <h6 class="text-warning font-monospace mb-0"><i class="fa-brands fa-windows me-2"></i>Windows</h6>
+                        <a href="/api/agent/download/windows" class="btn btn-outline-success btn-sm"><i class="fa-solid fa-download me-1"></i> Download Agent (.zip)</a>
+                    </div>
+                    <p class="text-muted small mb-2">To run the agent persistently in the background, open PowerShell as Administrator and run:</p>
+                    <div class="bg-black p-2 rounded mb-3 font-monospace text-success small border border-secondary">python micro_agent_windows.py install</div>
+                    <p class="text-muted small mb-2">To stop and remove the background service:</p>
+                    <div class="bg-black p-2 rounded font-monospace text-danger small border border-secondary">python micro_agent_windows.py uninstall</div>
+                </div>
             </div>
 
-            <h6 class="text-warning mt-4 font-monospace"><i class="fa-solid fa-greater-than me-2"></i>Windows Background Service Management</h6>
-            <p class="text-muted small mb-2">To run the Windows agent persistently in the background, open PowerShell as Administrator and run:</p>
-            <div class="bg-black p-2 rounded mb-3 font-monospace text-success small border border-secondary">python micro_agent_windows.py install</div>
-            <p class="text-muted small mb-2">To stop and remove the background service:</p>
-            <div class="bg-black p-2 rounded font-monospace text-danger small border border-secondary">python micro_agent_windows.py uninstall</div>
+            <div class="card bg-black border-secondary mb-3">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                        <h6 class="text-warning font-monospace mb-0"><i class="fa-brands fa-linux me-2"></i>Linux</h6>
+                        <a href="/api/agent/download/linux" class="btn btn-outline-info btn-sm"><i class="fa-solid fa-download me-1"></i> Download Agent (.tar.gz)</a>
+                    </div>
+                    <p class="text-muted small mb-2">To run the agent persistently as a systemd service, extract the download and run as root:</p>
+                    <div class="bg-black p-2 rounded mb-3 font-monospace text-success small border border-secondary">sudo python3 micro_agent_linux.py install</div>
+                    <p class="text-muted small mb-2">To stop and remove the background service:</p>
+                    <div class="bg-black p-2 rounded font-monospace text-danger small border border-secondary">sudo python3 micro_agent_linux.py uninstall</div>
+                </div>
+            </div>
 
-            <h6 class="text-warning mt-4 font-monospace"><i class="fa-solid fa-greater-than me-2"></i>macOS Background Service Management</h6>
-            <p class="text-muted small mb-2">To run the macOS agent persistently as a launchd daemon, extract the download and run as root (launchd requires it for a system-level daemon):</p>
-            <div class="bg-black p-2 rounded mb-3 font-monospace text-success small border border-secondary">sudo python3 micro_agent_macos.py install</div>
-            <p class="text-muted small mb-2">To stop and remove the background service:</p>
-            <div class="bg-black p-2 rounded font-monospace text-danger small border border-secondary">sudo python3 micro_agent_macos.py uninstall</div>
-            <p class="text-muted small mt-3 mb-0"><i class="fa-solid fa-triangle-exclamation me-1 text-warning"></i>macOS support is newer and has a smaller action set than Windows/Linux (no persistence sweep, software inventory, or SCA checks yet), and host isolation (pfctl) has not been live-verified against real macOS hardware -- test Isolate Host on a non-critical machine before relying on it during a real incident.</p>
+            <div class="card bg-black border-secondary mb-3">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                        <h6 class="text-warning font-monospace mb-0"><i class="fa-brands fa-apple me-2"></i>macOS</h6>
+                        <a href="/api/agent/download/macos" class="btn btn-outline-light btn-sm"><i class="fa-solid fa-download me-1"></i> Download Agent (.tar.gz)</a>
+                    </div>
+                    <p class="text-muted small mb-2">To run the agent persistently as a launchd daemon, extract the download and run as root (launchd requires it for a system-level daemon):</p>
+                    <div class="bg-black p-2 rounded mb-3 font-monospace text-success small border border-secondary">sudo python3 micro_agent_macos.py install</div>
+                    <p class="text-muted small mb-2">To stop and remove the background service:</p>
+                    <div class="bg-black p-2 rounded font-monospace text-danger small border border-secondary">sudo python3 micro_agent_macos.py uninstall</div>
+                    <p class="text-muted small mt-3 mb-0"><i class="fa-solid fa-triangle-exclamation me-1 text-warning"></i>macOS support is newer and has a smaller action set than Windows/Linux (no persistence sweep, software inventory, or SCA checks yet), and host isolation (pfctl) has not been live-verified against real macOS hardware -- test Isolate Host on a non-critical machine before relying on it during a real incident.</p>
+                </div>
+            </div>
+
             <p class="text-muted small mt-2 mb-0"><i class="fa-solid fa-circle-info me-1"></i>Already-deployed agents can also be upgraded remotely from the Response Actions tab instead of reinstalling by hand.</p>
         </div>
     </div>
@@ -529,6 +553,14 @@ async function deleteFimPath(fid) {
 }
 
 // ---- Deployment tab: SOC ingestion token ----
+function toggleSocTokenVisibility() {
+    const input = document.getElementById('socToken');
+    const icon = document.getElementById('socTokenEyeIcon');
+    const showing = input.type === 'text';
+    input.type = showing ? 'password' : 'text';
+    icon.className = showing ? 'fa-solid fa-eye' : 'fa-solid fa-eye-slash';
+}
+
 function generateToken() {
     const chars = 'abcdef0123456789';
     let token = '';
