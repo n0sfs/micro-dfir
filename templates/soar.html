@@ -331,7 +331,8 @@ const CASE_ACTION_LABELS = {
     isolate_host: 'Isolate confirmed hosts (EDR)', restore_network: 'Restore network on confirmed hosts (EDR)',
     collect_triage: 'Collect triage bundle from confirmed hosts (EDR)',
     quarantine_file: 'Quarantine a file on confirmed hosts (EDR)',
-    kill_scheduled_task: 'Remove a scheduled task on confirmed hosts (EDR, Windows only)'
+    kill_scheduled_task: 'Remove a scheduled task on confirmed hosts (EDR, Windows only)',
+    kill_process_by_name: 'Kill matching processes on confirmed hosts (EDR)'
 };
 const ALERT_ACTION_LABELS = {
     send_email: 'Send email', send_webhook: 'Send webhook', send_slack: 'Send Slack message',
@@ -345,7 +346,7 @@ function actionLabelsForTrigger(triggerEvent) {
 // for these in the editor, matching PLAYBOOK_ACTION_TYPES_ALWAYS_GATED server-side
 // (which re-forces it regardless of what's submitted, so this is a UI hint, not the
 // actual enforcement point).
-const ACTION_TYPES_ALWAYS_GATED = ['isolate_host', 'restore_network', 'collect_triage', 'quarantine_file', 'kill_scheduled_task'];
+const ACTION_TYPES_ALWAYS_GATED = ['isolate_host', 'restore_network', 'collect_triage', 'quarantine_file', 'kill_scheduled_task', 'kill_process_by_name'];
 
 function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -543,6 +544,9 @@ function actionParamsFieldsHtml(seq, actionType, params) {
         case 'kill_scheduled_task':
             return `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_task_name" placeholder="Scheduled task name, e.g. WindowsUpdateSvc" value="${escHtml(params.task_name || '')}">
                 <div class="small text-muted mt-1">Windows only -- skipped on any confirmed host that isn't Windows. Always requires approval.</div>`;
+        case 'kill_process_by_name':
+            return `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_pattern" placeholder="Process name or path substring, e.g. mimikatz" value="${escHtml(params.pattern || '')}">
+                <div class="small text-muted mt-1">Kills every process whose name or full path/command line contains this text (case-insensitive) on every Case Asset marked <strong>Confirmed</strong> compromised. Broader blast radius than a single PID -- always requires approval.</div>`;
         case 'create_case':
             return `<div class="small text-muted">No params -- creates a new case from the triggering alert (title/severity carried over) and links it, then runs any matching "Case created" playbooks against it.</div>`;
         default:
@@ -630,6 +634,7 @@ function collectActionRow(row) {
         }
         case 'quarantine_file': params.path = getVal('path'); break;
         case 'kill_scheduled_task': params.task_name = getVal('task_name'); break;
+        case 'kill_process_by_name': params.pattern = getVal('pattern'); break;
     }
     return { action_type: actionType, params, requires_approval: requiresApproval };
 }

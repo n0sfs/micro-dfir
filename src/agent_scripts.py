@@ -28,6 +28,28 @@ def kill_process(pid):
         f"\"Process {pid} terminated.\" }} catch {{ \"Failed to terminate PID {pid}: $_\" }}"
     )
 
+# Unlike kill_process()'s single live PID (something an analyst just saw and picked),
+# this targets every process whose name OR executable path CONTAINS the given pattern --
+# built for automation (a SOAR playbook can't know a PID ahead of time, but can be
+# authored against a known-bad process/file name) and for "kill every instance of X"
+# containment on a single host. [regex]::Escape() treats the pattern as a literal
+# substring, not a user-supplied regex; -match is case-insensitive by default in
+# PowerShell. Deliberately broader-blast-radius than kill_process, so it's gated at
+# edr.command.advanced for the direct console action (see AGENT_COMMAND_TIER1_LABELS)
+# and always requires_approval as a playbook action.
+def kill_process_by_name(pattern):
+    esc = pattern.replace('`', '``').replace('"', '`"').replace('$', '`$')
+    return f"""$pattern = [regex]::Escape("{esc}")
+$targets = Get-Process | Where-Object {{ $_.ProcessName -match $pattern -or ($_.Path -and $_.Path -match $pattern) }}
+if (-not $targets) {{ '{{"killed":[],"failed":[],"message":"no matching processes"}}'; exit }}
+$killed = @(); $failed = @()
+foreach ($p in $targets) {{
+    try {{ Stop-Process -Id $p.Id -Force -ErrorAction Stop; $killed += @{{pid=$p.Id; name=$p.ProcessName; path=$p.Path}} }}
+    catch {{ $failed += @{{pid=$p.Id; name=$p.ProcessName; error="$_"}} }}
+}}
+@{{killed=$killed; failed=$failed}} | ConvertTo-Json -Compress
+"""
+
 def isolate_host(soc_ip):
     if not _IPV4_RE.match(soc_ip):
         raise ValueError(f"Invalid SOC IP address: {soc_ip!r}")
@@ -814,6 +836,7 @@ try {{
 WINDOWS_TEMPLATES = {
     'list_processes': (lambda params: _PROGRESS_SILENT + list_processes(), []),
     'kill_process': (lambda params: _PROGRESS_SILENT + kill_process(params['pid']), ['pid']),
+    'kill_process_by_name': (lambda params: _PROGRESS_SILENT + kill_process_by_name(params['pattern']), ['pattern']),
     'isolate_host': (lambda params: _PROGRESS_SILENT + isolate_host(params['soc_ip']), ['soc_ip']),
     'restore_network': (lambda params: _PROGRESS_SILENT + restore_network(), []),
     'collect_triage': (lambda params: _PROGRESS_SILENT + collect_triage(), []),
@@ -858,6 +881,45 @@ def kill_process_linux(pid):
         f'    echo "Failed to terminate PID {pid}: no such process."\n'
         f'fi'
     )
+
+# Same "match by name/path substring, not a live PID" rationale as the Windows
+# kill_process_by_name(). Uses `ps -Ao pid=,comm=,args=` (works identically on Linux and
+# macOS -- no /proc dependency) rather than /proc/<pid>/exe, so this one function is
+# shared verbatim by both POSIX agents instead of a Linux-only procfs version plus a
+# separate macOS one.
+def kill_process_by_name_linux(pattern):
+    esc = pattern.replace('\\', '\\\\').replace("'", "\\'")
+    return f"""python3 - <<'PYEOF'
+import json, os, re, signal, subprocess
+
+pattern = re.compile(re.escape('{esc}'), re.IGNORECASE)
+out = subprocess.run(['ps', '-Ao', 'pid=,comm=,args='], capture_output=True, text=True, timeout=15).stdout
+killed, failed = [], []
+my_pid = os.getpid()
+for line in out.splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    parts = line.split(None, 2)
+    if len(parts) < 2:
+        continue
+    try:
+        pid = int(parts[0])
+    except ValueError:
+        continue
+    comm = parts[1]
+    args = parts[2] if len(parts) > 2 else ''
+    if pid <= 1 or pid == my_pid:
+        continue
+    if pattern.search(comm) or pattern.search(args):
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed.append({{'pid': pid, 'name': comm}})
+        except Exception as e:
+            failed.append({{'pid': pid, 'name': comm, 'error': str(e)}})
+print(json.dumps({{'killed': killed, 'failed': failed}}))
+PYEOF
+"""
 
 # A dedicated chain (rather than editing INPUT/OUTPUT's default policy directly, as the
 # Windows firewall-profile approach does) makes isolate/restore a clean flush-and-remove
@@ -1599,6 +1661,7 @@ PYEOF
 LINUX_TEMPLATES = {
     'list_processes': (lambda params: list_processes_linux(), []),
     'kill_process': (lambda params: kill_process_linux(params['pid']), ['pid']),
+    'kill_process_by_name': (lambda params: kill_process_by_name_linux(params['pattern']), ['pattern']),
     'isolate_host': (lambda params: isolate_host_linux(params['soc_ip']), ['soc_ip']),
     'restore_network': (lambda params: restore_network_linux(), []),
     'collect_triage': (lambda params: collect_triage_linux(), []),
@@ -1646,6 +1709,42 @@ def kill_process_macos(pid):
         f'    echo "Failed to terminate PID {pid}: no such process."\n'
         f'fi'
     )
+
+# Identical shape to kill_process_by_name_linux() -- `ps -Ao pid=,comm=,args=` output is
+# the same on both POSIX agents, no /proc dependency either way.
+def kill_process_by_name_macos(pattern):
+    esc = pattern.replace('\\', '\\\\').replace("'", "\\'")
+    return f"""python3 - <<'PYEOF'
+import json, os, re, signal, subprocess
+
+pattern = re.compile(re.escape('{esc}'), re.IGNORECASE)
+out = subprocess.run(['ps', '-Ao', 'pid=,comm=,args='], capture_output=True, text=True, timeout=15).stdout
+killed, failed = [], []
+my_pid = os.getpid()
+for line in out.splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    parts = line.split(None, 2)
+    if len(parts) < 2:
+        continue
+    try:
+        pid = int(parts[0])
+    except ValueError:
+        continue
+    comm = parts[1]
+    args = parts[2] if len(parts) > 2 else ''
+    if pid <= 1 or pid == my_pid:
+        continue
+    if pattern.search(comm) or pattern.search(args):
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed.append({{'pid': pid, 'name': comm}})
+        except Exception as e:
+            failed.append({{'pid': pid, 'name': comm, 'error': str(e)}})
+print(json.dumps({{'killed': killed, 'failed': failed}}))
+PYEOF
+"""
 
 # pfctl anchor-based isolation -- same "dedicated ruleset, flush-and-remove on restore"
 # shape as the Linux agent's iptables chain, so restore can't leave stray rules behind
@@ -1760,6 +1859,7 @@ PYEOF
 MACOS_TEMPLATES = {
     'list_processes': (lambda params: list_processes_macos(), []),
     'kill_process': (lambda params: kill_process_macos(params['pid']), ['pid']),
+    'kill_process_by_name': (lambda params: kill_process_by_name_macos(params['pattern']), ['pattern']),
     'isolate_host': (lambda params: isolate_host_macos(params['soc_ip']), ['soc_ip']),
     'restore_network': (lambda params: restore_network_macos(), []),
     'collect_triage': (lambda params: collect_triage_macos(), []),
