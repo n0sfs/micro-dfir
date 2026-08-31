@@ -5925,6 +5925,32 @@ def api_dashboard_alert_severity():
     ).fetchall()
     return jsonify({'severity': [dict(r) for r in rows]})
 
+# FIM hits land as ordinary live_logs rows (app='FIM', see run_fim_check() in both
+# Windows/Linux/macOS agents) with no dedicated aggregation anywhere else -- an
+# analyst had to know to go query Log Search for app:FIM to notice a change-activity
+# spike or a hot host. Same trend-bucketing shape as api_dashboard_alert_trend.
+@app.route('/api/dashboards/fim-activity', methods=['GET'])
+@login_required
+def api_dashboard_fim_activity():
+    days = _dashboard_window_days(request)
+    bucket = "strftime('%Y-%m-%d %H:00', timestamp)" if days <= 7 else "strftime('%Y-%m-%d', timestamp)"
+    db = get_db()
+    trend = db.execute(
+        f"SELECT {bucket} as t_bucket, COUNT(*) as count FROM live_logs "
+        f"WHERE app = 'FIM' AND timestamp >= datetime('now', ?) GROUP BY t_bucket ORDER BY t_bucket ASC",
+        (f'-{days} days',)
+    ).fetchall()
+    top_host = db.execute(
+        "SELECT host, COUNT(*) as count FROM live_logs WHERE app = 'FIM' AND timestamp >= datetime('now', ?) "
+        "GROUP BY host ORDER BY count DESC LIMIT 1",
+        (f'-{days} days',)
+    ).fetchone()
+    return jsonify({
+        'trend': [dict(r) for r in trend],
+        'total': sum(r['count'] for r in trend),
+        'top_host': dict(top_host) if top_host else None,
+    })
+
 @app.route('/api/dashboards/risk-trend', methods=['GET'])
 @login_required
 def api_dashboard_risk_trend():
@@ -6055,6 +6081,42 @@ def api_dashboard_agent_status():
             pass
         counts[status] += 1
     return jsonify({'status_counts': counts, 'total': len(rows)})
+
+# chart_agent_status (above) is deliberately real-time-only -- this is the trend
+# counterpart: a dip in daily distinct-checked-in-host count over the selected range
+# surfaces "we lost N endpoints overnight" the way a flat online/offline snapshot
+# never can. Version distribution rides along as fleet-composition context (which
+# hosts are behind the newest deployed agent), not a separate widget.
+@app.route('/api/dashboards/agent-health-trend', methods=['GET'])
+@login_required
+def api_dashboard_agent_health_trend():
+    days = _dashboard_window_days(request)
+    bucket = "strftime('%Y-%m-%d %H:00', timestamp)" if days <= 7 else "strftime('%Y-%m-%d', timestamp)"
+    db = get_db()
+    trend = db.execute(
+        f"SELECT {bucket} as t_bucket, COUNT(DISTINCT ip_address) as count FROM agent_polls "
+        f"WHERE timestamp >= datetime('now', ?) GROUP BY t_bucket ORDER BY t_bucket ASC",
+        (f'-{days} days',)
+    ).fetchall()
+    # Latest poll per host (same MAX(id) GROUP BY ip_address shape api_dashboard_agent_status
+    # uses above), not every poll ever -- a host that upgraded mid-window shouldn't count
+    # under both its old and new version. version DESC works because every real
+    # AGENT_VERSION is a zero-padded YYYY.MM.DD.N date stamp, so the lexicographic max
+    # is the real latest -- not a majority-vote guess.
+    version_rows = db.execute(
+        "SELECT version, COUNT(*) as count FROM agent_polls "
+        "WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY ip_address) AND version IS NOT NULL "
+        "GROUP BY version ORDER BY version DESC"
+    ).fetchall()
+    versions = [dict(r) for r in version_rows]
+    latest_version = versions[0]['version'] if versions else None
+    outdated_count = sum(v['count'] for v in versions if v['version'] != latest_version)
+    return jsonify({
+        'trend': [dict(r) for r in trend],
+        'versions': versions,
+        'latest_version': latest_version,
+        'outdated_count': outdated_count,
+    })
 
 # Case metrics/SLA -- a single global SLA target (case_sla_hours, default 24) applies
 # to every case; no per-queue/per-severity SLA tiers, matching the scope of every other
@@ -6909,6 +6971,7 @@ WIDGET_TYPES = {
     'chart_agent_status': {}, 'chart_mitre_coverage': {}, 'chart_threat_actors': {},
     'chart_case_stats': {}, 'chart_case_aging': {}, 'chart_case_queue_backlog': {},
     'chart_case_workload': {}, 'chart_case_close_trend': {}, 'chart_compliance_coverage': {},
+    'chart_fim_activity': {}, 'chart_agent_health_trend': {},
     # "App" widgets (Batch 2) -- compact live embeds of other pages, all reusing their
     # existing endpoints (/api/alerts, /api/cases, /api/logs/search, /api/ti/lookup,
     # /api/agent/commands) rather than any new backend logic. Purely additive to this
