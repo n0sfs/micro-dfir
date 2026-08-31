@@ -261,7 +261,7 @@ function tierBadgeClass(tier) {
 function renderTopRiskWidget(container, widgetId, config) {
     container.innerHTML = `
         <table class="table table-dark table-hover table-sm align-middle mb-0">
-            <thead><tr><th>Entity</th><th>Score</th><th>Tier</th></tr></thead>
+            <thead><tr><th>Entity</th><th>Priority</th><th>Tier</th></tr></thead>
             <tbody><tr><td colspan="3" class="text-center text-muted py-3">Loading…</td></tr></tbody>
         </table>`;
     fetch(`/api/dashboards/top-risk-entities?range=${widgetRange(config)}`).then(r => r.json()).then(d => {
@@ -270,12 +270,20 @@ function renderTopRiskWidget(container, widgetId, config) {
             body.innerHTML = '<tr><td colspan="3" class="text-center text-muted py-3">No risk activity in this window.</td></tr>';
             return;
         }
-        body.innerHTML = d.entities.map(e => `
-            <tr>
+        // Ranked by priority_score (peak severity + signal breadth + recency decay) so
+        // a stale-but-loud alert from days ago doesn't keep outranking current activity
+        // -- raw_score (the window's total point sum) is shown as supporting context in
+        // the title tooltip, not as the headline number.
+        body.innerHTML = d.entities.map(e => {
+            const title = `${e.raw_score} raw point${e.raw_score === 1 ? '' : 's'} across ${e.event_count} event${e.event_count === 1 ? '' : 's'} in this window`;
+            const priorityDisplay = e.priority_score != null ? e.priority_score.toFixed(1) : '—';
+            return `
+            <tr title="${escHtml(title)}">
                 <td class="small">${entityIcon(e.entity_type)}${escHtml(e.entity_id)}</td>
-                <td>${e.score}</td>
+                <td>${priorityDisplay}${e.priority_score != null ? '<span class="text-muted small">/10</span>' : ''}</td>
                 <td><span class="badge ${tierBadgeClass(e.tier)}">${escHtml(e.tier)}</span></td>
-            </tr>`).join('');
+            </tr>`;
+        }).join('');
     }).catch(err => console.error('Error loading top risk entities:', err));
 }
 
