@@ -483,6 +483,10 @@
             <input type="text" id="entityAttributionNote" class="form-control bg-dark text-light border-secondary" placeholder="e.g. per Mandiant M-Trends 2024">
           </div>
         </div>
+        <div class="mb-3">
+          <label class="form-label">External References <span class="text-muted small">(optional, one per line: Label | https://...)</span></label>
+          <textarea id="entityExternalReferences" class="form-control bg-dark text-light border-secondary font-monospace small" rows="3" placeholder="Mandiant APT28 Profile | https://www.mandiant.com/resources/apt28"></textarea>
+        </div>
         <div id="entityModalError" class="text-danger small" style="display:none;"></div>
       </div>
       <div class="modal-footer border-secondary">
@@ -1517,6 +1521,39 @@ function confidenceBadge(confidence) {
     return `<span class="badge ${map[confidence] || 'bg-secondary'}">${escHtml(confidence)}</span>`;
 }
 
+// Each line is "Label | https://..." (or just a bare URL/label with no "|"). Only
+// http(s) URLs are linkified -- anything else (a bad paste, a javascript: URI) renders
+// as inert text instead of an <a href>.
+function parseExternalRefs(text) {
+    return (text || '').split('\n').map(l => l.trim()).filter(Boolean).map(line => {
+        const pipeIdx = line.indexOf('|');
+        if (pipeIdx === -1) return { label: line, url: line };
+        return { label: line.slice(0, pipeIdx).trim(), url: line.slice(pipeIdx + 1).trim() };
+    });
+}
+
+function safeHref(url) {
+    // No base argument: a relative/malformed string (e.g. a plain-text label with no
+    // "|" separator) must throw here, not silently resolve against the current origin.
+    try {
+        const u = new URL(url);
+        if (u.protocol === 'http:' || u.protocol === 'https:') return u.href;
+    } catch (e) { /* not a valid absolute URL -- render as plain text */ }
+    return null;
+}
+
+function renderExternalRefs(text) {
+    const refs = parseExternalRefs(text);
+    if (!refs.length) return '';
+    const items = refs.map(r => {
+        const href = safeHref(r.url);
+        return href
+            ? `<li><a href="${escHtml(href)}" target="_blank" rel="noopener noreferrer">${escHtml(r.label)}</a></li>`
+            : `<li>${escHtml(r.label)}</li>`;
+    }).join('');
+    return `<h6 class="small text-uppercase text-muted mt-3">External References</h6><ul class="small mb-2 ps-3">${items}</ul>`;
+}
+
 function loadEntities() {
     fetch('/api/ti/entities').then(r => r.json()).then(entities => {
         allEntities = entities;
@@ -1573,6 +1610,7 @@ function openEntityModal(entity) {
     document.getElementById('entityTechniques').value = entity ? (entity.techniques || []).join(', ') : '';
     document.getElementById('entityConfidence').value = entity ? (entity.confidence || '') : '';
     document.getElementById('entityAttributionNote').value = entity ? (entity.attribution_note || '') : '';
+    document.getElementById('entityExternalReferences').value = entity ? (entity.external_references || '') : '';
     document.querySelector('#entityModal .modal-title').innerText = entity ? 'Edit Entity' : 'Add Entity';
     entityModal.show();
 }
@@ -1587,6 +1625,7 @@ async function saveEntity() {
         techniques: document.getElementById('entityTechniques').value.trim(),
         confidence: document.getElementById('entityConfidence').value,
         attribution_note: document.getElementById('entityAttributionNote').value.trim(),
+        external_references: document.getElementById('entityExternalReferences').value.trim(),
     };
     const url = editingEntityId ? `/api/ti/entities/${editingEntityId}` : '/api/ti/entities';
     const method = editingEntityId ? 'PUT' : 'POST';
@@ -1743,6 +1782,7 @@ async function openEntityDetail(id) {
             <div class="mb-3">
                 ${(e.techniques || []).map(t => `<span class="badge bg-secondary me-1 mb-1" title="${escHtml(t.tactic_label)}">T${escHtml(t.id)}${t.name ? ' — ' + escHtml(t.name) : ''}</span>`).join('') || '<span class="text-muted small">No techniques listed.</span>'}
             </div>
+            ${renderExternalRefs(e.external_references)}
             <h6 class="small text-uppercase text-muted">Matching IOCs (${(e.matched_iocs || []).length})</h6>
             <div class="table-responsive mb-3" style="max-height:220px; overflow-y:auto;">
                 <table class="table table-dark table-sm mb-0">

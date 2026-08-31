@@ -1258,7 +1258,7 @@ def _entity_row_to_dict(r):
 
 def _get_ti_entities(db):
     return [_entity_row_to_dict(r) for r in db.execute(
-        "SELECT id, entity_type, name, aliases, description, techniques, source, confidence, attribution_note, "
+        "SELECT id, entity_type, name, aliases, description, techniques, source, confidence, attribution_note, external_references, "
         "(SELECT COUNT(*) FROM ti_relationships WHERE entity_id = ti_entities.id) as linked_count "
         "FROM ti_entities ORDER BY name"
     ).fetchall()]
@@ -1405,11 +1405,12 @@ def api_ti_entities():
         return jsonify({'error': f'An entity named "{name}" already exists'}), 400
     aliases = ','.join(a.strip() for a in (d.get('aliases') or '').split(',') if a.strip())
     techniques = ','.join(t.strip() for t in (d.get('techniques') or '').split(',') if t.strip())
+    external_references = '\n'.join(l.strip() for l in (d.get('external_references') or '').splitlines() if l.strip())
     db.execute(
-        "INSERT INTO ti_entities (entity_type, name, aliases, description, techniques, source, created_by, confidence, attribution_note) "
-        "VALUES (?, ?, ?, ?, ?, 'admin', ?, ?, ?)",
+        "INSERT INTO ti_entities (entity_type, name, aliases, description, techniques, source, created_by, confidence, attribution_note, external_references) "
+        "VALUES (?, ?, ?, ?, ?, 'admin', ?, ?, ?, ?)",
         (entity_type, name, aliases, (d.get('description') or '').strip(), techniques, current_user.username,
-         confidence, (d.get('attribution_note') or '').strip())
+         confidence, (d.get('attribution_note') or '').strip(), external_references)
     )
     db.commit()
     _ACTOR_SUMMARY_CACHE.clear()
@@ -1445,11 +1446,12 @@ def api_ti_entity_detail_admin(eid):
         return jsonify({'error': f'An entity named "{name}" already exists'}), 400
     aliases = ','.join(a.strip() for a in (d.get('aliases') or '').split(',') if a.strip())
     techniques = ','.join(t.strip() for t in (d.get('techniques') or '').split(',') if t.strip())
+    external_references = '\n'.join(l.strip() for l in (d.get('external_references') or '').splitlines() if l.strip())
     db.execute(
         "UPDATE ti_entities SET entity_type = ?, name = ?, aliases = ?, description = ?, techniques = ?, "
-        "confidence = ?, attribution_note = ? WHERE id = ?",
+        "confidence = ?, attribution_note = ?, external_references = ? WHERE id = ?",
         (entity_type, name, aliases, (d.get('description') or '').strip(), techniques,
-         confidence, (d.get('attribution_note') or '').strip(), eid)
+         confidence, (d.get('attribution_note') or '').strip(), external_references, eid)
     )
     db.commit()
     _ACTOR_SUMMARY_CACHE.clear()
@@ -1468,7 +1470,7 @@ def api_ti_entity_full_detail(eid):
 
     db = get_db()
     row = db.execute(
-        "SELECT id, entity_type, name, aliases, description, techniques, source, confidence, attribution_note "
+        "SELECT id, entity_type, name, aliases, description, techniques, source, confidence, attribution_note, external_references "
         "FROM ti_entities WHERE id = ?", (eid,)
     ).fetchone()
     if not row:
@@ -6815,6 +6817,19 @@ def migrate_ti_entities_confidence():
     except Exception:
         pass
 
+def migrate_ti_entities_references():
+    # One "Label | https://..." reference per line, free text like attribution_note --
+    # no structured citation format exists elsewhere in this codebase to match.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(ti_entities)").fetchall()}
+        if 'external_references' not in cols:
+            conn.execute("ALTER TABLE ti_entities ADD COLUMN external_references TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_live_logs_ip_columns():
     # source_ip/destination_ip were added to schema.sql at some point but no migration
     # ever backfilled them onto already-deployed databases, and no ingest path ever
@@ -9461,6 +9476,7 @@ migrate_seed_ioc_correlation_rule()
 migrate_enrichment_results()
 migrate_ti_entities()
 migrate_ti_entities_confidence()
+migrate_ti_entities_references()
 
 try:
     # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every
