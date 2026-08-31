@@ -49,6 +49,10 @@
     .cov-score-delta.up{color:var(--success);}
     .cov-score-delta.down{color:var(--danger);}
     .cov-score-delta.flat{color:var(--text-muted);}
+    .cov-logsrc-link{font-size:.72rem; color:var(--text-muted); cursor:pointer; display:inline-flex; align-items:center; gap:5px; width:fit-content; margin-top:1px;}
+    .cov-logsrc-link:hover{color:var(--accent);}
+    .cov-logsrc-link.active-tier{color:var(--accent);}
+    .cov-logsrc-link.has-gaps i{color:var(--warning);}
     .cov-chip-row{display:flex; gap:10px; flex-wrap:wrap; flex:1;}
     .cov-chip{display:flex; align-items:center; gap:8px; padding:9px 16px; border-radius:999px; background:var(--bg-card-alt); border:1px solid var(--border); font-size:.82rem; cursor:pointer; transition:border-color .1s ease;}
     .cov-chip:hover{border-color:var(--accent);}
@@ -69,6 +73,12 @@
     .cov-tier-pop-id{font-family:var(--font-mono); font-size:.68rem; color:var(--text-muted); flex-shrink:0; min-width:64px;}
     .cov-tier-pop-name{color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
     .cov-tier-pop-tactic{color:var(--text-muted); font-size:.68rem; margin-left:auto; flex-shrink:0; padding-left:6px;}
+    .cov-logsrc-apps{display:flex; flex-wrap:wrap; gap:4px; margin-bottom:4px;}
+    .cov-logsrc-app-chip{background:var(--bg-card-alt); border:1px solid var(--border); border-radius:4px; padding:2px 7px; font-size:.7rem; color:var(--text-secondary);}
+    .cov-logsrc-gap-item{display:flex; justify-content:space-between; align-items:baseline; gap:8px; font-size:.76rem; padding:4px; border-radius:4px;}
+    .cov-logsrc-gap-item:hover{background:var(--bg-card-alt);}
+    .cov-logsrc-gap-label{color:var(--text-secondary);}
+    .cov-logsrc-gap-count{color:var(--warning); font-variant-numeric:tabular-nums; flex-shrink:0; font-size:.7rem; white-space:nowrap;}
 
     .cov-matrix{display:flex; gap:12px; overflow-x:auto; padding-bottom:8px;}
     .cov-col{min-width:216px; flex:0 0 216px; background:var(--bg-card-alt); border:1px solid var(--border); border-radius:var(--radius); padding:14px;}
@@ -705,6 +715,9 @@
                 <div class="cov-score-meta">
                     <div class="cov-score-label" title="How much of the curated ATT&#38;CK technique set has an enabled rule mapped to it (Active + Validated). A rule only needs to be enabled to count here -- it doesn't need to have fired yet.">Overall Coverage</div>
                     <div class="cov-score-delta flat" id="covScoreDelta">—</div>
+                    <div class="cov-logsrc-link" id="covLogSourcesLink" role="button" tabindex="0" onclick="toggleCovTierPopover('log_sources', this)">
+                        <i class="fa-solid fa-tower-broadcast"></i> <span id="covLogSourcesSummary">Log sources&hellip;</span>
+                    </div>
                 </div>
             </div>
             <div class="cov-score-block detection">
@@ -3870,6 +3883,18 @@ function renderCoverageHero() {
     document.getElementById('detScoreNote').textContent = detTotal
         ? `${coverageData.total_validated} of ${detTotal} techniques proven by a real alert`
         : 'Techniques with a rule that has actually fired';
+
+    const logSources = coverageData && coverageData.log_sources;
+    const linkEl = document.getElementById('covLogSourcesLink');
+    if (logSources) {
+        const gapCount = logSources.gaps.length;
+        document.getElementById('covLogSourcesSummary').textContent =
+            `${logSources.ingested_apps.length} log source${logSources.ingested_apps.length === 1 ? '' : 's'} ingested${gapCount ? ` · ${gapCount} gap${gapCount === 1 ? '' : 's'}` : ''}`;
+        linkEl.classList.toggle('has-gaps', gapCount > 0);
+    } else {
+        document.getElementById('covLogSourcesSummary').textContent = 'Log sources…';
+        linkEl.classList.remove('has-gaps');
+    }
 }
 
 // Flat list of {id, name, tactic} for every technique currently in the given tier,
@@ -3890,26 +3915,49 @@ function closeCovTierPopover() {
     const pop = document.getElementById('covTierPopover');
     pop.style.display = 'none';
     pop.dataset.tier = '';
-    document.querySelectorAll('#coverageChips .cov-chip.active-tier').forEach(el => el.classList.remove('active-tier'));
+    document.querySelectorAll('#coverageChips .cov-chip.active-tier, #covLogSourcesLink.active-tier').forEach(el => el.classList.remove('active-tier'));
 }
 
-// Anchored to the clicked chip, positioned relative to #coverageHero (which is the
-// nearest position:relative ancestor) rather than the viewport, so it stays put under
-// the chip row regardless of page scroll.
+function logSourcesPopoverHtml() {
+    const ls = coverageData && coverageData.log_sources;
+    if (!ls) return `<div class="cov-tier-pop-header"><i class="fa-solid fa-tower-broadcast"></i> Log Sources</div><div class="text-muted small">Loading&hellip;</div>`;
+    const appsHtml = ls.ingested_apps.length
+        ? `<div class="cov-logsrc-apps">${ls.ingested_apps.map(a => `<span class="cov-logsrc-app-chip">${escHtml(a)}</span>`).join('')}</div>`
+        : `<div class="text-muted small mb-2">Nothing ingested yet.</div>`;
+    const gapsHtml = ls.gaps.length
+        ? ls.gaps.map(g => `<div class="cov-logsrc-gap-item"><span class="cov-logsrc-gap-label">${escHtml(g.label)}</span><span class="cov-logsrc-gap-count">${g.rule_count} rule${g.rule_count === 1 ? '' : 's'} &middot; ${g.technique_count} technique${g.technique_count === 1 ? '' : 's'}</span></div>`).join('')
+        : `<div class="text-muted small">No hard gaps -- every enabled rule's log source is either ingested or unknown.</div>`;
+    return `
+        <div class="cov-tier-pop-header"><i class="fa-solid fa-tower-broadcast"></i> Log Sources</div>
+        <div class="cov-tier-pop-list">
+            <div class="small text-muted mb-1">Currently ingesting (${ls.ingested_apps.length}):</div>
+            ${appsHtml}
+            <div class="small text-muted mb-1" style="margin-top:6px;">Never wired up -- these rules can't reach Validated no matter what fires, until the source itself is ingested:</div>
+            ${gapsHtml}
+        </div>`;
+}
+
+// Anchored to the clicked chip/link, positioned relative to #coverageHero (which is
+// the nearest position:relative ancestor) rather than the viewport, so it stays put
+// regardless of page scroll.
 function toggleCovTierPopover(tierKey, chipEl) {
     const pop = document.getElementById('covTierPopover');
     if (pop.dataset.tier === tierKey && pop.style.display !== 'none') {
         closeCovTierPopover();
         return;
     }
-    const tierMeta = COVERAGE_TIERS.find(t => t.key === tierKey);
-    const techs = coverageTechniquesByTier(tierKey).sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
-    pop.innerHTML = `
-        <div class="cov-tier-pop-header"><span class="dot ${tierMeta.dot}"></span>${escHtml(tierMeta.label)} &mdash; ${techs.length} technique${techs.length === 1 ? '' : 's'}</div>
-        <div class="cov-tier-pop-list">
-            ${techs.length ? techs.map(t => `<div class="cov-tier-pop-item"><span class="cov-tier-pop-id">${escHtml(t.id)}</span><span class="cov-tier-pop-name">${escHtml(t.name || '')}</span><span class="cov-tier-pop-tactic">${escHtml(t.tactic || '')}</span></div>`).join('')
-                        : '<div class="text-muted small">None right now.</div>'}
-        </div>`;
+    if (tierKey === 'log_sources') {
+        pop.innerHTML = logSourcesPopoverHtml();
+    } else {
+        const tierMeta = COVERAGE_TIERS.find(t => t.key === tierKey);
+        const techs = coverageTechniquesByTier(tierKey).sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+        pop.innerHTML = `
+            <div class="cov-tier-pop-header"><span class="dot ${tierMeta.dot}"></span>${escHtml(tierMeta.label)} &mdash; ${techs.length} technique${techs.length === 1 ? '' : 's'}</div>
+            <div class="cov-tier-pop-list">
+                ${techs.length ? techs.map(t => `<div class="cov-tier-pop-item"><span class="cov-tier-pop-id">${escHtml(t.id)}</span><span class="cov-tier-pop-name">${escHtml(t.name || '')}</span><span class="cov-tier-pop-tactic">${escHtml(t.tactic || '')}</span></div>`).join('')
+                            : '<div class="text-muted small">None right now.</div>'}
+            </div>`;
+    }
     const hero = document.getElementById('coverageHero');
     const heroRect = hero.getBoundingClientRect();
     const chipRect = chipEl.getBoundingClientRect();
@@ -3917,13 +3965,13 @@ function toggleCovTierPopover(tierKey, chipEl) {
     pop.style.top = (chipRect.bottom - heroRect.top + 6) + 'px';
     pop.style.display = 'block';
     pop.dataset.tier = tierKey;
-    document.querySelectorAll('#coverageChips .cov-chip.active-tier').forEach(el => el.classList.remove('active-tier'));
+    document.querySelectorAll('#coverageChips .cov-chip.active-tier, #covLogSourcesLink.active-tier').forEach(el => el.classList.remove('active-tier'));
     chipEl.classList.add('active-tier');
 }
 
 document.addEventListener('click', (e) => {
     const pop = document.getElementById('covTierPopover');
-    if (pop && pop.style.display !== 'none' && !pop.contains(e.target) && !e.target.closest('.cov-chip')) {
+    if (pop && pop.style.display !== 'none' && !pop.contains(e.target) && !e.target.closest('.cov-chip') && !e.target.closest('#covLogSourcesLink')) {
         closeCovTierPopover();
     }
 });

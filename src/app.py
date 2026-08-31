@@ -2291,6 +2291,67 @@ def _rule_log_source_ingestible(product, service, ingested_apps):
         return False
     return bool(expected & ingested_apps)
 
+# Human-readable labels for every SIGMA_LOGSOURCE_INGESTED_APPS entry mapped to an
+# EMPTY app set -- i.e. a log source this appliance has no ingest path for at all
+# (not "the rule needs a specific app we haven't seen yet", but "there is no app value
+# that could ever satisfy this"). Keys not listed here fall back to the product name.
+_LOG_SOURCE_GAP_LABELS = {
+    ('linux', 'auditd'): 'Linux auditd',
+    ('linux', 'syslog'): 'Linux syslog',
+    ('aws', None): 'AWS CloudTrail',
+    ('azure', None): 'Azure AD / Activity Logs',
+    ('gcp', None): 'GCP Audit Logs',
+    ('okta', None): 'Okta System Log',
+    ('m365', None): 'Microsoft 365 Unified Audit Log',
+    ('github', None): 'GitHub Audit Log',
+}
+
+def _log_source_gap_summary(db):
+    """The "what should we enable to improve Coverage" answer: what's actually being
+    ingested right now (_get_ingested_apps -- ground truth from live_logs.app), plus
+    which Sigma log-source categories are a HARD gap (SIGMA_LOGSOURCE_INGESTED_APPS
+    maps them to an empty app set -- no ingest path exists at all, not just "not seen
+    yet"), each counted by how many currently-enabled rules and curated MITRE
+    techniques are stuck behind it. A rule counted here can never leave 'active' by
+    construction (see log_source_gap in _build_mitre_coverage) until that source is
+    wired into ingestion -- these are the highest-leverage gaps to close."""
+    from mitre_attack import techniques_for_tags
+    groups = {}
+    for r in db.execute("SELECT rule_yaml FROM sigma_rules WHERE enabled = 1").fetchall():
+        ry = r['rule_yaml']
+        try:
+            raw_product = (_extract_yaml_field('product', ry) or '').strip().lower() or None
+            raw_service = (_extract_yaml_field('service', ry) or '').strip().lower() or None
+        except Exception:
+            continue
+        if not raw_product:
+            continue
+        key = (raw_product, raw_service)
+        expected = SIGMA_LOGSOURCE_INGESTED_APPS.get(key)
+        if expected is None:
+            key = (raw_product, None)
+            expected = SIGMA_LOGSOURCE_INGESTED_APPS.get(key)
+        if expected is None or expected:
+            continue  # unknown combo, or a real (possibly-satisfied) ingest path -- not a hard gap
+        label = _LOG_SOURCE_GAP_LABELS.get(key, key[0].title())
+        g = groups.setdefault(label, {'rule_count': 0, 'technique_ids': set()})
+        g['rule_count'] += 1
+        try:
+            t_match = re.search(r'^tags:\s*\n((\s+-\s*[^\n\r]+\n?)+)', ry, re.MULTILINE)
+            tags = [t.strip().strip('- ') for t in t_match.group(1).split('\n') if t.strip()] if t_match else []
+            for tech in techniques_for_tags(tags):
+                if tech['tactic'] != 'unmapped':
+                    g['technique_ids'].add(tech['id'])
+        except Exception:
+            pass
+    return {
+        'ingested_apps': sorted(_get_ingested_apps(db)),
+        'gaps': [
+            {'label': label, 'rule_count': g['rule_count'], 'technique_count': len(g['technique_ids'])}
+            for label, g in sorted(groups.items(), key=lambda kv: -len(kv[1]['technique_ids']))
+        ],
+    }
+
 def _get_rules_cache(db):
     """Returns the rules_out list used by both /api/rules and /api/mitre/coverage,
     rebuilding from sigma_rules when the TTL cache is stale."""
@@ -2660,7 +2721,9 @@ def api_mitre_coverage():
     rules = _get_rules_cache(db)
     validated = _get_validated_technique_counts(db, days)
     actor_techniques = _build_actor_technique_index(db)
-    return jsonify(_build_mitre_coverage(rules, validated, actor_techniques))
+    result = _build_mitre_coverage(rules, validated, actor_techniques)
+    result['log_sources'] = _log_source_gap_summary(db)
+    return jsonify(result)
 
 @app.route('/api/mitre/coverage/history', methods=['GET'])
 @login_required
