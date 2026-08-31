@@ -59,6 +59,10 @@ _FIELD_COLUMN_ALIASES = {
     # own name for the same concept as Sysmon's 'Image'; 'targetimage' covers Sysmon
     # event types where a different process is the subject (e.g. access/tamper events).
     'image': 'process_image', 'newprocessname': 'process_image', 'targetimage': 'process_image',
+    # 'exe' is Linux auditd's own field name for the same concept -- see
+    # _extract_auditd_exec_fields() in app.py, which is what actually populates
+    # process_image for app='auditd' rows.
+    'exe': 'process_image',
     'commandline': 'command_line', 'processcommandline': 'command_line',
     'parentimage': 'parent_image',
     'parentcommandline': 'parent_command_line',

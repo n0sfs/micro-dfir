@@ -409,6 +409,27 @@ def _extract_process_fields(message):
                 out[col] = val
     return out
 
+# The Linux agent's own flattened format for a microdfir_exec auditd hit (see
+# fetch_audit_exec_logs() in agents/micro_agent_linux.py): "exec: {exe} {cmd_line}",
+# where cmd_line is the reconstructed argv (itself starting with exe again). Parallels
+# _extract_process_fields()'s Sysmon-message parsing, but for the one message shape the
+# 'auditd' app value actually sends -- Sysmon's Image:/CommandLine: label patterns never
+# match this, so without this, every auditd exec row's process_image/command_line stay
+# NULL despite the data being right there in the message.
+_AUDITD_EXEC_RE = re.compile(r'^exec:\s*(\S+)\s*(.*)$')
+
+def _extract_auditd_exec_fields(message):
+    if not message:
+        return {}
+    m = _AUDITD_EXEC_RE.match(message.strip())
+    if not m:
+        return {}
+    out = {'process_image': m.group(1)}
+    cmd_line = m.group(2).strip()
+    if cmd_line:
+        out['command_line'] = cmd_line
+    return out
+
 # Maps the same 5 target columns as _PROCESS_FIELD_PATTERNS above, but reads them from
 # a channel's raw event XML (captured when a channel has "Capture XML" enabled) instead
 # of guessing at the rendered Message text -- every <Data Name="..."> is explicit, so
@@ -514,9 +535,12 @@ def api_ingest():
             # Message text -- prefer it when present and it actually yields something,
             # falling back to the message-regex extractor otherwise (the common case,
             # since XML capture is opt-in per channel).
-            proc = _extract_process_fields_from_xml(raw_xml) if raw_xml else {}
-            if not proc:
-                proc = _extract_process_fields(msg)
+            if app_n == 'auditd':
+                proc = _extract_auditd_exec_fields(msg)
+            else:
+                proc = _extract_process_fields_from_xml(raw_xml) if raw_xml else {}
+                if not proc:
+                    proc = _extract_process_fields(msg)
             # FIM sends its own computed sha256 as a dedicated field (not embedded in the
             # free-text message, which just reads "File changed: <path>") -- see
             # run_fim_check() in both agent scripts. Falls back to it only when the
@@ -2242,7 +2266,11 @@ SIGMA_LOGSOURCE_INGESTED_APPS = {
     ('windows', 'powershell-classic'): {'powershell'},
     ('windows', 'windefend'): {'windows defender'},
     ('windows', None): {'sysmon', 'security', 'system', 'application', 'powershell', 'windows defender'},
-    ('linux', 'auditd'): set(),
+    # The Linux agent's exec-auditing path (enable_exec_auditing in agent_scripts.py +
+    # fetch_audit_exec_logs() in micro_agent_linux.py) already ships real execve events
+    # tagged app='auditd' the moment that rule is enabled on a host -- this used to be
+    # an empty set (permanently gapped) before that ingest path existed.
+    ('linux', 'auditd'): {'auditd'},
     ('linux', 'syslog'): set(),
     ('linux', None): {'systemd', 'sshd', 'kernel', 'cron', 'dbus-daemon', 'systemd-logind', 'wpa_supplicant', 'fwupd'},
     ('aws', None): set(),
