@@ -109,12 +109,13 @@
                                     </div>
                                 </div>
                             </th>
+                            <th>Group</th>
                             <th>Heartbeat</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody id="endpointsTableBody">
-                        <tr><td colspan="9" class="text-center text-muted py-4">Loading active endpoints...</td></tr>
+                        <tr><td colspan="10" class="text-center text-muted py-4">Loading active endpoints...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -231,6 +232,27 @@
             </div>
         </div>
 
+        <!-- Group dispatch -->
+        <div class="card-body py-2 px-3 border-bottom border-secondary">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+                <h6 class="mb-0 text-muted"><i class="fa-solid fa-layer-group me-2"></i>Run on a Group</h6>
+                <span class="text-muted small">— dispatch one action to every endpoint tagged with a group (set an endpoint's group in the Agents tab).</span>
+            </div>
+            <div class="d-flex align-items-center gap-2 mt-2 flex-wrap">
+                <select id="groupDispatchGroup" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:180px;"></select>
+                <select id="groupDispatchAction" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:200px;">
+                    <option value="ioc_sweep">Known-Bad Hash Sweep</option>
+                    <option value="string_sweep">YARA String Sweep</option>
+                    <option value="collect_triage">Collect Triage</option>
+                    <option value="upgrade">Upgrade Agent</option>
+                </select>
+                {% if has_permission('edr.command.advanced') %}
+                <button type="button" class="btn btn-sm btn-outline-primary" onclick="runGroupDispatch()"><i class="fa-solid fa-play me-1"></i>Run on Group</button>
+                {% endif %}
+                <span id="groupDispatchMsg" class="small" style="display:none;"></span>
+            </div>
+        </div>
+
         <!-- History -->
         <div class="card-body py-2 px-3 border-bottom border-secondary d-flex justify-content-between align-items-center">
             <h6 class="mb-0 text-muted"><i class="fa-solid fa-clock-rotate-left me-2"></i>All Response Action History</h6>
@@ -320,6 +342,7 @@ document.addEventListener("DOMContentLoaded", function() {
     loadFimPaths();
     loadFimInterval();
     loadAgentSweepConfig();
+    loadAgentGroupsDropdown();
     setInterval(loadUniqueEndpoints, 30000);
     // The agent itself only checks in roughly every 8s, so polling much faster than
     // that wouldn't surface results any sooner — this just keeps the steady-state
@@ -391,6 +414,36 @@ function saveAgentSweepConfig() {
         if (ok) { toast('Automatic sweep schedule saved.', 'success'); loadAgentSweepConfig(); }
         else { toast(data.error || 'Failed to save.', 'danger'); }
     }).catch(err => toast('Error: ' + err, 'danger'));
+}
+
+function loadAgentGroupsDropdown() {
+    fetch('/api/agent/groups').then(r => r.json()).then(groups => {
+        const sel = document.getElementById('groupDispatchGroup');
+        sel.innerHTML = groups.length
+            ? groups.map(g => `<option value="${escHtml(g)}">${escHtml(g)}</option>`).join('')
+            : '<option value="">No groups yet -- set one in the Agents tab</option>';
+    }).catch(err => console.error('Error loading agent groups:', err));
+}
+
+function runGroupDispatch() {
+    const group = document.getElementById('groupDispatchGroup').value;
+    const label = document.getElementById('groupDispatchAction').value;
+    const msg = document.getElementById('groupDispatchMsg');
+    if (!group) { msg.className = 'small text-danger'; msg.innerText = 'No group selected.'; msg.style.display = 'inline'; return; }
+    fetch('/api/agent/commands', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({group, label})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        msg.style.display = 'inline';
+        if (ok) {
+            const n = data.queued.length, failN = data.failed.length;
+            msg.className = failN ? 'small text-warning' : 'small text-success';
+            msg.innerText = failN ? `Queued to ${n}, failed for ${failN} host(s).` : `Queued to ${n} host${n === 1 ? '' : 's'}.`;
+            loadCommandHistory();
+        } else {
+            msg.className = 'small text-danger'; msg.innerText = data.error || 'Failed to dispatch.';
+        }
+        setTimeout(() => { msg.style.display = 'none'; }, 6000);
+    }).catch(err => { msg.className = 'small text-danger'; msg.innerText = 'Error: ' + err; msg.style.display = 'inline'; });
 }
 
 function loadFimPaths() {
@@ -471,6 +524,23 @@ function saveToken() {
 
 function rowHost(el) {
     return el.closest('tr').dataset.hostname;
+}
+
+function saveEndpointGroup(hostname, group_name) {
+    group_name = (group_name || '').trim();
+    const local = allEndpoints.find(d => d.hostname === hostname);
+    if (local && (local.group || '') === group_name) return; // no change, skip the round-trip
+    fetch(`/api/agent/${encodeURIComponent(hostname)}/group`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({group_name})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (ok) {
+            if (local) local.group = group_name;
+            toast('Group saved.', 'success');
+        } else {
+            toast(data.error || 'Failed to save group.', 'danger');
+            renderEndpoints(); // revert the input back to the last-known-good value
+        }
+    }).catch(err => toast('Error: ' + err, 'danger'));
 }
 
 // ---- Heartbeat sparkline ----
@@ -647,7 +717,7 @@ function renderEndpoints() {
 
     if (allEndpoints.length === 0) {
         document.getElementById('endpointCountLabel').innerText = '';
-        tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-3">No active agent endpoints detected.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted py-3">No active agent endpoints detected.</td></tr>';
         updateSelectAllCheckboxState();
         updateBulkActionBar();
         return;
@@ -660,7 +730,8 @@ function renderEndpoints() {
     if (endpointFilters.version.length) filtered = filtered.filter(dev => endpointFilters.version.includes(dev.version || 'unknown'));
     if (q) filtered = filtered.filter(dev =>
         (dev.hostname || '').toLowerCase().includes(q) ||
-        (dev.endpoint_ip || '').toLowerCase().includes(q)
+        (dev.endpoint_ip || '').toLowerCase().includes(q) ||
+        (dev.group || '').toLowerCase().includes(q)
     );
 
     const filtersActive = q || endpointStatusFilter !== 'all' || endpointFilters.os.length || endpointFilters.version.length;
@@ -669,7 +740,7 @@ function renderEndpoints() {
         : `${allEndpoints.length} endpoint${allEndpoints.length === 1 ? '' : 's'}`;
 
     if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-3">No endpoints match your filters.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted py-3">No endpoints match your filters.</td></tr>';
         updateSelectAllCheckboxState();
         updateBulkActionBar();
         return;
@@ -690,6 +761,7 @@ function renderEndpoints() {
                     <td>${endpointStatusBadge(dev.status)}</td>
                     <td class="text-nowrap"><span title="${escHtml(dev.last_check_in)}">${escHtml(relativeTime(dev.last_check_in)) || escHtml(dev.last_check_in)}</span></td>
                     <td class="text-nowrap">${versionBadge(dev)}</td>
+                    <td class="text-nowrap"><input type="text" class="form-control form-control-sm bg-dark text-light border-secondary py-0" style="width:110px; font-size:.8rem;" value="${escHtml(dev.group || '')}" placeholder="—" title="Organizational grouping for bulk response actions -- not a config policy" onblur="saveEndpointGroup(rowHost(this), this.value)" onkeydown="if(event.key==='Enter') this.blur()"></td>
                     <td>${heartbeatSpark(dev.status, dev.recent_polls)}</td>
                     <td class="text-nowrap">
                         <div class="dropdown d-inline-block">
