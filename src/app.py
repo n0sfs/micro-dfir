@@ -4424,23 +4424,30 @@ def _dry_run_playbook(db, playbook_id, cid):
 def _execute_playbook_actions(db, cid, playbook_id, actions):
     results = []
     overall_status = 'success'
+    pending_approval = False
     for a in actions:
-        action_params = json.loads(a['params']) if a['params'] else {}
-        if a['requires_approval']:
-            db.execute(
-                "INSERT INTO playbook_approvals (playbook_id, case_id, action_type, params) VALUES (?, ?, ?, ?)",
-                (playbook_id, cid, a['action_type'], json.dumps(action_params))
-            )
-            results.append(f"{a['action_type']}: queued for approval")
-            if overall_status == 'success':
-                overall_status = 'pending_approval'
-            continue
         try:
+            action_params = json.loads(a['params']) if a['params'] else {}
+            if a['requires_approval']:
+                db.execute(
+                    "INSERT INTO playbook_approvals (playbook_id, case_id, action_type, params) VALUES (?, ?, ?, ?)",
+                    (playbook_id, cid, a['action_type'], json.dumps(action_params))
+                )
+                results.append(f"{a['action_type']}: queued for approval")
+                pending_approval = True
+                continue
             result = _run_playbook_action(db, cid, a['action_type'], action_params)
             results.append(f"{a['action_type']}: {result}")
         except Exception as e:
             results.append(f"{a['action_type']}: FAILED ({e})")
             overall_status = 'partial'
+    # A gated action queued in this run must always surface as pending_approval, even if
+    # another action in the same playbook also failed -- 'pending_approval' takes priority
+    # over 'partial' because "there's a live isolate_host approval waiting on a decision"
+    # is the more urgent signal for an operator scanning playbook_runs; the failure detail
+    # itself is still preserved in `detail` regardless of which status label wins.
+    if pending_approval:
+        overall_status = 'pending_approval'
     detail = '; '.join(results) if results else 'no actions configured'
     return detail, overall_status
 
@@ -4467,13 +4474,20 @@ def _check_playbook_rate_limit(db, pb, cid):
     ).fetchone()[0]
     if recent < pb['max_runs_per_hour']:
         return True
-    db.execute("UPDATE playbooks SET enabled = 0 WHERE id = ?", (pb['id'],))
-    detail = f"rate limit tripped ({recent}/{pb['max_runs_per_hour']} runs in the last hour) -- playbook auto-disabled"
-    db.execute(
-        "INSERT INTO playbook_runs (playbook_id, case_id, status, detail) VALUES (?, ?, 'rate_limited', ?)",
-        (pb['id'], cid, detail)
-    )
-    _log_case_event(db, cid, 'playbook_run', f"{pb['name']}: {detail}")
+    # Concurrent triggers (gunicorn runs multiple worker processes/threads) can all read
+    # the same over-limit `recent` count before any of them commits -- WHERE enabled = 1
+    # makes the disable itself the compare-and-swap, so only the one request whose UPDATE
+    # actually flips it gets to log the trip. Without this, a burst of triggers all past
+    # the limit each independently "trip" the same already-disabled playbook, writing a
+    # duplicate rate_limited row and case_event per request in the burst.
+    tripped = db.execute("UPDATE playbooks SET enabled = 0 WHERE id = ? AND enabled = 1", (pb['id'],))
+    if tripped.rowcount:
+        detail = f"rate limit tripped ({recent}/{pb['max_runs_per_hour']} runs in the last hour) -- playbook auto-disabled"
+        db.execute(
+            "INSERT INTO playbook_runs (playbook_id, case_id, status, detail) VALUES (?, ?, 'rate_limited', ?)",
+            (pb['id'], cid, detail)
+        )
+        _log_case_event(db, cid, 'playbook_run', f"{pb['name']}: {detail}")
     return False
 
 def _run_playbooks_for_case(db, cid, trigger_event, queue_id, tlp, status, severity):
@@ -4818,6 +4832,11 @@ def api_playbook_runs(pid):
 @app.route('/api/playbooks/<int:pid>/dry-run', methods=['POST'])
 @login_required
 def api_playbook_dry_run(pid):
+    # A dry-run preview for an isolate_host action names the case's confirmed-compromised
+    # hosts in plain text (e.g. "would isolate 2 confirmed host(s): WIN-A, WIN-B") -- an
+    # EDR isolation target list. Same permission boundary as the real "Run Now" route.
+    err = require_permission('soar.playbooks.manage')
+    if err: return err
     db = get_db()
     case_id = (request.json or {}).get('case_id')
     if not case_id:
@@ -4881,6 +4900,13 @@ def api_playbook_run(pid):
 @app.route('/api/playbook-approvals', methods=['GET'])
 @login_required
 def api_playbook_approvals():
+    # Its own panel in templates/soar.html is already hidden behind
+    # has_permission('soar.playbooks.manage') -- that only hides the UI. Without this
+    # check, any logged-in user (a default 'analyst' role has no soar.playbooks.manage)
+    # could read the full pending/approved/rejected queue directly, including which
+    # case has an isolate_host action awaiting sign-off and any action's raw params.
+    err = require_permission('soar.playbooks.manage')
+    if err: return err
     db = get_db()
     status = request.args.get('status') or 'pending'
     if status not in PLAYBOOK_APPROVAL_STATUSES:
@@ -4915,11 +4941,38 @@ def api_playbook_approval_decide(approval_id):
     approval = db.execute("SELECT * FROM playbook_approvals WHERE id = ?", (approval_id,)).fetchone()
     if not approval:
         return jsonify({'error': 'Approval not found'}), 404
-    if approval['status'] != 'pending':
-        return jsonify({'error': f"This approval was already {approval['status']}"}), 400
     decision = (request.json or {}).get('decision')
     if decision not in ('approve', 'reject'):
         return jsonify({'error': "decision must be 'approve' or 'reject'"}), 400
+    # Approving an isolate_host action is what actually fires it -- require the same EDR
+    # permission the direct one-click isolate button requires (AGENT_COMMAND_TIER1_LABELS
+    # -> 'edr.command.basic'), not just soar.playbooks.manage. Without this, a custom role
+    # granted soar.playbooks.manage but not edr.command.basic could approve a host
+    # isolation through the SOAR queue, sidestepping the permission boundary that blocks
+    # that same user from the direct EDR action. Rejecting never executes anything, so it
+    # doesn't need this extra check.
+    if decision == 'approve' and approval['action_type'] == 'isolate_host':
+        err = require_permission('edr.command.basic')
+        if err: return err
+
+    # Atomically claim this approval BEFORE doing anything else. A plain "check status in
+    # Python, then execute, then UPDATE" (the original shape) is a classic TOCTOU race: a
+    # double-click, or two analysts deciding the same approval at once, could both read
+    # status='pending' before either commits, letting a gated action like isolate_host
+    # execute twice -- or leave a false audit trail if an approve and a reject race and
+    # the reject's UPDATE lands last despite the action having already run. Making the
+    # status flip itself the compare-and-swap (WHERE status='pending') means only one
+    # concurrent request can ever win it; SQLite's write-transaction serialization is what
+    # makes this safe, not application-level locking.
+    new_status = 'approved' if decision == 'approve' else 'rejected'
+    claim = db.execute(
+        "UPDATE playbook_approvals SET status = ?, decided_by = ?, decided_at = datetime('now') "
+        "WHERE id = ? AND status = 'pending'",
+        (new_status, current_user.username, approval_id)
+    )
+    if claim.rowcount == 0:
+        db.commit()
+        return jsonify({'error': 'This approval was already decided.'}), 400
 
     pb = db.execute("SELECT name FROM playbooks WHERE id = ?", (approval['playbook_id'],)).fetchone()
     playbook_name = pb['name'] if pb else f"playbook #{approval['playbook_id']}"
@@ -4930,16 +4983,8 @@ def api_playbook_approval_decide(approval_id):
         except Exception as e:
             result = f"FAILED ({e})"
         _log_case_event(db, approval['case_id'], 'playbook_action_approved', f"{playbook_name} — {approval['action_type']}: {result}")
-        db.execute(
-            "UPDATE playbook_approvals SET status = 'approved', decided_by = ?, decided_at = datetime('now') WHERE id = ?",
-            (current_user.username, approval_id)
-        )
     else:
         _log_case_event(db, approval['case_id'], 'playbook_action_rejected', f"{playbook_name} — {approval['action_type']}")
-        db.execute(
-            "UPDATE playbook_approvals SET status = 'rejected', decided_by = ?, decided_at = datetime('now') WHERE id = ?",
-            (current_user.username, approval_id)
-        )
     db.commit()
     return jsonify({'status': 'success'})
 
