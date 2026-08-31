@@ -126,7 +126,13 @@
     <!-- Actions pane -->
     <div id="paneActions" style="display:none;">
         <div class="card-body">
-            <p class="text-muted small">Actions catalog goes here (Phase 3).</p>
+            <p class="text-muted small mb-3">Every action type a playbook step can run -- read-only reference, not a queue. Build these into a playbook from the Playbooks tab.</p>
+            <div class="table-responsive">
+                <table class="table table-dark table-sm align-middle mb-0">
+                    <thead><tr><th class="ps-3">Action</th><th>Scope</th><th>Approval</th><th>Description</th></tr></thead>
+                    <tbody id="actionsCatalogTableBody"></tbody>
+                </table>
+            </div>
         </div>
     </div>
 
@@ -415,6 +421,49 @@ function actionLabelsForTrigger(triggerEvent) {
 // (which re-forces it regardless of what's submitted, so this is a UI hint, not the
 // actual enforcement point).
 const ACTION_TYPES_ALWAYS_GATED = ['isolate_host', 'restore_network', 'collect_triage', 'quarantine_file', 'kill_scheduled_task', 'kill_process_by_name'];
+
+// Actions catalog (Actions tab) -- descriptions authored here, but the actual ROW LIST
+// is driven by the real CASE_ACTION_LABELS/ALERT_ACTION_LABELS below rather than a
+// separately hand-typed list, so a future new action type can't silently go missing
+// from this reference (it'll show with a fallback description instead of not at all).
+const ACTION_DESCRIPTIONS = {
+    apply_template: 'Bulk-creates every task from a chosen Case Template on this case.',
+    add_task: 'Adds one task to the case.',
+    add_note: 'Logs a note to the case timeline.',
+    set_queue: 'Moves the case to a different queue (or unassigns it).',
+    analyze_entity: "Runs host/user threat-intel analysis against the first linked alert item that carries that entity type.",
+    send_email: 'Sends an email via the shared Notification Channels config (Notifications tab).',
+    send_webhook: 'POSTs a JSON body to a URL, or a named secret from Manage Secrets.',
+    send_slack: 'Posts a message to a Slack incoming webhook (URL or a named secret).',
+    isolate_host: 'Cuts network access on every Case Asset marked Confirmed compromised.',
+    restore_network: 'Restores network access on every Case Asset marked Confirmed compromised.',
+    collect_triage: 'Collects a forensic triage bundle from every Case Asset marked Confirmed compromised.',
+    quarantine_file: 'Quarantines an admin-typed file path on every Case Asset marked Confirmed compromised.',
+    kill_scheduled_task: 'Removes an admin-typed Windows scheduled task on every Case Asset marked Confirmed compromised (Windows hosts only -- others are skipped).',
+    kill_process_by_name: 'Kills every process whose name or full path/command line contains an admin-typed pattern, on every Case Asset marked Confirmed compromised.',
+    create_case: 'Creates a case from the triggering alert (title/severity carried over) and links it, cascading into any matching "Case created" playbooks.',
+};
+
+function renderActionsCatalog() {
+    const tbody = document.getElementById('actionsCatalogTableBody');
+    if (!tbody) return;
+    const keys = Array.from(new Set([...Object.keys(CASE_ACTION_LABELS), ...Object.keys(ALERT_ACTION_LABELS)])).sort();
+    tbody.innerHTML = keys.map(key => {
+        const inCase = key in CASE_ACTION_LABELS, inAlert = key in ALERT_ACTION_LABELS;
+        const scope = inCase && inAlert ? 'Case + Alert' : (inCase ? 'Case' : 'Alert');
+        // Alert-scoped playbooks have no approval-gate mechanism at all (see soar_alerts.py) --
+        // "N/A" there is accurate, not just "Optional", so it doesn't read as a safety gap.
+        const approval = !inCase ? '<span class="text-muted">N/A (alert-scoped)</span>'
+            : (ACTION_TYPES_ALWAYS_GATED.includes(key) ? '<span class="badge bg-danger">Always</span>' : '<span class="badge bg-secondary">Optional</span>');
+        const label = CASE_ACTION_LABELS[key] || ALERT_ACTION_LABELS[key];
+        return `<tr>
+            <td class="ps-3 small fw-bold">${escHtml(label)}</td>
+            <td class="small">${scope}</td>
+            <td class="small">${approval}</td>
+            <td class="small text-muted">${escHtml(ACTION_DESCRIPTIONS[key] || '')}</td>
+        </tr>`;
+    }).join('');
+}
 
 function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1134,6 +1183,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadPendingApprovals();
     loadAlertNotifications();
     loadQueuesForSoar();
+    renderActionsCatalog();
 });
 </script>
 {% endblock %}
