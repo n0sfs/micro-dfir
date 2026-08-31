@@ -84,7 +84,25 @@
     <!-- Case Templates pane -->
     <div id="paneCasetemplates" style="display:none;">
         <div class="card-body">
-            <p class="text-muted small">Case Templates content goes here (Phase 4).</p>
+            <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+                <p class="small text-muted mb-0" style="max-width:820px;">
+                    <i class="fa-solid fa-circle-info me-1"></i>
+                    A template's task checklist and custom fields are copied onto a case the moment
+                    it's applied -- editing or deleting a template afterward never changes a case that
+                    already used it.
+                </p>
+                <button type="button" class="btn btn-primary text-nowrap" onclick="showCaseTemplateModal()"><i class="fa-solid fa-plus me-1"></i>New Template</button>
+            </div>
+            <div class="card bg-dark border-secondary">
+                <div class="table-responsive">
+                    <table class="table table-dark table-sm align-middle mb-0">
+                        <thead><tr>
+                            <th class="ps-3">Name</th><th>Description</th><th>Tasks</th><th>Fields</th><th class="text-end pe-3"></th>
+                        </tr></thead>
+                        <tbody id="caseTemplatesTableBody"><tr><td colspan="5" class="text-center text-muted py-4">Loading&hellip;</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
         </div>
     </div>
     {% endif %}
@@ -201,6 +219,43 @@
             <p class="text-muted small mt-3 mb-0"><i class="fa-solid fa-lock me-1"></i>Tier 3 (Senior Analyst) or Admin role required to change notification channel settings.</p>
             {% endif %}
             <div id="notifMsg" class="mt-2 small" style="display:none;"></div>
+        </div>
+    </div>
+</div>
+
+<!-- New/Edit Case Template modal -->
+<div class="modal fade" id="caseTemplateModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content bg-dark text-light border-secondary">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title" id="caseTemplateModalTitle">New Template</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="ctId">
+                <div class="mb-2">
+                    <label class="form-label small text-muted mb-1">Name</label>
+                    <input type="text" id="ctName" class="form-control form-control-sm bg-dark text-light border-secondary">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label small text-muted mb-1">Description</label>
+                    <input type="text" id="ctDescription" class="form-control form-control-sm bg-dark text-light border-secondary">
+                </div>
+
+                <label class="form-label small text-muted mb-1">Tasks <span class="text-muted">(copied onto every case that applies this template)</span></label>
+                <div id="ctTasksList" class="mb-1"></div>
+                <button type="button" class="btn btn-sm btn-outline-secondary mb-3" onclick="addCaseTemplateTaskRow('')"><i class="fa-solid fa-plus me-1"></i>Add Task</button>
+
+                <label class="form-label small text-muted mb-1">Custom Fields <span class="text-muted">(typed fields editable on any case created from this template)</span></label>
+                <div id="ctFieldsList" class="mb-1"></div>
+                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addCaseTemplateFieldRow({})"><i class="fa-solid fa-plus me-1"></i>Add Field</button>
+
+                <div id="ctError" class="text-danger small mt-3" style="display:none;"></div>
+            </div>
+            <div class="modal-footer border-secondary">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="saveCaseTemplate()">Save</button>
+            </div>
         </div>
     </div>
 </div>
@@ -559,6 +614,159 @@ async function removeSoarQueueMember(qid, username) {
 
 function loadTemplatesForPlaybooks() {
     return fetch('/api/case-templates').then(r => r.json()).then(t => { caseTemplatesForPb = t || []; }).catch(() => { caseTemplatesForPb = []; });
+}
+
+// ---- Case Templates tab -- full CRUD + typed custom fields. Own fetch/array (not
+// caseTemplatesForPb above) so a save/delete here can refresh independently of whether
+// the playbook editor has been opened yet.
+let allCaseTemplatesForSoar = [];
+let caseTemplateModal;
+let ctTaskSeq = 0, ctFieldSeq = 0;
+const CASE_TEMPLATE_FIELD_TYPE_LABELS = { text: 'Text', dropdown: 'Dropdown', date: 'Date', checkbox: 'Checkbox' };
+
+function loadCaseTemplatesForSoar() {
+    return fetch('/api/case-templates').then(r => r.json()).then(t => { allCaseTemplatesForSoar = t || []; renderCaseTemplatesTable(); }).catch(() => { allCaseTemplatesForSoar = []; renderCaseTemplatesTable(); });
+}
+
+function renderCaseTemplatesTable() {
+    const tbody = document.getElementById('caseTemplatesTableBody');
+    if (!tbody) return;
+    if (!allCaseTemplatesForSoar.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted small py-3">No templates yet.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = allCaseTemplatesForSoar.map(t => `
+        <tr>
+            <td class="ps-3 small">${escHtml(t.name)}</td>
+            <td class="text-muted small">${escHtml(t.description || '')}</td>
+            <td class="small text-nowrap">${t.tasks.length}</td>
+            <td class="small text-nowrap">${t.fields.length}</td>
+            <td class="text-end pe-3 text-nowrap">
+                <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" title="Edit" onclick="editCaseTemplate(${t.id})"><i class="fa-solid fa-pen"></i></button>
+                <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete" onclick="deleteCaseTemplate(${t.id}, '${escJs(t.name)}')"><i class="fa-solid fa-trash"></i></button>
+            </td>
+        </tr>
+    `).join('');
+}
+
+function addCaseTemplateTaskRow(title) {
+    const seq = ctTaskSeq++;
+    const list = document.getElementById('ctTasksList');
+    const div = document.createElement('div');
+    div.className = 'd-flex gap-2 align-items-center mb-1';
+    div.id = `ctTaskRow_${seq}`;
+    div.innerHTML = `
+        <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="ctTaskTitle_${seq}" value="${escHtml(title)}" placeholder="Task title">
+        <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove" onclick="document.getElementById('ctTaskRow_${seq}').remove()"><i class="fa-solid fa-xmark"></i></button>
+    `;
+    list.appendChild(div);
+}
+
+function addCaseTemplateFieldRow(f) {
+    const seq = ctFieldSeq++;
+    const list = document.getElementById('ctFieldsList');
+    const div = document.createElement('div');
+    div.className = 'd-flex gap-2 align-items-start border border-secondary rounded p-2 mb-2';
+    div.id = `ctFieldRow_${seq}`;
+    const fieldType = f.field_type || 'text';
+    const options = (f.options || []).join(', ');
+    div.innerHTML = `
+        <div class="flex-grow-1">
+            <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="ctFieldLabel_${seq}" value="${escHtml(f.label || '')}" placeholder="Field label">
+            <div class="d-flex gap-2 align-items-center">
+                <select class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:140px;" id="ctFieldType_${seq}" onchange="onCaseTemplateFieldTypeChange(${seq})">
+                    ${Object.entries(CASE_TEMPLATE_FIELD_TYPE_LABELS).map(([k, label]) => `<option value="${k}" ${k === fieldType ? 'selected' : ''}>${label}</option>`).join('')}
+                </select>
+                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="ctFieldOptions_${seq}" value="${escHtml(options)}" placeholder="Comma-separated options" style="${fieldType === 'dropdown' ? '' : 'display:none;'}">
+                <div class="form-check form-check-sm text-nowrap">
+                    <input class="form-check-input" type="checkbox" id="ctFieldRequired_${seq}" ${f.required ? 'checked' : ''}>
+                    <label class="form-check-label small text-muted" for="ctFieldRequired_${seq}">Required</label>
+                </div>
+            </div>
+        </div>
+        <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove" onclick="document.getElementById('ctFieldRow_${seq}').remove()"><i class="fa-solid fa-xmark"></i></button>
+    `;
+    list.appendChild(div);
+}
+
+function onCaseTemplateFieldTypeChange(seq) {
+    const type = document.getElementById(`ctFieldType_${seq}`).value;
+    document.getElementById(`ctFieldOptions_${seq}`).style.display = type === 'dropdown' ? '' : 'none';
+}
+
+function collectCaseTemplateTasks() {
+    return Array.from(document.getElementById('ctTasksList').children)
+        .map(row => document.getElementById(row.id.replace('ctTaskRow', 'ctTaskTitle')).value.trim())
+        .filter(Boolean);
+}
+
+function collectCaseTemplateFields() {
+    return Array.from(document.getElementById('ctFieldsList').children).map(row => {
+        const seq = row.id.split('_')[1];
+        const fieldType = document.getElementById(`ctFieldType_${seq}`).value;
+        return {
+            label: document.getElementById(`ctFieldLabel_${seq}`).value.trim(),
+            field_type: fieldType,
+            options: fieldType === 'dropdown' ? document.getElementById(`ctFieldOptions_${seq}`).value.split(',').map(s => s.trim()).filter(Boolean) : [],
+            required: document.getElementById(`ctFieldRequired_${seq}`).checked
+        };
+    }).filter(f => f.label);
+}
+
+function showCaseTemplateModal() {
+    document.getElementById('caseTemplateModalTitle').innerText = 'New Template';
+    document.getElementById('ctId').value = '';
+    document.getElementById('ctName').value = '';
+    document.getElementById('ctDescription').value = '';
+    document.getElementById('ctError').style.display = 'none';
+    document.getElementById('ctTasksList').innerHTML = '';
+    document.getElementById('ctFieldsList').innerHTML = '';
+    addCaseTemplateTaskRow('');
+    if (!caseTemplateModal) caseTemplateModal = new bootstrap.Modal(document.getElementById('caseTemplateModal'));
+    caseTemplateModal.show();
+}
+
+function editCaseTemplate(tid) {
+    const t = allCaseTemplatesForSoar.find(x => x.id === tid);
+    if (!t) return;
+    document.getElementById('caseTemplateModalTitle').innerText = 'Edit Template';
+    document.getElementById('ctId').value = t.id;
+    document.getElementById('ctName').value = t.name;
+    document.getElementById('ctDescription').value = t.description || '';
+    document.getElementById('ctError').style.display = 'none';
+    document.getElementById('ctTasksList').innerHTML = '';
+    document.getElementById('ctFieldsList').innerHTML = '';
+    (t.tasks.length ? t.tasks : ['']).forEach(addCaseTemplateTaskRow);
+    t.fields.forEach(addCaseTemplateFieldRow);
+    if (!caseTemplateModal) caseTemplateModal = new bootstrap.Modal(document.getElementById('caseTemplateModal'));
+    caseTemplateModal.show();
+}
+
+function saveCaseTemplate() {
+    const errBox = document.getElementById('ctError');
+    errBox.style.display = 'none';
+    const tid = document.getElementById('ctId').value;
+    const payload = {
+        name: document.getElementById('ctName').value.trim(),
+        description: document.getElementById('ctDescription').value.trim(),
+        tasks: collectCaseTemplateTasks(),
+        fields: collectCaseTemplateFields()
+    };
+    if (!payload.name) { errBox.innerText = 'Name is required.'; errBox.style.display = 'block'; return; }
+    const url = tid ? `/api/case-templates/${tid}` : '/api/case-templates';
+    const method = tid ? 'PUT' : 'POST';
+    fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+        .then(r => r.json().then(data => ({ ok: r.ok, data })))
+        .then(({ ok, data }) => {
+            if (ok) { caseTemplateModal.hide(); loadCaseTemplatesForSoar(); }
+            else { errBox.innerText = data.error || 'Failed to save template.'; errBox.style.display = 'block'; }
+        }).catch(err => { errBox.innerText = 'Error: ' + err; errBox.style.display = 'block'; });
+}
+
+async function deleteCaseTemplate(tid, name) {
+    if (!(await confirmDialog(`Delete the "${name}" template? Cases already created from it keep their tasks and fields untouched.`, { title: 'Delete template', danger: true, confirmLabel: 'Delete' }))) return;
+    await fetch(`/api/case-templates/${tid}`, { method: 'DELETE' });
+    await loadCaseTemplatesForSoar();
 }
 
 // Names/descriptions only -- the API never returns a secret's value (see api_playbook_secrets()).
@@ -1184,6 +1392,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadAlertNotifications();
     loadQueuesForSoar();
     renderActionsCatalog();
+    if (document.getElementById('caseTemplatesTableBody')) loadCaseTemplatesForSoar();
 });
 </script>
 {% endblock %}

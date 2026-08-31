@@ -567,6 +567,22 @@ function taskRow(t, isClosed) {
         </div>`;
 }
 
+function caseFieldInput(f, isClosed) {
+    const disabled = isClosed ? 'disabled' : '';
+    let control;
+    if (f.field_type === 'checkbox') {
+        control = `<div class="form-check mt-2"><input type="checkbox" class="form-check-input" id="caseField_${f.id}" ${f.value === '1' || f.value === 'true' ? 'checked' : ''} ${disabled}></div>`;
+    } else if (f.field_type === 'date') {
+        control = `<input type="date" id="caseField_${f.id}" class="form-control form-control-sm bg-dark text-light border-secondary" value="${escHtml(f.value || '')}" ${disabled}>`;
+    } else if (f.field_type === 'dropdown') {
+        const options = (f.options || []).map(o => `<option value="${escHtml(o)}" ${f.value === o ? 'selected' : ''}>${escHtml(o)}</option>`).join('');
+        control = `<select id="caseField_${f.id}" class="form-select form-select-sm bg-dark text-light border-secondary" ${disabled}><option value="">--</option>${options}</select>`;
+    } else {
+        control = `<input type="text" id="caseField_${f.id}" class="form-control form-control-sm bg-dark text-light border-secondary" value="${escHtml(f.value || '')}" ${disabled}>`;
+    }
+    return `<div class="col-md-6"><label class="form-label small text-muted mb-1">${escHtml(f.label)}</label>${control}</div>`;
+}
+
 function caseEventLabel(e) {
     const map = {
         created: 'Case created',
@@ -727,6 +743,15 @@ function loadAndRenderCaseDetail(cid) {
                             </div>
                         </div>
                     </div>
+                    ${c.fields.length ? `
+                    <div class="card bg-dark border-secondary mb-3">
+                        <div class="card-header border-secondary">Custom Fields <span class="text-muted small">— from the case template applied when this case was created</span></div>
+                        <div class="card-body">
+                            <div class="row g-2">${c.fields.map(f => caseFieldInput(f, isClosed)).join('')}</div>
+                            <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="saveCaseFields()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-floppy-disk me-1"></i>Save</button>
+                            <span id="caseFieldsSaveMsg" class="small text-success ms-2" style="display:none;">Saved.</span>
+                        </div>
+                    </div>` : ''}
                 </div>
                 <div class="col-lg-5">
                     <div class="card bg-dark border-secondary mb-3">
@@ -890,6 +915,21 @@ function saveCaseDetail() {
         loadCases();
         openCaseDetail(activeCaseId);  // refresh the timeline with whatever just got logged
     }).catch(err => toast('Error saving case: ' + err, 'danger'));
+}
+
+function saveCaseFields() {
+    const values = Array.from(document.querySelectorAll('[id^="caseField_"]')).map(el => ({
+        id: parseInt(el.id.split('_')[1], 10),
+        value: el.type === 'checkbox' ? (el.checked ? '1' : '') : el.value
+    }));
+    if (!values.length) return;
+    fetch(`/api/cases/${activeCaseId}/fields`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({values})
+    }).then(r => r.json()).then(() => {
+        const msg = document.getElementById('caseFieldsSaveMsg');
+        msg.style.display = 'inline';
+        setTimeout(() => msg.style.display = 'none', 2000);
+    }).catch(err => toast('Error saving fields: ' + err, 'danger'));
 }
 
 async function removeCaseItem(itemRowId) {
