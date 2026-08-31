@@ -1,0 +1,83 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8">{% include "_report_styles.html" %}</head><body>
+    {% include "_report_branding_header.html" %}
+    <h2>Executive Summary &mdash; {{ framework_label }}</h2>
+    <div>
+        <div class="metric-box"><div class="metric-value">{{ rules_enabled_count }} / {{ rules_total }}</div><div>Rules Tagged &amp; Enabled</div></div>
+        <div class="metric-box"><div class="metric-value">{% if sca.total %}{{ sca.passed }} / {{ sca.total }}{% else %}&mdash;{% endif %}</div><div>Hardening Checks Passed</div></div>
+        <div class="metric-box"><div class="metric-value">{{ assessed_hosts }} / {{ total_hosts }}</div><div>Endpoints Assessed</div></div>
+        <div class="metric-box"><div class="metric-value">{{ total_detections }}</div><div>Detections (30 days)</div></div>
+    </div>
+    <p style="margin-top:20px; font-size:9pt; color:#666;">This report is scoped to {{ framework_label }} only: which detection rules are tagged and enabled for it, whether those rules have actually produced alerts, whether the endpoint hardening state {{ framework_label }} calls for is verified true across the fleet, and what fraction of the enrolled estate that hardening picture actually reflects. It is a snapshot of this deployment's own detection/configuration posture, not an independent compliance attestation or audit finding.</p>
+
+    <h2 class="section-title">Detection Rules</h2>
+    {% if rules %}
+    <table>
+        <thead><tr><th>Rule</th><th>Status</th><th>Alerts (30 days)</th></tr></thead>
+        <tbody>
+        {% for r in rules %}
+            <tr>
+                <td>{{ r.title }}</td>
+                <td>{% if r.enabled %}<span class="pill pill-full">Enabled</span>{% else %}<span class="pill pill-none">Disabled</span>{% endif %}</td>
+                <td>{{ r.alert_count }}{% if r.enabled and r.alert_count == 0 %} <span style="color:#a13a4d;">&mdash; no alerts yet</span>{% endif %}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<p>No rules are currently tagged for {{ framework_label }}.</p>{% endif %}
+
+    <h2 class="section-title">Endpoint Hardening (SCA)</h2>
+    <p style="font-size:9pt; color:#666;">{{ assessed_hosts }} of {{ total_hosts }} enrolled endpoint(s) have run an SCA hardening check. Percentages below reflect only the endpoints that have.</p>
+    {% if sca_failing_checks %}
+    <table>
+        <thead><tr><th>Host</th><th>Check</th><th>Detail</th></tr></thead>
+        <tbody>
+        {% for c in sca_failing_checks %}
+            <tr>
+                <td>{{ c.hostname }}</td>
+                <td>{{ c.title }}</td>
+                <td>{{ c.detail }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% elif sca.total %}<p>All hardening checks relevant to {{ framework_label }} are currently passing.</p>
+    {% else %}<p>No SCA hardening check results are relevant to {{ framework_label }} yet.</p>{% endif %}
+
+    <h2 class="section-title">Recent Detections{% if detections_truncated %} (most recent {{ row_cap }} of {{ total_detections }}){% endif %}</h2>
+    {% if detections %}
+    <table>
+        <thead><tr><th>Timestamp</th><th>Host</th><th>Rule</th><th>Severity</th></tr></thead>
+        <tbody>
+        {% for d in detections %}
+            <tr>
+                <td>{{ d.timestamp }}</td>
+                <td>{{ d.host or '' }}</td>
+                <td>{{ d.rule_title }}</td>
+                <td>{{ d.severity or '' }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<p>No alerts from {{ framework_label }}-tagged rules in the last 30 days.</p>{% endif %}
+
+    <h2 class="section-title">Audit Trail</h2>
+    <p style="font-size:9pt; color:#666;">Tagging, enable, and disable changes to rules currently tagged for {{ framework_label }}.</p>
+    {% if audit_trail %}
+    <table>
+        <thead><tr><th>Timestamp</th><th>Actor</th><th>Action</th><th>Rule ID</th><th>Details</th></tr></thead>
+        <tbody>
+        {% for e in audit_trail %}
+            <tr>
+                <td>{{ e.timestamp }}</td>
+                <td>{{ e.username or '(unknown)' }}</td>
+                <td>{{ e.action }}</td>
+                <td>{{ e.target_id }}</td>
+                <td>{{ e.details or '' }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<p>No tagging/enable/disable changes recorded for {{ framework_label }}-tagged rules.</p>{% endif %}
+
+    {% include "_report_branding_footer.html" %}
+</body></html>

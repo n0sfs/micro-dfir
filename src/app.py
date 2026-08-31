@@ -3261,13 +3261,21 @@ def trigger_report():
     report_type = request.form.get('type', 'security')
     if report_type not in REPORT_TYPES:
         report_type = 'security'
+    # Only meaningful (and only sent by the form) for report_type == 'compliance' --
+    # narrows the generated PDF to one framework instead of today's all-frameworks
+    # survey. Validated against the real framework keys rather than trusted as-is, even
+    # though subprocess.run's list argv is already shell-injection-safe, so a bad value
+    # can't silently produce a report with an empty/garbage framework label.
+    framework_key = request.form.get('framework') or None
+    if framework_key not in COMPLIANCE_FRAMEWORKS:
+        framework_key = None
     try:
-        subprocess.run(
-            ["/opt/micro-dfir/venv/bin/python3", "/opt/micro-dfir/src/generate_report.py",
-             report_type, f"--user={current_user.username}", "--source=manual"],
-            check=True, timeout=120
-        )
-        log_audit('report_generate', 'report', report_type)
+        cmd = ["/opt/micro-dfir/venv/bin/python3", "/opt/micro-dfir/src/generate_report.py",
+               report_type, f"--user={current_user.username}", "--source=manual"]
+        if framework_key:
+            cmd.append(f"--framework={framework_key}")
+        subprocess.run(cmd, check=True, timeout=120)
+        log_audit('report_generate', 'report', report_type, framework_key)
         flash("Report successfully generated!", "success")
     except subprocess.TimeoutExpired:
         flash("Report generation timed out.", "danger")
@@ -3284,7 +3292,7 @@ def api_report_history():
     # 100-row cap by a busy caseload.
     rows = [dict(r) for r in get_db().execute(
         "SELECT id, report_type, filename, status, triggered_by, trigger_source, "
-        "started_at, completed_at, file_size_bytes, error_message "
+        "started_at, completed_at, file_size_bytes, error_message, framework_label "
         "FROM report_history WHERE case_id IS NULL ORDER BY id DESC LIMIT 100"
     ).fetchall()]
     for r in rows:
@@ -8634,6 +8642,26 @@ def migrate_report_history_case_id():
     except Exception:
         pass
 
+def migrate_report_history_framework():
+    # Exact mirror of migrate_report_history_case_id() above, for the same reason: a
+    # per-framework Compliance Report generation needs somewhere to record which
+    # framework it was scoped to, so the history table can show "Compliance Report --
+    # CIS Controls" instead of an indistinguishable plain "Compliance Report" row.
+    # framework_label is a snapshot at generation time (not re-derived from
+    # framework_key + a live COMPLIANCE_FRAMEWORKS lookup), same "survives the source
+    # data changing later" reasoning as case_title.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(report_history)").fetchall()}
+        if 'framework_key' not in cols:
+            conn.execute("ALTER TABLE report_history ADD COLUMN framework_key TEXT")
+        if 'framework_label' not in cols:
+            conn.execute("ALTER TABLE report_history ADD COLUMN framework_label TEXT")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_log_search_indexes():
     # _build_log_filters() (Log Search / UEBA Timeline) filters on host/app/severity/
     # username/event_id constantly, but only `timestamp` was ever indexed on live_logs/
@@ -11172,6 +11200,7 @@ migrate_seed_ueba_rules()
 migrate_risk_score_events_rule_id()
 migrate_report_history()
 migrate_report_history_case_id()
+migrate_report_history_framework()
 migrate_log_search_indexes()
 migrate_alerts_triage()
 migrate_alerts_geoip_columns()

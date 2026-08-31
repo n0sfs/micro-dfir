@@ -161,8 +161,98 @@ def generate_security_report():
     conn.close()
     return _render_and_write('report_template.html', context, _report_filename('Security'))
 
-def generate_compliance_report():
+# Mirrors app.py's COMPLIANCE_AUDIT_ACTIONS -- this script has no Flask app context, same
+# duplication reasoning as COMPLIANCE_FRAMEWORK_LABELS/SCA_CHECK_FRAMEWORKS above.
+COMPLIANCE_AUDIT_ACTIONS = ('rule_compliance_tag', 'rule_toggle', 'rule_bulk_toggle')
+
+def _framework_focused_context(conn, cursor, framework_key):
+    label = COMPLIANCE_FRAMEWORK_LABELS.get(framework_key, framework_key)
+    like_pattern = f'%{framework_key}%'
+    thirty_days_ago = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
+
+    # Rule coverage, scoped to this framework, with real fired-alert evidence per rule --
+    # not just enabled=1. Same alerts-JOIN-sigma_rules shape already used by
+    # generate_security_report()'s top_alerts query above, extended with the
+    # compliance_tags LIKE filter this module already uses for the all-frameworks report.
+    rule_rows = cursor.execute(
+        "SELECT sr.id, sr.title, sr.enabled, "
+        "(SELECT COUNT(*) FROM alerts a WHERE a.rule_id = sr.id AND a.timestamp >= ?) as alert_count "
+        "FROM sigma_rules sr WHERE sr.compliance_tags LIKE ? ORDER BY sr.enabled DESC, alert_count DESC, sr.title",
+        (thirty_days_ago, like_pattern)
+    ).fetchall()
+    rules = [dict(r) for r in rule_rows]
+    rules_enabled_count = sum(1 for r in rules if r['enabled'])
+
+    # Endpoint hardening (SCA), scoped to this one framework -- same aggregation the
+    # all-frameworks report uses, just read out for a single key instead of looped.
+    sca_agg, sca_failing_all = _sca_framework_aggregate(_latest_sca_results(cursor))
+    sca = sca_agg.get(framework_key, {'total': 0, 'passed': 0, 'failed': 0, 'errored': 0})
+    sca_failing = [f for f in sca_failing_all if label in f['frameworks'].split(', ')]
+
+    # Fleet coverage -- how much of the enrolled estate this hardening picture actually
+    # reflects, not just its pass rate. agent_tokens is the hostname-native enrollment
+    # table (see migrate_agent_groups()'s own comment in app.py).
+    total_hosts = cursor.execute(
+        "SELECT COUNT(DISTINCT hostname) FROM agent_tokens WHERE hostname IS NOT NULL"
+    ).fetchone()[0]
+    assessed_hosts = len(_latest_sca_results(cursor))
+
+    # Recent detections -- real alert rows, not just the count above, so this reads as
+    # evidence rather than a bare statistic. Same 200-row cap generate_audit_report()
+    # already establishes as this report set's convention.
+    detection_rows = cursor.execute(
+        "SELECT a.timestamp, a.host, sr.title as rule_title, a.severity FROM alerts a "
+        "JOIN sigma_rules sr ON a.rule_id = sr.id "
+        "WHERE sr.compliance_tags LIKE ? AND a.timestamp >= ? ORDER BY a.timestamp DESC LIMIT ?",
+        (like_pattern, thirty_days_ago, AUDIT_REPORT_ROW_CAP)
+    ).fetchall()
+    detections = [dict(r) for r in detection_rows]
+    total_detections = cursor.execute(
+        "SELECT COUNT(*) FROM alerts a JOIN sigma_rules sr ON a.rule_id = sr.id "
+        "WHERE sr.compliance_tags LIKE ? AND a.timestamp >= ?",
+        (like_pattern, thirty_days_ago)
+    ).fetchone()[0]
+
+    # Audit trail, scoped to changes on rules CURRENTLY tagged with this framework --
+    # a rule detagged since the change was made won't show here, same "current state"
+    # framing the rest of this report uses.
+    placeholders = ','.join('?' for _ in COMPLIANCE_AUDIT_ACTIONS)
+    audit_rows = cursor.execute(
+        f"SELECT al.timestamp, al.username, al.action, al.target_id, al.details FROM audit_log al "
+        f"JOIN sigma_rules sr ON al.target_id = CAST(sr.id AS TEXT) "
+        f"WHERE al.action IN ({placeholders}) AND sr.compliance_tags LIKE ? ORDER BY al.id DESC LIMIT ?",
+        (*COMPLIANCE_AUDIT_ACTIONS, like_pattern, AUDIT_REPORT_ROW_CAP)
+    ).fetchall()
+    audit_trail = [dict(r) for r in audit_rows]
+
+    return {
+        "date_generated": datetime.now().strftime("%B %d, %Y"),
+        "report_title": f"Compliance Report — {label}",
+        "report_subtitle": "Detection rules, endpoint hardening, and audit evidence for this framework",
+        "branding": _branding_context(conn),
+        "framework_label": label,
+        "rules": rules,
+        "rules_total": len(rules),
+        "rules_enabled_count": rules_enabled_count,
+        "sca": sca,
+        "sca_failing_checks": sca_failing,
+        "total_hosts": total_hosts,
+        "assessed_hosts": assessed_hosts,
+        "detections": detections,
+        "total_detections": total_detections,
+        "detections_truncated": total_detections > AUDIT_REPORT_ROW_CAP,
+        "audit_trail": audit_trail,
+        "row_cap": AUDIT_REPORT_ROW_CAP,
+    }
+
+def generate_compliance_report(framework_key=None):
     conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
+
+    if framework_key:
+        context = _framework_focused_context(conn, cursor, framework_key)
+        conn.close()
+        return _render_and_write('report_template_compliance_framework.html', context, _report_filename(f"Compliance_{framework_key}"))
+
     rows = cursor.execute(
         "SELECT compliance_tags, enabled FROM sigma_rules WHERE compliance_tags IS NOT NULL AND compliance_tags != ''"
     ).fetchall()
@@ -350,12 +440,15 @@ def generate_case_report(case_id):
 
 REPORT_GENERATORS = {
     'security': generate_security_report,
-    'compliance': generate_compliance_report,
+    # 'compliance' is handled by its own explicit branch in run_report() (needs to pass
+    # framework_key through), same as 'case' -- not listed here to avoid two dispatch
+    # paths for the same type.
     'audit': generate_audit_report,
 }
 
 def _record_history(conn, report_type, filename, status, started_at, completed_at,
-                     triggered_by, trigger_source, error_message=None, case_id=None, case_title=None):
+                     triggered_by, trigger_source, error_message=None, case_id=None, case_title=None,
+                     framework_key=None, framework_label=None):
     file_size = None
     if status == 'success' and filename:
         try:
@@ -364,8 +457,10 @@ def _record_history(conn, report_type, filename, status, started_at, completed_a
             pass
     conn.execute(
         "INSERT INTO report_history (report_type, filename, status, triggered_by, trigger_source, "
-        "started_at, completed_at, file_size_bytes, error_message, case_id, case_title) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (report_type, filename, status, triggered_by, trigger_source, started_at, completed_at, file_size, error_message, case_id, case_title)
+        "started_at, completed_at, file_size_bytes, error_message, case_id, case_title, framework_key, framework_label) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (report_type, filename, status, triggered_by, trigger_source, started_at, completed_at, file_size, error_message,
+         case_id, case_title, framework_key, framework_label)
     )
     conn.commit()
 
@@ -376,20 +471,22 @@ def _record_history(conn, report_type, filename, status, started_at, completed_a
 # duplicating the insert or a cron run silently having no record at all. A case report
 # (report_type == 'case') is the one path that needs case_id -- looked up here so a
 # failed generation still records which case it was for, not just that something failed.
-def run_report(report_type, triggered_by=None, trigger_source='manual', case_id=None):
+def run_report(report_type, triggered_by=None, trigger_source='manual', case_id=None, framework_key=None):
     started_at = datetime.now().isoformat()
     conn = sqlite3.connect(DB_PATH, timeout=30)
     case_title = None
+    framework_label = COMPLIANCE_FRAMEWORK_LABELS.get(framework_key) if framework_key else None
     try:
         # Defensive create -- mirrors _get_or_create_secret_key()'s own pattern in
         # app.py, in case this runs before migrate_report_history()/
-        # migrate_report_history_case_id() have (e.g. cron fires between a code deploy
-        # and the next app restart that runs migrations).
+        # migrate_report_history_case_id()/migrate_report_history_framework() have (e.g.
+        # cron fires between a code deploy and the next app restart that runs migrations).
         conn.execute('''CREATE TABLE IF NOT EXISTS report_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT, report_type TEXT NOT NULL, filename TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'success', triggered_by TEXT, trigger_source TEXT NOT NULL DEFAULT 'manual',
             started_at DATETIME, completed_at DATETIME, file_size_bytes INTEGER, error_message TEXT,
-            case_id INTEGER, case_title TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            case_id INTEGER, case_title TEXT, framework_key TEXT, framework_label TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )''')
         if report_type == 'case':
             if case_id is None:
@@ -399,13 +496,17 @@ def run_report(report_type, triggered_by=None, trigger_source='manual', case_id=
                 raise ValueError(f"Case {case_id} not found")
             case_title = row[0]
             filename = generate_case_report(case_id)
+        elif report_type == 'compliance':
+            filename = generate_compliance_report(framework_key)
         else:
             filename = REPORT_GENERATORS.get(report_type, generate_security_report)()
         _record_history(conn, report_type, filename, 'success', started_at,
-                         datetime.now().isoformat(), triggered_by, trigger_source, case_id=case_id, case_title=case_title)
+                         datetime.now().isoformat(), triggered_by, trigger_source, case_id=case_id, case_title=case_title,
+                         framework_key=framework_key, framework_label=framework_label)
     except Exception as e:
         _record_history(conn, report_type, '', 'failed', started_at,
-                         datetime.now().isoformat(), triggered_by, trigger_source, str(e), case_id=case_id, case_title=case_title)
+                         datetime.now().isoformat(), triggered_by, trigger_source, str(e), case_id=case_id, case_title=case_title,
+                         framework_key=framework_key, framework_label=framework_label)
         conn.close()
         raise
     conn.close()
@@ -417,5 +518,6 @@ if __name__ == "__main__":
     parser.add_argument('--user', default=None)
     parser.add_argument('--source', default='scheduled', choices=('manual', 'scheduled'))
     parser.add_argument('--case-id', type=int, default=None)
+    parser.add_argument('--framework', default=None)
     args = parser.parse_args()
-    run_report(args.report_type, triggered_by=args.user, trigger_source=args.source, case_id=args.case_id)
+    run_report(args.report_type, triggered_by=args.user, trigger_source=args.source, case_id=args.case_id, framework_key=args.framework)
