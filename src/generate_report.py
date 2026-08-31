@@ -1,4 +1,4 @@
-import base64, mimetypes, os, sqlite3
+import base64, json, mimetypes, os, sqlite3
 from datetime import datetime, timedelta
 from jinja2 import Environment, FileSystemLoader
 from weasyprint import HTML
@@ -17,6 +17,79 @@ COMPLIANCE_FRAMEWORK_LABELS = {
     'nist_csf': 'NIST CSF', 'iso_27001': 'ISO 27001', 'soc2': 'SOC 2',
     'cis_controls': 'CIS Controls', 'gdpr': 'GDPR',
 }
+
+# Kept in sync with app.py's SCA_CHECK_FRAMEWORKS -- same reasoning as
+# COMPLIANCE_FRAMEWORK_LABELS above (this module runs its own sqlite3 connection, not
+# Flask's get_db(), so the mapping is duplicated rather than imported).
+SCA_CHECK_FRAMEWORKS = {
+    'firewall_enabled': ['pci_dss', 'cis_controls', 'nist_800_53', 'nist_csf', 'iso_27001', 'soc2'],
+    'smb1_disabled': ['cis_controls', 'nist_800_53', 'pci_dss'],
+    'rdp_nla': ['cis_controls', 'nist_800_53', 'pci_dss', 'soc2'],
+    'defender_realtime': ['cis_controls', 'nist_800_53', 'hipaa', 'pci_dss', 'soc2'],
+    'guest_disabled': ['cis_controls', 'nist_800_53', 'pci_dss', 'iso_27001'],
+    'uac_enabled': ['cis_controls', 'nist_800_53'],
+    'lm_hash_disabled': ['cis_controls', 'pci_dss', 'nist_800_53'],
+    'autorun_disabled': ['cis_controls', 'nist_800_53'],
+    'ps_execution_policy': ['cis_controls', 'nist_800_53'],
+    'bitlocker_enabled': ['hipaa', 'pci_dss', 'nist_800_53', 'gdpr', 'iso_27001', 'soc2'],
+    'windows_update_service': ['cis_controls', 'nist_800_53', 'pci_dss'],
+    'account_lockout': ['pci_dss', 'hipaa', 'nist_800_53', 'cis_controls', 'iso_27001', 'soc2', 'gdpr'],
+    'ssh_root_login': ['cis_controls', 'nist_800_53', 'pci_dss', 'soc2'],
+    'ssh_password_auth': ['cis_controls', 'nist_800_53', 'pci_dss', 'soc2'],
+    'firewall_active': ['pci_dss', 'cis_controls', 'nist_800_53', 'nist_csf', 'iso_27001', 'soc2'],
+    'passwd_perms': ['cis_controls', 'nist_800_53'],
+    'shadow_perms': ['cis_controls', 'nist_800_53', 'pci_dss'],
+    'no_empty_passwords': ['pci_dss', 'hipaa', 'cis_controls', 'nist_800_53', 'soc2'],
+    'password_min_len': ['pci_dss', 'hipaa', 'cis_controls', 'nist_800_53', 'soc2', 'iso_27001'],
+    'password_max_days': ['pci_dss', 'cis_controls', 'nist_800_53'],
+    'core_dumps_restricted': ['cis_controls', 'nist_800_53'],
+    'aslr_enabled': ['cis_controls', 'nist_800_53'],
+    'time_sync_active': ['cis_controls', 'nist_800_53', 'pci_dss'],
+}
+
+def _latest_sca_results(cursor):
+    rows = cursor.execute(
+        "SELECT hostname, stdout FROM agent_commands WHERE label = 'sca_check' AND status = 'done' "
+        "AND id IN (SELECT MAX(id) FROM agent_commands WHERE label = 'sca_check' AND status = 'done' GROUP BY hostname)"
+    ).fetchall()
+    results = []
+    for row in rows:
+        try:
+            parsed = json.loads(row['stdout']) if row['stdout'] else None
+        except (ValueError, TypeError):
+            parsed = None
+        checks = parsed.get('checks') if isinstance(parsed, dict) else None
+        if isinstance(checks, list):
+            results.append({'hostname': row['hostname'], 'checks': checks})
+    return results
+
+def _sca_framework_aggregate(sca_results):
+    agg = {key: {'total': 0, 'passed': 0, 'failed': 0, 'errored': 0} for key in COMPLIANCE_FRAMEWORK_LABELS}
+    failing = []
+    for host in sca_results:
+        for check in host['checks']:
+            frameworks = SCA_CHECK_FRAMEWORKS.get(check.get('id'))
+            if not frameworks:
+                continue
+            status = check.get('status')
+            for fw in frameworks:
+                if fw not in agg:
+                    continue
+                agg[fw]['total'] += 1
+                if status == 'pass':
+                    agg[fw]['passed'] += 1
+                elif status == 'fail':
+                    agg[fw]['failed'] += 1
+                elif status == 'error':
+                    agg[fw]['errored'] += 1
+            if status == 'fail':
+                failing.append({
+                    'hostname': host['hostname'], 'title': check.get('title', check.get('id')),
+                    'detail': check.get('detail', ''),
+                    'frameworks': ', '.join(COMPLIANCE_FRAMEWORK_LABELS.get(f, f) for f in frameworks),
+                })
+    failing.sort(key=lambda f: (f['title'], f['hostname']))
+    return agg, failing
 
 # Action categories a compliance reviewer would specifically want called out, not
 # buried in a full activity list -- user management, credential/cert changes, and
@@ -103,6 +176,13 @@ def generate_compliance_report():
                 if row['enabled']:
                     coverage[tag]['enabled'] += 1
 
+    # Second, deliberately separate metric per framework -- fleet-wide SCA hardening
+    # check pass rate, not blended into the rule-coverage total/enabled above. See
+    # _sca_framework_aggregate's own docstring-equivalent comment for why.
+    sca_agg, sca_failing = _sca_framework_aggregate(_latest_sca_results(cursor))
+    for key, sca in sca_agg.items():
+        coverage[key]['sca'] = sca
+
     frameworks = sorted(coverage.values(), key=lambda f: f['label'])
     full_coverage_count = sum(1 for f in frameworks if f['total'] > 0 and f['enabled'] == f['total'])
 
@@ -113,6 +193,7 @@ def generate_compliance_report():
         "frameworks": frameworks,
         "full_coverage_count": full_coverage_count,
         "total_frameworks": len(frameworks),
+        "sca_failing_checks": sca_failing,
     }
     conn.close()
     return _render_and_write('report_template_compliance.html', context, _report_filename('Compliance'))

@@ -8,7 +8,7 @@
     <p style="margin-top:20px; font-size:9pt; color:#666;">Coverage reflects Sigma detection rules manually tagged against each framework in Micro DFIR's rule editor — it is a snapshot of what this deployment's detection rules claim to address, not an independent compliance attestation or audit finding.</p>
     <h2 class="section-title">Framework Coverage</h2>
     <table>
-        <thead><tr><th>Framework</th><th>Rules Tagged</th><th>Enabled</th><th>Disabled</th><th>Status</th></tr></thead>
+        <thead><tr><th>Framework</th><th>Rules Tagged</th><th>Enabled</th><th>Disabled</th><th>Status</th><th>Hardening Checks Passed</th></tr></thead>
         <tbody>
         {% for f in frameworks %}
             <tr>
@@ -22,9 +22,27 @@
                     {% else %}<span class="pill pill-partial">{{ f.total - f.enabled }} disabled</span>
                     {% endif %}
                 </td>
+                <td>{% if f.sca.total %}{{ f.sca.passed }} / {{ f.sca.total }}{% else %}&mdash;{% endif %}</td>
             </tr>
         {% endfor %}
         </tbody>
     </table>
+    <p style="margin-top:10px; font-size:9pt; color:#666;">Hardening Checks Passed reflects the latest SCA check result from every endpoint that has run one, mapped to each framework by which controls that check verifies -- fleet-wide, not per-host. Endpoints that have never run a check contribute nothing to either side of the count.</p>
+    {% if sca_failing_checks %}
+    <h2 class="section-title">Endpoint Hardening &mdash; Failing Checks</h2>
+    <table>
+        <thead><tr><th>Host</th><th>Check</th><th>Frameworks</th><th>Detail</th></tr></thead>
+        <tbody>
+        {% for c in sca_failing_checks %}
+            <tr>
+                <td>{{ c.hostname }}</td>
+                <td>{{ c.title }}</td>
+                <td>{{ c.frameworks }}</td>
+                <td>{{ c.detail }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
     {% include "_report_branding_footer.html" %}
 </body></html>
