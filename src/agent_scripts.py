@@ -705,7 +705,21 @@ $procs = Get-Process -ErrorAction SilentlyContinue
 $result.no_backing_path = @($procs | Where-Object { -not $_.Path -and $_.Id -ne 0 } |
     Select-Object Id,ProcessName | Select-Object -First 100)
 
-$result.unsigned = @($procs | Where-Object { $_.Path } | ForEach-Object {
+# Live-verified real bug: checking every running process serially with
+# Get-AuthenticodeSignature timed out at 180s on real production data --
+# catalog-signature verification (how nearly every Windows system binary is
+# signed, rather than an embedded signature) is genuinely slow per file. Two
+# fixes: (1) skip C:\Windows entirely for the signature check specifically
+# -- system binaries are both the slowest case AND the lowest-value target
+# (injected/malicious code realistically runs from Temp/AppData/Downloads,
+# not a faked Windows system path), still fully covered by no_backing_path
+# above, which is cheap; (2) dedupe by path first so N processes sharing one
+# binary (svchost.exe et al) only pay the verification cost once, and cap
+# the distinct-path count as a hard ceiling regardless of host process count.
+$candidates = @($procs | Where-Object { $_.Path -and $_.Path -notlike 'C:\Windows\*' } |
+    Group-Object Path | ForEach-Object { $_.Group | Select-Object -First 1 } | Select-Object -First 50)
+
+$result.unsigned = @($candidates | ForEach-Object {
     try {
         $sig = Get-AuthenticodeSignature -FilePath $_.Path -ErrorAction Stop
         if ($sig.Status -ne 'Valid') {
@@ -713,6 +727,7 @@ $result.unsigned = @($procs | Where-Object { $_.Path } | ForEach-Object {
         }
     } catch {}
 } | Select-Object -First 100)
+$result.unsigned_scope = "Non-system paths only (excludes C:\Windows\*), deduplicated by binary, capped at 50 distinct executables checked -- catalog-signature verification is too slow to run against every running process."
 
 $result.note = "Informational only -- a process with no backing file path or an unsigned/invalid-signature binary is common for both malicious injection AND ordinary unsigned third-party software. Not a verdict, a starting point for manual triage."
 $result | ConvertTo-Json -Depth 3 -Compress
