@@ -9994,7 +9994,7 @@ def api_fim_path_detail(fid):
 # collateral risk beyond the action itself, and no backend data/detection-logic
 # access involved. Every other label (custom scripts, agent lifecycle, and the
 # heavier hunt-flavored sweeps/collections) stays gated to Tier 3+ below.
-AGENT_COMMAND_TIER1_LABELS = {'isolate_host', 'restore_network', 'collect_triage', 'kill_process', 'quarantine_file'}
+AGENT_COMMAND_TIER1_LABELS = {'isolate_host', 'restore_network', 'collect_triage', 'kill_process', 'quarantine_file', 'kill_scheduled_task'}
 
 def _queue_agent_command(db, hostname, label, params, script_in, queued_by):
     """Builds and queues one command for one host -- the exact per-host logic
