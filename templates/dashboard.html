@@ -31,7 +31,8 @@
     #tuningTable .sort-ic.active-sort{color:var(--accent);}
 
     /* ===== Coverage tab ===== */
-    .cov-hero{display:flex; flex-wrap:wrap; gap:28px; align-items:center;}
+    .cov-hero{display:flex; flex-wrap:wrap; gap:28px; align-items:center; position:relative;}
+    .cov-score-label{cursor:help;}
     .cov-score-block{display:flex; align-items:center; gap:16px; padding-right:28px; border-right:1px solid var(--border);}
     .cov-score-ring{position:relative; width:88px; height:88px; flex-shrink:0;}
     .cov-score-ring svg{width:100%; height:100%; transform:rotate(-90deg);}
@@ -49,7 +50,9 @@
     .cov-score-delta.down{color:var(--danger);}
     .cov-score-delta.flat{color:var(--text-muted);}
     .cov-chip-row{display:flex; gap:10px; flex-wrap:wrap; flex:1;}
-    .cov-chip{display:flex; align-items:center; gap:8px; padding:9px 16px; border-radius:999px; background:var(--bg-card-alt); border:1px solid var(--border); font-size:.82rem;}
+    .cov-chip{display:flex; align-items:center; gap:8px; padding:9px 16px; border-radius:999px; background:var(--bg-card-alt); border:1px solid var(--border); font-size:.82rem; cursor:pointer; transition:border-color .1s ease;}
+    .cov-chip:hover{border-color:var(--accent);}
+    .cov-chip.active-tier{border-color:var(--accent); background:var(--bg-card);}
     .cov-chip .dot{width:9px; height:9px; border-radius:50%; flex-shrink:0;}
     .cov-chip .num{font-weight:700; font-variant-numeric:tabular-nums; color:var(--text-primary);}
     .cov-chip .lbl{color:var(--text-secondary);}
@@ -57,6 +60,15 @@
     .cov-dot-inactive{background:var(--warning);}
     .cov-dot-active{background:var(--info);}
     .cov-dot-validated{background:var(--success);}
+
+    .cov-tier-pop{position:absolute; z-index:20; background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); box-shadow:0 8px 24px rgba(0,0,0,.45); padding:10px 12px; min-width:260px; max-width:380px;}
+    .cov-tier-pop-header{display:flex; align-items:center; gap:8px; font-weight:700; font-size:.8rem; margin-bottom:8px; padding-bottom:6px; border-bottom:1px solid var(--border); color:var(--text-primary);}
+    .cov-tier-pop-list{max-height:260px; overflow-y:auto; display:flex; flex-direction:column; gap:2px;}
+    .cov-tier-pop-item{display:flex; gap:8px; align-items:baseline; font-size:.76rem; padding:3px 4px; border-radius:4px;}
+    .cov-tier-pop-item:hover{background:var(--bg-card-alt);}
+    .cov-tier-pop-id{font-family:var(--font-mono); font-size:.68rem; color:var(--text-muted); flex-shrink:0; min-width:64px;}
+    .cov-tier-pop-name{color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+    .cov-tier-pop-tactic{color:var(--text-muted); font-size:.68rem; margin-left:auto; flex-shrink:0; padding-left:6px;}
 
     .cov-matrix{display:flex; gap:12px; overflow-x:auto; padding-bottom:8px;}
     .cov-col{min-width:216px; flex:0 0 216px; background:var(--bg-card-alt); border:1px solid var(--border); border-radius:var(--radius); padding:14px;}
@@ -691,7 +703,7 @@
                     <div class="cov-score-value" id="covScoreValue">—</div>
                 </div>
                 <div class="cov-score-meta">
-                    <div class="cov-score-label">Overall Coverage</div>
+                    <div class="cov-score-label" title="How much of the curated ATT&#38;CK technique set has an enabled rule mapped to it (Active + Validated). A rule only needs to be enabled to count here -- it doesn't need to have fired yet.">Overall Coverage</div>
                     <div class="cov-score-delta flat" id="covScoreDelta">—</div>
                 </div>
             </div>
@@ -704,11 +716,12 @@
                     <div class="cov-score-value" id="detScoreValue">—</div>
                 </div>
                 <div class="cov-score-meta">
-                    <div class="cov-score-label">Detection Score</div>
+                    <div class="cov-score-label" title="The stricter sibling of Coverage: only techniques PROVEN by a real alert actually firing (Validated tier only). An enabled-but-never-fired rule counts toward Coverage, not here -- so Detection Score is always &#8804; Coverage.">Detection Score</div>
                     <div class="cov-score-note" id="detScoreNote">Techniques with a rule that has actually fired</div>
                 </div>
             </div>
             <div class="cov-chip-row" id="coverageChips"></div>
+            <div class="cov-tier-pop" id="covTierPopover" style="display:none;"></div>
         </div>
         <div id="coverageHistoryEmpty" class="text-muted small text-center py-4" style="display:none;">History builds up daily starting today — check back tomorrow to see a trend.</div>
         <div style="height:170px;"><canvas id="coverageHistoryChart"></canvas></div>
@@ -3841,8 +3854,11 @@ function renderCoverageHero() {
     }
 
     document.getElementById('coverageChips').innerHTML = COVERAGE_TIERS.map(t => `
-        <div class="cov-chip"><span class="dot ${t.dot}"></span><span class="num">${totals[t.key]}</span><span class="lbl">${t.label}</span></div>
+        <div class="cov-chip" data-tier="${t.key}" role="button" tabindex="0" title="Click to see which techniques" onclick="toggleCovTierPopover('${t.key}', this)"><span class="dot ${t.dot}"></span><span class="num">${totals[t.key]}</span><span class="lbl">${t.label}</span></div>
     `).join('');
+    // Underlying data just changed (reload/time-range switch) -- any open popover would
+    // otherwise show a stale technique list next to fresh totals.
+    closeCovTierPopover();
 
     // Detection Score is the stricter sibling metric: validated (actually-fired)
     // techniques over the full curated set, computed server-side in
@@ -3855,6 +3871,62 @@ function renderCoverageHero() {
         ? `${coverageData.total_validated} of ${detTotal} techniques proven by a real alert`
         : 'Techniques with a rule that has actually fired';
 }
+
+// Flat list of {id, name, tactic} for every technique currently in the given tier,
+// across all tactics -- built client-side from the same coverageData the grid below
+// already renders from, so the two never disagree.
+function coverageTechniquesByTier(tierKey) {
+    const out = [];
+    if (!coverageData) return out;
+    coverageData.tactics.forEach(t => {
+        t.techniques.forEach(tech => {
+            if (tech.tier === tierKey) out.push({ id: tech.id, name: tech.name, tactic: t.label });
+        });
+    });
+    return out;
+}
+
+function closeCovTierPopover() {
+    const pop = document.getElementById('covTierPopover');
+    pop.style.display = 'none';
+    pop.dataset.tier = '';
+    document.querySelectorAll('#coverageChips .cov-chip.active-tier').forEach(el => el.classList.remove('active-tier'));
+}
+
+// Anchored to the clicked chip, positioned relative to #coverageHero (which is the
+// nearest position:relative ancestor) rather than the viewport, so it stays put under
+// the chip row regardless of page scroll.
+function toggleCovTierPopover(tierKey, chipEl) {
+    const pop = document.getElementById('covTierPopover');
+    if (pop.dataset.tier === tierKey && pop.style.display !== 'none') {
+        closeCovTierPopover();
+        return;
+    }
+    const tierMeta = COVERAGE_TIERS.find(t => t.key === tierKey);
+    const techs = coverageTechniquesByTier(tierKey).sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+    pop.innerHTML = `
+        <div class="cov-tier-pop-header"><span class="dot ${tierMeta.dot}"></span>${escHtml(tierMeta.label)} &mdash; ${techs.length} technique${techs.length === 1 ? '' : 's'}</div>
+        <div class="cov-tier-pop-list">
+            ${techs.length ? techs.map(t => `<div class="cov-tier-pop-item"><span class="cov-tier-pop-id">${escHtml(t.id)}</span><span class="cov-tier-pop-name">${escHtml(t.name || '')}</span><span class="cov-tier-pop-tactic">${escHtml(t.tactic || '')}</span></div>`).join('')
+                        : '<div class="text-muted small">None right now.</div>'}
+        </div>`;
+    const hero = document.getElementById('coverageHero');
+    const heroRect = hero.getBoundingClientRect();
+    const chipRect = chipEl.getBoundingClientRect();
+    pop.style.left = Math.max(0, chipRect.left - heroRect.left) + 'px';
+    pop.style.top = (chipRect.bottom - heroRect.top + 6) + 'px';
+    pop.style.display = 'block';
+    pop.dataset.tier = tierKey;
+    document.querySelectorAll('#coverageChips .cov-chip.active-tier').forEach(el => el.classList.remove('active-tier'));
+    chipEl.classList.add('active-tier');
+}
+
+document.addEventListener('click', (e) => {
+    const pop = document.getElementById('covTierPopover');
+    if (pop && pop.style.display !== 'none' && !pop.contains(e.target) && !e.target.closest('.cov-chip')) {
+        closeCovTierPopover();
+    }
+});
 
 function loadCoverageTab() {
     const range = document.getElementById('coverageRange').value;
