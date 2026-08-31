@@ -71,6 +71,11 @@
     .cov-cell-name{white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:500;}
     .cov-cell-id{font-family:var(--font-mono); font-size:.62rem; opacity:.7; flex-shrink:0;}
     .cov-cell .fa-triangle-exclamation, .cov-cell .fa-plug-circle-xmark{font-size:.68rem; margin-left:3px;}
+    .cov-cell-caret{font-size:.65rem; opacity:.6; margin-right:5px; cursor:pointer; flex-shrink:0; width:10px; text-align:center;}
+    .cov-cell-caret:hover{opacity:1;}
+    .cov-cell-subcount{font-size:.6rem; font-family:var(--font-mono); font-weight:600; background:var(--bg-inset); border-radius:999px; padding:1px 6px; margin-right:5px; color:var(--text-muted);}
+    .cov-cell-group{display:flex; flex-direction:column; gap:3px; margin:2px 0 4px 15px; padding-left:8px; border-left:1px solid var(--border);}
+    .cov-cell-sub{padding:5px 9px; font-size:.7rem;}
     .tier-gap{background:var(--bg-inset); color:var(--text-muted);}
     .tier-inactive{background:color-mix(in srgb, var(--warning) 16%, transparent); color:var(--warning);}
     .tier-active{background:color-mix(in srgb, var(--info) 18%, transparent); color:var(--info); font-weight:600;}
@@ -3839,6 +3844,64 @@ function loadCoverageTab() {
     });
 }
 
+// Sub-techniques (e.g. "1055.001") nest under their parent ("1055") only when the
+// parent is ALSO present in this same tactic's technique list -- lookup()'s fallback
+// means that's not always true, so an orphaned sub-technique stays a top-level cell
+// rather than being silently dropped.
+function groupTechniquesForNesting(techniques) {
+    const byId = {};
+    techniques.forEach(t => { byId[t.id] = t; });
+    const childrenByParent = {};
+    const consumed = new Set();
+    techniques.forEach(t => {
+        if (t.id.includes('.')) {
+            const parentId = t.id.split('.')[0];
+            if (byId[parentId]) {
+                (childrenByParent[parentId] = childrenByParent[parentId] || []).push(t);
+                consumed.add(t.id);
+            }
+        }
+    });
+    Object.values(childrenByParent).forEach(arr => arr.sort((a, b) => (b.count - a.count) || a.id.localeCompare(b.id)));
+    const topLevel = techniques.filter(t => !consumed.has(t.id));
+    return { topLevel, childrenByParent };
+}
+
+function covCellHtml(tech, leadingBadge) {
+    return `
+        <span class="cov-cell-name">${escHtml(tech.name || ('T' + tech.id))}</span>
+        <span class="d-flex align-items-center flex-shrink-0">
+            ${leadingBadge || ''}${tech.threat_actors && tech.threat_actors.length ? '<i class="fa-solid fa-triangle-exclamation text-warning" title="A known threat actor/malware uses this technique"></i>' : ''}${tech.log_source_gap ? '<i class="fa-solid fa-plug-circle-xmark text-warning" title="Enabled, but its rule(s) need a log source this appliance does not ingest"></i>' : ''}
+            <span class="cov-cell-id ms-1">T${escHtml(tech.id)}</span>
+        </span>`;
+}
+
+function renderCovCell(tactic, tech, children) {
+    const hasChildren = children && children.length;
+    const groupId = `covgrp-${tactic}-${tech.id}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const caret = hasChildren ? `<i class="fa-solid fa-caret-right cov-cell-caret" onclick="event.stopPropagation(); toggleCovGroup('${groupId}', this)"></i>` : '';
+    const subcount = hasChildren ? `<span class="cov-cell-subcount" title="${children.length} sub-technique${children.length === 1 ? '' : 's'}">${children.length}</span>` : '';
+    const cell = `
+        <div class="cov-cell ${COVERAGE_TIER_CELL_CLASS[tech.tier]}" onclick="openCoverageDrilldown('${escHtml(tactic)}','${escHtml(tech.id)}')" title="T${escHtml(tech.id)} ${escHtml(tech.name || '')}">
+            ${caret}${covCellHtml(tech, subcount)}
+        </div>`;
+    if (!hasChildren) return cell;
+    const childCells = children.map(c => `
+        <div class="cov-cell cov-cell-sub ${COVERAGE_TIER_CELL_CLASS[c.tier]}" onclick="openCoverageDrilldown('${escHtml(tactic)}','${escHtml(c.id)}')" title="T${escHtml(c.id)} ${escHtml(c.name || '')}">
+            ${covCellHtml(c)}
+        </div>`).join('');
+    return `${cell}<div class="cov-cell-group" id="${groupId}" style="display:none;">${childCells}</div>`;
+}
+
+function toggleCovGroup(groupId, caretEl) {
+    const el = document.getElementById(groupId);
+    if (!el) return;
+    const opening = el.style.display === 'none';
+    el.style.display = opening ? 'flex' : 'none';
+    caretEl.classList.toggle('fa-caret-right', !opening);
+    caretEl.classList.toggle('fa-caret-down', opening);
+}
+
 function renderCoverageGrid(d) {
     const grid = document.getElementById('coverageGrid');
     if (!d.tactics || !d.tactics.length) {
@@ -3851,20 +3914,14 @@ function renderCoverageGrid(d) {
             const n = t.tiers[ct.key] || 0;
             return n ? `<span class="${ct.bar}" style="width:${(n / total * 100).toFixed(2)}%" title="${n} ${ct.label}"></span>` : '';
         }).join('');
+        const { topLevel, childrenByParent } = groupTechniquesForNesting(t.techniques);
         return `
         <div class="cov-col">
             <div class="cov-col-title">${escHtml(t.label)}</div>
             <div class="cov-col-sub">${t.total} technique${t.total === 1 ? '' : 's'}</div>
             <div class="cov-bar">${bar}</div>
             <div class="cov-cells">
-                ${t.techniques.map(tech => `
-                <div class="cov-cell ${COVERAGE_TIER_CELL_CLASS[tech.tier]}" onclick="openCoverageDrilldown('${escHtml(t.tactic)}','${escHtml(tech.id)}')" title="T${escHtml(tech.id)} ${escHtml(tech.name || '')}">
-                    <span class="cov-cell-name">${escHtml(tech.name || ('T' + tech.id))}</span>
-                    <span class="d-flex align-items-center flex-shrink-0">
-                        ${tech.threat_actors && tech.threat_actors.length ? '<i class="fa-solid fa-triangle-exclamation text-warning" title="A known threat actor/malware uses this technique"></i>' : ''}${tech.log_source_gap ? '<i class="fa-solid fa-plug-circle-xmark text-warning" title="Enabled, but its rule(s) need a log source this appliance does not ingest"></i>' : ''}
-                        <span class="cov-cell-id ms-1">T${escHtml(tech.id)}</span>
-                    </span>
-                </div>`).join('')}
+                ${topLevel.map(tech => renderCovCell(t.tactic, tech, childrenByParent[tech.id])).join('')}
             </div>
         </div>`;
     }).join('');
