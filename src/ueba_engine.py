@@ -489,6 +489,21 @@ def _run_off_hours_model(con, cfg):
 def _run_rare_process_population_model(con, cfg):
     if not cfg['rare_process_enabled']:
         return []
+    # "Rare" only means something relative to a real population to be a minority
+    # within. With too few hosts reporting at all, host_count <= rare_process_max_hosts
+    # is trivially true for EVERY process on EVERY host (there's no larger population
+    # to contrast against), so a 1-2-host lab/small-fleet deployment would otherwise
+    # get flooded with meaningless "rare process" noise for completely ordinary system
+    # processes (svchost.exe, conhost.exe, ...) instead of real outlier signal. Require
+    # the total population to actually exceed the rarity cutoff before flagging anyone
+    # as a minority within it.
+    total_hosts = con.execute(
+        "SELECT COUNT(DISTINCT host) FROM siem.live_logs "
+        f"WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE - INTERVAL {cfg['lookback_days']} DAY "
+        "  AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN')"
+    ).fetchone()[0]
+    if total_hosts <= cfg['rare_process_max_hosts']:
+        return []
     query = (
         "WITH host_counts AS (SELECT lower(process_image) as process_key, COUNT(DISTINCT host) as host_count FROM siem.live_logs "
         f"    WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE - INTERVAL {cfg['lookback_days']} DAY "
