@@ -7,7 +7,6 @@
             <p>Group related alerts and UEBA anomalies together while you work an incident.</p>
         </div>
         <div class="d-flex gap-2">
-            <button type="button" class="btn btn-outline-secondary" onclick="showManageQueuesModal()"><i class="fa-solid fa-inbox me-1"></i>Manage Queues</button>
             <button type="button" class="btn btn-outline-primary" onclick="showNewCaseModal()"><i class="fa-solid fa-plus me-1"></i>New Case</button>
         </div>
     </div>
@@ -134,44 +133,6 @@
     </div>
 </div>
 
-<!-- Manage Queues modal -->
-<div class="modal fade" id="manageQueuesModal" tabindex="-1">
-    <div class="modal-dialog modal-lg modal-dialog-scrollable">
-        <div class="modal-content bg-dark text-light border-secondary">
-            <div class="modal-header border-secondary">
-                <h5 class="modal-title"><i class="fa-solid fa-inbox me-2"></i>Case Queues</h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <div class="table-responsive mb-3">
-                    <table class="table table-dark table-sm align-middle mb-0">
-                        <thead><tr><th>Name</th><th>Description</th><th>Members</th><th>Cases</th><th></th></tr></thead>
-                        <tbody id="queuesTableBody"><tr><td colspan="5" class="text-center text-muted small py-3">Loading…</td></tr></tbody>
-                    </table>
-                </div>
-                {% if has_permission('cases.queues.manage') %}
-                <div class="row g-2 align-items-end bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
-                    <div class="col-md-4">
-                        <label class="form-label small text-muted mb-1">New Queue Name</label>
-                        <input type="text" id="newQueueName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Fraud Investigations">
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label small text-muted mb-1">Description (optional)</label>
-                        <input type="text" id="newQueueDescription" class="form-control form-control-sm bg-dark text-light border-secondary">
-                    </div>
-                    <div class="col-md-2">
-                        <button type="button" class="btn btn-sm btn-outline-primary w-100" onclick="addQueue()"><i class="fa-solid fa-plus me-1"></i>Add</button>
-                    </div>
-                </div>
-                <div id="newQueueError" class="text-danger small mt-1" style="display:none;"></div>
-                {% else %}
-                <p class="text-muted small mb-0"><i class="fa-solid fa-lock me-1"></i>Admin role required to create or edit queues.</p>
-                {% endif %}
-            </div>
-        </div>
-    </div>
-</div>
-
 <!-- Command Result Detail modal (for command_result case items) -->
 <div class="modal fade" id="caseCmdResultModal" tabindex="-1">
     <div class="modal-dialog modal-lg modal-dialog-scrollable">
@@ -188,7 +149,6 @@
 </div>
 
 <script>
-const IS_ADMIN = hasPermission('cases.queues.manage');
 const CAN_DELETE_CASES = hasPermission('cases.delete');
 const CAN_EDR_RESPOND = hasPermission('edr.command.basic');
 const CURRENT_USERNAME = {{ current_user.username|tojson }};
@@ -197,7 +157,7 @@ let allQueues = [];
 let caseFilter = 'all';
 let activeCaseId = null;
 let activeCaseClosed = false;
-let newCaseModal, manageQueuesModal;
+let newCaseModal;
 // Fleet-wide SLA target (hours) and known EDR-enrolled hosts -- both loaded once at
 // page init (see DOMContentLoaded below) and reused across every case detail render
 // rather than re-fetched per case.
@@ -517,91 +477,12 @@ function renderCases() {
     `).join('');
 }
 
-function showManageQueuesModal() {
-    const proceed = () => {
-        renderQueuesTable();
-        if (!manageQueuesModal) manageQueuesModal = new bootstrap.Modal(document.getElementById('manageQueuesModal'));
-        manageQueuesModal.show();
-    };
-    if (IS_ADMIN && !window.allUsersForQueues) {
-        fetch('/api/settings/users').then(r => r.json()).then(data => {
-            window.allUsersForQueues = (data.users || []).map(u => u.username);
-            proceed();
-        }).catch(() => { window.allUsersForQueues = []; proceed(); });
-    } else {
-        proceed();
-    }
-}
-
-function renderQueuesTable() {
-    const tbody = document.getElementById('queuesTableBody');
-    if (!allQueues.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted small py-3">No queues yet.</td></tr>';
-        return;
-    }
-    const userOptions = (window.allUsersForQueues || []).map(u => `<option value="${escHtml(u)}">${escHtml(u)}</option>`).join('');
-    tbody.innerHTML = allQueues.map(q => `
-        <tr>
-            <td class="small">${escHtml(q.name)}</td>
-            <td class="text-muted small">${escHtml(q.description || '')}</td>
-            <td class="small">
-                ${(q.members || []).map(m => `<span class="badge bg-secondary me-1 mb-1">${escHtml(m)}${IS_ADMIN ? ` <a href="#" class="text-light" onclick="removeQueueMember(${q.id}, '${escJs(m)}'); return false;">&times;</a>` : ''}</span>`).join('') || '<span class="text-muted">none</span>'}
-                ${IS_ADMIN ? `
-                <div class="d-flex gap-1 mt-1">
-                    <select class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:140px;" id="addMemberSelect${q.id}">
-                        <option value="">Add member…</option>
-                        ${userOptions}
-                    </select>
-                    <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="addQueueMember(${q.id})"><i class="fa-solid fa-plus"></i></button>
-                </div>` : ''}
-            </td>
-            <td class="text-muted small text-nowrap">${q.open_case_count}/${q.total_case_count}</td>
-            <td class="text-end">${IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete queue" onclick="deleteQueue(${q.id}, '${escJs(q.name)}')"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
-        </tr>
-    `).join('');
-}
-
+// Queue create/edit/delete/membership management moved to SOAR > Queues (see
+// templates/soar.html) -- this page keeps only the read-only picker/filter above
+// (loadCaseQueues/allQueues/populateQueueSelect), which any analyst still needs
+// regardless of whether they can manage queues.
 function escJs(s) {
     return String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-}
-
-async function addQueue() {
-    const nameEl = document.getElementById('newQueueName');
-    const descEl = document.getElementById('newQueueDescription');
-    const errBox = document.getElementById('newQueueError');
-    errBox.style.display = 'none';
-    const name = nameEl.value.trim();
-    if (!name) { errBox.innerText = 'Name is required.'; errBox.style.display = 'block'; return; }
-    const res = await fetch('/api/case-queues', {
-        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name, description: descEl.value.trim()})
-    });
-    const data = await res.json();
-    if (!res.ok) { errBox.innerText = data.error || 'Failed to create queue.'; errBox.style.display = 'block'; return; }
-    nameEl.value = ''; descEl.value = '';
-    await loadCaseQueues();
-    renderQueuesTable();
-}
-
-async function deleteQueue(qid, name) {
-    if (!(await confirmDialog(`Delete the "${name}" queue? Cases in it will be unassigned, not deleted.`, {title: 'Delete queue', danger: true, confirmLabel: 'Delete'}))) return;
-    await fetch(`/api/case-queues/${qid}`, {method: 'DELETE'});
-    await loadCaseQueues();
-    renderQueuesTable();
-}
-
-async function addQueueMember(qid) {
-    const sel = document.getElementById(`addMemberSelect${qid}`);
-    const username = sel.value;
-    if (!username) return;
-    await fetch(`/api/case-queues/${qid}/members`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username})});
-    await loadCaseQueues();
-    renderQueuesTable();
-}
-
-async function removeQueueMember(qid, username) {
-    await fetch(`/api/case-queues/${qid}/members`, {method: 'DELETE', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username})});
-    await loadCaseQueues();
-    renderQueuesTable();
 }
 
 function showNewCaseModal() {
