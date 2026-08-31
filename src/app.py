@@ -10510,9 +10510,12 @@ def api_download_agent(os_type):
     from flask import send_file, request
     import io, zipfile, tarfile, os
 
-    # Mints a fresh enrollment credential and ships a full installer -- agent
-    # deployment, gated the same as every other "manage backend data" Tier 3+ action.
-    err = require_permission('edr.agent.manage')
+    # Mints a fresh enrollment credential and ships a full installer, embedding the
+    # live SOC secret token -- admin-only (same permission the Deployment tab itself is
+    # already gated behind), not edr.agent.manage/Tier 3+: this endpoint is reachable
+    # directly regardless of whether the tab is visible, so the two gates must match or
+    # a Senior Analyst without deployment access could still curl this directly.
+    err = require_permission('settings.system.manage')
     if err: return err
 
     # Grab the exact IP the user is connecting to the UI with
@@ -10846,7 +10849,17 @@ def api_agent_commands():
     label = d.get('label')
     if not label or (not hostname and not group_name):
         return jsonify({'error': 'hostname (or group) and label are required'}), 400
-    err = require_permission('edr.command.basic' if label in AGENT_COMMAND_TIER1_LABELS else 'edr.command.advanced')
+    # 'upgrade' is carved out to admin-only (same permission as the Deployment tab and
+    # the uninstall route above) rather than falling into the generic edr.command.advanced
+    # bucket every other non-Tier-1 action uses -- it rewrites the agent's own running
+    # code, a different risk class than collecting data or killing a process.
+    if label == 'upgrade':
+        required_perm = 'settings.system.manage'
+    elif label in AGENT_COMMAND_TIER1_LABELS:
+        required_perm = 'edr.command.basic'
+    else:
+        required_perm = 'edr.command.advanced'
+    err = require_permission(required_perm)
     if err: return err
 
     if group_name:
@@ -10959,7 +10972,10 @@ def api_agent_set_group(hostname):
 @login_required
 def delete_agent(hostname):
     from flask import jsonify
-    err = require_permission('edr.agent.manage')
+    # Admin-only, not edr.agent.manage/Tier 3+ -- irreversibly removes an endpoint's
+    # visibility (agent_polls) and queues an actual self-uninstall on the host, higher
+    # blast radius than the rest of "agent management" (group assignment, etc).
+    err = require_permission('settings.system.manage')
     if err: return err
     db = get_db()
     db.execute('DELETE FROM agent_polls WHERE user_agent = ?', (hostname,))
