@@ -26,6 +26,16 @@ PRIORITY_DECAY_CAP = 80
 PRIORITY_WEIGHT_PEAK = 0.4
 PRIORITY_WEIGHT_BREADTH = 0.3
 PRIORITY_WEIGHT_DECAY = 0.3
+# decay_score sums points*exp(-hours_ago/half_life) per event -- each individual old
+# event's weight goes to ~0, but summed over enough of them a large-enough historical
+# volume (a since-resolved alert-storm incident, days later) can still add up to more
+# than PRIORITY_DECAY_CAP, saturating decay_norm at 10 -- fully "current" -- purely from
+# stale volume, defeating the whole point of decay. Capping how many events feed the sum
+# (the MOST RECENT N, not a random/arbitrary subset) bounds worst-case stale-volume
+# contribution to a negligible amount while a genuine current incident -- which by
+# definition produces its alerts recently -- still has its full recent event set well
+# under this cap and reaches the same decay_norm ceiling it always would.
+PRIORITY_DECAY_EVENT_CAP = 200
 
 # Point values an admin can retune without a schema change -- one JSON settings blob
 # rather than ~15 individual keys the way UEBA_DEFAULTS above does it, since that
@@ -909,7 +919,13 @@ def run_priority_scoring():
             # (clock skew, or a row inserted mid-transaction) blowing up into a negative
             # exponent, which would make a "future" event dominate the decay sum instead
             # of just contributing full weight like any other very-recent event.
-            decay_score = sum(e['points'] * math.exp(-max(e['hours_ago'], 0) / half_life) for e in events)
+            # Only the most-recent PRIORITY_DECAY_EVENT_CAP events feed the sum -- see
+            # the constant's own comment above for why an uncapped sum lets stale volume
+            # saturate this score regardless of true recency. peak_points/
+            # distinct_indicators intentionally still use the FULL event set: MAX and
+            # set-cardinality aren't subject to the same volume-scaling problem a SUM is.
+            decay_events = sorted(events, key=lambda e: e['hours_ago'])[:PRIORITY_DECAY_EVENT_CAP]
+            decay_score = sum(e['points'] * math.exp(-max(e['hours_ago'], 0) / half_life) for e in decay_events)
 
             peak_norm = min(peak_points, PRIORITY_PEAK_CAP) / PRIORITY_PEAK_CAP * 10
             breadth_norm = min(distinct_indicators, PRIORITY_BREADTH_CAP) / PRIORITY_BREADTH_CAP * 10
