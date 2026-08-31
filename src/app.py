@@ -6443,7 +6443,12 @@ def api_dashboard_widgets(did):
     if widget_type not in WIDGET_TYPES:
         return jsonify({'error': f'Unknown widget_type: {widget_type}'}), 400
     x, y, w, h = d.get('x', 0), d.get('y', 0), d.get('w', 4), d.get('h', 4)
-    config = json.dumps(d.get('config')) if d.get('config') else None
+    widget_config = d.get('config')
+    if widget_type == 'chart_custom':
+        widget_config, err = _validate_custom_widget_config(widget_config)
+        if err:
+            return jsonify({'error': err}), 400
+    config = json.dumps(widget_config) if widget_config else None
     cur = db.execute(
         "INSERT INTO dashboard_widgets (dashboard_id, widget_type, x, y, w, h, config) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (did, widget_type, x, y, w, h, config)
@@ -6477,7 +6482,8 @@ def api_dashboard_widgets_layout(did):
 @login_required
 def api_dashboard_widget_detail(did, wid):
     db = get_db()
-    if not db.execute("SELECT 1 FROM dashboard_widgets WHERE id = ? AND dashboard_id = ?", (wid, did)).fetchone():
+    widget = db.execute("SELECT widget_type FROM dashboard_widgets WHERE id = ? AND dashboard_id = ?", (wid, did)).fetchone()
+    if not widget:
         return jsonify({'error': 'Widget not found'}), 404
     if request.method == 'DELETE':
         db.execute("DELETE FROM dashboard_widgets WHERE id = ?", (wid,))
@@ -6485,10 +6491,40 @@ def api_dashboard_widget_detail(did, wid):
         return jsonify({'ok': 1})
     d = request.json or {}
     if 'config' in d:
-        config = json.dumps(d.get('config')) if d.get('config') else None
+        widget_config = d.get('config')
+        if widget['widget_type'] == 'chart_custom':
+            widget_config, err = _validate_custom_widget_config(widget_config)
+            if err:
+                return jsonify({'error': err}), 400
+        config = json.dumps(widget_config) if widget_config else None
         db.execute("UPDATE dashboard_widgets SET config = ? WHERE id = ?", (config, wid))
         db.commit()
     return jsonify({'status': 'success'})
+
+@app.route('/api/dashboards/<int:did>/widgets/<int:wid>/query', methods=['GET'])
+@login_required
+def api_dashboard_widget_custom_query(did, wid):
+    db = get_db()
+    widget = db.execute(
+        "SELECT widget_type, config FROM dashboard_widgets WHERE id = ? AND dashboard_id = ?", (wid, did)
+    ).fetchone()
+    if not widget or widget['widget_type'] != 'chart_custom':
+        return jsonify({'error': 'Widget not found'}), 404
+    # Defensive re-validation on top of what already happened at save time -- cheap, and
+    # guards against a config row written before an allowlist changed or edited directly
+    # in the DB.
+    config, err = _validate_custom_widget_config(json.loads(widget['config']) if widget['config'] else {})
+    if err:
+        return jsonify({'error': err}), 400
+    return jsonify(_run_custom_widget_query(config))
+
+@app.route('/api/dashboards/widgets/preview', methods=['POST'])
+@login_required
+def api_dashboard_widget_preview():
+    config, err = _validate_custom_widget_config((request.json or {}).get('config'))
+    if err:
+        return jsonify({'error': err}), 400
+    return jsonify(_run_custom_widget_query(config))
 
 # ==========================================
 # GLOBAL SETTINGS & AGENT DEPLOYMENT ROUTES
@@ -7143,6 +7179,11 @@ WIDGET_TYPES = {
     'app_threat_hunter': {}, 'app_edr_actions': {},
     # Ported from the retired standalone Home page -- see DEFAULT_HOME_WIDGETS below.
     'app_stat_tiles': {},
+    # User-built widget: a chart/number driven by a saved query config against live_logs,
+    # reusing _build_log_filters (the same safe, parameterized filter builder Log Search
+    # itself uses) rather than any new SQL-building code. See _validate_custom_widget_config
+    # / _run_custom_widget_query below.
+    'chart_custom': {},
 }
 
 # The default "Overview" dashboard's seeded layout -- reproduces today's fixed-page
@@ -9397,6 +9438,150 @@ def _build_log_filters(args):
 
     where_clause = (" WHERE " + " and ".join(conditions)) if conditions else ""
     return where_clause, params
+
+# ---- "Custom Chart" dashboard widget (chart_custom) -- a user-built chart/number driven
+# by a saved query config against live_logs, reusing _build_log_filters above (the same
+# safe, parameterized filter builder Log Search itself uses) instead of any new
+# SQL-building code. Deliberately scoped to live_logs only, not the full log/alert/anomaly
+# UNION Log Search queries -- every column these allowlists reference already exists
+# directly on live_logs, and going after the 3-way UNION would need a whole second
+# aggregating query builder this doesn't need. This also means 'types' must never appear
+# in the shim dict handed to _build_log_filters -- live_logs has no log_type column (it's
+# a UNION-only literal _LOG_BRANCH_SQL injects), and _active_log_types() only sees
+# args.get('types', ''), so simply omitting that key keeps it a safe no-op.
+
+# Deliberately a separate, smaller list than LOG_SEARCH_ALLOWED_FIELDS -- grouping on a
+# free-text/high-cardinality column (message, command_line, parent_command_line) is both
+# meaningless for a breakdown/top-N chart and an unindexed hash-aggregate over long TEXT.
+# Mirrored in templates/dashboards.html as a small hardcoded JS array (same
+# duplicate-small-catalogs-per-file convention this codebase already uses elsewhere) --
+# keep both in sync if this list changes.
+CUSTOM_WIDGET_GROUP_BY = {
+    'app', 'severity', 'host', 'username', 'event_id', 'source_ip', 'destination_ip',
+    'process_image', 'parent_image', 'original_file_name', 'query_name', 'file_hash',
+}
+# Mirrors dashboards.html's existing WIDGET_LOG_BASIC_FIELDS (already used by the
+# app_log_search widget's Basic mode) -- not the fuller LOG_SEARCH_ALLOWED_FIELDS, same
+# smaller, already-proven-safe set, zero new wiring.
+CUSTOM_WIDGET_FIELD_KEYS = {
+    'username', 'host', 'event_id', 'source_ip', 'destination_ip', 'message',
+    'process_image', 'command_line', 'parent_image', 'parent_command_line',
+    'original_file_name',
+}
+CUSTOM_WIDGET_CHART_TYPES = {'trend', 'breakdown', 'top_n', 'number'}
+CUSTOM_WIDGET_FIELD_OPS = {'equals', 'not_equals', 'starts_with', 'ends_with', 'gt', 'lt', 'contains'}
+
+def _validate_custom_widget_config(config):
+    # Rebuilds the config from scratch, copying over only known keys -- never passes the
+    # caller's raw dict through, which is what stops a stray 'types' key (see the module
+    # comment above) or anything else unexpected from ever reaching a query. Returns
+    # (cleaned_config, error_message_or_None).
+    config = config or {}
+    chart_type = config.get('chart_type')
+    if chart_type not in CUSTOM_WIDGET_CHART_TYPES:
+        return None, f"chart_type must be one of {', '.join(sorted(CUSTOM_WIDGET_CHART_TYPES))}"
+
+    group_by = config.get('group_by') or None
+    needs_group_by = chart_type in ('breakdown', 'top_n')
+    if needs_group_by:
+        if not group_by or group_by not in CUSTOM_WIDGET_GROUP_BY:
+            return None, f"group_by is required for {chart_type} and must be one of {', '.join(sorted(CUSTOM_WIDGET_GROUP_BY))}"
+    elif group_by:
+        return None, f"group_by is not applicable to chart_type={chart_type}"
+
+    time_range = config.get('range') or '24h'
+    start_raw, end_raw = config.get('start') or '', config.get('end') or ''
+    if time_range == 'custom':
+        if not _parse_datetime_local(start_raw) and not _parse_datetime_local(end_raw):
+            return None, "range=custom requires a start and/or end"
+    elif time_range not in _RANGE_DELTAS:
+        return None, f"range must be 'custom' or one of {', '.join(sorted(_RANGE_DELTAS))}"
+
+    field_key = config.get('fieldKey') or ''
+    if field_key and field_key not in CUSTOM_WIDGET_FIELD_KEYS:
+        return None, f"fieldKey must be one of {', '.join(sorted(CUSTOM_WIDGET_FIELD_KEYS))}"
+    field_op = config.get('fieldOp') or 'contains'
+    if field_op not in CUSTOM_WIDGET_FIELD_OPS:
+        return None, f"fieldOp must be one of {', '.join(sorted(CUSTOM_WIDGET_FIELD_OPS))}"
+
+    try:
+        limit = int(config.get('limit') or (8 if chart_type == 'breakdown' else 10))
+    except (TypeError, ValueError):
+        limit = 8 if chart_type == 'breakdown' else 10
+    limit = max(1, min(limit, 25))
+
+    return {
+        'title': (config.get('title') or '').strip()[:100],
+        'chart_type': chart_type,
+        'group_by': group_by if needs_group_by else None,
+        # Stored RAW (not pre-parsed) -- _build_log_filters calls _parse_datetime_local
+        # itself at query time, same as every other caller; re-parsing an already-parsed
+        # "YYYY-MM-DD HH:MM:SS" string is a harmless no-op there, so there's no reason to
+        # duplicate that parsing here.
+        'range': time_range, 'start': start_raw, 'end': end_raw,
+        'q': (config.get('q') or '').strip(),
+        'app': (config.get('app') or '').strip(),
+        'severity': (config.get('severity') or '').strip(),
+        'fieldKey': field_key, 'fieldOp': field_op,
+        'fieldVal': (config.get('fieldVal') or '').strip(),
+        'limit': limit,
+    }, None
+
+def _custom_widget_trend_bucket(time_range):
+    # Finer granularity than _dashboard_window_days' plain days<=7 rule -- this widget's
+    # range vocabulary goes as low as 5m, where an hourly bucket would collapse to 1-2
+    # bars. 'custom' defaults to daily (safe/bounded regardless of how wide the custom
+    # span turns out to be).
+    if time_range in ('5m', '15m', '30m', '1h'):
+        return "strftime('%Y-%m-%d %H:%M', timestamp)"
+    if time_range in ('4h', '12h', '24h', '3d', '7d'):
+        return "strftime('%Y-%m-%d %H:00', timestamp)"
+    return "strftime('%Y-%m-%d', timestamp)"
+
+def _run_custom_widget_query(config):
+    # config must already be the output of _validate_custom_widget_config -- this
+    # function trusts group_by is allowlist-safe (still double-checked below, since it's
+    # the one value here that goes into raw SQL rather than a '?' parameter).
+    shim = {
+        'q': config.get('q', ''), 'range': config.get('range', '24h'),
+        'app': config.get('app', ''), 'severity': config.get('severity', ''),
+        'fieldKey': config.get('fieldKey', ''), 'fieldOp': config.get('fieldOp', 'contains'),
+        'fieldVal': config.get('fieldVal', ''),
+        'start': config.get('start', ''), 'end': config.get('end', ''),
+    }
+    where_clause, params = _build_log_filters(shim)
+    db = get_db()
+    chart_type = config['chart_type']
+
+    if chart_type == 'number':
+        value = db.execute(f"SELECT COUNT(*) FROM live_logs {where_clause}", params).fetchone()[0]
+        return {'value': value}
+
+    if chart_type == 'trend':
+        bucket = _custom_widget_trend_bucket(config.get('range', '24h'))
+        rows = db.execute(
+            f"SELECT {bucket} as t_bucket, COUNT(*) as count FROM live_logs {where_clause} GROUP BY t_bucket ORDER BY t_bucket ASC",
+            params
+        ).fetchall()
+        return {'rows': [dict(r) for r in rows]}
+
+    # breakdown / top_n
+    group_by = config.get('group_by')
+    if group_by not in CUSTOM_WIDGET_GROUP_BY:
+        raise ValueError(f"invalid group_by: {group_by}")
+    limit = config.get('limit') or 10
+    rows = db.execute(
+        f"SELECT COALESCE({group_by}, 'Unknown') as label, COUNT(*) as count FROM live_logs {where_clause} "
+        f"GROUP BY label ORDER BY count DESC LIMIT ?",
+        params + [limit]
+    ).fetchall()
+    result = [dict(r) for r in rows]
+    if chart_type == 'breakdown':
+        total = db.execute(f"SELECT COUNT(*) FROM live_logs {where_clause}", params).fetchone()[0]
+        other = total - sum(r['count'] for r in result)
+        if other > 0:
+            result.append({'label': 'Other', 'count': other})
+    return {'rows': result}
 
 # Pushes WHERE + ORDER BY + LIMIT into EACH branch before unioning, instead of applying
 # them once after the union closes (the old SELECT * FROM (<union>) WHERE ... ORDER BY

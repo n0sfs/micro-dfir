@@ -98,6 +98,95 @@
     </div>
 </div>
 
+<!-- Custom Chart config-builder modal (chart_custom widget) -->
+<div class="modal fade" id="customWidgetConfigModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content bg-dark border-secondary text-light">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title" id="ccwModalTitle">New Custom Chart</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="small text-muted">Builds a chart against your raw log data (the same filters Log Search uses) -- pick what to filter, how to group it, and how to draw it.</p>
+                <div class="row g-2 mb-2">
+                    <div class="col-md-6">
+                        <label class="form-label small text-muted mb-1">Title</label>
+                        <input type="text" id="ccwTitle" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Failed Logons by Host">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted mb-1">Chart Type</label>
+                        <select id="ccwChartType" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onCustomWidgetChartTypeChange()">
+                            <option value="trend">Trend over time</option>
+                            <option value="breakdown">Breakdown (donut)</option>
+                            <option value="top_n">Top N (bar)</option>
+                            <option value="number">Single number</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3" id="ccwGroupByWrap">
+                        <label class="form-label small text-muted mb-1">Group By</label>
+                        <select id="ccwGroupBy" class="form-select form-select-sm bg-dark text-light border-secondary"></select>
+                    </div>
+                </div>
+                <div class="row g-2 mb-2">
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted mb-1">Time Range</label>
+                        <select id="ccwRange" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onCustomWidgetRangeChange()"></select>
+                    </div>
+                    <div class="col-md-4" id="ccwStartWrap" style="display:none;">
+                        <label class="form-label small text-muted mb-1">Start</label>
+                        <input type="datetime-local" id="ccwStart" class="form-control form-control-sm bg-dark text-light border-secondary">
+                    </div>
+                    <div class="col-md-4" id="ccwEndWrap" style="display:none;">
+                        <label class="form-label small text-muted mb-1">End</label>
+                        <input type="datetime-local" id="ccwEnd" class="form-control form-control-sm bg-dark text-light border-secondary">
+                    </div>
+                </div>
+                <div class="row g-2 mb-2">
+                    <div class="col-md-6">
+                        <label class="form-label small text-muted mb-1">App <span class="text-muted">(comma-separated, optional)</span></label>
+                        <input type="text" id="ccwApp" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Sysmon, FIM">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small text-muted mb-1">Severity <span class="text-muted">(comma-separated, optional)</span></label>
+                        <input type="text" id="ccwSeverity" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. High, Critical">
+                    </div>
+                </div>
+                <label class="form-label small text-muted mb-1">Field Filter <span class="text-muted">(optional)</span></label>
+                <div class="input-group input-group-sm mb-2">
+                    <select id="ccwFieldKey" class="form-select bg-dark text-light border-secondary" style="max-width:160px;">
+                        <option value="">Field&hellip;</option>
+                    </select>
+                    <select id="ccwFieldOp" class="form-select bg-dark text-light border-secondary" style="max-width:110px;">
+                        <option value="contains" selected>contains</option>
+                        <option value="equals">=</option>
+                        <option value="not_equals">!=</option>
+                        <option value="starts_with">starts</option>
+                        <option value="ends_with">ends</option>
+                        <option value="gt">&gt;</option>
+                        <option value="lt">&lt;</option>
+                    </select>
+                    <input type="text" id="ccwFieldVal" class="form-control bg-dark text-light border-secondary" placeholder="Value&hellip;">
+                </div>
+                <div class="mb-2" id="ccwLimitWrap">
+                    <label class="form-label small text-muted mb-1">Show top</label>
+                    <input type="number" id="ccwLimit" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:100px;" min="1" max="25" value="8">
+                </div>
+                <div id="ccwError" class="text-danger small mt-2" style="display:none;"></div>
+                <hr class="border-secondary">
+                <div class="d-flex align-items-center gap-2 mb-2">
+                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="previewCustomWidget()"><i class="fa-solid fa-eye me-1"></i>Preview</button>
+                    <span id="ccwPreviewError" class="text-danger small" style="display:none;"></span>
+                </div>
+                <div id="ccwPreviewBody" class="border border-secondary rounded p-2" style="min-height:120px; display:none;"></div>
+            </div>
+            <div class="modal-footer border-secondary">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="saveCustomWidgetConfig()">Save</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Actor sightings modal (Known Threat Actors widget) -->
 <div class="modal fade" id="actorSightingsModal" tabindex="-1">
     <div class="modal-dialog modal-lg modal-dialog-scrollable">
@@ -826,6 +915,21 @@ const WIDGET_LOG_RANGE_LABELS = {
     '12h': 'Last 12h', '24h': 'Last 24h', '3d': 'Last 3d', '7d': 'Last 7d', '30d': 'Last 30d', 'all': 'All Time',
 };
 
+// Custom Chart widget's group-by allowlist -- deliberately separate from/smaller than
+// WIDGET_LOG_BASIC_FIELDS above: grouping on a free-text/high-cardinality column
+// (message, command_line) is both meaningless for a breakdown/top-N chart and an
+// unindexed hash-aggregate. Mirrors src/app.py's CUSTOM_WIDGET_GROUP_BY -- keep both in
+// sync if this list changes (same duplicate-small-catalogs-per-file convention this
+// codebase already uses elsewhere, e.g. WIDGET_LOG_BASIC_FIELDS's own comment above).
+const GROUP_BY_ALLOWED = [
+    { value: 'app', label: 'App' }, { value: 'severity', label: 'Severity' },
+    { value: 'host', label: 'Host' }, { value: 'username', label: 'User' },
+    { value: 'event_id', label: 'Event ID' }, { value: 'source_ip', label: 'Src IP' },
+    { value: 'destination_ip', label: 'Dest IP' }, { value: 'process_image', label: 'Process Image' },
+    { value: 'parent_image', label: 'Parent Image' }, { value: 'original_file_name', label: 'Original File Name' },
+    { value: 'query_name', label: 'DNS Query' }, { value: 'file_hash', label: 'File Hash' },
+];
+
 // Ported from dashboard.html's own LOG_TABLE_COLUMNS -- same 15 columns, same 9
 // on-by-default, same fixed on-screen order regardless of pick order. Shares the
 // full page's own 'microdfir_search_columns' localStorage key below (a personal
@@ -1306,6 +1410,186 @@ function renderEdrActionsWidget(container, widgetId, config) {
     WIDGET_INTERVALS[widgetId] = setInterval(loadEdrHistory, 30000);
 }
 
+// ---- Custom Chart widget (chart_custom) -- a user-built chart/number against raw
+// live_logs data, driven by a saved query config (see src/app.py's
+// _validate_custom_widget_config/_run_custom_widget_query for the backend half of this
+// contract). This is the first real consumer of dashboard_widgets.config -- every other
+// widget type either has no config or only the still-unused config.range override.
+
+function customWidgetNumberHtml(value, title) {
+    return `<div class="text-center py-3">
+        <div style="font-size:2.4rem; font-weight:600;">${(value || 0).toLocaleString()}</div>
+        ${title ? `<div class="small text-muted">${escHtml(title)}</div>` : ''}
+    </div>`;
+}
+
+// Shared by renderCustomWidget() and the config modal's Preview button, so the two can
+// never draw a chart differently for the same config+data.
+function buildCustomWidgetChartJsConfig(chartType, data, c) {
+    if (chartType === 'trend') {
+        return {
+            type: 'line',
+            data: { labels: data.rows.map(x => x.t_bucket), datasets: [{ data: data.rows.map(x => x.count), borderColor: c.accent, backgroundColor: c.accent, tension: 0.3, fill: false, pointRadius: 2 }] },
+            options: baseLineOptions(c),
+        };
+    }
+    const palette = [c.accent, c.success, c.warning, c.danger, c.info, c.muted];
+    if (chartType === 'breakdown') {
+        return {
+            type: 'doughnut',
+            data: { labels: data.rows.map(x => x.label), datasets: [{ data: data.rows.map(x => x.count), backgroundColor: data.rows.map((_, i) => palette[i % palette.length]), borderColor: 'transparent' }] },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: c.text, boxWidth: 12 } } } },
+        };
+    }
+    // top_n
+    return {
+        type: 'bar',
+        data: { labels: data.rows.map(x => x.label), datasets: [{ data: data.rows.map(x => x.count), backgroundColor: c.accent }] },
+        options: baseHBarOptions(c),
+    };
+}
+
+function renderCustomWidget(container, widgetId, config) {
+    container.innerHTML = config.chart_type === 'number' ? '<div></div>' : '<canvas></canvas>';
+    fetch(`/api/dashboards/${currentDashboardId}/widgets/${widgetId}/query`).then(r => r.json().then(data => ({ ok: r.ok, data }))).then(({ ok, data }) => {
+        if (!ok) { container.innerHTML = `<p class="text-danger small mb-0">${escHtml(data.error || 'Error loading chart')}</p>`; return; }
+        destroyChart(widgetId);
+        if (config.chart_type === 'number') {
+            container.innerHTML = customWidgetNumberHtml(data.value, config.title);
+            return;
+        }
+        const canvas = container.querySelector('canvas');
+        DASH_CHARTS[widgetId] = new Chart(canvas.getContext('2d'), buildCustomWidgetChartJsConfig(config.chart_type, data, chartTheme()));
+    }).catch(err => { container.innerHTML = `<p class="text-danger small mb-0">Error loading chart: ${escHtml(String(err))}</p>`; });
+}
+
+function populateCustomWidgetModalSelects() {
+    document.getElementById('ccwGroupBy').innerHTML = GROUP_BY_ALLOWED.map(g => `<option value="${g.value}">${escHtml(g.label)}</option>`).join('');
+    document.getElementById('ccwRange').innerHTML =
+        WIDGET_LOG_RANGE_PRESETS.filter(r => r !== 'all').map(r => `<option value="${r}">${escHtml(WIDGET_LOG_RANGE_LABELS[r])}</option>`).join('') +
+        '<option value="custom">Custom&hellip;</option>';
+    document.getElementById('ccwFieldKey').innerHTML =
+        '<option value="">Field&hellip;</option>' + WIDGET_LOG_BASIC_FIELDS.map(f => `<option value="${f.value}">${escHtml(f.label)}</option>`).join('');
+}
+
+function onCustomWidgetChartTypeChange() {
+    const needsGroupBy = ['breakdown', 'top_n'].includes(document.getElementById('ccwChartType').value);
+    document.getElementById('ccwGroupByWrap').style.display = needsGroupBy ? '' : 'none';
+    document.getElementById('ccwLimitWrap').style.display = needsGroupBy ? '' : 'none';
+}
+
+function onCustomWidgetRangeChange() {
+    const isCustom = document.getElementById('ccwRange').value === 'custom';
+    document.getElementById('ccwStartWrap').style.display = isCustom ? '' : 'none';
+    document.getElementById('ccwEndWrap').style.display = isCustom ? '' : 'none';
+}
+
+function collectCustomWidgetConfig() {
+    const needsGroupBy = ['breakdown', 'top_n'].includes(document.getElementById('ccwChartType').value);
+    return {
+        title: document.getElementById('ccwTitle').value.trim(),
+        chart_type: document.getElementById('ccwChartType').value,
+        group_by: needsGroupBy ? document.getElementById('ccwGroupBy').value : null,
+        range: document.getElementById('ccwRange').value,
+        start: document.getElementById('ccwStart').value,
+        end: document.getElementById('ccwEnd').value,
+        app: document.getElementById('ccwApp').value.trim(),
+        severity: document.getElementById('ccwSeverity').value.trim(),
+        fieldKey: document.getElementById('ccwFieldKey').value,
+        fieldOp: document.getElementById('ccwFieldOp').value,
+        fieldVal: document.getElementById('ccwFieldVal').value.trim(),
+        limit: parseInt(document.getElementById('ccwLimit').value, 10) || 8,
+    };
+}
+
+function previewCustomWidget() {
+    const errBox = document.getElementById('ccwPreviewError');
+    const body = document.getElementById('ccwPreviewBody');
+    errBox.style.display = 'none';
+    const config = collectCustomWidgetConfig();
+    fetch('/api/dashboards/widgets/preview', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config }),
+    }).then(r => r.json().then(data => ({ ok: r.ok, data }))).then(({ ok, data }) => {
+        if (!ok) { errBox.innerText = data.error || 'Preview failed.'; errBox.style.display = 'block'; body.style.display = 'none'; return; }
+        body.style.display = 'block';
+        destroyChart('ccwPreview');
+        if (config.chart_type === 'number') {
+            body.innerHTML = customWidgetNumberHtml(data.value, config.title);
+            return;
+        }
+        body.innerHTML = '<canvas></canvas>';
+        DASH_CHARTS['ccwPreview'] = new Chart(body.querySelector('canvas').getContext('2d'), buildCustomWidgetChartJsConfig(config.chart_type, data, chartTheme()));
+    }).catch(err => { errBox.innerText = 'Error: ' + err; errBox.style.display = 'block'; });
+}
+
+let ccwEditingWidgetId = null;
+let customWidgetConfigModalInstance;
+
+// wid=null + existingConfig=null opens the modal fresh for a brand-new widget;
+// otherwise pre-fills it for editing widget `wid`'s already-saved config (via the gear
+// icon added to its card header, see addWidgetToGrid()).
+function openCustomWidgetConfigModal(wid, existingConfig) {
+    ccwEditingWidgetId = wid || null;
+    populateCustomWidgetModalSelects();
+    const cfg = existingConfig || {};
+    document.getElementById('ccwModalTitle').innerText = wid ? 'Edit Custom Chart' : 'New Custom Chart';
+    document.getElementById('ccwTitle').value = cfg.title || '';
+    document.getElementById('ccwChartType').value = cfg.chart_type || 'trend';
+    document.getElementById('ccwRange').value = cfg.range || '24h';
+    document.getElementById('ccwGroupBy').value = cfg.group_by || '';
+    document.getElementById('ccwStart').value = cfg.start || '';
+    document.getElementById('ccwEnd').value = cfg.end || '';
+    document.getElementById('ccwApp').value = cfg.app || '';
+    document.getElementById('ccwSeverity').value = cfg.severity || '';
+    document.getElementById('ccwFieldKey').value = cfg.fieldKey || '';
+    document.getElementById('ccwFieldOp').value = cfg.fieldOp || 'contains';
+    document.getElementById('ccwFieldVal').value = cfg.fieldVal || '';
+    document.getElementById('ccwLimit').value = cfg.limit || 8;
+    document.getElementById('ccwError').style.display = 'none';
+    document.getElementById('ccwPreviewError').style.display = 'none';
+    document.getElementById('ccwPreviewBody').style.display = 'none';
+    document.getElementById('ccwPreviewBody').innerHTML = '';
+    onCustomWidgetChartTypeChange();
+    onCustomWidgetRangeChange();
+    if (!customWidgetConfigModalInstance) customWidgetConfigModalInstance = new bootstrap.Modal(document.getElementById('customWidgetConfigModal'));
+    customWidgetConfigModalInstance.show();
+}
+
+function saveCustomWidgetConfig() {
+    const errBox = document.getElementById('ccwError');
+    errBox.style.display = 'none';
+    const config = collectCustomWidgetConfig();
+    const def = WIDGET_REGISTRY.chart_custom;
+
+    if (ccwEditingWidgetId) {
+        fetch(`/api/dashboards/${currentDashboardId}/widgets/${ccwEditingWidgetId}`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config }),
+        }).then(r => r.json().then(data => ({ ok: r.ok, data }))).then(({ ok, data }) => {
+            if (!ok) { errBox.innerText = data.error || 'Failed to save.'; errBox.style.display = 'block'; return; }
+            customWidgetConfigModalInstance.hide();
+            RENDERED_WIDGETS[ccwEditingWidgetId].config = config;
+            const titleSpan = document.getElementById(`widgetTitle_${ccwEditingWidgetId}`);
+            if (titleSpan) titleSpan.innerHTML = `<i class="fa-solid ${def.icon} me-2"></i>${escHtml(config.title || def.label)}`;
+            const container = document.getElementById(`widgetBody_${ccwEditingWidgetId}`);
+            if (container) renderCustomWidget(container, ccwEditingWidgetId, config);
+        }).catch(err => { errBox.innerText = 'Error: ' + err; errBox.style.display = 'block'; });
+        return;
+    }
+
+    const y = grid.getGridItems().reduce((max, item) => {
+        const n = item.gridstackNode;
+        return n ? Math.max(max, n.y + n.h) : max;
+    }, 0);
+    fetch(`/api/dashboards/${currentDashboardId}/widgets`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ widget_type: 'chart_custom', x: 0, y, w: def.defaultW, h: def.defaultH, config }),
+    }).then(r => r.json().then(data => ({ ok: r.ok, data }))).then(({ ok, data }) => {
+        if (!ok) { errBox.innerText = data.error || 'Failed to save.'; errBox.style.display = 'block'; return; }
+        addWidgetToGrid({ id: data.id, widget_type: 'chart_custom', x: 0, y, w: def.defaultW, h: def.defaultH, config });
+        customWidgetConfigModalInstance.hide();
+    }).catch(err => { errBox.innerText = 'Error: ' + err; errBox.style.display = 'block'; });
+}
+
 // widget_type -> {label, icon, category, defaultW, defaultH, live, render}. The 14
 // chart_* entries (Batch 1) and 5 app_* entries (Batch 2) are otherwise identical in
 // shape -- the Add Widget picker's "Live App Views" section (see renderWidgetPicker())
@@ -1336,6 +1620,11 @@ const WIDGET_REGISTRY = {
     app_edr_actions:   { label: 'EDR Response Actions', icon: 'fa-laptop-medical', category: 'app', defaultW: 6, defaultH: 5, render: renderEdrActionsWidget },
     // Ported from the retired standalone Home page.
     app_stat_tiles:    { label: 'Stat Tiles', icon: 'fa-gauge', category: 'app', defaultW: 12, defaultH: 2, render: renderStatTilesWidget },
+    // User-built widget: opens a config-builder modal instead of adding with a default,
+    // empty config (see addWidget()'s `def.configurable` branch) -- config.range is its
+    // OWN saved time range, not the page-level dashRangeSelect this widget deliberately
+    // ignores (see the note on widgetRange() -- range vocabularies don't match).
+    chart_custom: { label: 'Custom Chart', icon: 'fa-sliders', category: 'chart', defaultW: 6, defaultH: 4, configurable: true, render: renderCustomWidget },
 };
 
 // widgetId (number) -> {widget_type, config} for whatever's actually on screen right
@@ -1411,12 +1700,13 @@ function addWidgetToGrid(w) {
     if (!def) return; // an unrecognized widget_type (e.g. added by a future version) -- degrade gracefully instead of throwing
     RENDERED_WIDGETS[w.id] = { widget_type: w.widget_type, config: w.config || {} };
     const liveBadge = def.live ? '<span class="badge bg-secondary me-1" title="Reflects current state, not the selected time range">Live</span>' : '';
+    const configureBtn = def.configurable ? `<button type="button" class="btn btn-sm btn-link text-muted p-0 me-2 widget-configure-btn" onclick="openCustomWidgetConfigModal(${w.id}, RENDERED_WIDGETS[${w.id}].config)" title="Configure"><i class="fa-solid fa-gear"></i></button>` : '';
     grid.addWidget({
         id: String(w.id), x: w.x, y: w.y, w: w.w, h: w.h,
         content: `<div class="card bg-dark border-secondary widget-card">
             <div class="card-header border-secondary d-flex justify-content-between align-items-center">
-                <span><i class="fa-solid ${def.icon} me-2"></i>${escHtml(def.label)}</span>
-                <span class="d-flex align-items-center">${liveBadge}<button type="button" class="btn btn-sm btn-link text-muted p-0 widget-remove-btn" onclick="removeWidget(${w.id})" title="Remove"><i class="fa-solid fa-xmark"></i></button></span>
+                <span id="widgetTitle_${w.id}"><i class="fa-solid ${def.icon} me-2"></i>${escHtml((w.config && w.config.title) || def.label)}</span>
+                <span class="d-flex align-items-center">${liveBadge}${configureBtn}<button type="button" class="btn btn-sm btn-link text-muted p-0 widget-remove-btn" onclick="removeWidget(${w.id})" title="Remove"><i class="fa-solid fa-xmark"></i></button></span>
             </div>
             <div class="card-body widget-body" id="widgetBody_${w.id}"></div>
         </div>`,
@@ -1585,6 +1875,14 @@ function renderWidgetPicker() {
 function addWidget(widgetType) {
     const def = WIDGET_REGISTRY[widgetType];
     if (!def) return;
+    if (def.configurable) {
+        // Custom widgets need their query config built before there's anything to add --
+        // saveCustomWidgetConfig() does the actual POST + addWidgetToGrid() once the user
+        // finishes the config-builder modal, instead of adding immediately with {}.
+        if (addWidgetModalInstance) addWidgetModalInstance.hide();
+        openCustomWidgetConfigModal(null, null);
+        return;
+    }
     // Land the new widget below everything currently on the grid, full-width start
     // column, so it never overlaps an existing one.
     const y = grid.getGridItems().reduce((max, item) => {
