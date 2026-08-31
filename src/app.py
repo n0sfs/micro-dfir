@@ -4255,6 +4255,103 @@ def _run_scheduled_playbooks(db):
         db.execute("UPDATE playbooks SET last_scheduled_run = datetime('now') WHERE id = ?", (pb['id'],))
         db.commit()
 
+# Wazuh's model auto-runs its hash/YARA checks on a timer instead of waiting for an
+# analyst to notice and dispatch one -- ioc_sweep/string_sweep already do the real
+# detection work (see api_agent_commands()'s POST branch), this just queues them the
+# same way on a schedule instead of only from a manual click. Config lives in
+# settings['agent_sweep_config'] (JSON: interval_hours, last_run) -- interval_hours
+# 0/absent means disabled, matching the "empty means off" convention used elsewhere.
+def _run_scheduled_agent_sweeps(db):
+    import json as _json
+    from datetime import timedelta
+    cfg_row = db.execute("SELECT value FROM settings WHERE key = 'agent_sweep_config'").fetchone()
+    cfg = _json.loads(cfg_row['value']) if cfg_row and cfg_row['value'] else {}
+    interval_hours = cfg.get('interval_hours') or 0
+    if not interval_hours:
+        return
+
+    now = datetime.utcnow()
+    last_run = cfg.get('last_run')
+    if last_run:
+        try:
+            last = datetime.strptime(last_run, '%Y-%m-%d %H:%M:%S')
+            if (now - last).total_seconds() < interval_hours * 3600:
+                return
+        except (ValueError, TypeError):
+            pass
+
+    # Online or Idle hosts only (same 300s freshness window agent_checkins() uses) --
+    # a host that's actually gone (uninstalled, powered off) has nothing to gain from a
+    # queued command it will never come back to pick up, and this keeps the queue from
+    # silently piling up stale commands for decommissioned endpoints.
+    cutoff = (now - timedelta(seconds=300)).strftime('%Y-%m-%d %H:%M:%S')
+    hosts = db.execute(
+        "SELECT user_agent as hostname, os FROM agent_polls "
+        "WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY ip_address) AND timestamp >= ?",
+        (cutoff,)
+    ).fetchall()
+    if not hosts:
+        cfg['last_run'] = now.strftime('%Y-%m-%d %H:%M:%S')
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('agent_sweep_config', ?)", (_json.dumps(cfg),))
+        db.commit()
+        return
+
+    # Recomputed fresh here too, same as the manual-dispatch branch in
+    # api_agent_commands() -- a sweep queued today reflects today's live IOC/YARA
+    # state, not whatever it was at some earlier point.
+    sweep_params = {
+        'ioc_sweep': {
+            'hashes': _get_live_ioc_sha256_hashes(db),
+            'md5_hashes': _get_live_ioc_md5_hashes(db),
+            'sha1_hashes': _get_live_ioc_sha1_hashes(db),
+        },
+        'string_sweep': {'patterns': _get_live_yara_strings()},
+    }
+    for h in hosts:
+        os_name = h['os'] if h['os'] in ('windows', 'linux') else 'windows'
+        templates = agent_scripts.TEMPLATES_BY_OS[os_name]
+        for label, params in sweep_params.items():
+            builder, required = templates[label]
+            if any(not params.get(p) for p in required):
+                continue  # nothing loaded to sweep for yet (no IOCs / no YARA rules)
+            try:
+                script = builder(params)
+            except Exception:
+                continue
+            db.execute(
+                "INSERT INTO agent_commands (hostname, label, script, queued_by) VALUES (?, ?, ?, 'scheduled_sweep')",
+                (h['hostname'], label, script)
+            )
+    cfg['last_run'] = now.strftime('%Y-%m-%d %H:%M:%S')
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('agent_sweep_config', ?)", (_json.dumps(cfg),))
+    db.commit()
+
+@app.route('/api/settings/agent-sweeps', methods=['GET', 'POST'])
+@login_required
+def api_settings_agent_sweeps():
+    import json
+    db = get_db()
+    if request.method == 'GET':
+        row = db.execute("SELECT value FROM settings WHERE key = 'agent_sweep_config'").fetchone()
+        cfg = json.loads(row['value']) if row and row['value'] else {}
+        return jsonify({'interval_hours': cfg.get('interval_hours') or 0, 'last_run': cfg.get('last_run')})
+    err = require_permission('edr.command.advanced')
+    if err: return err
+    d = request.json or {}
+    try:
+        interval_hours = int(d.get('interval_hours') or 0)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'interval_hours must be a whole number'}), 400
+    if interval_hours < 0:
+        return jsonify({'error': 'interval_hours cannot be negative'}), 400
+    row = db.execute("SELECT value FROM settings WHERE key = 'agent_sweep_config'").fetchone()
+    cfg = json.loads(row['value']) if row and row['value'] else {}
+    cfg['interval_hours'] = interval_hours
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('agent_sweep_config', ?)", (json.dumps(cfg),))
+    db.commit()
+    log_audit('agent_sweep_config_change', 'settings', None, f'interval_hours={interval_hours}')
+    return jsonify({'status': 'success'})
+
 # Hit by sigma_engine.py's background loop (every ~30s, same cadence as its TI-feed
 # auto-sync check) -- not a user-facing route, so no @login_required/current_user. The
 # due-check inside _run_scheduled_playbooks() makes this cheap to call that often (a
@@ -4267,6 +4364,7 @@ def api_run_scheduled_playbooks():
         return jsonify({'error': 'Forbidden'}), 403
     db = get_db()
     _run_scheduled_playbooks(db)
+    _run_scheduled_agent_sweeps(db)
     return jsonify({'status': 'success'})
 
 @app.route('/api/playbooks', methods=['GET', 'POST'])
