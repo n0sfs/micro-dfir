@@ -185,6 +185,7 @@
                             <button type="button" class="btn btn-sm btn-outline-info console-action-btn" data-permission="settings.system.manage" onclick="consoleUpgrade()"><i class="fa-solid fa-rotate me-2"></i>Upgrade Agent</button>
                             <button type="button" class="btn btn-sm btn-outline-danger console-action-btn" data-permission="settings.system.manage" onclick="consoleUninstall()"><i class="fa-solid fa-trash me-2"></i>Uninstall Agent</button>
                             <button type="button" class="btn btn-sm btn-outline-warning console-action-btn" onclick="checkHostVulnerabilities()"><i class="fa-solid fa-bug me-2"></i>Check for Vulnerabilities</button>
+                            <button type="button" class="btn btn-sm btn-outline-info console-action-btn" onclick="viewScaResults()"><i class="fa-solid fa-shield-halved me-2"></i>View SCA Results</button>
                         </div>
 
                         <div id="consoleParamForm" style="display:none;" class="border border-secondary rounded p-2 mt-2 bg-secondary bg-opacity-10"></div>
@@ -221,11 +222,14 @@
         <!-- Vulnerability check results -->
         <div id="vulnCheckResults" class="card-body py-2 px-3 border-bottom border-secondary" style="display:none;"></div>
 
+        <!-- SCA hardening check results -->
+        <div id="scaCheckResults" class="card-body py-2 px-3 border-bottom border-secondary" style="display:none;"></div>
+
         <!-- Automatic sweeps -->
         <div class="card-body py-2 px-3 border-bottom border-secondary">
             <div class="d-flex align-items-center gap-2 flex-wrap">
                 <h6 class="mb-0 text-muted"><i class="fa-solid fa-clock me-2"></i>Automatic Endpoint Sweeps</h6>
-                <span class="text-muted small">— run the known-bad-hash and YARA string sweeps on every online/idle endpoint, on a schedule, instead of only when queued by hand.</span>
+                <span class="text-muted small">— run the known-bad-hash sweep, YARA string sweep, and SCA hardening checks on every online/idle endpoint, on a schedule, instead of only when queued by hand.</span>
             </div>
             <div class="d-flex align-items-center gap-2 mt-2">
                 <select id="agentSweepInterval" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:220px;" onchange="saveAgentSweepConfig()">
@@ -1336,6 +1340,43 @@ function checkHostVulnerabilities() {
             <div class="alert alert-warning py-2 px-3 small mb-2"><i class="fa-solid fa-triangle-exclamation me-1"></i>Name-based matching against NVD's CPE data -- approximate, not a definitive vulnerability scan. Verify before acting.</div>
             <div class="table-responsive"><table class="table table-dark table-sm table-striped mb-0">
                 <thead><tr><th>Installed</th><th>CVE</th><th>Severity</th><th>CVSS</th><th>Description</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table></div>`;
+    }).catch(err => { box.innerHTML = `<div class="text-danger small">Error: ${escHtml(String(err))}</div>`; });
+}
+
+function scaStatusBadge(status) {
+    const map = {pass: 'bg-success', fail: 'bg-danger', error: 'bg-secondary'};
+    return `<span class="badge ${map[status] || 'bg-secondary'}">${escHtml((status || 'unknown').toUpperCase())}</span>`;
+}
+
+function viewScaResults() {
+    if (!consoleSelectedHost) return;
+    const hostname = consoleSelectedHost;
+    const box = document.getElementById('scaCheckResults');
+    box.style.display = 'block';
+    box.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i>Loading...';
+    fetch(`/api/agent/${encodeURIComponent(hostname)}/sca-results`).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (!ok) {
+            box.innerHTML = `<div class="text-muted small"><i class="fa-solid fa-circle-info me-1"></i>${escHtml(data.error || 'Failed to load.')}</div>`;
+            return;
+        }
+        const header = `<h6 class="small text-uppercase text-muted mb-2"><i class="fa-solid fa-shield-halved me-1"></i>SCA Hardening Checks — ${escHtml(hostname)} <span class="text-muted" style="text-transform:none;">(${data.passed} passed, ${data.failed} failed, ${data.errored} error, as of ${escHtml(data.completed_at || 'unknown time')})</span></h6>`;
+        if (!data.checks.length) {
+            box.innerHTML = header + '<p class="text-muted small mb-0">No checks reported.</p>';
+            return;
+        }
+        const rows = data.checks.map(c => `
+            <tr>
+                <td class="small">${escHtml(c.title || c.id)}</td>
+                <td>${scaStatusBadge(c.status)}</td>
+                <td class="small text-muted">${escHtml((c.frameworks || []).join(', ') || '—')}</td>
+                <td class="small text-muted" style="max-width:380px;">${escHtml(c.detail || '')}</td>
+            </tr>`).join('');
+        box.innerHTML = header + `
+            <div class="alert alert-secondary py-2 px-3 small mb-2"><i class="fa-solid fa-circle-info me-1"></i>Hand-authored CIS-Benchmark-style checks -- not the licensed CIS Benchmark itself. Fleet-wide results roll into each framework's Hardening score in the Compliance dashboard widget and report.</div>
+            <div class="table-responsive"><table class="table table-dark table-sm table-striped mb-0">
+                <thead><tr><th>Check</th><th>Status</th><th>Frameworks</th><th>Detail</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table></div>`;
     }).catch(err => { box.innerHTML = `<div class="text-danger small">Error: ${escHtml(String(err))}</div>`; });

@@ -658,6 +658,14 @@ function renderComplianceCoverageWidget(container, widgetId, config) {
                 const pct = f.total > 0 ? Math.round((f.enabled / f.total) * 100) : 0;
                 const barColor = f.total === 0 ? 'bg-secondary' : (f.enabled === f.total ? 'bg-success' : 'bg-warning');
                 const status = f.total === 0 ? 'No rules tagged' : (f.enabled === f.total ? 'Fully enabled' : `${f.total - f.enabled} disabled`);
+                // Second, deliberately separate bar -- fleet-wide SCA hardening check pass
+                // rate for this framework, not blended into the rule-coverage bar above
+                // (same reasoning as MITRE's Coverage/Detection split: this answers "is the
+                // endpoint config actually verified", not "do we have a rule mapped").
+                const sca = f.sca || { total: 0, passed: 0 };
+                const scaPct = sca.total > 0 ? Math.round((sca.passed / sca.total) * 100) : 0;
+                const scaColor = sca.total === 0 ? 'bg-secondary' : (sca.passed === sca.total ? 'bg-success' : (sca.passed === 0 ? 'bg-danger' : 'bg-warning'));
+                const scaStatus = sca.total === 0 ? 'No hardening checks yet' : `${sca.passed}/${sca.total} checks passing`;
                 return `
                 <div class="mb-2">
                     <div class="d-flex justify-content-between small">
@@ -666,6 +674,13 @@ function renderComplianceCoverageWidget(container, widgetId, config) {
                     </div>
                     <div class="progress" style="height:6px;">
                         <div class="progress-bar ${barColor}" style="width:${f.total === 0 ? 100 : pct}%;"></div>
+                    </div>
+                    <div class="d-flex justify-content-between small mt-1" style="opacity:.85;">
+                        <span class="text-muted" style="font-size:.72rem;"><i class="fa-solid fa-shield-halved me-1"></i>Hardening</span>
+                        <span class="text-muted" style="font-size:.72rem;">${scaStatus}</span>
+                    </div>
+                    <div class="progress" style="height:4px;">
+                        <div class="progress-bar ${scaColor}" style="width:${sca.total === 0 ? 100 : scaPct}%;"></div>
                     </div>
                 </div>`;
             }).join('')}

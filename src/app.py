@@ -1917,6 +1917,83 @@ COMPLIANCE_FRAMEWORKS = {
 
 COMPLIANCE_AUDIT_ACTIONS = ('rule_compliance_tag', 'rule_toggle', 'rule_bulk_toggle')
 
+# Which framework(s) each SCA hardening check (agent_scripts.py's sca_check()/
+# sca_check_linux()) is relevant to -- same "no authoritative auto-mapping, assigned by
+# hand" situation as COMPLIANCE_FRAMEWORKS itself above, just for a fixed, code-defined
+# set of ~23 checks rather than user-created Sigma rules, so this is a plain dict here
+# rather than a per-item UI like rule compliance_tags gets. Deliberately a SECOND,
+# separate signal from rule coverage above (checks_total/checks_passed, not blended into
+# the same total/enabled count) -- rule coverage answers "do we have a detection mapped
+# to this framework", this answers "is the endpoint config that framework asks for
+# actually verified true right now", the same Coverage-vs-Detection-Score split already
+# used for MITRE.
+SCA_CHECK_FRAMEWORKS = {
+    # Windows (agent_scripts.py sca_check())
+    'firewall_enabled': ['pci_dss', 'cis_controls', 'nist_800_53', 'nist_csf', 'iso_27001', 'soc2'],
+    'smb1_disabled': ['cis_controls', 'nist_800_53', 'pci_dss'],
+    'rdp_nla': ['cis_controls', 'nist_800_53', 'pci_dss', 'soc2'],
+    'defender_realtime': ['cis_controls', 'nist_800_53', 'hipaa', 'pci_dss', 'soc2'],
+    'guest_disabled': ['cis_controls', 'nist_800_53', 'pci_dss', 'iso_27001'],
+    'uac_enabled': ['cis_controls', 'nist_800_53'],
+    'lm_hash_disabled': ['cis_controls', 'pci_dss', 'nist_800_53'],
+    'autorun_disabled': ['cis_controls', 'nist_800_53'],
+    'ps_execution_policy': ['cis_controls', 'nist_800_53'],
+    'bitlocker_enabled': ['hipaa', 'pci_dss', 'nist_800_53', 'gdpr', 'iso_27001', 'soc2'],
+    'windows_update_service': ['cis_controls', 'nist_800_53', 'pci_dss'],
+    'account_lockout': ['pci_dss', 'hipaa', 'nist_800_53', 'cis_controls', 'iso_27001', 'soc2', 'gdpr'],
+    # Linux (agent_scripts.py sca_check_linux())
+    'ssh_root_login': ['cis_controls', 'nist_800_53', 'pci_dss', 'soc2'],
+    'ssh_password_auth': ['cis_controls', 'nist_800_53', 'pci_dss', 'soc2'],
+    'firewall_active': ['pci_dss', 'cis_controls', 'nist_800_53', 'nist_csf', 'iso_27001', 'soc2'],
+    'passwd_perms': ['cis_controls', 'nist_800_53'],
+    'shadow_perms': ['cis_controls', 'nist_800_53', 'pci_dss'],
+    'no_empty_passwords': ['pci_dss', 'hipaa', 'cis_controls', 'nist_800_53', 'soc2'],
+    'password_min_len': ['pci_dss', 'hipaa', 'cis_controls', 'nist_800_53', 'soc2', 'iso_27001'],
+    'password_max_days': ['pci_dss', 'cis_controls', 'nist_800_53'],
+    'core_dumps_restricted': ['cis_controls', 'nist_800_53'],
+    'aslr_enabled': ['cis_controls', 'nist_800_53'],
+    'time_sync_active': ['cis_controls', 'nist_800_53', 'pci_dss'],
+}
+
+def _get_latest_sca_results(db):
+    # Same "latest row per host" shape already used for agent health (see the
+    # agent-health-trend dashboard widget's query), applied to agent_commands instead of
+    # agent_polls.
+    rows = db.execute(
+        "SELECT hostname, stdout FROM agent_commands WHERE label = 'sca_check' AND status = 'done' "
+        "AND id IN (SELECT MAX(id) FROM agent_commands WHERE label = 'sca_check' AND status = 'done' GROUP BY hostname)"
+    ).fetchall()
+    results = []
+    for row in rows:
+        try:
+            parsed = json.loads(row['stdout']) if row['stdout'] else None
+        except (ValueError, TypeError):
+            parsed = None
+        checks = parsed.get('checks') if isinstance(parsed, dict) else None
+        if isinstance(checks, list):
+            results.append({'hostname': row['hostname'], 'checks': checks})
+    return results
+
+def _sca_framework_aggregate(sca_results):
+    agg = {key: {'total': 0, 'passed': 0, 'failed': 0, 'errored': 0} for key in COMPLIANCE_FRAMEWORKS}
+    for host in sca_results:
+        for check in host['checks']:
+            frameworks = SCA_CHECK_FRAMEWORKS.get(check.get('id'))
+            if not frameworks:
+                continue
+            status = check.get('status')
+            for fw in frameworks:
+                if fw not in agg:
+                    continue
+                agg[fw]['total'] += 1
+                if status == 'pass':
+                    agg[fw]['passed'] += 1
+                elif status == 'fail':
+                    agg[fw]['failed'] += 1
+                elif status == 'error':
+                    agg[fw]['errored'] += 1
+    return agg
+
 @app.route('/api/compliance/audit-trail', methods=['GET'])
 @login_required
 def api_compliance_audit_trail():
@@ -1954,6 +2031,13 @@ def api_compliance_coverage():
                 coverage[tag]['total'] += 1
                 if row['enabled']:
                     coverage[tag]['enabled'] += 1
+    # Second, deliberately separate metric per framework -- "is the endpoint hardening
+    # that framework asks for actually verified true right now" (fleet-wide SCA pass
+    # rate), not blended into the rule-coverage total/enabled above. Same
+    # Coverage-vs-Detection-Score split already used for MITRE.
+    sca_agg = _sca_framework_aggregate(_get_latest_sca_results(db))
+    for key, sca in sca_agg.items():
+        coverage[key]['sca'] = sca
     frameworks = sorted(coverage.values(), key=lambda f: f['label'])
     return jsonify({
         'frameworks': frameworks,
@@ -2196,6 +2280,38 @@ def api_vulnerabilities_for_host(hostname):
     return jsonify({
         'hostname': hostname, 'inventory_collected_at': row['completed_at'],
         'apps_scanned': len(apps), 'matches': matches,
+    })
+
+@app.route('/api/agent/<hostname>/sca-results', methods=['GET'])
+@login_required
+def api_sca_results_for_host(hostname):
+    # Same shape as api_vulnerabilities_for_host above -- latest agent_commands.stdout
+    # for a specific label, this time sca_check, gated the same way (the stdout column
+    # can hold forensic output for any host, same floor as GET /api/agent/commands).
+    err = require_permission('edr.command.basic')
+    if err: return err
+    db = get_db()
+    row = db.execute(
+        "SELECT stdout, completed_at FROM agent_commands "
+        "WHERE hostname = ? AND label = 'sca_check' AND status = 'done' AND stdout IS NOT NULL "
+        "ORDER BY id DESC LIMIT 1",
+        (hostname,)
+    ).fetchone()
+    if not row:
+        return jsonify({'error': 'No SCA hardening check has run on this host yet. Run "View SCA Results" -> queue one, or wait for the next scheduled sweep.'}), 404
+    try:
+        result = json.loads(row['stdout'])
+    except (ValueError, TypeError):
+        return jsonify({'error': 'The stored SCA result is not valid JSON.'}), 500
+    checks = result.get('checks', []) if isinstance(result, dict) else []
+    for c in checks:
+        c['frameworks'] = SCA_CHECK_FRAMEWORKS.get(c.get('id'), [])
+    return jsonify({
+        'hostname': hostname, 'completed_at': row['completed_at'],
+        'checks': checks,
+        'passed': result.get('passed', 0) if isinstance(result, dict) else 0,
+        'failed': result.get('failed', 0) if isinstance(result, dict) else 0,
+        'errored': result.get('errored', 0) if isinstance(result, dict) else 0,
     })
 
 def invalidate_rules_cache():
@@ -4876,27 +4992,36 @@ def _run_scheduled_agent_sweeps(db):
         },
         'string_sweep': {'patterns': _get_live_yara_strings()},
         'yara_condition_sweep': {'rule_conditions': _get_live_yara_rule_conditions()},
+        # No live data to load -- sca_check() takes no params, it just runs a fixed set
+        # of hardening checks against whatever the host's config already is. See the
+        # ALWAYS_RUN_SWEEP_LABELS carve-out below.
+        'sca_check': {},
     }
+    # ioc_sweep/string_sweep/yara_condition_sweep are only worth queuing once something's
+    # actually loaded to check against (empty params -> a guaranteed no-op command) --
+    # sca_check has no such live-data dependency, so it must never be caught by that same
+    # "nothing loaded" skip.
+    ALWAYS_RUN_SWEEP_LABELS = {'sca_check'}
     for h in hosts:
         os_name = h['os'] if h['os'] in ('windows', 'linux', 'macos') else 'windows'
         templates = agent_scripts.TEMPLATES_BY_OS[os_name]
         for label, params in sweep_params.items():
-            # macOS has no ioc_sweep/string_sweep/yara_condition_sweep templates yet
-            # (v1 deliberately ships a smaller core action set) -- .get() skips those
-            # hosts/labels cleanly instead of a bare templates[label] KeyError, which
-            # would otherwise abort the whole sweep loop for every host that comes
-            # after the first macOS one.
+            # macOS has no ioc_sweep/string_sweep/yara_condition_sweep/sca_check
+            # templates yet (v1 deliberately ships a smaller core action set) -- .get()
+            # skips those hosts/labels cleanly instead of a bare templates[label]
+            # KeyError, which would otherwise abort the whole sweep loop for every host
+            # that comes after the first macOS one.
             entry = templates.get(label)
             if entry is None:
                 continue
             builder, required = entry
-            # NOT `required` here -- ioc_sweep/string_sweep/yara_condition_sweep all
-            # register required=[] (an empty live list is a legitimate STATE the
-            # builder itself already handles gracefully, not a missing-param user
-            # error), so that list is always empty and this check would never actually
-            # skip anything. Checking the live sweep data directly is what actually
-            # avoids queuing a no-op command to a host with nothing loaded to check yet.
-            if not any(params.values()):
+            # NOT `required` here -- every one of these labels registers required=[] (an
+            # empty live list/dict is a legitimate STATE the builder itself already
+            # handles gracefully, not a missing-param user error), so that list is
+            # always empty and this check would never actually skip anything. Checking
+            # the live sweep data directly is what actually avoids queuing a no-op
+            # command to a host with nothing loaded to check yet.
+            if label not in ALWAYS_RUN_SWEEP_LABELS and not any(params.values()):
                 continue  # nothing loaded to sweep for yet (no IOCs / no YARA rules)
             try:
                 script = builder(params)
