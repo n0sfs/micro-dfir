@@ -305,7 +305,8 @@
             <p class="text-muted small mb-3">Download pre-configured agent scripts embedded with your current SOC secret and server IP, or manage local background services.</p>
             <div class="mb-4">
                 <a href="/api/agent/download/windows" class="btn btn-outline-success btn-sm me-2"><i class="fa-brands fa-windows me-1"></i> Download Windows Agent (.zip)</a>
-                <a href="/api/agent/download/linux" class="btn btn-outline-info btn-sm"><i class="fa-brands fa-linux me-1"></i> Download Linux Agent (.tar.gz)</a>
+                <a href="/api/agent/download/linux" class="btn btn-outline-info btn-sm me-2"><i class="fa-brands fa-linux me-1"></i> Download Linux Agent (.tar.gz)</a>
+                <a href="/api/agent/download/macos" class="btn btn-outline-light btn-sm"><i class="fa-brands fa-apple me-1"></i> Download macOS Agent (.tar.gz)</a>
             </div>
 
             <h6 class="text-warning mt-4 font-monospace"><i class="fa-solid fa-greater-than me-2"></i>Windows Background Service Management</h6>
@@ -313,7 +314,14 @@
             <div class="bg-black p-2 rounded mb-3 font-monospace text-success small border border-secondary">python micro_agent_windows.py install</div>
             <p class="text-muted small mb-2">To stop and remove the background service:</p>
             <div class="bg-black p-2 rounded font-monospace text-danger small border border-secondary">python micro_agent_windows.py uninstall</div>
-            <p class="text-muted small mt-3 mb-0"><i class="fa-solid fa-circle-info me-1"></i>Already-deployed agents can also be upgraded remotely from the Response Actions tab instead of reinstalling by hand.</p>
+
+            <h6 class="text-warning mt-4 font-monospace"><i class="fa-solid fa-greater-than me-2"></i>macOS Background Service Management</h6>
+            <p class="text-muted small mb-2">To run the macOS agent persistently as a launchd daemon, extract the download and run as root (launchd requires it for a system-level daemon):</p>
+            <div class="bg-black p-2 rounded mb-3 font-monospace text-success small border border-secondary">sudo python3 micro_agent_macos.py install</div>
+            <p class="text-muted small mb-2">To stop and remove the background service:</p>
+            <div class="bg-black p-2 rounded font-monospace text-danger small border border-secondary">sudo python3 micro_agent_macos.py uninstall</div>
+            <p class="text-muted small mt-3 mb-0"><i class="fa-solid fa-triangle-exclamation me-1 text-warning"></i>macOS support is newer and has a smaller action set than Windows/Linux (no persistence sweep, software inventory, or SCA checks yet), and host isolation (pfctl) has not been live-verified against real macOS hardware -- test Isolate Host on a non-critical machine before relying on it during a real incident.</p>
+            <p class="text-muted small mt-2 mb-0"><i class="fa-solid fa-circle-info me-1"></i>Already-deployed agents can also be upgraded remotely from the Response Actions tab instead of reinstalling by hand.</p>
         </div>
     </div>
     {% endif %}
@@ -623,7 +631,12 @@ function relativeTime(ts) {
 
 function osIcon(os) {
     if (os === 'linux') return '<i class="fa-brands fa-linux text-warning" title="Linux"></i> <span class="text-muted small">Linux</span>';
+    if (os === 'macos') return '<i class="fa-brands fa-apple text-light" title="macOS"></i> <span class="text-muted small">macOS</span>';
     return '<i class="fa-brands fa-windows text-info" title="Windows"></i> <span class="text-muted small">Windows</span>';
+}
+
+function osLabel(os) {
+    return os === 'linux' ? 'Linux' : (os === 'macos' ? 'macOS' : 'Windows');
 }
 
 // Multi-line native tooltip (title attribute) shown on hover — the browser renders \n
@@ -631,7 +644,7 @@ function osIcon(os) {
 function hostInfoText(dev) {
     return [
         `Hostname: ${dev.hostname}`,
-        `OS: ${dev.os === 'linux' ? 'Linux' : 'Windows'}`,
+        `OS: ${osLabel(dev.os)}`,
         `IP: ${dev.endpoint_ip}`,
         `Status: ${dev.status}`,
         `Version: ${dev.version && dev.version !== 'unknown' ? dev.version : 'Unknown'}`,
@@ -745,7 +758,7 @@ function renderEndpoints() {
     const q = (document.getElementById('endpointSearchBox').value || '').trim().toLowerCase();
     let filtered = allEndpoints;
     if (endpointStatusFilter !== 'all') filtered = filtered.filter(dev => dev.status === endpointStatusFilter);
-    if (endpointFilters.os.length) filtered = filtered.filter(dev => endpointFilters.os.includes(dev.os === 'linux' ? 'linux' : 'windows'));
+    if (endpointFilters.os.length) filtered = filtered.filter(dev => endpointFilters.os.includes(dev.os || 'windows'));
     if (endpointFilters.version.length) filtered = filtered.filter(dev => endpointFilters.version.includes(dev.version || 'unknown'));
     if (q) filtered = filtered.filter(dev =>
         (dev.hostname || '').toLowerCase().includes(q) ||
@@ -1004,6 +1017,15 @@ const CONSOLE_ACTION_DISPLAY = {
         upgrade: 'Upgrade-Agent (fetch latest agent, restart)',
         enable_exec_auditing: 'Enable-Exec-Auditing (auditd: log every execve syscall, key=microdfir_exec)',
         disable_exec_auditing: 'Disable-Exec-Auditing (auditd: remove the microdfir_exec rule)'
+    },
+    macos: {
+        list_processes: 'ps (list running processes)',
+        collect_triage: 'Collect-Triage (processes, connections, LaunchAgents/LaunchDaemons, logged-in users)',
+        collect_file: 'Collect-File (hash + base64 content, 4MB limit)',
+        quarantine_file: 'Quarantine-File (move to a locked-down folder, chmod 000 + chflags uchg if supported -- contain, not just collect)',
+        isolate_host: 'Isolate-Host (pfctl: block all traffic except this SOC server -- not yet live-verified on real macOS hardware)',
+        restore_network: 'Restore-Network (pfctl: flush the isolation anchor)',
+        upgrade: 'Upgrade-Agent (fetch latest agent, restart)'
     }
 };
 
@@ -1019,15 +1041,15 @@ const CONSOLE_DROPDOWN_ACTIONS = [
     { value: 'collect_registry_key', label: 'Registry Key', permission: 'edr.command.advanced', needsParams: true, osOnly: 'windows' },
     { value: 'kill_scheduled_task', label: 'Kill Scheduled Task', permission: 'edr.command.basic', needsParams: true, osOnly: 'windows' },
     { value: 'collect_triage', label: 'Triage Collection', permission: 'edr.command.basic' },
-    { value: 'persistence_sweep', label: 'Persistence Sweep', permission: 'edr.command.advanced' },
-    { value: 'ioc_sweep', label: 'IOC Hash Sweep', permission: 'edr.command.advanced' },
-    { value: 'string_sweep', label: 'String Sweep', permission: 'edr.command.advanced' },
-    { value: 'yara_condition_sweep', label: 'YARA Condition Sweep', permission: 'edr.command.advanced' },
-    { value: 'collect_software_inventory', label: 'Software Inventory', permission: 'edr.command.advanced' },
-    { value: 'sca_check', label: 'SCA Hardening Check', permission: 'edr.command.advanced' },
-    { value: 'collect_network_connections', label: 'Network Connections', permission: 'edr.command.advanced' },
-    { value: 'collect_dns_arp', label: 'DNS Cache / ARP Table', permission: 'edr.command.advanced' },
-    { value: 'check_process_injection_indicators', label: 'Process Injection Indicators', permission: 'edr.command.advanced' },
+    { value: 'persistence_sweep', label: 'Persistence Sweep', permission: 'edr.command.advanced', osOnly: ['windows', 'linux'] },
+    { value: 'ioc_sweep', label: 'IOC Hash Sweep', permission: 'edr.command.advanced', osOnly: ['windows', 'linux'] },
+    { value: 'string_sweep', label: 'String Sweep', permission: 'edr.command.advanced', osOnly: ['windows', 'linux'] },
+    { value: 'yara_condition_sweep', label: 'YARA Condition Sweep', permission: 'edr.command.advanced', osOnly: ['windows', 'linux'] },
+    { value: 'collect_software_inventory', label: 'Software Inventory', permission: 'edr.command.advanced', osOnly: ['windows', 'linux'] },
+    { value: 'sca_check', label: 'SCA Hardening Check', permission: 'edr.command.advanced', osOnly: ['windows', 'linux'] },
+    { value: 'collect_network_connections', label: 'Network Connections', permission: 'edr.command.advanced', osOnly: ['windows', 'linux'] },
+    { value: 'collect_dns_arp', label: 'DNS Cache / ARP Table', permission: 'edr.command.advanced', osOnly: ['windows', 'linux'] },
+    { value: 'check_process_injection_indicators', label: 'Process Injection Indicators', permission: 'edr.command.advanced', osOnly: ['windows', 'linux'] },
     { value: 'collect_browser_artifacts', label: 'Browser Artifacts', permission: 'edr.command.advanced', osOnly: 'windows' },
     { value: 'collect_forensic_timestamps', label: 'Forensic Timestamps', permission: 'edr.command.advanced', osOnly: 'windows' },
     { value: 'collect_recent_file_changes', label: 'Recent File Changes', permission: 'edr.command.advanced', osOnly: 'windows' },
@@ -1039,7 +1061,10 @@ function renderConsoleActionSelect() {
     const sel = document.getElementById('consoleActionSelect');
     const os = consoleSelectedOS();
     const previous = sel.value;
-    const available = CONSOLE_DROPDOWN_ACTIONS.filter(a => (!a.osOnly || a.osOnly === os) && hasPermission(a.permission));
+    // osOnly is either a single OS string (e.g. 'windows') or an array of allowed OSes
+    // (e.g. ['windows', 'linux'] for an action macOS doesn't support yet) -- Array.isArray
+    // lets both shapes share one field instead of needing a second one just for macOS.
+    const available = CONSOLE_DROPDOWN_ACTIONS.filter(a => (!a.osOnly || (Array.isArray(a.osOnly) ? a.osOnly.includes(os) : a.osOnly === os)) && hasPermission(a.permission));
     sel.innerHTML = available.map(a => `<option value="${a.value}">${escHtml(a.label)}</option>`).join('')
         || '<option value="">No actions available</option>';
     if (available.some(a => a.value === previous)) sel.value = previous;
@@ -1060,7 +1085,7 @@ function consoleRunSelectedAction() {
 
 function consoleSelectedOS() {
     const dev = allEndpoints.find(e => e.hostname === consoleSelectedHost);
-    return (dev && dev.os === 'linux') ? 'linux' : 'windows';
+    return (dev && (dev.os === 'linux' || dev.os === 'macos')) ? dev.os : 'windows';
 }
 
 function populateConsoleHostSelect() {
@@ -1090,7 +1115,11 @@ function openInConsole(hostname) {
 }
 
 function consolePromptSymbol(os) {
-    return os === 'linux' ? '$' : 'PS&gt;';
+    return (os === 'linux' || os === 'macos') ? '$' : 'PS&gt;';
+}
+
+function consoleShellName(os) {
+    return (os === 'linux' || os === 'macos') ? 'bash' : 'PowerShell';
 }
 
 function onConsoleHostChange() {
@@ -1109,8 +1138,8 @@ function onConsoleHostChange() {
     const os = consoleSelectedOS();
     document.getElementById('consolePrompt').innerHTML = consolePromptSymbol(os);
     document.getElementById('consoleCmdInput').placeholder = !active
-        ? `Type a ${os === 'linux' ? 'bash' : 'PowerShell'} command and press Enter...`
-        : (hasPermission('edr.command.advanced') ? `Type a ${os === 'linux' ? 'bash' : 'PowerShell'} command and press Enter...` : 'The "Queue advanced response actions" permission is required for free-text commands');
+        ? `Type a ${consoleShellName(os)} command and press Enter...`
+        : (hasPermission('edr.command.advanced') ? `Type a ${consoleShellName(os)} command and press Enter...` : 'The "Queue advanced response actions" permission is required for free-text commands');
     // auditd only exists on Linux -- hide those two buttons entirely rather than let
     // them queue a command the server will just reject for a Windows target.
     document.querySelectorAll('.console-action-btn[data-os-only]').forEach(btn => {

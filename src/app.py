@@ -4630,10 +4630,18 @@ def _run_scheduled_agent_sweeps(db):
         'yara_condition_sweep': {'rule_conditions': _get_live_yara_rule_conditions()},
     }
     for h in hosts:
-        os_name = h['os'] if h['os'] in ('windows', 'linux') else 'windows'
+        os_name = h['os'] if h['os'] in ('windows', 'linux', 'macos') else 'windows'
         templates = agent_scripts.TEMPLATES_BY_OS[os_name]
         for label, params in sweep_params.items():
-            builder, required = templates[label]
+            # macOS has no ioc_sweep/string_sweep/yara_condition_sweep templates yet
+            # (v1 deliberately ships a smaller core action set) -- .get() skips those
+            # hosts/labels cleanly instead of a bare templates[label] KeyError, which
+            # would otherwise abort the whole sweep loop for every host that comes
+            # after the first macOS one.
+            entry = templates.get(label)
+            if entry is None:
+                continue
+            builder, required = entry
             # NOT `required` here -- ioc_sweep/string_sweep/yara_condition_sweep all
             # register required=[] (an empty live list is a legitimate STATE the
             # builder itself already handles gracefully, not a missing-param user
@@ -8405,7 +8413,7 @@ def agent_config():
     # matches every agent that existed before this, rather than surfacing a confusing
     # third "unknown" OS state in the UI for endpoints that just haven't upgraded yet.
     agent_os = request.headers.get('X-Agent-OS', 'windows')
-    if agent_os not in ('windows', 'linux'):
+    if agent_os not in ('windows', 'linux', 'macos'):
         agent_os = 'windows'
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     db.execute('CREATE TABLE IF NOT EXISTS agent_polls (id INTEGER PRIMARY KEY, timestamp TEXT, ip_address TEXT, user_agent TEXT, version TEXT, os TEXT)')
@@ -9512,7 +9520,7 @@ def _get_host_os(db, hostname):
         "SELECT os FROM agent_polls WHERE user_agent = ? AND os IS NOT NULL AND os != '' ORDER BY id DESC LIMIT 1",
         (hostname,)
     ).fetchone()
-    return row['os'] if row and row['os'] in ('windows', 'linux') else 'windows'
+    return row['os'] if row and row['os'] in ('windows', 'linux', 'macos') else 'windows'
 
 def _get_live_ioc_sha256_hashes(db):
     # ioc_type labeling for hashes is inconsistent across feeds ('md5'/'sha1'/'sha256'
@@ -9820,7 +9828,20 @@ def api_download_agent(os_type):
             
         memory_file.seek(0)
         return send_file(memory_file, download_name='MicroDFIR_Linux_Agent.tar.gz', as_attachment=True)
-        
+
+    elif os_type == 'macos':
+        script_data = _build_agent_source('micro_agent_macos.py', server_ip, ui_port, ingest_port, soc_token)
+        if script_data is None:
+            return "macOS agent not found on server.", 404
+
+        with tarfile.open(fileobj=memory_file, mode='w:gz') as tf:
+            tarinfo = tarfile.TarInfo('micro_agent_macos.py')
+            tarinfo.size = len(script_data.encode('utf-8'))
+            tf.addfile(tarinfo, io.BytesIO(script_data.encode('utf-8')))
+
+        memory_file.seek(0)
+        return send_file(memory_file, download_name='MicroDFIR_macOS_Agent.tar.gz', as_attachment=True)
+
     return "Invalid OS type requested.", 400
 
 
