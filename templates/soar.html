@@ -543,11 +543,16 @@ function addPlaybookActionRow(actionType, params, requiresApproval) {
     const div = document.createElement('div');
     div.className = 'd-flex gap-2 align-items-start border border-secondary rounded p-2 mb-2';
     div.id = `pbActionRow_${seq}`;
-    const chosenType = actionType || 'add_note';
+    const labelsForRow = actionLabelsForTrigger(document.getElementById('pbTrigger').value);
+    // Fall back to the first entry of whichever label set actually applies right now --
+    // a hardcoded 'add_note' default would silently mismatch an alert_created playbook,
+    // where add_note isn't even an option (the dropdown would auto-select its first REAL
+    // option while the param fields underneath rendered add_note's, out of sync).
+    const chosenType = actionType || Object.keys(labelsForRow)[0];
     div.innerHTML = `
         <div style="width:180px;">
             <select class="form-select form-select-sm bg-dark text-light border-secondary mb-1" id="pbActType_${seq}" onchange="onPlaybookActionTypeChange(${seq})">
-                ${Object.entries(actionLabelsForTrigger(document.getElementById('pbTrigger').value)).map(([k, label]) => `<option value="${k}" ${k === chosenType ? 'selected' : ''}>${label}</option>`).join('')}
+                ${Object.entries(labelsForRow).map(([k, label]) => `<option value="${k}" ${k === chosenType ? 'selected' : ''}>${label}</option>`).join('')}
             </select>
             <div class="form-check form-check-sm">
                 <input class="form-check-input" type="checkbox" id="pbActApproval_${seq}" ${requiresApproval ? 'checked' : ''}>
