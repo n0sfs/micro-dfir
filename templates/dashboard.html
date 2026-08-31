@@ -666,10 +666,16 @@
         <h5 class="mb-0 text-info"><i class="fa-solid fa-folder-open"></i> Generated PDF Reports</h5>
         <form method="POST" action="{{ url_for('trigger_report') }}" class="m-0 d-flex gap-2 align-items-center">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <select name="type" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;">
+            <select name="type" id="reportTypeSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" onchange="onReportTypeChange()">
                 <option value="security">Security Summary</option>
                 <option value="compliance">Compliance Report</option>
                 <option value="audit">Audit Trail Report</option>
+            </select>
+            <select name="framework" id="reportFrameworkSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto; display:none;" title="Narrow the Compliance Report to one framework instead of the all-frameworks survey">
+                <option value="">All Frameworks</option>
+                {% for key, label in compliance_frameworks.items() %}
+                <option value="{{ key }}">{{ label }}</option>
+                {% endfor %}
             </select>
             <button type="submit" class="btn btn-sm btn-outline-success"><i class="fa-solid fa-bolt"></i> Generate Report</button>
         </form>
@@ -1089,6 +1095,14 @@ function setStatTile(i, label, value, large) {
 }
 
 const REPORT_TYPE_LABELS = { security: 'Security Summary', compliance: 'Compliance Report', audit: 'Audit Trail Report' };
+
+// The framework select only means anything for report_type=compliance -- hidden (and
+// its value ignored server-side via COMPLIANCE_FRAMEWORKS validation regardless) for
+// the other two types.
+function onReportTypeChange() {
+    const isCompliance = document.getElementById('reportTypeSelect').value === 'compliance';
+    document.getElementById('reportFrameworkSelect').style.display = isCompliance ? '' : 'none';
+}
 let reportHistoryData = [];
 let searchStats = {};
 let pipelineStats = {};
@@ -3741,7 +3755,7 @@ function renderReportHistory() {
     }
     body.innerHTML = reportHistoryData.map(h => `
         <tr>
-            <td><i class="fa-regular fa-file-pdf text-danger me-2"></i>${escHtml(REPORT_TYPE_LABELS[h.report_type] || h.report_type)}</td>
+            <td><i class="fa-regular fa-file-pdf text-danger me-2"></i>${escHtml(REPORT_TYPE_LABELS[h.report_type] || h.report_type)}${h.framework_label ? ' — ' + escHtml(h.framework_label) : ''}</td>
             <td class="small text-muted">${escHtml(h.completed_at || h.started_at || '')}</td>
             <td class="small">${h.triggered_by ? escHtml(h.triggered_by) : '<span class="text-muted">scheduled</span>'}</td>
             <td>${h.status === 'success' ? '<span class="badge bg-success">Success</span>' : `<span class="badge bg-danger" title="${escHtml(h.error_message || '')}">Failed</span>`}</td>
