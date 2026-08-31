@@ -213,6 +213,66 @@ foreach ($p in $paths) {
 """
     return script.replace('__PATTERNS__', pattern_list).replace('__RULEMAP__', rule_map)
 
+def _ps_string_array_literal(values):
+    return ','.join("'" + _ps_escape_literal(v) + "'" for v in values)
+
+def yara_condition_sweep(rule_conditions):
+    # rule_conditions: [{rule, strings, required_n, condition_label}, ...] from
+    # app.py's _get_live_yara_rule_conditions() -- a real condition check ("at least
+    # required_n of these strings must be present"), not string_sweep's independent
+    # any-string-hit reporting. required_n already folds any/all/N-of-them into one
+    # plain integer threshold, so the only comparison needed here is count >= required_n.
+    rules = [r for r in (rule_conditions or []) if r.get('strings') and r.get('required_n')]
+    if not rules:
+        return "Write-Output '{\"error\":\"no condition-evaluable YARA rules are currently available to sweep for\"}'"
+    rules_src = ','.join(
+        "[PSCustomObject]@{ rule='%s'; requiredN=%d; label='%s'; strings=@(%s) }" % (
+            _ps_escape_literal(r['rule']), int(r['required_n']), _ps_escape_literal(r.get('condition_label', '')),
+            _ps_string_array_literal(r['strings']),
+        )
+        for r in rules
+    )
+    # Same bounded scope/extension list as string_sweep() above, and the same
+    # Contains()-loop-over-a-flat-pattern-list performance lesson applies here too --
+    # per-rule string counts are summed with the same per-pattern .Contains() loop,
+    # just grouped by rule afterward instead of reported independently.
+    script = """$rules = @(__RULES__)
+$paths = @($env:TEMP, $env:APPDATA, $env:ProgramData, (Join-Path $env:USERPROFILE 'Downloads'))
+$cutoff = (Get-Date).AddDays(-14)
+$exts = @('.exe','.dll','.scr','.ps1','.bat','.vbs','.js','.jar','.msi')
+$maxHits = 50
+$scanned = 0
+$hits = @()
+$totalMatchingFiles = 0
+foreach ($p in $paths) {
+    if (-not (Test-Path $p)) { continue }
+    Get-ChildItem -Path $p -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -ge $cutoff -and $exts -contains $_.Extension.ToLower() -and $_.Length -lt 5MB } |
+        ForEach-Object {
+            $scanned++
+            try {
+                $content = [IO.File]::ReadAllText($_.FullName)
+                $matchedRules = @()
+                foreach ($r in $rules) {
+                    $count = 0
+                    foreach ($s in $r.strings) { if ($content.Contains($s)) { $count++ } }
+                    if ($count -ge $r.requiredN) {
+                        $matchedRules += [PSCustomObject]@{ rule=$r.rule; condition=$r.label; matched_strings=$count; total_strings=$r.strings.Count }
+                    }
+                }
+                if ($matchedRules.Count -gt 0) {
+                    $totalMatchingFiles++
+                    if ($hits.Count -lt $maxHits) {
+                        $hits += [PSCustomObject]@{ path=$_.FullName; size=$_.Length; modified=$_.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'); matched_rules=$matchedRules }
+                    }
+                }
+            } catch {}
+        }
+}
+[PSCustomObject]@{ scanned=$scanned; hits=$hits; rules_evaluated=$rules.Count; total_matching_files=$totalMatchingFiles; hits_truncated=($totalMatchingFiles -gt $maxHits) } | ConvertTo-Json -Compress -Depth 6
+"""
+    return script.replace('__RULES__', rules_src)
+
 # Progress records (e.g. from Get-FileHash on multiple files in collect_triage) get
 # serialized as CLIXML and mixed straight into stdout when PowerShell runs
 # non-interactively with its output captured — confirmed in production, where a
@@ -518,6 +578,7 @@ WINDOWS_TEMPLATES = {
     # not a missing-parameter error.
     'ioc_sweep': (lambda params: _PROGRESS_SILENT + ioc_sweep(params.get('hashes', []), params.get('md5_hashes', []), params.get('sha1_hashes', [])), []),
     'string_sweep': (lambda params: _PROGRESS_SILENT + string_sweep(params.get('patterns', [])), []),
+    'yara_condition_sweep': (lambda params: _PROGRESS_SILENT + yara_condition_sweep(params.get('rule_conditions', [])), []),
 }
 
 # ---- Linux (bash) ----
@@ -734,6 +795,76 @@ print(json.dumps({'scanned': scanned, 'hits': hits}))
 PYEOF
 """
     return script.replace('__PATTERN_MAP__', pattern_map_src)
+
+def yara_condition_sweep_linux(rule_conditions):
+    # rule_conditions: [{rule, strings, required_n, condition_label}, ...] from
+    # app.py's _get_live_yara_rule_conditions() -- a real condition check ("at least
+    # required_n of these strings must be present"), not string_sweep's independent
+    # any-string-hit reporting. required_n already folds any/all/N-of-them into one
+    # plain integer threshold, so the only comparison needed here is count >= required_n.
+    rules = [r for r in (rule_conditions or []) if r.get('strings') and r.get('required_n')]
+    if not rules:
+        return "echo '{\"error\": \"no condition-evaluable YARA rules are currently available to sweep for\"}'"
+    # repr() is valid-Python-literal escaping, same as string_sweep_linux() above --
+    # rule/string text is free-form content pulled from rule files, not a trusted shape.
+    rules_src = repr([
+        {'rule': r['rule'], 'strings': list(r['strings']), 'required_n': int(r['required_n']), 'condition_label': r.get('condition_label', '')}
+        for r in rules
+    ])
+    script = """python3 - <<'PYEOF'
+import json, os, time
+
+RULES = __RULES__
+for r in RULES:
+    r['string_bytes'] = [s.encode('utf-8', 'ignore') for s in r['strings']]
+PATHS = ['/tmp', '/var/tmp', '/dev/shm', os.path.expanduser('~/Downloads')]
+EXTS = {'', '.sh', '.bin', '.elf', '.py', '.php', '.pl', '.out'}
+CUTOFF = time.time() - 14 * 86400
+MAX_SIZE = 10 * 1024 * 1024
+MAX_HITS = 50
+
+scanned = 0
+hits = []
+total_matching_files = 0
+for base in PATHS:
+    if not os.path.isdir(base):
+        continue
+    for root, dirs, files in os.walk(base):
+        for name in files:
+            path = os.path.join(root, name)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            if st.st_mtime < CUTOFF or st.st_size > MAX_SIZE:
+                continue
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in EXTS:
+                continue
+            scanned += 1
+            try:
+                with open(path, 'rb') as f:
+                    data = f.read()
+            except OSError:
+                continue
+            matched_rules = []
+            for r in RULES:
+                count = sum(1 for b in r['string_bytes'] if b in data)
+                if count >= r['required_n']:
+                    matched_rules.append({'rule': r['rule'], 'condition': r['condition_label'], 'matched_strings': count, 'total_strings': len(r['strings'])})
+            if matched_rules:
+                total_matching_files += 1
+                if len(hits) < MAX_HITS:
+                    hits.append({
+                        'path': path, 'size': st.st_size,
+                        'modified': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_mtime)),
+                        'matched_rules': matched_rules,
+                    })
+
+print(json.dumps({'scanned': scanned, 'hits': hits, 'rules_evaluated': len(RULES), 'total_matching_files': total_matching_files, 'hits_truncated': total_matching_files > MAX_HITS}))
+PYEOF
+"""
+    return script.replace('__RULES__', rules_src)
 
 # Deeper than collect_triage_linux()'s lighter cron/systemd touch above -- every user's
 # own crontab individually (not just the system-wide files), the FULL enabled-unit list
@@ -957,6 +1088,7 @@ LINUX_TEMPLATES = {
     'collect_ssh_artifacts': (lambda params: collect_ssh_artifacts_linux(), []),
     'ioc_sweep': (lambda params: ioc_sweep_linux(params.get('hashes', []), params.get('md5_hashes', []), params.get('sha1_hashes', [])), []),
     'string_sweep': (lambda params: string_sweep_linux(params.get('patterns', [])), []),
+    'yara_condition_sweep': (lambda params: yara_condition_sweep_linux(params.get('rule_conditions', [])), []),
     'enable_exec_auditing': (lambda params: enable_exec_auditing(), []),
     'disable_exec_auditing': (lambda params: disable_exec_auditing(), []),
 }

@@ -243,6 +243,7 @@
                 <select id="groupDispatchAction" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:200px;">
                     <option value="ioc_sweep">Known-Bad Hash Sweep</option>
                     <option value="string_sweep">YARA String Sweep</option>
+                    <option value="yara_condition_sweep">YARA Condition Sweep</option>
                     <option value="collect_triage">Collect Triage</option>
                     <option value="upgrade">Upgrade Agent</option>
                 </select>
@@ -949,6 +950,7 @@ const CONSOLE_ACTION_DISPLAY = {
         persistence_sweep: 'Persistence-Sweep (scheduled tasks, services, Run/RunOnce keys, startup folders, WMI event subscriptions -- diffed against the last run on this host)',
         ioc_sweep: 'IOC-Sweep (hash recent files in Temp/Downloads/AppData/ProgramData against known-bad hashes)',
         string_sweep: 'String-Sweep (search recent files in Temp/Downloads/AppData/ProgramData for known-bad YARA strings)',
+        yara_condition_sweep: 'YARA-Condition-Sweep (same files as String-Sweep, but requires each rule\'s actual any/all/N-of-them condition to be satisfied, not just one string hit)',
         collect_browser_artifacts: 'Collect-Browser-Artifacts (Chrome/Edge/Firefox history file metadata + recent downloads, all user profiles)',
         collect_forensic_timestamps: 'Collect-Forensic-Timestamps (Prefetch listing, Amcache/Shimcache metadata)',
         collect_recent_file_changes: 'Collect-Recent-File-Changes (files modified in the last 24h across common drop locations)',
@@ -963,6 +965,7 @@ const CONSOLE_ACTION_DISPLAY = {
         persistence_sweep: 'Persistence-Sweep (user crontabs, full enabled-unit list, init.d, shell profiles, LD_PRELOAD, kernel modules, root SUID/SGID binaries -- diffed against the last run on this host; plus hidden-process and promiscuous-interface rootcheck-style checks, re-reported every run)',
         ioc_sweep: 'IOC-Sweep (hash recent files in /tmp, /var/tmp, ~/Downloads against known-bad hashes)',
         string_sweep: 'String-Sweep (search recent files in /tmp, /var/tmp, ~/Downloads for known-bad YARA strings)',
+        yara_condition_sweep: 'YARA-Condition-Sweep (same files as String-Sweep, but requires each rule\'s actual any/all/N-of-them condition to be satisfied, not just one string hit)',
         collect_ssh_artifacts: 'Collect-SSH-Artifacts (shell history, authorized_keys, known_hosts, all real users)',
         isolate_host: 'Isolate-Host (iptables: block all traffic except this SOC server)',
         restore_network: 'Restore-Network (iptables: remove isolation rules)',
@@ -984,6 +987,7 @@ const CONSOLE_DROPDOWN_ACTIONS = [
     { value: 'persistence_sweep', label: 'Persistence Sweep', permission: 'edr.command.advanced' },
     { value: 'ioc_sweep', label: 'IOC Hash Sweep', permission: 'edr.command.advanced' },
     { value: 'string_sweep', label: 'String Sweep', permission: 'edr.command.advanced' },
+    { value: 'yara_condition_sweep', label: 'YARA Condition Sweep', permission: 'edr.command.advanced' },
     { value: 'collect_browser_artifacts', label: 'Browser Artifacts', permission: 'edr.command.advanced', osOnly: 'windows' },
     { value: 'collect_forensic_timestamps', label: 'Forensic Timestamps', permission: 'edr.command.advanced', osOnly: 'windows' },
     { value: 'collect_recent_file_changes', label: 'Recent File Changes', permission: 'edr.command.advanced', osOnly: 'windows' },
