@@ -4370,13 +4370,20 @@ def _run_scheduled_agent_sweeps(db):
             'sha1_hashes': _get_live_ioc_sha1_hashes(db),
         },
         'string_sweep': {'patterns': _get_live_yara_strings()},
+        'yara_condition_sweep': {'rule_conditions': _get_live_yara_rule_conditions()},
     }
     for h in hosts:
         os_name = h['os'] if h['os'] in ('windows', 'linux') else 'windows'
         templates = agent_scripts.TEMPLATES_BY_OS[os_name]
         for label, params in sweep_params.items():
             builder, required = templates[label]
-            if any(not params.get(p) for p in required):
+            # NOT `required` here -- ioc_sweep/string_sweep/yara_condition_sweep all
+            # register required=[] (an empty live list is a legitimate STATE the
+            # builder itself already handles gracefully, not a missing-param user
+            # error), so that list is always empty and this check would never actually
+            # skip anything. Checking the live sweep data directly is what actually
+            # avoids queuing a no-op command to a host with nothing loaded to check yet.
+            if not any(params.values()):
                 continue  # nothing loaded to sweep for yet (no IOCs / no YARA rules)
             try:
                 script = builder(params)
@@ -9234,6 +9241,108 @@ def _get_live_yara_strings(limit=150):
                     return results
     return results
 
+_YARA_ANY_STRING_DEF_RE = re.compile(r'^\s*\$\w+\s*=')
+_YARA_CONDITION_START_RE = re.compile(r'^\s*condition\s*:\s*(.*)$')
+_YARA_CONDITION_ANY_RE = re.compile(r'^\s*(?:any|1)\s+of\s+them\s*;?\s*$', re.IGNORECASE)
+_YARA_CONDITION_ALL_RE = re.compile(r'^\s*all\s+of\s+them\s*;?\s*$', re.IGNORECASE)
+_YARA_CONDITION_NOF_RE = re.compile(r'^\s*(\d+)\s+of\s+them\s*;?\s*$', re.IGNORECASE)
+
+def _get_live_yara_rule_conditions(max_rules=60, max_strings_per_rule=25):
+    # A step beyond _get_live_yara_strings()'s flat any-string-hit list: groups a rule's
+    # strings together and classifies its condition into one of the few forms simple
+    # enough to safely evaluate without a real YARA engine on the endpoint --
+    # "any/1 of them", "all of them", "N of them". Anything else (named-string boolean
+    # logic, hex/regex strings, PE/math modules, offsets) is genuinely out of reach for a
+    # dependency-free pure-Python matcher, so a rule using any of that -- or containing
+    # even ONE string this can't cleanly extract (hex/regex/nocase/wide/base64) -- is
+    # dropped entirely rather than guessed at: a rule silently excluded from the
+    # condition-aware sweep is a missed detection; a rule wrongly reported as
+    # condition-satisfied is a false CRITICAL alert. Only the former is acceptable here.
+    rules_out = []
+    if not os.path.isdir(YARA_RULES_DIR):
+        return rules_out
+    for root, dirs, files in os.walk(YARA_RULES_DIR):
+        for fname in sorted(files):
+            if not fname.endswith(('.yar', '.yara')):
+                continue
+            full_path = os.path.join(root, fname)
+            rel_path = os.path.relpath(full_path, YARA_RULES_DIR)
+            try:
+                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    lines = f.read().splitlines()
+            except OSError:
+                continue
+
+            i = 0
+            while i < len(lines):
+                rule_m = _YARA_RULE_NAME_RE.match(lines[i])
+                if not rule_m:
+                    i += 1
+                    continue
+                rule_name = rule_m.group(1)
+                strings, supported, condition = [], True, None
+                i += 1
+                while i < len(lines) and not _YARA_RULE_NAME_RE.match(lines[i]):
+                    line = lines[i]
+                    cond_m = _YARA_CONDITION_START_RE.match(line)
+                    if cond_m:
+                        # Condition text may continue on following lines up to the
+                        # closing brace -- join them, since "N of them" etc. is always
+                        # written as one logical expression even if line-wrapped.
+                        cond_lines = [cond_m.group(1)]
+                        j = i + 1
+                        while j < len(lines) and lines[j].strip() != '}':
+                            cond_lines.append(lines[j])
+                            j += 1
+                        cond_text = re.sub(r'//.*$', '', ' '.join(cond_lines), flags=re.MULTILINE).strip()
+                        if _YARA_CONDITION_ANY_RE.match(cond_text):
+                            condition = 'any'
+                        elif _YARA_CONDITION_ALL_RE.match(cond_text):
+                            condition = 'all'
+                        else:
+                            nof_m = _YARA_CONDITION_NOF_RE.match(cond_text)
+                            condition = ('n_of', int(nof_m.group(1))) if nof_m else None
+                        i = j
+                        continue
+                    str_m = _YARA_STRING_DEF_RE.match(line)
+                    if str_m:
+                        raw, tail = str_m.group(1), str_m.group(2).lower()
+                        unescaped = _unescape_yara_string(raw)
+                        # No length-based noise filter here, unlike _get_live_yara_strings()
+                        # above -- for "all of them"/"N of them" a real condition needs
+                        # EVERY string checked or the count is wrong, which can turn a
+                        # partial (false) match into a reported "condition satisfied". A
+                        # too-short/degenerate literal (empty, or so short it's not really
+                        # a signature) makes the WHOLE rule unsafe to evaluate instead of
+                        # just being dropped, since dropping it would silently weaken an
+                        # AND-style condition into something easier to satisfy than the
+                        # real rule.
+                        if any(mod in tail for mod in _YARA_SKIP_MODIFIERS) or len(unescaped) < 2:
+                            supported = False
+                        else:
+                            strings.append(unescaped)
+                    elif _YARA_ANY_STRING_DEF_RE.match(line):
+                        supported = False  # a $-string def that ISN'T the plain-text form (hex/regex)
+                    i += 1
+
+                if supported and condition and strings and len(strings) <= max_strings_per_rule:
+                    deduped = sorted(set(strings))
+                    # Resolved to a plain integer threshold ("at least N of these strings
+                    # must be present") -- any/all/N-of-them are really the same check
+                    # with a different N, so the agent only has to implement one
+                    # comparison instead of three branches of condition logic.
+                    if condition == 'any':
+                        required_n, label = 1, 'any of them'
+                    elif condition == 'all':
+                        required_n, label = len(deduped), 'all of them'
+                    else:
+                        required_n, label = condition[1], f'{condition[1]} of them'
+                    if required_n <= len(deduped):  # can't require more matches than strings exist
+                        rules_out.append({'rule': rule_name, 'file': rel_path, 'strings': deduped, 'required_n': required_n, 'condition_label': label})
+                if len(rules_out) >= max_rules:
+                    return rules_out
+    return rules_out
+
 AGENT_TLS_CERT_PATH = '/opt/micro-dfir/config/cert.pem'
 
 def _build_agent_source(agent_filename, server_ip, ui_port, ingest_port, soc_token):
@@ -9522,6 +9631,8 @@ def _queue_agent_command(db, hostname, label, params, script_in, queued_by):
             params['sha1_hashes'] = _get_live_ioc_sha1_hashes(db)
         if label == 'string_sweep':
             params['patterns'] = _get_live_yara_strings()
+        if label == 'yara_condition_sweep':
+            params['rule_conditions'] = _get_live_yara_rule_conditions()
         if label == 'isolate_host' and not params.get('soc_ip'):
             s = {r[0]: r[1] for r in db.execute("SELECT key, value FROM settings").fetchall()}
             soc_ip = s.get('ingest_bind_ip', '0.0.0.0')
