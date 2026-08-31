@@ -1700,13 +1700,19 @@ function addWidgetToGrid(w) {
     if (!def) return; // an unrecognized widget_type (e.g. added by a future version) -- degrade gracefully instead of throwing
     RENDERED_WIDGETS[w.id] = { widget_type: w.widget_type, config: w.config || {} };
     const liveBadge = def.live ? '<span class="badge bg-secondary me-1" title="Reflects current state, not the selected time range">Live</span>' : '';
+    // Same "badge next to the title" pattern as liveBadge above -- def.configurable is
+    // only ever true for chart_custom today, but this stays generic in case a future
+    // user-built widget type joins it. bg-primary matches the blue call-out this widget
+    // type already gets in the Add Widget picker, so the same color reads as "custom"
+    // in both places.
+    const customBadge = def.configurable ? '<span class="badge bg-primary me-1" title="A widget you built yourself, not part of the built-in catalog">Custom</span>' : '';
     const configureBtn = def.configurable ? `<button type="button" class="btn btn-sm btn-link text-muted p-0 me-2 widget-configure-btn" onclick="openCustomWidgetConfigModal(${w.id}, RENDERED_WIDGETS[${w.id}].config)" title="Configure"><i class="fa-solid fa-gear"></i></button>` : '';
     grid.addWidget({
         id: String(w.id), x: w.x, y: w.y, w: w.w, h: w.h,
         content: `<div class="card bg-dark border-secondary widget-card">
             <div class="card-header border-secondary d-flex justify-content-between align-items-center">
                 <span id="widgetTitle_${w.id}"><i class="fa-solid ${def.icon} me-2"></i>${escHtml((w.config && w.config.title) || def.label)}</span>
-                <span class="d-flex align-items-center">${liveBadge}${configureBtn}<button type="button" class="btn btn-sm btn-link text-muted p-0 widget-remove-btn" onclick="removeWidget(${w.id})" title="Remove"><i class="fa-solid fa-xmark"></i></button></span>
+                <span class="d-flex align-items-center">${customBadge}${liveBadge}${configureBtn}<button type="button" class="btn btn-sm btn-link text-muted p-0 widget-remove-btn" onclick="removeWidget(${w.id})" title="Remove"><i class="fa-solid fa-xmark"></i></button></span>
             </div>
             <div class="card-body widget-body" id="widgetBody_${w.id}"></div>
         </div>`,
