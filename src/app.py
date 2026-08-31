@@ -95,6 +95,7 @@ class User(UserMixin):
 PERMISSION_REGISTRY = [
     {'key': 'cases.delete', 'label': 'Delete cases', 'category': 'Cases'},
     {'key': 'cases.queues.manage', 'label': 'Manage case queues', 'category': 'Cases'},
+    {'key': 'cases.templates.manage', 'label': 'Manage case templates & custom fields', 'category': 'Cases'},
     {'key': 'logsearch.droprules.manage', 'label': 'Manage ingestion drop rules', 'category': 'Log Search'},
     {'key': 'rules.manage', 'label': 'Manage detection rules', 'category': 'Detection Rules'},
     {'key': 'ueba.config.manage', 'label': 'Manage UEBA config & anomaly rules', 'category': 'UEBA'},
@@ -3610,6 +3611,20 @@ def _log_case_event(db, cid, event_type, detail=None):
         (cid, actor, event_type, detail)
     )
 
+def _seed_case_template_fields(db, cid, template_id):
+    # Copies label/field_type onto case_field_values at apply time -- deliberately
+    # denormalized (no live FK to case_template_fields) so a later template edit never
+    # rewrites a case's own historical field record.
+    fields = db.execute(
+        "SELECT label, field_type, options FROM case_template_fields WHERE template_id = ? ORDER BY position",
+        (template_id,)
+    ).fetchall()
+    if fields:
+        db.executemany(
+            "INSERT INTO case_field_values (case_id, label, field_type, options, value, position) VALUES (?, ?, ?, ?, '', ?)",
+            [(cid, f['label'], f['field_type'], f['options'], i) for i, f in enumerate(fields)]
+        )
+
 # Closed = the formal administrative closing (read-only, still reopenable if new
 # evidence surfaces) -- see the case-detail PUT handler below for the one path that's
 # still allowed to write to a closed case (leaving 'closed' in that same request).
@@ -3761,6 +3776,7 @@ def api_cases():
                 "INSERT INTO case_tasks (case_id, title, position, created_by) VALUES (?, ?, ?, ?)",
                 [(cid, t, i, current_user.username) for i, t in enumerate(tasks)]
             )
+            _seed_case_template_fields(db, cid, template_id)
             _log_case_event(db, cid, 'template_applied', tpl['name'])
 
     _run_playbooks_for_case(db, cid, 'case_created', queue_id, tlp, 'open', severity)
@@ -3938,7 +3954,14 @@ def api_case_detail(cid):
     case_iocs = [dict(i) for i in db.execute(
         "SELECT id, ioc_type, value, notes, added_by, added_at FROM case_iocs WHERE case_id = ? ORDER BY added_at", (cid,)
     ).fetchall()]
-    return jsonify({**dict(case), 'items': items_out, 'tasks': tasks, 'events': events, 'assets': case_assets, 'iocs': case_iocs})
+    field_values = []
+    for f in db.execute(
+        "SELECT id, label, field_type, options, value, position FROM case_field_values WHERE case_id = ? ORDER BY position", (cid,)
+    ).fetchall():
+        fv = dict(f)
+        fv['options'] = json.loads(fv['options']) if fv['options'] else []
+        field_values.append(fv)
+    return jsonify({**dict(case), 'items': items_out, 'tasks': tasks, 'events': events, 'assets': case_assets, 'iocs': case_iocs, 'fields': field_values})
 
 @app.route('/api/cases/<int:cid>/items', methods=['POST'])
 @login_required
@@ -4122,6 +4145,21 @@ def api_case_task_detail(cid, tid):
     if status != task['status']:
         _log_case_event(db, cid, 'task_done' if status == 'done' else 'task_reopened', title)
     db.execute("UPDATE case_tasks SET title = ?, status = ?, assignee = ? WHERE id = ?", (title, status, assignee, tid))
+    db.commit()
+    return jsonify({"status": "success"})
+
+@app.route('/api/cases/<int:cid>/fields', methods=['PUT'])
+@login_required
+def api_case_fields_update(cid):
+    db = get_db()
+    err = _require_open_case(db, cid)
+    if err: return err
+    values = (request.get_json() or {}).get('values') or []
+    existing_ids = {row['id'] for row in db.execute("SELECT id FROM case_field_values WHERE case_id = ?", (cid,)).fetchall()}
+    for v in values:
+        if v.get('id') not in existing_ids:
+            return jsonify({"error": f"field {v.get('id')} does not belong to this case"}), 400
+        db.execute("UPDATE case_field_values SET value = ? WHERE id = ?", (v.get('value') or '', v['id']))
     db.commit()
     return jsonify({"status": "success"})
 
@@ -4355,6 +4393,7 @@ def _run_playbook_action(db, cid, action_type, params, dry_run=False):
             "INSERT INTO case_tasks (case_id, title, position, created_by) VALUES (?, ?, ?, 'playbook')",
             [(cid, t, max_pos + 1 + i) for i, t in enumerate(tasks)]
         )
+        _seed_case_template_fields(db, cid, params.get('template_id'))
         _log_case_event(db, cid, 'template_applied', tpl['name'])
         return f"applied template '{tpl['name']}' ({len(tasks)} tasks)"
 
@@ -5286,17 +5325,107 @@ def api_playbook_secret_delete(sid):
     log_audit('playbook_secret_delete', 'playbook_secret', existing['name'])
     return jsonify({'ok': 1})
 
-@app.route('/api/case-templates', methods=['GET'])
+def _case_template_fields_out(db, template_id):
+    rows = db.execute(
+        "SELECT id, label, field_type, options, required, position FROM case_template_fields WHERE template_id = ? ORDER BY position",
+        (template_id,)
+    ).fetchall()
+    out = []
+    for r in rows:
+        f = dict(r)
+        f['options'] = json.loads(f['options']) if f['options'] else []
+        f['required'] = bool(f['required'])
+        out.append(f)
+    return out
+
+@app.route('/api/case-templates', methods=['GET', 'POST'])
 @login_required
 def api_case_templates():
     db = get_db()
-    rows = db.execute("SELECT id, name, description, tasks FROM case_templates ORDER BY name").fetchall()
-    out = []
-    for r in rows:
-        d = dict(r)
-        d['tasks'] = json.loads(d['tasks'])
-        out.append(d)
-    return jsonify(out)
+    if request.method == 'GET':
+        rows = db.execute("SELECT id, name, description, tasks FROM case_templates ORDER BY name").fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d['tasks'] = json.loads(d['tasks'])
+            d['fields'] = _case_template_fields_out(db, d['id'])
+            out.append(d)
+        return jsonify(out)
+
+    err = require_permission('cases.templates.manage')
+    if err: return err
+    d = request.json or {}
+    name = (d.get('name') or '').strip()
+    tasks = [t.strip() for t in (d.get('tasks') or []) if isinstance(t, str) and t.strip()]
+    fields = d.get('fields') or []
+    if not name:
+        return jsonify({'error': 'name is required'}), 400
+    for f in fields:
+        if f.get('field_type') not in CASE_TEMPLATE_FIELD_TYPES:
+            return jsonify({'error': f"invalid field_type: {f.get('field_type')}"}), 400
+        if not (f.get('label') or '').strip():
+            return jsonify({'error': 'every field requires a label'}), 400
+    if db.execute("SELECT 1 FROM case_templates WHERE name = ?", (name,)).fetchone():
+        return jsonify({'error': f'A template named "{name}" already exists'}), 400
+    cur = db.execute(
+        "INSERT INTO case_templates (name, description, tasks, created_by) VALUES (?, ?, ?, ?)",
+        (name, (d.get('description') or '').strip(), json.dumps(tasks), current_user.username)
+    )
+    tid = cur.lastrowid
+    for i, f in enumerate(fields):
+        options = f.get('options') or []
+        db.execute(
+            "INSERT INTO case_template_fields (template_id, label, field_type, options, required, position) VALUES (?, ?, ?, ?, ?, ?)",
+            (tid, f['label'].strip(), f['field_type'], json.dumps(options) if f['field_type'] == 'dropdown' else None, 1 if f.get('required') else 0, i)
+        )
+    db.commit()
+    log_audit('case_template_create', 'case_template', name)
+    return jsonify({'status': 'success', 'id': tid})
+
+@app.route('/api/case-templates/<int:tid>', methods=['PUT', 'DELETE'])
+@login_required
+def api_case_template_detail(tid):
+    err = require_permission('cases.templates.manage')
+    if err: return err
+    db = get_db()
+    existing = db.execute("SELECT name FROM case_templates WHERE id = ?", (tid,)).fetchone()
+    if not existing:
+        return jsonify({'error': 'Template not found'}), 404
+
+    if request.method == 'DELETE':
+        db.execute("DELETE FROM case_template_fields WHERE template_id = ?", (tid,))
+        db.execute("DELETE FROM case_templates WHERE id = ?", (tid,))
+        db.commit()
+        log_audit('case_template_delete', 'case_template', existing['name'])
+        return jsonify({'ok': 1})
+
+    d = request.json or {}
+    name = (d.get('name') or '').strip()
+    tasks = [t.strip() for t in (d.get('tasks') or []) if isinstance(t, str) and t.strip()]
+    fields = d.get('fields') or []
+    if not name:
+        return jsonify({'error': 'name is required'}), 400
+    for f in fields:
+        if f.get('field_type') not in CASE_TEMPLATE_FIELD_TYPES:
+            return jsonify({'error': f"invalid field_type: {f.get('field_type')}"}), 400
+        if not (f.get('label') or '').strip():
+            return jsonify({'error': 'every field requires a label'}), 400
+    if db.execute("SELECT 1 FROM case_templates WHERE name = ? AND id != ?", (name, tid)).fetchone():
+        return jsonify({'error': f'A template named "{name}" already exists'}), 400
+    db.execute(
+        "UPDATE case_templates SET name = ?, description = ?, tasks = ? WHERE id = ?",
+        (name, (d.get('description') or '').strip(), json.dumps(tasks), tid)
+    )
+    db.execute("DELETE FROM case_template_fields WHERE template_id = ?", (tid,))
+    for i, f in enumerate(fields):
+        options = f.get('options') or []
+        db.execute(
+            "INSERT INTO case_template_fields (template_id, label, field_type, options, required, position) VALUES (?, ?, ?, ?, ?, ?)",
+            (tid, f['label'].strip(), f['field_type'], json.dumps(options) if f['field_type'] == 'dropdown' else None, 1 if f.get('required') else 0, i)
+        )
+    db.commit()
+    log_audit('case_template_update', 'case_template', name)
+    return jsonify({'status': 'success'})
 
 UEBA_CONFIG_DEFAULTS = {
     'ueba_lookback_days': '30', 'ueba_stddev_multiplier': '3', 'ueba_min_baseline': '50',
@@ -6811,6 +6940,8 @@ CASE_TEMPLATES_SEED = [
                'Document findings', 'Close out or escalate']},
 ]
 
+CASE_TEMPLATE_FIELD_TYPES = {'text', 'dropdown', 'date', 'checkbox'}
+
 def migrate_case_upgrade():
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
@@ -6855,6 +6986,38 @@ def migrate_case_upgrade():
                 "INSERT OR IGNORE INTO case_templates (name, description, tasks, created_by) VALUES (?, ?, ?, 'system')",
                 (t['name'], t['description'], json.dumps(t['tasks']))
             )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_case_template_fields():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute('''CREATE TABLE IF NOT EXISTS case_template_fields (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            template_id INTEGER NOT NULL,
+            label TEXT NOT NULL,
+            field_type TEXT NOT NULL,
+            options TEXT,
+            required INTEGER NOT NULL DEFAULT 0,
+            position INTEGER NOT NULL DEFAULT 0
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_case_template_fields_template ON case_template_fields(template_id)')
+        # Deliberately no FK to case_template_fields -- a case's field values are a
+        # stable historical record that a later template edit must never rewrite,
+        # same principle already applied to original_yaml on Sigma rules.
+        conn.execute('''CREATE TABLE IF NOT EXISTS case_field_values (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id INTEGER NOT NULL,
+            label TEXT NOT NULL,
+            field_type TEXT NOT NULL,
+            options TEXT,
+            value TEXT,
+            position INTEGER NOT NULL DEFAULT 0
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_case_field_values_case ON case_field_values(case_id)')
         conn.commit()
         conn.close()
     except Exception:
@@ -7146,6 +7309,39 @@ def migrate_role_permissions():
                     "INSERT INTO role_permissions (role_id, permission_key) VALUES (?, ?)",
                     [(rid, key) for key in perms]
                 )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# cases.templates.manage is a new permission (Case Templates CRUD + custom fields in
+# SOAR) -- _BUILTIN_ROLE_SEED above only seeds a truly fresh install (zero existing
+# roles), so an already-deployed appliance's roles need this granted explicitly. Mirrors
+# whichever roles already have cases.queues.manage (its natural sibling -- both are
+# admin-only by default via PERMISSION_KEYS, neither is in _SENIOR_ANALYST_PERMISSIONS),
+# so the new tab is usable immediately without a manual trip to Settings > Roles first.
+# Guarded by a one-time settings flag (same pattern as
+# migrate_seed_legacy_notification_playbook) rather than re-deriving from
+# cases.queues.manage on every startup -- otherwise an admin who deliberately revokes
+# just this one permission from a role (while leaving cases.queues.manage granted)
+# would have it silently re-added on the next deploy.
+def migrate_case_templates_manage_permission():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+        seeded = conn.execute("SELECT value FROM settings WHERE key = 'case_templates_permission_seeded'").fetchone()
+        if seeded and seeded['value'] == '1':
+            conn.close()
+            return
+        role_ids = [r[0] for r in conn.execute(
+            "SELECT role_id FROM role_permissions WHERE permission_key = 'cases.queues.manage'"
+        ).fetchall()]
+        conn.executemany(
+            "INSERT OR IGNORE INTO role_permissions (role_id, permission_key) VALUES (?, 'cases.templates.manage')",
+            [(rid,) for rid in role_ids]
+        )
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('case_templates_permission_seeded', '1')")
         conn.commit()
         conn.close()
     except Exception:
@@ -10612,6 +10808,7 @@ migrate_ueba_math_v2()
 migrate_assets_identities()
 migrate_cases()
 migrate_case_upgrade()
+migrate_case_template_fields()
 migrate_case_queues()
 migrate_case_assets()
 migrate_case_severity()
@@ -10619,6 +10816,7 @@ migrate_case_iocs()
 migrate_dashboards()
 migrate_role_casing()
 migrate_role_permissions()
+migrate_case_templates_manage_permission()
 migrate_role_default_dashboard()
 migrate_role_default_dashboard_v2()
 migrate_playbooks()
