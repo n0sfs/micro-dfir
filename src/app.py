@@ -1887,6 +1887,28 @@ COMPLIANCE_FRAMEWORKS = {
     'cis_controls': 'CIS Controls', 'gdpr': 'GDPR',
 }
 
+COMPLIANCE_AUDIT_ACTIONS = ('rule_compliance_tag', 'rule_toggle', 'rule_bulk_toggle')
+
+@app.route('/api/compliance/audit-trail', methods=['GET'])
+@login_required
+def api_compliance_audit_trail():
+    # Who tagged/enabled/disabled a compliance-relevant rule, and when -- these three
+    # actions already write real audit_log rows (log_audit calls in api_rule_compliance,
+    # api_r_tog, api_rules_bulk), this just surfaces them filtered to compliance's own
+    # slice instead of requiring a trip through the full unfiltered audit log. Gated the
+    # same way the full audit log is (audit.view), not threatintel/rules.manage --
+    # reading who-changed-what is an audit concern, not a rule-editing one.
+    err = require_permission('audit.view')
+    if err: return err
+    db = get_db()
+    placeholders = ','.join('?' * len(COMPLIANCE_AUDIT_ACTIONS))
+    rows = db.execute(
+        f"SELECT id, timestamp, username, action, target_id, details FROM audit_log "
+        f"WHERE action IN ({placeholders}) ORDER BY id DESC LIMIT 25",
+        COMPLIANCE_AUDIT_ACTIONS
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
 @app.route('/api/compliance/coverage', methods=['GET'])
 @login_required
 def api_compliance_coverage():
