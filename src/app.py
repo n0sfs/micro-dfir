@@ -5277,6 +5277,24 @@ def _risk_tier(score, tiers):
     if score >= tiers['medium']: return 'Medium'
     return 'Low'
 
+# Tiers for the 0-10 normalized priority_score (ueba_engine.py's run_priority_scoring,
+# peak+breadth+decay blend) -- a different scale from _risk_tier's raw point thresholds
+# above, which stay tied to RISK_SCORE_DEFAULTS['points'] and are admin-configurable.
+# priority_score's 0-10 range is fixed by construction (each component is normalized
+# before blending), so these boundaries are static rather than another settings-table
+# tunable. Calibrated so a SINGLE fresh critical alert alone (peak=40=PRIORITY_PEAK_CAP,
+# breadth=1, minimal decay loss) lands around 6.1 -- High, not automatically Critical --
+# since genuinely converging multiple distinct signal types is what should push an
+# entity into Critical, matching run_priority_scoring()'s whole point (breadth over a
+# single loud alert).
+_PRIORITY_TIERS = {'critical': 7.5, 'high': 5.5, 'medium': 3}
+
+def _priority_tier(score):
+    if score >= _PRIORITY_TIERS['critical']: return 'Critical'
+    if score >= _PRIORITY_TIERS['high']: return 'High'
+    if score >= _PRIORITY_TIERS['medium']: return 'Medium'
+    return 'Low'
+
 @app.route('/api/ueba/risk-scores', methods=['GET'])
 @login_required
 def api_ueba_risk_scores():
@@ -5682,16 +5700,37 @@ def api_dashboard_risk_trend():
 @app.route('/api/dashboards/top-risk-entities', methods=['GET'])
 @login_required
 def api_dashboard_top_risk_entities():
+    # Ranked and tiered by priority_score (ueba_engine.py's run_priority_scoring --
+    # peak severity + signal breadth + exponential recency decay, 24h half-life by
+    # default), NOT the raw windowed point sum. A flat sum over the dashboard's window
+    # let one old, since-resolved alert flood keep an entity pinned at "Critical" for
+    # the rest of that window with zero current activity -- priority_score is what
+    # run_priority_scoring() was already built to fix exactly this, just never wired
+    # into this widget. raw_score/event_count are still returned as secondary context
+    # (still a legitimate "how much total activity" number), but don't drive the
+    # ranking or badge here.
     days = _dashboard_window_days(request)
     db = get_db()
-    cfg = get_risk_score_config(db)
     rows = db.execute(
-        "SELECT entity_type, entity_id, SUM(points) as score, COUNT(*) as event_count, MAX(computed_at) as last_event "
-        "FROM risk_score_events WHERE computed_at >= datetime('now', ?) "
-        "GROUP BY entity_type, entity_id HAVING score > 0 ORDER BY score DESC LIMIT 10",
+        "SELECT rse.entity_type as entity_type, rse.entity_id as entity_id, "
+        "SUM(rse.points) as raw_score, COUNT(*) as event_count, MAX(rse.computed_at) as last_event, "
+        "ps.priority_score as priority_score "
+        "FROM risk_score_events rse "
+        "LEFT JOIN ueba_priority_scores ps ON rse.entity_type = ps.entity_type AND rse.entity_id = ps.entity_id "
+        "WHERE rse.computed_at >= datetime('now', ?) "
+        "GROUP BY rse.entity_type, rse.entity_id HAVING raw_score > 0 "
+        "ORDER BY (priority_score IS NULL), priority_score DESC, raw_score DESC LIMIT 10",
         (f'-{days} days',)
     ).fetchall()
-    out = [{**dict(r), 'tier': _risk_tier(r['score'], cfg['tiers'])} for r in rows]
+    raw_tiers = get_risk_score_config(db)['tiers']
+    out = []
+    for r in rows:
+        d = dict(r)
+        # No priority row yet (UEBA hasn't run since deploy, or priority scoring is
+        # disabled) -- fall back to the raw-sum tier rather than hiding the entity or
+        # mislabeling it Low.
+        d['tier'] = _priority_tier(r['priority_score']) if r['priority_score'] is not None else _risk_tier(r['raw_score'], raw_tiers)
+        out.append(d)
     return jsonify({'entities': out})
 
 @app.route('/api/dashboards/top-anomaly-rules', methods=['GET'])
