@@ -464,6 +464,32 @@ function hoursLabel(h) {
     return `${(h / 24).toFixed(1)}d`;
 }
 
+function renderComplianceCoverageWidget(container, widgetId, config) {
+    container.innerHTML = '<div class="compliance-widget-body p-2"></div>';
+    const body = container.querySelector('.compliance-widget-body');
+    const load = () => fetch('/api/compliance/coverage').then(r => r.json()).then(d => {
+        body.innerHTML = `
+            <div class="small text-muted mb-2">${d.full_coverage_count} / ${d.total_frameworks} frameworks fully enabled</div>
+            ${d.frameworks.map(f => {
+                const pct = f.total > 0 ? Math.round((f.enabled / f.total) * 100) : 0;
+                const barColor = f.total === 0 ? 'bg-secondary' : (f.enabled === f.total ? 'bg-success' : 'bg-warning');
+                const status = f.total === 0 ? 'No rules tagged' : (f.enabled === f.total ? 'Fully enabled' : `${f.total - f.enabled} disabled`);
+                return `
+                <div class="mb-2">
+                    <div class="d-flex justify-content-between small">
+                        <span>${escHtml(f.label)}</span>
+                        <span class="text-muted">${f.enabled}/${f.total} &middot; ${status}</span>
+                    </div>
+                    <div class="progress" style="height:6px;">
+                        <div class="progress-bar ${barColor}" style="width:${f.total === 0 ? 100 : pct}%;"></div>
+                    </div>
+                </div>`;
+            }).join('')}`;
+    }).catch(err => console.error('Error loading compliance coverage:', err));
+    load();
+    WIDGET_INTERVALS[widgetId] = setInterval(load, 60000);
+}
+
 function renderCaseStatsWidget(container, widgetId, config) {
     container.innerHTML = `
         <div class="d-flex justify-content-end small text-muted mb-2">
@@ -1220,6 +1246,7 @@ const WIDGET_REGISTRY = {
     chart_case_queue_backlog: { label: 'Open Cases by Queue', icon: 'fa-inbox', category: 'chart', defaultW: 4, defaultH: 4, live: true, render: renderCaseQueueBacklogWidget },
     chart_case_workload:      { label: 'Analyst Workload', icon: 'fa-user-clock', category: 'chart', defaultW: 4, defaultH: 4, live: true, render: renderCaseWorkloadWidget },
     chart_case_close_trend:   { label: 'Cases Closed Trend', icon: 'fa-chart-line', category: 'chart', defaultW: 12, defaultH: 4, render: renderCaseCloseTrendWidget },
+    chart_compliance_coverage: { label: 'Compliance Framework Coverage', icon: 'fa-clipboard-check', category: 'chart', defaultW: 6, defaultH: 5, live: true, render: renderComplianceCoverageWidget },
     // App widgets (Batch 2) -- compact live embeds, all reusing existing endpoints.
     app_alerts:        { label: 'Alerts', icon: 'fa-triangle-exclamation', category: 'app', defaultW: 4, defaultH: 5, render: renderAlertsWidget },
     app_cases:         { label: 'Cases', icon: 'fa-folder-open', category: 'app', defaultW: 4, defaultH: 5, render: renderCasesWidget },
