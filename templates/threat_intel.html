@@ -242,7 +242,7 @@
                         <input type="text" id="entitySearch" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:280px;" placeholder="Search name or alias..." oninput="filterEntities()">
                         <select id="entityTypeFilter" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:180px;" onchange="filterEntities()">
                             <option value="">All Types</option>
-                            <option value="threat_actor">Threat Actor</option>
+                            <option value="actor">Threat Actor</option>
                             <option value="malware">Malware</option>
                             <option value="ransomware">Ransomware</option>
                             <option value="tool">Tool</option>
@@ -501,7 +501,7 @@
         <div class="mb-3">
           <label class="form-label">Type</label>
           <select id="entityType" class="form-select bg-dark text-light border-secondary">
-            <option value="threat_actor">Threat Actor</option>
+            <option value="actor">Threat Actor</option>
             <option value="malware">Malware</option>
             <option value="ransomware">Ransomware</option>
             <option value="tool">Tool</option>
@@ -1562,7 +1562,7 @@ let currentIocs = [], linkIocModal = null;
 function initEntityModal() { if (!entityModal) entityModal = new bootstrap.Modal(document.getElementById('entityModal')); }
 
 function entityTypeBadge(type) {
-    const map = {threat_actor: 'bg-danger', ransomware: 'bg-danger', malware: 'bg-warning text-dark', tool: 'bg-info text-dark'};
+    const map = {actor: 'bg-danger', ransomware: 'bg-danger', malware: 'bg-warning text-dark', tool: 'bg-info text-dark'};
     return `<span class="badge ${map[type] || 'bg-secondary'}">${escHtml(type || '')}</span>`;
 }
 
