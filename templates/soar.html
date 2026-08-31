@@ -18,9 +18,7 @@
             {% if has_permission('cases.templates.manage') %}
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnCasetemplates" onclick="switchSoarTab('casetemplates')"><i class="fa-solid fa-list-check me-2"></i>Case Templates</button></li>
             {% endif %}
-            {% if has_permission('cases.queues.manage') %}
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnQueues" onclick="switchSoarTab('queues')"><i class="fa-solid fa-inbox me-2"></i>Queues</button></li>
-            {% endif %}
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnActions" onclick="switchSoarTab('actions')"><i class="fa-solid fa-list me-2"></i>Actions</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnNotifications" onclick="switchSoarTab('notifications')"><i class="fa-solid fa-tower-broadcast me-2"></i>Notifications</button></li>
         </ul>
@@ -91,14 +89,39 @@
     </div>
     {% endif %}
 
-    {% if has_permission('cases.queues.manage') %}
-    <!-- Queues pane -->
+    <!-- Queues pane -- relocated from the old "Manage Queues" modal in templates/cases.html
+         (cases.html keeps its own read-only queue picker/filter, unaffected). Visible to
+         everyone (queue membership/description is useful context to any analyst, same as
+         the old modal let anyone open it); create/delete/member actions stay gated by
+         cases.queues.manage, matching how the old modal itself already split this. -->
     <div id="paneQueues" style="display:none;">
         <div class="card-body">
-            <p class="text-muted small">Queues content goes here (Phase 2).</p>
+            <div class="table-responsive mb-3">
+                <table class="table table-dark table-sm align-middle mb-0">
+                    <thead><tr><th class="ps-3">Name</th><th>Description</th><th>Members</th><th>Cases</th><th class="text-end pe-3"></th></tr></thead>
+                    <tbody id="soarQueuesTableBody"><tr><td colspan="5" class="text-center text-muted small py-3">Loading&hellip;</td></tr></tbody>
+                </table>
+            </div>
+            {% if has_permission('cases.queues.manage') %}
+            <div class="row g-2 align-items-end bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
+                <div class="col-md-4">
+                    <label class="form-label small text-muted mb-1">New Queue Name</label>
+                    <input type="text" id="newSoarQueueName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Fraud Investigations">
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label small text-muted mb-1">Description (optional)</label>
+                    <input type="text" id="newSoarQueueDescription" class="form-control form-control-sm bg-dark text-light border-secondary">
+                </div>
+                <div class="col-md-2">
+                    <button type="button" class="btn btn-sm btn-outline-primary w-100" onclick="addSoarQueue()"><i class="fa-solid fa-plus me-1"></i>Add</button>
+                </div>
+            </div>
+            <div id="newSoarQueueError" class="text-danger small mt-1" style="display:none;"></div>
+            {% else %}
+            <p class="text-muted small mb-0"><i class="fa-solid fa-lock me-1"></i>Admin role required to create or edit queues.</p>
+            {% endif %}
         </div>
     </div>
-    {% endif %}
 
     <!-- Actions pane -->
     <div id="paneActions" style="display:none;">
@@ -353,6 +376,7 @@
 <script>
 const IS_ADMIN = hasPermission('soar.secrets.manage');
 const CAN_MANAGE_PLAYBOOKS = hasPermission('soar.playbooks.manage');
+const CAN_MANAGE_QUEUES = hasPermission('cases.queues.manage');
 let allPlaybooks = [];
 let allQueuesForPb = [];
 let caseTemplatesForPb = [];
@@ -401,6 +425,87 @@ function escJs(s) {
 
 function loadQueuesForPlaybooks() {
     return fetch('/api/case-queues').then(r => r.json()).then(qs => { allQueuesForPb = qs || []; }).catch(() => { allQueuesForPb = []; });
+}
+
+// ---- Queues tab -- relocated from cases.html's "Manage Queues" modal (see comment on
+// #paneQueues). A separate array/fetch from allQueuesForPb above rather than sharing it:
+// that one only backs the playbook editor's condition dropdown and isn't guaranteed to
+// carry members/open_case_count/total_case_count, which this table needs.
+let allQueuesForSoar = [];
+
+function loadQueuesForSoar() {
+    const p = fetch('/api/case-queues').then(r => r.json()).then(qs => { allQueuesForSoar = qs || []; renderSoarQueuesTable(); }).catch(() => { allQueuesForSoar = []; renderSoarQueuesTable(); });
+    if (CAN_MANAGE_QUEUES && !window.allUsersForQueues) {
+        fetch('/api/settings/users').then(r => r.json()).then(data => {
+            window.allUsersForQueues = (data.users || []).map(u => u.username);
+            renderSoarQueuesTable();
+        }).catch(() => { window.allUsersForQueues = []; });
+    }
+    return p;
+}
+
+function renderSoarQueuesTable() {
+    const tbody = document.getElementById('soarQueuesTableBody');
+    if (!tbody) return;
+    if (!allQueuesForSoar.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted small py-3">No queues yet.</td></tr>';
+        return;
+    }
+    const userOptions = (window.allUsersForQueues || []).map(u => `<option value="${escHtml(u)}">${escHtml(u)}</option>`).join('');
+    tbody.innerHTML = allQueuesForSoar.map(q => `
+        <tr>
+            <td class="ps-3 small">${escHtml(q.name)}</td>
+            <td class="text-muted small">${escHtml(q.description || '')}</td>
+            <td class="small">
+                ${(q.members || []).map(m => `<span class="badge bg-secondary me-1 mb-1">${escHtml(m)}${CAN_MANAGE_QUEUES ? ` <a href="#" class="text-light" onclick="removeSoarQueueMember(${q.id}, '${escJs(m)}'); return false;">&times;</a>` : ''}</span>`).join('') || '<span class="text-muted">none</span>'}
+                ${CAN_MANAGE_QUEUES ? `
+                <div class="d-flex gap-1 mt-1">
+                    <select class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:140px;" id="addSoarMemberSelect${q.id}">
+                        <option value="">Add member&hellip;</option>
+                        ${userOptions}
+                    </select>
+                    <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="addSoarQueueMember(${q.id})"><i class="fa-solid fa-plus"></i></button>
+                </div>` : ''}
+            </td>
+            <td class="text-muted small text-nowrap">${q.open_case_count}/${q.total_case_count}</td>
+            <td class="text-end pe-3">${CAN_MANAGE_QUEUES ? `<button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete queue" onclick="deleteSoarQueue(${q.id}, '${escJs(q.name)}')"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
+        </tr>
+    `).join('');
+}
+
+async function addSoarQueue() {
+    const nameEl = document.getElementById('newSoarQueueName');
+    const descEl = document.getElementById('newSoarQueueDescription');
+    const errBox = document.getElementById('newSoarQueueError');
+    errBox.style.display = 'none';
+    const name = nameEl.value.trim();
+    if (!name) { errBox.innerText = 'Name is required.'; errBox.style.display = 'block'; return; }
+    const res = await fetch('/api/case-queues', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name, description: descEl.value.trim()})
+    });
+    const data = await res.json();
+    if (!res.ok) { errBox.innerText = data.error || 'Failed to create queue.'; errBox.style.display = 'block'; return; }
+    nameEl.value = ''; descEl.value = '';
+    await loadQueuesForSoar();
+}
+
+async function deleteSoarQueue(qid, name) {
+    if (!(await confirmDialog(`Delete the "${name}" queue? Cases in it will be unassigned, not deleted.`, {title: 'Delete queue', danger: true, confirmLabel: 'Delete'}))) return;
+    await fetch(`/api/case-queues/${qid}`, {method: 'DELETE'});
+    await loadQueuesForSoar();
+}
+
+async function addSoarQueueMember(qid) {
+    const sel = document.getElementById(`addSoarMemberSelect${qid}`);
+    const username = sel.value;
+    if (!username) return;
+    await fetch(`/api/case-queues/${qid}/members`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username})});
+    await loadQueuesForSoar();
+}
+
+async function removeSoarQueueMember(qid, username) {
+    await fetch(`/api/case-queues/${qid}/members`, {method: 'DELETE', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username})});
+    await loadQueuesForSoar();
 }
 
 function loadTemplatesForPlaybooks() {
@@ -1028,6 +1133,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadPlaybooks();
     loadPendingApprovals();
     loadAlertNotifications();
+    loadQueuesForSoar();
 });
 </script>
 {% endblock %}
