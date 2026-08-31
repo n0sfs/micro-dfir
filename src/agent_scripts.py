@@ -765,6 +765,51 @@ $result.note = "Informational only -- a process with no backing file path or an 
 $result | ConvertTo-Json -Depth 3 -Compress
 """
 
+_REGISTRY_HIVE_RE = re.compile(r'^(HKLM|HKCU|HKCR|HKU|HKCC):\\', re.IGNORECASE)
+
+# The persistence sweep and SCA check only ever look at a handful of FIXED keys (Run/
+# RunOnce, a few hardening settings) -- this is the general-purpose escape hatch for
+# whatever specific key an analyst is actually investigating, not limited to those.
+def collect_registry_key(key_path):
+    if not _REGISTRY_HIVE_RE.match(key_path.strip()):
+        raise ValueError(f"key_path must start with HKLM:\\, HKCU:\\, HKCR:\\, HKU:\\, or HKCC:\\ (got {key_path!r})")
+    esc = key_path.replace('`', '``').replace('"', '`"').replace('$', '`$')
+    return f"""$k = "{esc}"
+if (-not (Test-Path $k)) {{ '{{"error":"registry key not found"}}'; exit }}
+try {{
+    $item = Get-Item -Path $k -ErrorAction Stop
+    $values = @{{}}
+    foreach ($name in $item.Property) {{
+        $propName = if ($name -eq '') {{ '(Default)' }} else {{ $name }}
+        $values[$propName] = (Get-ItemProperty -Path $k -ErrorAction SilentlyContinue).$name
+    }}
+    $subkeys = @(Get-ChildItem -Path $k -ErrorAction SilentlyContinue | Select-Object -ExpandProperty PSChildName | Select-Object -First 200)
+    @{{ path = $k; values = $values; subkeys = $subkeys; subkeys_truncated = ($subkeys.Count -ge 200) }} | ConvertTo-Json -Depth 4 -Compress
+}} catch {{
+    $errMsg = $_.Exception.Message -replace '"', "'"
+    "{{`"error`":`"failed to read registry key: $errMsg`"}}"
+}}
+"""
+
+# Scoped to scheduled tasks specifically (the most common, most cleanly-identified
+# autostart mechanism the persistence sweep surfaces) rather than a universal remover
+# across every mechanism type (services, Run keys, startup folder, WMI subscriptions) --
+# each of those has different enough removal semantics that folding them into one action
+# would mean guessing which the analyst meant from the name alone.
+def kill_scheduled_task(task_name):
+    esc = task_name.replace('`', '``').replace('"', '`"').replace('$', '`$')
+    return f"""$n = "{esc}"
+$task = Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue
+if (-not $task) {{ '{{"error":"scheduled task not found"}}'; exit }}
+try {{
+    Unregister-ScheduledTask -TaskName $n -Confirm:$false -ErrorAction Stop
+    "{{`"status`":`"removed`",`"task_name`":`"$n`"}}"
+}} catch {{
+    $errMsg = $_.Exception.Message -replace '"', "'"
+    "{{`"error`":`"failed to remove scheduled task: $errMsg`"}}"
+}}
+"""
+
 # label -> (builder, required param names)
 WINDOWS_TEMPLATES = {
     'list_processes': (lambda params: _PROGRESS_SILENT + list_processes(), []),
@@ -775,6 +820,8 @@ WINDOWS_TEMPLATES = {
     'persistence_sweep': (lambda params: _PROGRESS_SILENT + persistence_sweep(), []),
     'collect_file': (lambda params: _PROGRESS_SILENT + collect_file(params['path']), ['path']),
     'quarantine_file': (lambda params: _PROGRESS_SILENT + quarantine_file(params['path']), ['path']),
+    'collect_registry_key': (lambda params: _PROGRESS_SILENT + collect_registry_key(params['key_path']), ['key_path']),
+    'kill_scheduled_task': (lambda params: _PROGRESS_SILENT + kill_scheduled_task(params['task_name']), ['task_name']),
     'collect_browser_artifacts': (lambda params: _PROGRESS_SILENT + collect_browser_artifacts(), []),
     'collect_forensic_timestamps': (lambda params: _PROGRESS_SILENT + collect_forensic_timestamps(), []),
     'collect_recent_file_changes': (lambda params: _PROGRESS_SILENT + collect_recent_file_changes(), []),

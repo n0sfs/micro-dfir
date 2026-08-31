@@ -979,6 +979,8 @@ const CONSOLE_ACTION_DISPLAY = {
         collect_dns_arp: 'Collect-DNS-ARP (DNS client cache + ARP/neighbor table)',
         check_process_injection_indicators: 'Check-Process-Injection-Indicators (processes with no backing file, unsigned binaries -- informational, not a verdict)',
         quarantine_file: 'Quarantine-File (move to a locked-down folder, deny execute -- contain, not just collect)',
+        collect_registry_key: 'Collect-Registry-Key (arbitrary key -- values + subkeys, not just the fixed Run-key checks)',
+        kill_scheduled_task: 'Kill-Scheduled-Task (Unregister-ScheduledTask -- remove a specific persistence mechanism found via Persistence Sweep)',
         isolate_host: 'Isolate-Host (block all traffic except this SOC server)',
         restore_network: 'Restore-Network',
         upgrade: 'Upgrade-Agent (fetch latest agent, restart)'
@@ -1014,6 +1016,8 @@ const CONSOLE_DROPDOWN_ACTIONS = [
     { value: 'kill_process', label: 'Kill Process (PID)', permission: 'edr.command.basic', needsParams: true },
     { value: 'collect_file', label: 'Collect File', permission: 'edr.command.advanced', needsParams: true },
     { value: 'quarantine_file', label: 'Quarantine File', permission: 'edr.command.basic', needsParams: true },
+    { value: 'collect_registry_key', label: 'Registry Key', permission: 'edr.command.advanced', needsParams: true, osOnly: 'windows' },
+    { value: 'kill_scheduled_task', label: 'Kill Scheduled Task', permission: 'edr.command.basic', needsParams: true, osOnly: 'windows' },
     { value: 'collect_triage', label: 'Triage Collection', permission: 'edr.command.basic' },
     { value: 'persistence_sweep', label: 'Persistence Sweep', permission: 'edr.command.advanced' },
     { value: 'ioc_sweep', label: 'IOC Hash Sweep', permission: 'edr.command.advanced' },
@@ -1316,6 +1320,20 @@ function consoleShowParamForm(label) {
                 <input type="text" id="paramQuarantinePath" class="form-control bg-dark text-light border-secondary" placeholder="C:\\Users\\...\\file.exe" onkeydown="if(event.key==='Enter') submitQuarantineFile()">
                 <button class="btn btn-outline-danger" onclick="submitQuarantineFile()">Run</button>
             </div>`;
+    } else if (label === 'collect_registry_key') {
+        wrap.innerHTML = `
+            <label class="form-label small text-muted mb-1">Registry key path (HKLM:\\, HKCU:\\, HKCR:\\, HKU:\\, or HKCC:\\)</label>
+            <div class="input-group input-group-sm">
+                <input type="text" id="paramRegKey" class="form-control bg-dark text-light border-secondary" placeholder="HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" onkeydown="if(event.key==='Enter') submitCollectRegistryKey()">
+                <button class="btn btn-outline-primary" onclick="submitCollectRegistryKey()">Run</button>
+            </div>`;
+    } else if (label === 'kill_scheduled_task') {
+        wrap.innerHTML = `
+            <label class="form-label small text-muted mb-1">Scheduled task name (as shown in Persistence Sweep results)</label>
+            <div class="input-group input-group-sm">
+                <input type="text" id="paramTaskName" class="form-control bg-dark text-light border-secondary" placeholder="EvilTask" onkeydown="if(event.key==='Enter') submitKillScheduledTask()">
+                <button class="btn btn-outline-danger" onclick="submitKillScheduledTask()">Run</button>
+            </div>`;
     } else {
         return;
     }
@@ -1342,6 +1360,21 @@ async function submitQuarantineFile() {
     if (!path) return;
     if (!(await confirmDialog(`Quarantine "${path}" on ${consoleSelectedHost}? The file will be moved out of place and locked down. This cannot be undone from here.`, {title: 'Quarantine file', danger: true, confirmLabel: 'Quarantine'}))) return;
     queueConsoleCommand(consoleSelectedHost, 'quarantine_file', {path}, `Quarantine-File "${path}"`);
+    document.getElementById('consoleParamForm').style.display = 'none';
+}
+
+function submitCollectRegistryKey() {
+    const keyPath = (document.getElementById('paramRegKey').value || '').trim();
+    if (!keyPath) return;
+    queueConsoleCommand(consoleSelectedHost, 'collect_registry_key', {key_path: keyPath}, `Collect-Registry-Key "${keyPath}"`);
+    document.getElementById('consoleParamForm').style.display = 'none';
+}
+
+async function submitKillScheduledTask() {
+    const taskName = (document.getElementById('paramTaskName').value || '').trim();
+    if (!taskName) return;
+    if (!(await confirmDialog(`Remove scheduled task "${taskName}" on ${consoleSelectedHost}? This cannot be undone.`, {title: 'Remove scheduled task', danger: true, confirmLabel: 'Remove'}))) return;
+    queueConsoleCommand(consoleSelectedHost, 'kill_scheduled_task', {task_name: taskName}, `Unregister-ScheduledTask -TaskName "${taskName}"`);
     document.getElementById('consoleParamForm').style.display = 'none';
 }
 
