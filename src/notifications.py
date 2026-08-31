@@ -1,10 +1,15 @@
-# Alert notification delivery (email + generic webhook) -- shared by both places an alert
-# gets created: sigma_engine.py's standalone detection loop (a raw sqlite3 connection, no
-# Flask context) and app.py's inline-heuristic ingest path (a Flask request context). This
-# module is intentionally DB-connection-agnostic: every function here takes an already-open
-# `db` (anything exposing .execute(...).fetchone(), which both sqlite3.Connection and
-# sqlite3.Cursor satisfy identically) or a plain config dict -- it never calls get_db()/
-# current_user itself, so it works unmodified in either caller's context.
+# The shared Email(SMTP)/Webhook "Notification Channels" config and low-level senders,
+# now surfaced in the SOAR page instead of Settings. Auto-dispatch on every new alert
+# used to live here (notify_if_configured/should_notify) but has moved to
+# soar_alerts.run_playbooks_for_alert, driven by real alert_created playbooks instead of
+# one hardcoded rule -- see the seeded "Legacy Alert Notifications" playbook
+# (migrate_seed_legacy_notification_playbook in app.py) for the reproduced default
+# behavior. What's left here backs the Test Send button (api_alert_notification_test)
+# and get_alert_notification_config()/_SEVERITY_ORDER, which soar_alerts.py's send_email
+# action and severity-threshold check both still read. Still DB-connection-agnostic
+# (every function takes an already-open `db` -- sqlite3.Connection or sqlite3.Cursor --
+# or a plain config dict; never calls get_db()/current_user) since soar_alerts.py needs
+# that same property.
 import copy
 import json
 import smtplib
@@ -23,6 +28,8 @@ ALERT_NOTIFICATION_DEFAULTS = {
 }
 
 _SEVERITY_ORDER = {'CRITICAL': 4, 'HIGH': 3, 'MEDIUM': 2, 'LOW': 1, 'INFO': 0}
+# Still used by soar_alerts.py's threshold comparison for alert_created playbooks (the
+# severity-ordering logic itself outlived the hardcoded dispatch this module used to do).
 
 
 def get_alert_notification_config(db):
@@ -35,11 +42,6 @@ def get_alert_notification_config(db):
         except (ValueError, TypeError):
             pass
     return cfg
-
-
-def should_notify(config, severity):
-    threshold = _SEVERITY_ORDER.get((config.get('min_severity') or 'High').upper(), 3)
-    return _SEVERITY_ORDER.get((severity or '').upper(), 0) >= threshold
 
 
 def _send_email(config, alert):
@@ -93,17 +95,3 @@ def send_alert_notification(config, alert):
         ok, err = _send_webhook(config, alert)
         results['webhook'] = {'ok': ok, 'error': err}
     return results
-
-
-def notify_if_configured(db, alert):
-    """The one call site both alert-creation paths use: reads config, checks the severity
-    threshold, sends if warranted. Swallows its own errors -- notification delivery must
-    never be the reason an alert fails to record."""
-    try:
-        config = get_alert_notification_config(db)
-        if not should_notify(config, alert.get('severity')):
-            return None
-        return send_alert_notification(config, alert)
-    except Exception as e:
-        print(f"[-] Alert notification dispatch failed: {e}")
-        return None

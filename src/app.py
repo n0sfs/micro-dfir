@@ -21,6 +21,7 @@ from flask_login import LoginManager, UserMixin, login_user, login_required, log
 from yara_scanner import scan_file
 from taxii_client import sync_one as ti_sync_one
 import agent_scripts
+import soar_alerts
 
 app = Flask(__name__, template_folder='../templates')
 DB_PATH = "/opt/micro-dfir/siem.db"
@@ -469,7 +470,6 @@ def _extract_process_fields_from_xml(xml_text):
 def api_ingest():
     from flask import request, jsonify
     import datetime
-    from notifications import notify_if_configured
     try:
         db = get_db()
         expected_token = get_soc_secret(db)
@@ -578,20 +578,23 @@ def api_ingest():
                 else:
                     from geoip import lookup_country
                     country_code, country_name = lookup_country(sip)
-                    db.execute(
+                    ins_cur = db.execute(
                         "INSERT INTO alerts (timestamp, rule_name, severity, host, message, username, source_ip, occurrence_count, last_seen, country_code, country_name) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
                         (ts, triggered_rule, alert_sev, hst, msg, usr, sip, ts, country_code, country_name)
                     )
+                    new_alert_id = ins_cur.lastrowid
                     # Same "only a brand-new alert notifies" rule as sigma_engine.py's path --
                     # a re-firing heuristic within the dedup window hits the `existing` branch
-                    # above instead. This runs inline in the ingest request; notify_if_configured
-                    # is a fast local settings lookup + a couple of short-timeout network calls
-                    # at most, never raises, and only fires at all if an admin has actually
-                    # configured a channel -- negligible added latency for the common case.
-                    notify_if_configured(db, {
-                        'rule_title': triggered_rule, 'severity': alert_sev, 'host': hst,
+                    # above instead. This runs inline in the ingest request; run_playbooks_for_alert
+                    # is a fast local settings/playbook lookup + a couple of short-timeout network
+                    # calls at most, never raises, and only fires at all if an admin has actually
+                    # configured an alert_created playbook -- negligible added latency for the
+                    # common case. The lambda lets an alert-triggered create_case action cascade
+                    # into the real case_created playbook engine, which only exists here in app.py.
+                    soar_alerts.run_playbooks_for_alert(db, {
+                        'id': new_alert_id, 'rule_title': triggered_rule, 'severity': alert_sev, 'host': hst,
                         'username': usr, 'source_ip': sip, 'message': msg, 'timestamp': ts,
-                    })
+                    }, run_case_playbooks_fn=lambda cid, qid, tlp, st, sev: _run_playbooks_for_case(db, cid, 'case_created', qid, tlp, st, sev))
             # -------------------------------
         db.commit()
         return jsonify({'status': 'success', 'ingested': count}), 200
@@ -4182,14 +4185,21 @@ def api_case_analyze(cid):
     return jsonify({'status': 'success', 'summary': summary})
 
 # ---- Playbooks (SOAR) ----
-PLAYBOOK_TRIGGERS = ('case_created', 'status_changed', 'queue_changed', 'assignee_changed', 'scheduled')
-PLAYBOOK_ACTION_TYPES = ('apply_template', 'add_task', 'add_note', 'set_queue', 'analyze_entity', 'send_webhook', 'send_slack', 'isolate_host')
+PLAYBOOK_TRIGGERS = ('case_created', 'status_changed', 'queue_changed', 'assignee_changed', 'scheduled', 'alert_created')
+PLAYBOOK_ACTION_TYPES = ('apply_template', 'add_task', 'add_note', 'set_queue', 'analyze_entity', 'send_email', 'send_webhook', 'send_slack', 'isolate_host')
+# alert_created playbooks are alert-scoped (no case_id exists yet -- see soar_alerts.py)
+# and get their own small, non-destructive action set instead of the case-scoped one
+# above; create_case is the bridge into the full case-scoped arsenal.
+ALERT_ACTION_TYPES = soar_alerts.PLAYBOOK_ALERT_ACTION_TYPES
 PLAYBOOK_APPROVAL_STATUSES = ('pending', 'approved', 'rejected')
 # isolate_host is the one playbook action type with real, physical consequences (it
 # cuts network access on a real endpoint) -- requires_approval is forced to 1 for it at
 # save time (see api_playbooks/api_playbook_detail below), never left to the editor's
 # checkbox, so there's no way to configure an unattended auto-isolate.
 PLAYBOOK_ACTION_TYPES_ALWAYS_GATED = {'isolate_host'}
+
+def _valid_action_types_for_trigger(trigger_event):
+    return ALERT_ACTION_TYPES if trigger_event == 'alert_created' else PLAYBOOK_ACTION_TYPES
 
 def _parse_max_runs_per_hour(d):
     val = d.get('max_runs_per_hour')
@@ -4317,6 +4327,38 @@ def _run_playbook_action(db, cid, action_type, params, dry_run=False):
             return f"would analyze {entity_type} '{entity_id}'"
         _run_case_analysis(db, cid, entity_type, entity_id)
         return f"analyzed {entity_type} '{entity_id}'"
+
+    if action_type == 'send_email':
+        # Reuses the single shared SMTP server config (host/port/user/pass/tls) that
+        # also backs the Notification Channels panel and the seeded Legacy Alert
+        # Notifications playbook -- playbooks don't each get their own mail server,
+        # only their own recipients/subject/body.
+        from notifications import get_alert_notification_config
+        config = get_alert_notification_config(db)
+        if not config.get('smtp_enabled') or not config.get('smtp_host'):
+            return "email channel not configured/enabled, skipped"
+        case = db.execute("SELECT title, status, tlp, pap FROM cases WHERE id = ?", (cid,)).fetchone()
+        to_raw = (params.get('to') or '').strip() or config.get('smtp_to') or ''
+        to_addrs = [a.strip() for a in to_raw.split(',') if a.strip()]
+        if not to_addrs:
+            return "no recipient configured (and no default To on the Email channel), skipped"
+        subject = _fill_playbook_template(params.get('subject') or 'Case #{{case_id}}: {{case_title}}', cid, case)
+        body = _fill_playbook_template(params.get('body') or 'Case #{{case_id}} ({{status}}): {{case_title}}', cid, case)
+        if dry_run:
+            return f"would email {', '.join(to_addrs)}: \"{subject}\""
+        from email.mime.text import MIMEText
+        import smtplib
+        msg = MIMEText(body)
+        msg['Subject'] = subject
+        msg['From'] = config.get('smtp_from') or config.get('smtp_user') or 'micro-dfir@localhost'
+        msg['To'] = ', '.join(to_addrs)
+        with smtplib.SMTP(config['smtp_host'], int(config.get('smtp_port') or 587), timeout=10) as server:
+            if config.get('smtp_use_tls', True):
+                server.starttls()
+            if config.get('smtp_user') and config.get('smtp_pass'):
+                server.login(config['smtp_user'], config['smtp_pass'])
+            server.sendmail(msg['From'], to_addrs, msg.as_string())
+        return f"emailed {', '.join(to_addrs)}"
 
     if action_type == 'send_webhook':
         # url_secret (a stored secret's NAME) takes precedence over a literal url --
@@ -4726,7 +4768,8 @@ def api_playbooks():
     if request.method == 'GET':
         rows = db.execute(
             "SELECT p.*, q.name as condition_queue_name, "
-            "(SELECT COUNT(*) FROM playbook_runs WHERE playbook_id = p.id) as run_count "
+            "(SELECT COUNT(*) FROM playbook_runs WHERE playbook_id = p.id) + "
+            "(SELECT COUNT(*) FROM playbook_alert_runs WHERE playbook_id = p.id) as run_count "
             "FROM playbooks p LEFT JOIN case_queues q ON q.id = p.condition_queue_id ORDER BY p.name"
         ).fetchall()
         out = []
@@ -4752,15 +4795,22 @@ def api_playbooks():
     if not actions:
         return jsonify({'error': 'At least one action is required'}), 400
     for a in actions:
-        if a.get('action_type') not in PLAYBOOK_ACTION_TYPES:
+        if a.get('action_type') not in _valid_action_types_for_trigger(trigger_event):
             return jsonify({'error': f"invalid action_type: {a.get('action_type')}"}), 400
     if db.execute("SELECT 1 FROM playbooks WHERE name = ?", (name,)).fetchone():
         return jsonify({'error': f'A playbook named "{name}" already exists'}), 400
-    condition_queue_id = d.get('condition_queue_id') or None
-    if condition_queue_id and not db.execute("SELECT 1 FROM case_queues WHERE id = ?", (condition_queue_id,)).fetchone():
-        return jsonify({'error': 'Condition queue not found'}), 400
-    condition_tlp = (d.get('condition_tlp') or '').strip() or None
-    condition_status = (d.get('condition_status') or '').strip() or None
+    # Alerts have no queue/TLP/status -- an alert_created playbook only ever gets a
+    # severity condition (compared as a threshold, not an exact match -- see
+    # soar_alerts.run_playbooks_for_alert), so the other 3 are force-nulled here rather
+    # than silently stored-but-ignored.
+    if trigger_event == 'alert_created':
+        condition_queue_id = condition_tlp = condition_status = None
+    else:
+        condition_queue_id = d.get('condition_queue_id') or None
+        if condition_queue_id and not db.execute("SELECT 1 FROM case_queues WHERE id = ?", (condition_queue_id,)).fetchone():
+            return jsonify({'error': 'Condition queue not found'}), 400
+        condition_tlp = (d.get('condition_tlp') or '').strip() or None
+        condition_status = (d.get('condition_status') or '').strip() or None
     condition_severity = (d.get('condition_severity') or '').strip() or None
     max_runs_per_hour = _parse_max_runs_per_hour(d)
     schedule_interval_minutes = _parse_schedule_interval(d)
@@ -4793,6 +4843,7 @@ def api_playbook_detail(pid):
     if request.method == 'DELETE':
         db.execute("DELETE FROM playbook_actions WHERE playbook_id = ?", (pid,))
         db.execute("DELETE FROM playbook_runs WHERE playbook_id = ?", (pid,))
+        db.execute("DELETE FROM playbook_alert_runs WHERE playbook_id = ?", (pid,))
         db.execute("DELETE FROM playbooks WHERE id = ?", (pid,))
         db.commit()
         log_audit('playbook_delete', 'playbook', existing['name'])
@@ -4812,15 +4863,18 @@ def api_playbook_detail(pid):
     if not actions:
         return jsonify({'error': 'At least one action is required'}), 400
     for a in actions:
-        if a.get('action_type') not in PLAYBOOK_ACTION_TYPES:
+        if a.get('action_type') not in _valid_action_types_for_trigger(trigger_event):
             return jsonify({'error': f"invalid action_type: {a.get('action_type')}"}), 400
     if db.execute("SELECT 1 FROM playbooks WHERE name = ? AND id != ?", (name, pid)).fetchone():
         return jsonify({'error': f'A playbook named "{name}" already exists'}), 400
-    condition_queue_id = d.get('condition_queue_id') or None
-    if condition_queue_id and not db.execute("SELECT 1 FROM case_queues WHERE id = ?", (condition_queue_id,)).fetchone():
-        return jsonify({'error': 'Condition queue not found'}), 400
-    condition_tlp = (d.get('condition_tlp') or '').strip() or None
-    condition_status = (d.get('condition_status') or '').strip() or None
+    if trigger_event == 'alert_created':
+        condition_queue_id = condition_tlp = condition_status = None
+    else:
+        condition_queue_id = d.get('condition_queue_id') or None
+        if condition_queue_id and not db.execute("SELECT 1 FROM case_queues WHERE id = ?", (condition_queue_id,)).fetchone():
+            return jsonify({'error': 'Condition queue not found'}), 400
+        condition_tlp = (d.get('condition_tlp') or '').strip() or None
+        condition_status = (d.get('condition_status') or '').strip() or None
     condition_severity = (d.get('condition_severity') or '').strip() or None
     max_runs_per_hour = _parse_max_runs_per_hour(d)
     schedule_interval_minutes = _parse_schedule_interval(d)
@@ -4857,6 +4911,16 @@ def api_playbook_toggle(pid):
 @login_required
 def api_playbook_runs(pid):
     db = get_db()
+    pb = db.execute("SELECT trigger_event FROM playbooks WHERE id = ?", (pid,)).fetchone()
+    if pb and pb['trigger_event'] == 'alert_created':
+        rows = db.execute(
+            "SELECT par.id, par.alert_id, s.title as rule_title, a.rule_name, a.host, a.severity, "
+            "par.triggered_at, par.status, par.detail "
+            "FROM playbook_alert_runs par LEFT JOIN alerts a ON a.id = par.alert_id "
+            "LEFT JOIN sigma_rules s ON a.rule_id = s.id WHERE par.playbook_id = ? ORDER BY par.triggered_at DESC LIMIT 50",
+            (pid,)
+        ).fetchall()
+        return jsonify([dict(r) for r in rows])
     rows = db.execute(
         "SELECT pr.id, pr.case_id, c.title as case_title, pr.triggered_at, pr.status, pr.detail "
         "FROM playbook_runs pr LEFT JOIN cases c ON c.id = pr.case_id WHERE pr.playbook_id = ? ORDER BY pr.triggered_at DESC LIMIT 50",
@@ -7022,6 +7086,64 @@ def migrate_playbook_approvals():
             decided_at DATETIME
         )''')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_playbook_approvals_status ON playbook_approvals(status)')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# playbook_runs.case_id is NOT NULL -- an alert-triggered run has no case (unless its
+# own create_case action makes one), so it gets this separate table instead of a risky
+# SQLite column-constraint migration. See soar_alerts.run_playbooks_for_alert.
+def migrate_playbook_alert_runs():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS playbook_alert_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            playbook_id INTEGER NOT NULL,
+            alert_id INTEGER,
+            triggered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            status TEXT NOT NULL DEFAULT 'success',
+            detail TEXT
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_playbook_alert_runs_playbook ON playbook_alert_runs(playbook_id)')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# One-time cutover: reproduces the old hardcoded "new alert >= severity X -> email/
+# webhook" behavior (notifications.notify_if_configured, now removed) as a real,
+# editable playbook, so existing alerting keeps working unchanged after the old code
+# path is deleted. Guarded by a settings flag (not "does a playbook named X exist") so
+# a seeded playbook an admin deliberately renamed or deleted never comes back.
+def migrate_seed_legacy_notification_playbook():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.row_factory = sqlite3.Row
+        seeded = conn.execute("SELECT value FROM settings WHERE key = 'legacy_notification_playbook_seeded'").fetchone()
+        if seeded and seeded['value'] == '1':
+            conn.close()
+            return
+        row = conn.execute("SELECT value FROM settings WHERE key = 'alert_notification_config'").fetchone()
+        cfg = json.loads(row['value']) if row and row['value'] else {}
+        if cfg.get('smtp_enabled') or cfg.get('webhook_enabled'):
+            cur = conn.execute(
+                "INSERT INTO playbooks (name, description, trigger_event, enabled, condition_severity, created_by) VALUES (?, ?, 'alert_created', 1, ?, 'system')",
+                ("Legacy Alert Notifications",
+                 "Auto-created from your existing Alert Notifications config so nothing stopped firing -- edit or delete freely.",
+                 (cfg.get('min_severity') or 'High').lower())
+            )
+            pid = cur.lastrowid
+            pos = 0
+            if cfg.get('smtp_enabled'):
+                conn.execute("INSERT INTO playbook_actions (playbook_id, position, action_type, params) VALUES (?, ?, 'send_email', '{}')", (pid, pos))
+                pos += 1
+            if cfg.get('webhook_enabled'):
+                conn.execute(
+                    "INSERT INTO playbook_actions (playbook_id, position, action_type, params) VALUES (?, ?, 'send_webhook', ?)",
+                    (pid, pos, json.dumps({'url': cfg.get('webhook_url') or ''}))
+                )
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('legacy_notification_playbook_seeded', '1')")
         conn.commit()
         conn.close()
     except Exception:
@@ -10288,6 +10410,8 @@ migrate_role_default_dashboard_v2()
 migrate_playbooks()
 migrate_playbook_secrets()
 migrate_playbook_approvals()
+migrate_playbook_alert_runs()
+migrate_seed_legacy_notification_playbook()
 migrate_live_logs_archive()
 migrate_fim_paths()
 migrate_ueba_priority_scores()
