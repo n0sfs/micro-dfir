@@ -2144,6 +2144,11 @@ def _correlate_software_vulnerabilities(db, apps):
 @app.route('/api/vulnerabilities/<hostname>', methods=['GET'])
 @login_required
 def api_vulnerabilities_for_host(hostname):
+    # Reads agent_commands.stdout for a collect_software_inventory result -- the same
+    # column GET /api/agent/commands gates behind edr.command.basic (it can hold
+    # forensic collection output for any host), just reached through a side door here.
+    err = require_permission('edr.command.basic')
+    if err: return err
     db = get_db()
     row = db.execute(
         "SELECT stdout, completed_at FROM agent_commands "
@@ -3222,21 +3227,25 @@ def api_report_schedule():
     return jsonify({'status': 'success', 'config': cfg})
 
 _SMTP_PASS_PLACEHOLDER = '••••••••'
+_WEBHOOK_URL_PLACEHOLDER = '••••••••(unchanged)'
 
 @app.route('/api/settings/alert-notifications', methods=['GET', 'POST'])
 @login_required
 def api_alert_notification_settings():
     from notifications import get_alert_notification_config, ALERT_NOTIFICATION_DEFAULTS
     db = get_db()
-    if request.method == 'GET':
-        cfg = get_alert_notification_config(db)
-        # Never echo the real secret back down to the browser -- the Save form only ever
-        # sees a placeholder, and leaving it unchanged (see POST below) keeps the real
-        # value intact rather than overwriting it with the placeholder string itself.
-        cfg['smtp_pass'] = _SMTP_PASS_PLACEHOLDER if cfg.get('smtp_pass') else ''
-        return jsonify(cfg)
     err = require_permission('settings.notifications.manage')
     if err: return err
+    if request.method == 'GET':
+        cfg = get_alert_notification_config(db)
+        # Never echo a real secret back down to the browser -- the Save form only ever
+        # sees a placeholder, and leaving it unchanged (see POST below) keeps the real
+        # value intact rather than overwriting it with the placeholder string itself.
+        # webhook_url is a bearer credential for most webhook receivers (Slack/Teams/
+        # Discord/generic) same as smtp_pass is for SMTP -- masked the same way.
+        cfg['smtp_pass'] = _SMTP_PASS_PLACEHOLDER if cfg.get('smtp_pass') else ''
+        cfg['webhook_url'] = _WEBHOOK_URL_PLACEHOLDER if cfg.get('webhook_url') else ''
+        return jsonify(cfg)
     d = request.json or {}
     cfg = get_alert_notification_config(db)
     for k in ALERT_NOTIFICATION_DEFAULTS:
@@ -3244,6 +3253,8 @@ def api_alert_notification_settings():
             continue
         if k == 'smtp_pass' and d[k] == _SMTP_PASS_PLACEHOLDER:
             continue  # unchanged placeholder from the GET above -- keep the existing secret
+        if k == 'webhook_url' and d[k] == _WEBHOOK_URL_PLACEHOLDER:
+            continue  # unchanged placeholder from the GET above -- keep the existing URL
         cfg[k] = d[k]
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('alert_notification_config', ?)", (json.dumps(cfg),))
     db.commit()
@@ -9357,6 +9368,16 @@ _ROLE_SLUG_RE = re.compile(r'^[a-z][a-z0-9_]*$')
 def api_settings_roles():
     db = get_db()
     if request.method == 'GET':
+        # Two legitimate callers need this: the role-management UI (settings.roles.manage)
+        # AND the "Add User" role dropdown, which only needs settings.users.manage to
+        # exist -- a user-manager who can't redefine what a role CAN do should still be
+        # able to see role names/slugs to assign one to a new account. Either permission
+        # is enough to read; only mutating a role still requires settings.roles.manage
+        # specifically (below). Without this check at all, a user with NEITHER permission
+        # could still read the full permission-key matrix for every role in the system.
+        perms = _current_user_permissions()
+        if 'settings.users.manage' not in perms and 'settings.roles.manage' not in perms:
+            return jsonify({'error': 'Missing permission: Manage users or Manage roles'}), 403
         roles = []
         for r in db.execute("SELECT id, slug, label, description, is_builtin, default_dashboard_id FROM roles ORDER BY is_builtin DESC, label").fetchall():
             perms = [row['permission_key'] for row in db.execute(
