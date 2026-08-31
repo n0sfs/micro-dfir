@@ -298,6 +298,11 @@
                         <option value="off">Off</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
                     </select>
                 </div>
+                <div class="col-6"><label class="form-label small text-muted mb-1">Vulnerability Report</label>
+                    <select data-report-type="vulnerability" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
+                        <option value="off">Off</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
+                    </select>
+                </div>
             </div>
             {% if has_permission('settings.reports.manage') %}
             <button class="btn btn-outline-primary btn-sm mt-2" onclick="saveReportSchedule()"><i class="fa-solid fa-save me-1"></i> Save Schedule</button>

@@ -670,6 +670,7 @@
                 <option value="security">Security Summary</option>
                 <option value="compliance">Compliance Report</option>
                 <option value="audit">Audit Trail Report</option>
+                <option value="vulnerability">Vulnerability Report</option>
             </select>
             <select name="framework" id="reportFrameworkSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto; display:none;" title="Narrow the Compliance Report to one framework instead of the all-frameworks survey">
                 <option value="">All Frameworks</option>
@@ -1094,7 +1095,7 @@ function setStatTile(i, label, value, large) {
     if (vEl) { vEl.innerText = value; vEl.style.fontSize = large ? '1.05rem' : ''; }
 }
 
-const REPORT_TYPE_LABELS = { security: 'Security Summary', compliance: 'Compliance Report', audit: 'Audit Trail Report' };
+const REPORT_TYPE_LABELS = { security: 'Security Summary', compliance: 'Compliance Report', audit: 'Audit Trail Report', vulnerability: 'Vulnerability Report' };
 
 // The framework select only means anything for report_type=compliance -- hidden (and
 // its value ignored server-side via COMPLIANCE_FRAMEWORKS validation regardless) for

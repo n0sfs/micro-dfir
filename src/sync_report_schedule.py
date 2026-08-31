@@ -10,9 +10,9 @@ import json, os, sqlite3, subprocess
 BASE_DIR = "/opt/micro-dfir"
 DB_PATH = os.path.join(BASE_DIR, "siem.db")
 
-REPORT_TYPES = ('security', 'compliance', 'audit')
+REPORT_TYPES = ('security', 'compliance', 'audit', 'vulnerability')
 REPORT_SCHEDULE_FREQUENCIES = ('off', 'weekly', 'monthly')
-REPORT_SCHEDULE_DEFAULTS = {'security': 'monthly', 'compliance': 'off', 'audit': 'off'}
+REPORT_SCHEDULE_DEFAULTS = {'security': 'monthly', 'compliance': 'off', 'audit': 'off', 'vulnerability': 'off'}
 REPORT_SCHEDULE_CRON = {'weekly': '0 6 * * 1', 'monthly': '0 1 1 * *'}
 
 def get_report_schedule_config():

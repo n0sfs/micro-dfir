@@ -21,6 +21,7 @@ from flask_login import LoginManager, UserMixin, login_user, login_required, log
 from yara_scanner import scan_file
 from taxii_client import sync_one as ti_sync_one
 import agent_scripts
+import vuln_matching
 import soar_alerts
 
 app = Flask(__name__, template_folder='../templates')
@@ -2061,24 +2062,42 @@ _CPE_RE = re.compile(r'^cpe:2\.3:[aoh]:([^:]+):([^:]+):([^:]+):')
 
 def _extract_affected_products(cve):
     # Walks configurations[].nodes[].cpeMatch[].criteria for cpe:2.3:PART:vendor:
-    # product:version:... strings. Deduped since the same vendor/product/version
-    # combination often appears in multiple config nodes (AND/OR branches, different
-    # target platforms) -- one row per unique combination is enough for correlation.
+    # product:version:... strings, plus each match's own versionStartIncluding/
+    # versionStartExcluding/versionEndIncluding/versionEndExcluding siblings (same
+    # object as criteria, just previously never read here) -- real version-range data,
+    # not just the flat version token baked into the CPE URI (often '*' when a range is
+    # used instead). `vulnerable` (also a sibling of criteria) defaults true in NVD's
+    # schema when absent, but an explicit `false` means this specific match denotes a
+    # NOT-vulnerable configuration (e.g. a "fixed in" platform entry) -- skipped, since
+    # including it would have correlation treat a patched state as if it were affected.
+    # Deduped on the full tuple including the range fields now, not just
+    # vendor/product/version, since two genuinely different ranges can otherwise share
+    # the same flat version token (commonly '*') and would wrongly collapse into one.
     seen = set()
     out = []
     for config in cve.get('configurations', []) or []:
         for node in config.get('nodes', []) or []:
             for match in node.get('cpeMatch', []) or []:
+                if match.get('vulnerable') is False:
+                    continue
                 criteria = match.get('criteria', '')
                 m = _CPE_RE.match(criteria)
                 if not m:
                     continue
                 vendor, product, version = m.group(1), m.group(2), m.group(3)
-                key = (vendor, product, version)
+                start_inc = match.get('versionStartIncluding')
+                start_exc = match.get('versionStartExcluding')
+                end_inc = match.get('versionEndIncluding')
+                end_exc = match.get('versionEndExcluding')
+                key = (vendor, product, version, start_inc, start_exc, end_inc, end_exc)
                 if key in seen:
                     continue
                 seen.add(key)
-                out.append({'vendor': vendor.replace('_', ' '), 'product': product.replace('_', ' '), 'version': version})
+                out.append({
+                    'vendor': vendor.replace('_', ' '), 'product': product.replace('_', ' '), 'version': version,
+                    'version_start_including': start_inc, 'version_start_excluding': start_exc,
+                    'version_end_including': end_inc, 'version_end_excluding': end_exc,
+                })
     return out
 
 def _sync_cve_feed(db):
@@ -2121,8 +2140,12 @@ def _sync_cve_feed(db):
         db.execute("DELETE FROM cve_affected_products WHERE cve_id = ?", (cve_id,))
         for ap in _extract_affected_products(cve):
             db.execute(
-                "INSERT INTO cve_affected_products (cve_id, vendor, product, version) VALUES (?, ?, ?, ?)",
-                (cve_id, ap['vendor'], ap['product'], ap['version'])
+                "INSERT INTO cve_affected_products (cve_id, vendor, product, version, "
+                "version_start_including, version_start_excluding, version_end_including, version_end_excluding) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (cve_id, ap['vendor'], ap['product'], ap['version'],
+                 ap['version_start_including'], ap['version_start_excluding'],
+                 ap['version_end_including'], ap['version_end_excluding'])
             )
         count += 1
     db.commit()
@@ -2188,70 +2211,11 @@ def api_cve_sync():
         return jsonify({'error': status['last_error']}), 502
     return jsonify(status)
 
-_SOFTWARE_NAME_JUNK_RE = re.compile(r'\s*\((?:x86|x64|32-bit|64-bit)\)\s*', re.IGNORECASE)
-_SOFTWARE_NAME_NONALNUM_RE = re.compile(r'[^a-z0-9]+')
-
-def _normalize_software_name(name):
-    n = _SOFTWARE_NAME_JUNK_RE.sub(' ', (name or '').lower())
-    return _SOFTWARE_NAME_NONALNUM_RE.sub(' ', n).strip()
-
-def _correlate_software_vulnerabilities(db, apps):
-    # Explicitly approximate, same caveat as migrate_cve_affected_products(): NVD's own
-    # CPE product names rarely match a vendor's installer-reported DisplayName exactly
-    # ("Google Chrome" vs CPE product "chrome"), so this checks BOTH a normalized exact
-    # match and "the CPE product name appears as a whole word in the app's normalized
-    # name" -- catches the common vendor-prefixed-name case ("chrome" inside "google
-    # chrome") without falling back to raw substring matching, which would flag almost
-    # anything against short/generic CPE product names and bury real findings in noise.
-    # A short (<4 char) CPE product name is skipped entirely for the same reason.
-    #
-    # Pulling the full cve_affected_products table into Python rather than pushing this
-    # matching into SQL is deliberate: word-boundary matching isn't expressible cleanly
-    # in a LIKE clause, and at this table's real size (a rolling ~7-day CVE window,
-    # a few thousand affected-product rows at most) a full in-memory pass per
-    # correlation call (not a hot path -- triggered on demand per host) is cheap.
-    candidates = db.execute(
-        "SELECT cap.cve_id, cap.vendor, cap.product, cap.version, cr.severity, cr.cvss_score, cr.description "
-        "FROM cve_affected_products cap JOIN cve_records cr ON cr.cve_id = cap.cve_id "
-        "WHERE LENGTH(cap.product) >= 4"
-    ).fetchall()
-
-    matches = []
-    seen = set()
-    for app in apps:
-        name_norm = _normalize_software_name(app.get('name', ''))
-        if not name_norm:
-            continue
-        version = (app.get('version') or '').strip()
-        for c in candidates:
-            product_norm = _normalize_software_name(c['product'])
-            if not product_norm:
-                continue
-            # Whole-word/whole-phrase containment, not `in name_words` (a set of
-            # single words can never contain a multi-word product like "7 zip") and
-            # not raw substring containment either (that would let a short product
-            # name match as part of an unrelated longer word). Padding both sides
-            # with spaces turns "is product_norm one of the space-separated tokens/
-            # phrases in name_norm" into a plain substring check.
-            if f' {product_norm} ' not in f' {name_norm} ':
-                continue
-            # '*' (or no version recorded) means NVD's CPE match wasn't pinned to one
-            # exact version -- treated as "no version constraint" here rather than
-            # attempting real version-range comparison (versionStartIncluding etc.),
-            # which this simplified extraction doesn't capture.
-            if c['version'] and c['version'] != '*' and c['version'] != version:
-                continue
-            key = (app.get('name'), c['cve_id'])
-            if key in seen:
-                continue
-            seen.add(key)
-            matches.append({
-                'installed_name': app.get('name'), 'installed_version': app.get('version'),
-                'cve_id': c['cve_id'], 'severity': c['severity'], 'cvss_score': c['cvss_score'],
-                'matched_product': c['product'], 'description': c['description'],
-            })
-    matches.sort(key=lambda m: (m['cvss_score'] or 0), reverse=True)
-    return matches
+# Vulnerability name/version matching now lives in vuln_matching.py (correlate_software_
+# vulnerabilities, normalize_software_name) -- a shared module both this file and
+# generate_report.py import directly (same plain-module-no-Flask-dependency shape
+# agent_scripts.py already uses), since the Vulnerability Report's fleet-wide
+# aggregation needs the exact same matching logic, not a second hand-maintained copy.
 
 @app.route('/api/vulnerabilities/<hostname>', methods=['GET'])
 @login_required
@@ -2276,7 +2240,7 @@ def api_vulnerabilities_for_host(hostname):
     except (ValueError, TypeError):
         return jsonify({'error': 'The stored inventory result is not valid JSON.'}), 500
     apps = inventory.get('apps', []) if isinstance(inventory, dict) else []
-    matches = _correlate_software_vulnerabilities(db, apps)
+    matches = vuln_matching.correlate_software_vulnerabilities(db, apps)
     return jsonify({
         'hostname': hostname, 'inventory_collected_at': row['completed_at'],
         'apps_scanned': len(apps), 'matches': matches,
@@ -3251,7 +3215,7 @@ def download_report(history_id):
         return redirect(url_for('dash', tab='reports'))
     return send_from_directory('/opt/micro-dfir/reports', row['filename'], as_attachment=True)
 
-REPORT_TYPES = ('security', 'compliance', 'audit')
+REPORT_TYPES = ('security', 'compliance', 'audit', 'vulnerability')
 
 @app.route('/reports/generate', methods=['POST'])
 @login_required
@@ -3386,7 +3350,7 @@ def report_branding_logo():
 # generate_report.py's own duplicated REPORT_BRANDING_DEFAULTS -- it has no Flask app
 # context and is invoked once at deploy time, not imported from here).
 REPORT_SCHEDULE_FREQUENCIES = ('off', 'weekly', 'monthly')
-REPORT_SCHEDULE_DEFAULTS = {'security': 'monthly', 'compliance': 'off', 'audit': 'off'}
+REPORT_SCHEDULE_DEFAULTS = {'security': 'monthly', 'compliance': 'off', 'audit': 'off', 'vulnerability': 'off'}
 REPORT_SCHEDULE_CRON = {
     'weekly': '0 6 * * 1',   # Monday 06:00 -- lands before the start of the work week
     'monthly': '0 1 1 * *',  # 1st of month 01:00 -- matches install.sh's old convention
@@ -6470,6 +6434,34 @@ def api_dashboard_case_close_trend():
     ).fetchall()
     return jsonify({'trend': [dict(r) for r in rows]})
 
+# Same fleet-wide aggregation the Vulnerability Report runs (generate_report.py's
+# generate_vulnerability_report), just live/JSON instead of a rendered PDF -- both call
+# the shared vuln_matching module rather than duplicating the correlation logic.
+@app.route('/api/dashboards/vulnerability-summary', methods=['GET'])
+@login_required
+def api_dashboard_vulnerability_summary():
+    import json
+    db = get_db()
+    severity_counts = {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0}
+    severity_order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}
+    findings = []
+    hosts_assessed = 0
+    for host in vuln_matching.latest_software_inventory(db):
+        hosts_assessed += 1
+        for m in vuln_matching.correlate_software_vulnerabilities(db, host['apps']):
+            sev = (m['severity'] or '').upper()
+            if sev in severity_counts:
+                severity_counts[sev] += 1
+            findings.append({**m, 'hostname': host['hostname']})
+    findings.sort(key=lambda f: (severity_order.get((f['severity'] or '').upper(), 9), -(f['cvss_score'] or 0)))
+    row = db.execute("SELECT value FROM settings WHERE key = 'cve_feed_status'").fetchone()
+    status = json.loads(row['value']) if row and row['value'] else {}
+    return jsonify({
+        'hosts_assessed': hosts_assessed, 'unique_cve_count': len({f['cve_id'] for f in findings}),
+        'severity_counts': severity_counts, 'top_findings': findings[:8],
+        'last_sync': status.get('last_sync'),
+    })
+
 @app.route('/api/settings/case-sla', methods=['GET', 'POST'])
 @login_required
 def api_case_sla_config():
@@ -7303,7 +7295,7 @@ WIDGET_TYPES = {
     'chart_agent_status': {}, 'chart_mitre_coverage': {}, 'chart_threat_actors': {},
     'chart_case_stats': {}, 'chart_case_aging': {}, 'chart_case_queue_backlog': {},
     'chart_case_workload': {}, 'chart_case_close_trend': {}, 'chart_compliance_coverage': {},
-    'chart_fim_activity': {}, 'chart_agent_health_trend': {},
+    'chart_fim_activity': {}, 'chart_agent_health_trend': {}, 'chart_vulnerability_summary': {},
     # "App" widgets (Batch 2) -- compact live embeds of other pages, all reusing their
     # existing endpoints (/api/alerts, /api/cases, /api/logs/search, /api/ti/lookup,
     # /api/agent/commands) rather than any new backend logic. Purely additive to this
@@ -8237,12 +8229,13 @@ def migrate_cve_records():
 def migrate_cve_affected_products():
     # Extracted from each CVE's CPE match criteria (cpe:2.3:a:vendor:product:version:...)
     # at sync time -- a separate table, not extra columns on cve_records, since one CVE
-    # commonly affects several distinct vendor/product/version combinations. This is
-    # explicitly approximate: real CPE matching also handles version RANGES
-    # (versionStartIncluding/versionEndExcluding) and edition/target_sw qualifiers this
-    # doesn't attempt -- version is stored as-is (including a literal '*' meaning "any
-    # version") and correlation treats '*' as "no version constraint", which is honest
-    # about the approximation rather than silently pretending to be exact.
+    # commonly affects several distinct vendor/product/version combinations. `version`
+    # is stored as-is (including a literal '*' meaning "any version" when NVD's CPE
+    # match uses a range instead of a pinned version) -- real range data lives in the 4
+    # columns migrate_cve_affected_products_ranges() below adds. The remaining
+    # approximation (edition/target_sw qualifiers, and NAME-side matching against a
+    # vendor's free-text DisplayName) is still real and disclosed in the UI/reports --
+    # see vuln_matching.py.
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
         conn.execute('''CREATE TABLE IF NOT EXISTS cve_affected_products (
@@ -8254,6 +8247,23 @@ def migrate_cve_affected_products():
         )''')
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cve_affected_product ON cve_affected_products(product)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cve_affected_cve_id ON cve_affected_products(cve_id)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_cve_affected_products_ranges():
+    # NVD's cpeMatch objects carry versionStartIncluding/versionStartExcluding/
+    # versionEndIncluding/versionEndExcluding as siblings of `criteria` -- always present
+    # in the API response, just never read/stored until now. See _extract_affected_products
+    # and vuln_matching.version_matches_range. Same column-existence-check ALTER TABLE
+    # pattern as migrate_agent_groups().
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(cve_affected_products)").fetchall()}
+        for col in ('version_start_including', 'version_start_excluding', 'version_end_including', 'version_end_excluding'):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE cve_affected_products ADD COLUMN {col} TEXT")
         conn.commit()
         conn.close()
     except Exception:
@@ -11190,6 +11200,7 @@ migrate_agent_tokens()
 migrate_agent_groups()
 migrate_cve_records()
 migrate_cve_affected_products()
+migrate_cve_affected_products_ranges()
 migrate_audit_log()
 migrate_risk_scoring()
 migrate_anomaly_rules()
