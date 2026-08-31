@@ -476,23 +476,30 @@ function renderAgentStatusWidget(container, widgetId, config) {
     }).catch(err => console.error('Error loading agent status:', err));
 }
 
-// Count 0 -> a flat muted cell (a real gap in coverage, not "no data yet" --
-// every curated technique is always present regardless of count). Count > 0
-// scales from accent toward danger so heavily-covered techniques stand out
-// from a rule or two just as easily as a glance at a bar chart would.
-function mitreCellStyle(count, c) {
-    if (count === 0) return `background:${c.grid}; color:${c.muted};`;
-    const step = Math.min(count, 5) / 5;
-    const color = step < 0.5 ? c.info : (step < 0.85 ? c.accent : c.danger);
-    return `background:${color}33; color:${color}; font-weight:600;`;
+// Same 4-tier model as the SIEM Coverage tab's drill-down grid (dashboard.html's
+// COVERAGE_TIERS/.tier-* cell classes) -- gap/inactive/active/validated, not a raw
+// enabled-rule-count gradient. Mirrors that page's exact alpha levels (16/18/20%) so a
+// technique reads the same color here as it does there.
+const MITRE_TIER_LABELS = { gap: 'Gap', inactive: 'Inactive', active: 'Active', validated: 'Validated' };
+function mitreTierColor(tier, c) {
+    return { gap: c.muted, inactive: c.warning, active: c.info, validated: c.success }[tier] || c.muted;
+}
+function mitreCellStyle(tech, c) {
+    const color = mitreTierColor(tech.tier, c);
+    if (tech.tier === 'gap') return `background:${c.grid}; color:${c.muted};`;
+    const alpha = tech.tier === 'validated' ? '33' : (tech.tier === 'active' ? '2e' : '29');
+    const weight = tech.tier === 'validated' ? 700 : (tech.tier === 'active' ? 600 : 500);
+    return `background:${color}${alpha}; color:${color}; font-weight:${weight};`;
 }
 
 function renderMitreCoverageWidget(container, widgetId, config) {
     container.innerHTML = `
+        <div class="d-flex flex-wrap align-items-center gap-3 mb-2 mitre-headline"></div>
         <div class="mitre-grid"></div>
         <div class="small text-muted mt-2 widget-unmapped" style="display:none;"></div>
         <p class="text-muted small text-center mb-0 py-3 widget-empty" style="display:none;">No enabled rules carry MITRE ATT&CK tags yet.</p>
         <div class="text-end mt-2"><a href="/siem?tab=coverage" class="small">View full coverage <i class="fa-solid fa-arrow-right"></i></a></div>`;
+    const headline = container.querySelector('.mitre-headline');
     const grid = container.querySelector('.mitre-grid');
     const unmappedEl = container.querySelector('.widget-unmapped');
     const emptyEl = container.querySelector('.widget-empty');
@@ -500,6 +507,21 @@ function renderMitreCoverageWidget(container, widgetId, config) {
         const c = chartTheme();
         const anyCoverage = d.tactics.some(t => t.covered > 0) || (d.unmapped && d.unmapped.length);
         emptyEl.style.display = anyCoverage ? 'none' : 'block';
+
+        // Same two deliberately-separate headline numbers as the Coverage tab's hero:
+        // Coverage (broader -- active+validated, just needs an enabled rule) and
+        // Detection Score (stricter -- validated only, an alert actually fired).
+        const totalTechniques = d.tactics.reduce((a, t) => a + t.total, 0);
+        const coveredTechniques = d.tactics.reduce((a, t) => a + t.covered, 0);
+        const coveragePct = totalTechniques ? (coveredTechniques / totalTechniques * 100) : 0;
+        const tierTotals = { gap: 0, inactive: 0, active: 0, validated: 0 };
+        d.tactics.forEach(t => Object.keys(tierTotals).forEach(k => tierTotals[k] += (t.tiers && t.tiers[k]) || 0));
+        headline.innerHTML = `
+            <span class="small"><strong style="color:${c.text};">${totalTechniques ? coveragePct.toFixed(0) + '%' : '—'}</strong> <span class="text-muted">Coverage</span></span>
+            <span class="small"><strong style="color:${c.text};">${totalTechniques ? (d.detection_score || 0).toFixed(1) + '%' : '—'}</strong> <span class="text-muted">Detection</span></span>
+            ${Object.entries(MITRE_TIER_LABELS).map(([key, label]) => `
+                <span class="small text-muted"><span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${mitreTierColor(key, c)}; margin-right:4px;"></span>${label} (${tierTotals[key]})</span>
+            `).join('')}`;
 
         grid.innerHTML = d.tactics.map(t => `
             <div class="mitre-col">
@@ -509,8 +531,8 @@ function renderMitreCoverageWidget(container, widgetId, config) {
                 </div>
                 <div class="mitre-cells">
                     ${t.techniques.map(tech => `
-                        <div class="mitre-cell" style="${mitreCellStyle(tech.count, c)}" title="T${escHtml(tech.id)} ${escHtml(tech.name || '')} — ${tech.count} enabled rule${tech.count === 1 ? '' : 's'}">
-                            T${escHtml(tech.id)}${tech.count > 0 ? ` (${tech.count})` : ''}
+                        <div class="mitre-cell" style="${mitreCellStyle(tech, c)}" title="T${escHtml(tech.id)} ${escHtml(tech.name || '')} — ${MITRE_TIER_LABELS[tech.tier]}${tech.count ? `, ${tech.count} enabled rule${tech.count === 1 ? '' : 's'}` : ''}${tech.log_source_gap ? ' — log source not ingested, may never fire' : ''}">
+                            T${escHtml(tech.id)}${tech.count > 0 ? ` (${tech.count})` : ''}${tech.log_source_gap ? ' <i class="fa-solid fa-plug-circle-xmark"></i>' : ''}
                         </div>`).join('')}
                 </div>
             </div>`).join('');
