@@ -192,8 +192,15 @@ def _framework_focused_context(conn, cursor, framework_key):
     # Fleet coverage -- how much of the enrolled estate this hardening picture actually
     # reflects, not just its pass rate. agent_tokens is the hostname-native enrollment
     # table (see migrate_agent_groups()'s own comment in app.py).
+    # agent_tokens looked like the hostname-native enrollment table on paper, but in
+    # practice most already-deployed agents authenticate via the older shared-secret
+    # path and never bind a row there (confirmed live: production had 5 agent_tokens
+    # rows, all with hostname=NULL, while every real host was only visible via
+    # agent_polls) -- agent_polls.user_agent (the hostname agents report themselves as)
+    # is what's actually populated for every host that has ever checked in, so that's
+    # the real "total known hosts" denominator, not agent_tokens.
     total_hosts = cursor.execute(
-        "SELECT COUNT(DISTINCT hostname) FROM agent_tokens WHERE hostname IS NOT NULL"
+        "SELECT COUNT(DISTINCT user_agent) FROM agent_polls"
     ).fetchone()[0]
     assessed_hosts = len(_latest_sca_results(cursor))
 
