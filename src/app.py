@@ -1887,6 +1887,30 @@ COMPLIANCE_FRAMEWORKS = {
     'cis_controls': 'CIS Controls', 'gdpr': 'GDPR',
 }
 
+@app.route('/api/compliance/coverage', methods=['GET'])
+@login_required
+def api_compliance_coverage():
+    # Same tagged-vs-enabled coverage generate_compliance_report() computes for the
+    # downloadable PDF (src/generate_report.py), exposed live for a Dashboards widget
+    # instead of only ever being visible inside a generated report.
+    db = get_db()
+    rows = db.execute(
+        "SELECT compliance_tags, enabled FROM sigma_rules WHERE compliance_tags IS NOT NULL AND compliance_tags != ''"
+    ).fetchall()
+    coverage = {key: {'key': key, 'label': label, 'total': 0, 'enabled': 0} for key, label in COMPLIANCE_FRAMEWORKS.items()}
+    for row in rows:
+        for tag in (row['compliance_tags'] or '').split(','):
+            if tag in coverage:
+                coverage[tag]['total'] += 1
+                if row['enabled']:
+                    coverage[tag]['enabled'] += 1
+    frameworks = sorted(coverage.values(), key=lambda f: f['label'])
+    return jsonify({
+        'frameworks': frameworks,
+        'full_coverage_count': sum(1 for f in frameworks if f['total'] > 0 and f['enabled'] == f['total']),
+        'total_frameworks': len(frameworks),
+    })
+
 def invalidate_rules_cache():
     global RULES_CACHE, TUNING_CACHE
     RULES_CACHE = None
