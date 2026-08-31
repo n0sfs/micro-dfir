@@ -464,10 +464,28 @@ function hoursLabel(h) {
     return `${(h / 24).toFixed(1)}d`;
 }
 
+function complianceAuditLine(row) {
+    const who = escHtml(row.username || 'unknown');
+    if (row.action === 'rule_compliance_tag') {
+        const tags = (row.details || '(cleared)').trim();
+        return `${who} tagged rule #${row.target_id} — ${escHtml(tags === '' ? '(cleared)' : tags)}`;
+    }
+    if (row.action === 'rule_toggle') {
+        return `${who} toggled rule #${row.target_id}`;
+    }
+    if (row.action === 'rule_bulk_toggle') {
+        return `${who} ${escHtml(row.details || '')}`;
+    }
+    return `${who} ${escHtml(row.action)}`;
+}
+
 function renderComplianceCoverageWidget(container, widgetId, config) {
     container.innerHTML = '<div class="compliance-widget-body p-2"></div>';
     const body = container.querySelector('.compliance-widget-body');
-    const load = () => fetch('/api/compliance/coverage').then(r => r.json()).then(d => {
+    const load = () => Promise.all([
+        fetch('/api/compliance/coverage').then(r => r.json()),
+        fetch('/api/compliance/audit-trail').then(r => r.ok ? r.json() : []).catch(() => []),
+    ]).then(([d, trail]) => {
         body.innerHTML = `
             <div class="small text-muted mb-2">${d.full_coverage_count} / ${d.total_frameworks} frameworks fully enabled</div>
             ${d.frameworks.map(f => {
@@ -484,7 +502,13 @@ function renderComplianceCoverageWidget(container, widgetId, config) {
                         <div class="progress-bar ${barColor}" style="width:${f.total === 0 ? 100 : pct}%;"></div>
                     </div>
                 </div>`;
-            }).join('')}`;
+            }).join('')}
+            <h6 class="small text-uppercase text-muted mt-3 mb-1">Recent Changes</h6>
+            <div class="small" style="max-height:140px; overflow-y:auto;">
+                ${trail.length
+                    ? trail.map(row => `<div class="text-muted border-top border-secondary py-1"><span class="text-nowrap">${complianceAuditLine(row)}</span><br><span style="font-size:.72rem;">${escHtml(row.timestamp)}</span></div>`).join('')
+                    : '<div class="text-muted fst-italic">No compliance tagging/enable changes recorded yet.</div>'}
+            </div>`;
     }).catch(err => console.error('Error loading compliance coverage:', err));
     load();
     WIDGET_INTERVALS[widgetId] = setInterval(load, 60000);
