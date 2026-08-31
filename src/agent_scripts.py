@@ -660,6 +660,64 @@ $errored = @($results | Where-Object { $_.status -eq 'error' }).Count
 [PSCustomObject]@{ checks = $results; passed = $passed; failed = $failed; errored = $errored; total = $results.Count } | ConvertTo-Json -Depth 4 -Compress
 """
 
+def collect_network_connections():
+    return r"""$result = @{}
+$result.tcp = @(try {
+    Get-NetTCPConnection -ErrorAction Stop |
+        Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess,@{N='ProcessName';E={(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName}} |
+        Select-Object -First 200
+} catch { @() })
+$result.udp = @(try {
+    Get-NetUDPEndpoint -ErrorAction Stop |
+        Select-Object LocalAddress,LocalPort,OwningProcess,@{N='ProcessName';E={(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName}} |
+        Select-Object -First 200
+} catch { @() })
+$result.tcp_truncated = ($result.tcp.Count -ge 200)
+$result.udp_truncated = ($result.udp.Count -ge 200)
+$result | ConvertTo-Json -Depth 4 -Compress
+"""
+
+def collect_dns_arp():
+    return r"""$result = @{}
+$result.dns_cache = @(try {
+    Get-DnsClientCache -ErrorAction Stop | Select-Object Entry,RecordType,Status,Data | Select-Object -First 200
+} catch { @() })
+$result.arp_table = @(try {
+    Get-NetNeighbor -AddressFamily IPv4 -ErrorAction Stop |
+        Where-Object { $_.State -ne 'Unreachable' } |
+        Select-Object IPAddress,LinkLayerAddress,State,InterfaceAlias |
+        Select-Object -First 200
+} catch { @() })
+$result | ConvertTo-Json -Depth 4 -Compress
+"""
+
+# Deliberately informational, not a verdict -- a process with no on-disk backing path or
+# an unsigned/invalid-signature binary is a real, well-known indicator technique
+# (hollowing, reflective injection, a deleted-after-launch dropper), but is ALSO common
+# for perfectly ordinary unsigned third-party software. Framed the same honest way
+# sca_check's own results are: real machine-specific data for an analyst to triage, not
+# an automated "this is malicious" claim -- matches this codebase's established
+# never-guess-wrong-on-severity philosophy.
+def check_process_injection_indicators():
+    return r"""$result = @{}
+$procs = Get-Process -ErrorAction SilentlyContinue
+
+$result.no_backing_path = @($procs | Where-Object { -not $_.Path -and $_.Id -ne 0 } |
+    Select-Object Id,ProcessName | Select-Object -First 100)
+
+$result.unsigned = @($procs | Where-Object { $_.Path } | ForEach-Object {
+    try {
+        $sig = Get-AuthenticodeSignature -FilePath $_.Path -ErrorAction Stop
+        if ($sig.Status -ne 'Valid') {
+            [PSCustomObject]@{ id = $_.Id; name = $_.ProcessName; path = $_.Path; signature_status = $sig.Status.ToString() }
+        }
+    } catch {}
+} | Select-Object -First 100)
+
+$result.note = "Informational only -- a process with no backing file path or an unsigned/invalid-signature binary is common for both malicious injection AND ordinary unsigned third-party software. Not a verdict, a starting point for manual triage."
+$result | ConvertTo-Json -Depth 3 -Compress
+"""
+
 # label -> (builder, required param names)
 WINDOWS_TEMPLATES = {
     'list_processes': (lambda params: _PROGRESS_SILENT + list_processes(), []),
@@ -675,6 +733,9 @@ WINDOWS_TEMPLATES = {
     'collect_live_forensics': (lambda params: _PROGRESS_SILENT + collect_live_forensics(), []),
     'collect_software_inventory': (lambda params: _PROGRESS_SILENT + collect_software_inventory(), []),
     'sca_check': (lambda params: _PROGRESS_SILENT + sca_check(), []),
+    'collect_network_connections': (lambda params: _PROGRESS_SILENT + collect_network_connections(), []),
+    'collect_dns_arp': (lambda params: _PROGRESS_SILENT + collect_dns_arp(), []),
+    'check_process_injection_indicators': (lambda params: _PROGRESS_SILENT + check_process_injection_indicators(), []),
     # 'hashes'/'md5_hashes'/'sha1_hashes' and 'patterns' are always server-populated
     # from the live IOC list / imported YARA rules right before dispatch (see app.py's
     # api_agent_commands()), never client-supplied — deliberately not in the required
@@ -1329,6 +1390,73 @@ print(json.dumps({'checks': checks, 'passed': passed, 'failed': failed, 'errored
 PYEOF
 """
 
+def collect_network_connections_linux():
+    return "ss -tunapl 2>/dev/null | head -300 || netstat -tunapl 2>/dev/null | head -300"
+
+def collect_dns_arp_linux():
+    return r"""echo "=== ARP / Neighbor Table ==="
+ip neigh show 2>/dev/null || arp -an 2>/dev/null || echo "(no ARP tooling available)"
+echo
+echo "=== DNS Resolver Cache (systemd-resolved, if active) ==="
+if command -v resolvectl >/dev/null 2>&1; then
+    resolvectl statistics 2>/dev/null || echo "(resolvectl present but the query failed)"
+else
+    echo "(systemd-resolved not in use on this host -- no system-wide DNS cache to query)"
+fi
+"""
+
+# Same informational-not-a-verdict framing as the Windows counterpart. A deleted-but-
+# running executable (/proc/*/exe resolving to a "(deleted)" target -- the binary on
+# disk was removed or replaced after the process started) and an executable memory
+# mapping with no backing file at all are both well-known reflective-injection/packing
+# indicators, but can also occur legitimately (a self-updating binary, a JIT compiler,
+# a package upgrade replacing a still-running binary).
+def check_process_injection_indicators_linux():
+    return r"""python3 - <<'PYEOF'
+import json, os
+
+result = {'deleted_but_running': [], 'anon_exec_mappings': []}
+
+for pid_dir in os.listdir('/proc'):
+    if not pid_dir.isdigit():
+        continue
+    try:
+        target = os.readlink(f'/proc/{pid_dir}/exe')
+    except (OSError, PermissionError):
+        continue
+    try:
+        with open(f'/proc/{pid_dir}/comm') as f:
+            comm = f.read().strip()
+    except Exception:
+        comm = ''
+
+    if '(deleted)' in target:
+        result['deleted_but_running'].append({'pid': int(pid_dir), 'comm': comm, 'exe': target})
+
+    try:
+        with open(f'/proc/{pid_dir}/maps') as f:
+            maps = f.read()
+    except (OSError, PermissionError):
+        continue
+    for line in maps.splitlines():
+        parts = line.split(None, 5)
+        if len(parts) < 5:
+            continue
+        addr, perms = parts[0], parts[1]
+        path = parts[5].strip() if len(parts) > 5 else ''
+        # Executable with no backing file (or a backing file that's been deleted) --
+        # every legitimately mapped shared library always has a real path here.
+        if 'x' in perms and (not path or '(deleted)' in path):
+            result['anon_exec_mappings'].append({'pid': int(pid_dir), 'comm': comm, 'region': addr, 'perms': perms})
+            break  # one hit per process is enough signal, avoid flooding on a chatty process
+
+result['deleted_but_running'] = result['deleted_but_running'][:100]
+result['anon_exec_mappings'] = result['anon_exec_mappings'][:100]
+result['note'] = "Informational only. A deleted-but-running executable or an executable memory region with no backing file is a strong reflective-injection/packing indicator, but can also occur legitimately (e.g. a self-updating binary, a JIT compiler). Not a verdict, a starting point for manual triage."
+print(json.dumps(result))
+PYEOF
+"""
+
 LINUX_TEMPLATES = {
     'list_processes': (lambda params: list_processes_linux(), []),
     'kill_process': (lambda params: kill_process_linux(params['pid']), ['pid']),
@@ -1340,6 +1468,9 @@ LINUX_TEMPLATES = {
     'collect_ssh_artifacts': (lambda params: collect_ssh_artifacts_linux(), []),
     'collect_software_inventory': (lambda params: collect_software_inventory_linux(), []),
     'sca_check': (lambda params: sca_check_linux(), []),
+    'collect_network_connections': (lambda params: collect_network_connections_linux(), []),
+    'collect_dns_arp': (lambda params: collect_dns_arp_linux(), []),
+    'check_process_injection_indicators': (lambda params: check_process_injection_indicators_linux(), []),
     'ioc_sweep': (lambda params: ioc_sweep_linux(params.get('hashes', []), params.get('md5_hashes', []), params.get('sha1_hashes', [])), []),
     'string_sweep': (lambda params: string_sweep_linux(params.get('patterns', [])), []),
     'yara_condition_sweep': (lambda params: yara_condition_sweep_linux(params.get('rule_conditions', [])), []),
