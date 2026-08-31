@@ -30,6 +30,7 @@
             <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'feeds' else '' }}" id="tabBtnFeeds" onclick="switchTiTab('feeds')"><i class="fa-solid fa-satellite-dish me-2"></i>Feed Sources</button></li>
             <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'entities' else '' }}" id="tabBtnEntities" onclick="switchTiTab('entities')"><i class="fa-solid fa-user-ninja me-2"></i>Threat Entities</button></li>
             <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'hunt' else '' }}" id="tabBtnHunt" onclick="switchTiTab('hunt')"><i class="fa-solid fa-magnifying-glass me-2"></i>YARA Scanning</button></li>
+            <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'vulns' else '' }}" id="tabBtnVulns" onclick="switchTiTab('vulns')"><i class="fa-solid fa-bug me-2"></i>Vulnerabilities</button></li>
         </ul>
     </div>
 
@@ -388,6 +389,55 @@
             </div>
         </div>
     </div>
+
+    <!-- Vulnerabilities pane -->
+    <div id="paneVulns" style="display:{{ 'block' if active_tab == 'vulns' else 'none' }};">
+        <div class="card-body">
+            <div class="card bg-dark border-secondary">
+                <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                    <span><i class="fa-solid fa-bug me-2"></i>CVE Database</span>
+                    <div class="d-flex align-items-center gap-2">
+                        <span id="cveSyncStatus" class="text-muted small"></span>
+                        {% if has_permission('threatintel.manage') %}
+                        <button type="button" class="btn btn-sm btn-outline-primary" id="cveSyncBtn" onclick="syncCveFeed()"><i class="fa-solid fa-rotate me-1"></i>Sync Now</button>
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted small"><i class="fa-solid fa-circle-info me-1"></i>Pulled from the <a href="https://nvd.nist.gov/" target="_blank" rel="noopener" class="text-muted">National Vulnerability Database</a>'s public API -- CVEs published in roughly the last week, refreshed on demand. Browsable reference today; not yet correlated against installed software on any endpoint.</p>
+                    <div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
+                        <input type="text" id="cveSearch" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:320px;" placeholder="Search CVE ID or description..." onkeyup="if(event.key === 'Enter') loadCveRecords()">
+                        <select id="cveSeverityFilter" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:160px;" onchange="loadCveRecords()">
+                            <option value="">All Severities</option>
+                            <option value="CRITICAL">Critical</option>
+                            <option value="HIGH">High</option>
+                            <option value="MEDIUM">Medium</option>
+                            <option value="LOW">Low</option>
+                        </select>
+                        <input type="number" id="cveMinScore" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:130px;" placeholder="Min CVSS" min="0" max="10" step="0.1" onchange="loadCveRecords()">
+                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadCveRecords()"><i class="fa-solid fa-magnifying-glass me-1"></i>Search</button>
+                        <span id="cveCountLabel" class="text-muted small ms-auto"></span>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-dark table-hover mb-0">
+                            <thead>
+                                <tr>
+                                    <th>CVE ID</th>
+                                    <th>Severity</th>
+                                    <th>CVSS</th>
+                                    <th>Description</th>
+                                    <th>Published</th>
+                                </tr>
+                            </thead>
+                            <tbody id="cveTableBody">
+                                <tr><td colspan="5" class="text-center text-muted py-3">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
 
 <!-- IOC Sweep Hit Detail Modal -->
@@ -646,7 +696,7 @@ const LAST_MATCHES_COUNT = {{ matches|length }};
 // ---- Tabs + shared stat row (repurposed per active tab, not two separate rows) ----
 let activeTiTab = '{{ "hunt" if active_tab == "hunt" else "iocs" }}';
 
-const TI_TAB_IDS = ['iocs', 'feeds', 'entities', 'hunt'];
+const TI_TAB_IDS = ['iocs', 'feeds', 'entities', 'hunt', 'vulns'];
 function switchTiTab(tab) {
     activeTiTab = tab;
     TI_TAB_IDS.forEach(t => {
@@ -2125,6 +2175,63 @@ function loadIocs() {
         .catch(err => console.error('Error loading IOCs:', err));
 }
 
+function cveSeverityBadge(severity) {
+    if (!severity) return '<span class="text-muted small">Unscored</span>';
+    const map = {CRITICAL: 'bg-danger', HIGH: 'bg-warning text-dark', MEDIUM: 'bg-info text-dark', LOW: 'bg-secondary'};
+    return `<span class="badge ${map[severity] || 'bg-secondary'}">${escHtml(severity)}</span>`;
+}
+
+function loadCveRecords() {
+    const q = document.getElementById('cveSearch').value.trim();
+    const severity = document.getElementById('cveSeverityFilter').value;
+    const minScore = document.getElementById('cveMinScore').value;
+    const params = new URLSearchParams();
+    if (q) params.set('q', q);
+    if (severity) params.set('severity', severity);
+    if (minScore) params.set('min_score', minScore);
+    fetch('/api/cve/records?' + params.toString()).then(r => r.json()).then(d => {
+        document.getElementById('cveCountLabel').innerText = `${d.total} CVE${d.total === 1 ? '' : 's'}`;
+        const tbody = document.getElementById('cveTableBody');
+        if (!d.rows.length) {
+            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">No CVEs match your filters. Try "Sync Now" if the database is empty.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = d.rows.map(c => `
+            <tr>
+                <td><a href="https://nvd.nist.gov/vuln/detail/${encodeURIComponent(c.cve_id)}" target="_blank" rel="noopener" class="font-monospace small">${escHtml(c.cve_id)}</a></td>
+                <td>${cveSeverityBadge(c.severity)}</td>
+                <td class="small">${c.cvss_score != null ? c.cvss_score.toFixed(1) : '—'}</td>
+                <td class="small text-muted" style="max-width:520px;">${escHtml((c.description || '').slice(0, 200))}${(c.description || '').length > 200 ? '…' : ''}</td>
+                <td class="small text-nowrap">${escHtml((c.published_date || '').slice(0, 10))}</td>
+            </tr>`).join('');
+    }).catch(err => console.error('Error loading CVE records:', err));
+}
+
+function loadCveSyncStatus() {
+    fetch('/api/cve/sync-status').then(r => r.json()).then(d => {
+        const el = document.getElementById('cveSyncStatus');
+        if (!d.last_sync) { el.innerText = `${d.total_stored || 0} stored, never synced`; return; }
+        const statusTxt = d.last_status === 'error' ? `error: ${d.last_error}` : `${d.last_count} fetched`;
+        el.innerText = `${d.total_stored} stored — last sync ${d.last_sync} (${statusTxt})`;
+        el.className = d.last_status === 'error' ? 'small text-danger' : 'small text-muted';
+    }).catch(err => console.error('Error loading CVE sync status:', err));
+}
+
+function syncCveFeed() {
+    const btn = document.getElementById('cveSyncBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i>Syncing...';
+    fetch('/api/cve/sync', {method: 'POST'}).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (ok) toast(`Synced ${data.last_count} CVE(s) from NVD.`, 'success');
+        else toast(data.error || 'Sync failed.', 'danger');
+        loadCveSyncStatus();
+        loadCveRecords();
+    }).catch(err => toast('Error: ' + err, 'danger')).finally(() => {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-rotate me-1"></i>Sync Now';
+    });
+}
+
 updateHuntStats();
 loadFeeds();
 loadEntities();
@@ -2135,5 +2242,7 @@ loadIocs();
 loadIocFacets();
 initIocFilterDropdowns();
 checkEntityDeepLink();
+loadCveSyncStatus();
+loadCveRecords();
 </script>
 {% endblock %}
