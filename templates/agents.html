@@ -978,6 +978,7 @@ const CONSOLE_ACTION_DISPLAY = {
         collect_network_connections: 'Collect-Network-Connections (live TCP/UDP connections with owning process)',
         collect_dns_arp: 'Collect-DNS-ARP (DNS client cache + ARP/neighbor table)',
         check_process_injection_indicators: 'Check-Process-Injection-Indicators (processes with no backing file, unsigned binaries -- informational, not a verdict)',
+        quarantine_file: 'Quarantine-File (move to a locked-down folder, deny execute -- contain, not just collect)',
         isolate_host: 'Isolate-Host (block all traffic except this SOC server)',
         restore_network: 'Restore-Network',
         upgrade: 'Upgrade-Agent (fetch latest agent, restart)'
@@ -995,6 +996,7 @@ const CONSOLE_ACTION_DISPLAY = {
         collect_network_connections: 'Collect-Network-Connections (ss/netstat: live TCP/UDP connections with owning process)',
         collect_dns_arp: 'Collect-DNS-ARP (ip neigh/arp ARP table + systemd-resolved cache stats if active)',
         check_process_injection_indicators: 'Check-Process-Injection-Indicators (deleted-but-running executables, anonymous executable memory mappings -- informational, not a verdict)',
+        quarantine_file: 'Quarantine-File (move to a locked-down folder, chmod 000 + chattr +i if supported -- contain, not just collect)',
         isolate_host: 'Isolate-Host (iptables: block all traffic except this SOC server)',
         restore_network: 'Restore-Network (iptables: remove isolation rules)',
         upgrade: 'Upgrade-Agent (fetch latest agent, restart)',
@@ -1011,6 +1013,7 @@ const CONSOLE_DROPDOWN_ACTIONS = [
     { value: 'list_processes', label: 'List Processes', permission: 'edr.command.advanced' },
     { value: 'kill_process', label: 'Kill Process (PID)', permission: 'edr.command.basic', needsParams: true },
     { value: 'collect_file', label: 'Collect File', permission: 'edr.command.advanced', needsParams: true },
+    { value: 'quarantine_file', label: 'Quarantine File', permission: 'edr.command.basic', needsParams: true },
     { value: 'collect_triage', label: 'Triage Collection', permission: 'edr.command.basic' },
     { value: 'persistence_sweep', label: 'Persistence Sweep', permission: 'edr.command.advanced' },
     { value: 'ioc_sweep', label: 'IOC Hash Sweep', permission: 'edr.command.advanced' },
@@ -1306,6 +1309,13 @@ function consoleShowParamForm(label) {
                 <input type="text" id="paramPath" class="form-control bg-dark text-light border-secondary" placeholder="C:\\Users\\...\\file.exe" onkeydown="if(event.key==='Enter') submitCollectFile()">
                 <button class="btn btn-outline-primary" onclick="submitCollectFile()">Run</button>
             </div>`;
+    } else if (label === 'quarantine_file') {
+        wrap.innerHTML = `
+            <label class="form-label small text-muted mb-1">Full file path to quarantine (moved + locked down, not just collected)</label>
+            <div class="input-group input-group-sm">
+                <input type="text" id="paramQuarantinePath" class="form-control bg-dark text-light border-secondary" placeholder="C:\\Users\\...\\file.exe" onkeydown="if(event.key==='Enter') submitQuarantineFile()">
+                <button class="btn btn-outline-danger" onclick="submitQuarantineFile()">Run</button>
+            </div>`;
     } else {
         return;
     }
@@ -1324,6 +1334,14 @@ function submitCollectFile() {
     const path = (document.getElementById('paramPath').value || '').trim();
     if (!path) return;
     queueConsoleCommand(consoleSelectedHost, 'collect_file', {path}, `Collect-File "${path}"`);
+    document.getElementById('consoleParamForm').style.display = 'none';
+}
+
+async function submitQuarantineFile() {
+    const path = (document.getElementById('paramQuarantinePath').value || '').trim();
+    if (!path) return;
+    if (!(await confirmDialog(`Quarantine "${path}" on ${consoleSelectedHost}? The file will be moved out of place and locked down. This cannot be undone from here.`, {title: 'Quarantine file', danger: true, confirmLabel: 'Quarantine'}))) return;
+    queueConsoleCommand(consoleSelectedHost, 'quarantine_file', {path}, `Quarantine-File "${path}"`);
     document.getElementById('consoleParamForm').style.display = 'none';
 }
 
