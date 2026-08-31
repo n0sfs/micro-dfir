@@ -287,11 +287,15 @@ def run_fim_check(paths):
         if prev is None:
             cur["hash"] = _hash_file(path)
             state[path] = cur
-            logs.append({"time": now, "host": host, "app": "FIM", "severity": "MEDIUM", "event_id": "-", "username": "-", "message": f"New file now being monitored: {path}"})
+            logs.append({"time": now, "host": host, "app": "FIM", "severity": "MEDIUM", "event_id": "-", "username": "-", "message": f"New file now being monitored: {path}", "sha256": cur["hash"]})
         elif prev.get("mtime") != cur["mtime"] or prev.get("size") != cur["size"]:
             cur["hash"] = _hash_file(path)
             if cur["hash"] != prev.get("hash"):
-                logs.append({"time": now, "host": host, "app": "FIM", "severity": "HIGH", "event_id": "-", "username": "-", "message": f"File changed: {path}"})
+                # sha256 rides along as its own field (not just embedded in the message)
+                # so the server can check it against the live IOC hash list without
+                # having to parse it back out of free text -- see api_ingest()'s
+                # FIM-hash branch, the server-side half of this same feature.
+                logs.append({"time": now, "host": host, "app": "FIM", "severity": "HIGH", "event_id": "-", "username": "-", "message": f"File changed: {path}", "sha256": cur["hash"]})
             state[path] = cur
     # A path an admin stopped watching is just dropped from the baseline, silently --
     # only paths still in the config can ever produce a "removed" alert above.

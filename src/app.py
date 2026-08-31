@@ -517,7 +517,13 @@ def api_ingest():
             proc = _extract_process_fields_from_xml(raw_xml) if raw_xml else {}
             if not proc:
                 proc = _extract_process_fields(msg)
-            file_hash = _canonical_hash(proc.get('hashes_raw'))
+            # FIM sends its own computed sha256 as a dedicated field (not embedded in the
+            # free-text message, which just reads "File changed: <path>") -- see
+            # run_fim_check() in both agent scripts. Falls back to it only when the
+            # generic process-hash extraction found nothing, since a real Sysmon-style
+            # hash is the more specific signal when both happen to be present.
+            fim_sha256 = (log.get('sha256') or '').strip().lower() if app_n == 'FIM' else ''
+            file_hash = _canonical_hash(proc.get('hashes_raw')) or (fim_sha256 or None)
             db.execute(
                 "INSERT INTO live_logs (timestamp, host, app, severity, event_id, username, source_ip, message, "
                 "process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml, "
@@ -534,8 +540,16 @@ def api_ingest():
             msg_lower = msg.lower()
             triggered_rule = None
             alert_sev = "INFO"
-            
-            if "mimikatz" in msg_lower or "lsass" in msg_lower:
+
+            # A file FIM just flagged as new/changed, whose hash matches a live
+            # threat-intel IOC, is real evidence -- not just "something on disk changed"
+            # but "something on disk changed AND it's a known-bad file". Checked ahead of
+            # the keyword heuristics below (which a FIM message like "File changed: X"
+            # would never match anyway) so this always wins when it fires.
+            if fim_sha256 and fim_sha256 in _get_live_ioc_sha256_hashes(db):
+                triggered_rule = "Known-Bad Hash Matched via FIM"
+                alert_sev = "CRITICAL"
+            elif "mimikatz" in msg_lower or "lsass" in msg_lower:
                 triggered_rule = "Credential Dumping Activity"
                 alert_sev = "CRITICAL"
             elif "powershell" in msg_lower and ("-enc" in msg_lower or "-w hidden" in msg_lower):
