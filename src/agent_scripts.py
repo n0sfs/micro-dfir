@@ -558,6 +558,26 @@ $result.note = "BitLocker recovery keys and USB/PowerShell/LNK history are metad
 $result | ConvertTo-Json -Depth 5 -Compress
 """
 
+# Registry Uninstall keys are the standard, side-effect-free way to enumerate installed
+# software on Windows -- unlike Win32_Product (WMI), which silently triggers a repair
+# reconfiguration of every MSI-installed app it enumerates and is notoriously slow.
+# Covers native 64-bit apps (HKLM), 32-bit apps on 64-bit Windows (WOW6432Node), and
+# per-user installs (HKCU) -- the three places a DisplayName/DisplayVersion pair
+# realistically lives. Feeds server-side CVE correlation (see
+# _correlate_software_vulnerabilities in app.py), not shown as an end in itself.
+def collect_software_inventory():
+    return r"""$paths = @(
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+    'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+)
+$apps = Get-ItemProperty -Path $paths -ErrorAction SilentlyContinue |
+    Where-Object { $_.DisplayName -and $_.DisplayName.Trim() -ne '' } |
+    Select-Object @{N='name';E={$_.DisplayName}}, @{N='version';E={$_.DisplayVersion}}, @{N='publisher';E={$_.Publisher}}
+$apps = @($apps | Sort-Object name, version -Unique)
+[PSCustomObject]@{ count = $apps.Count; apps = $apps } | ConvertTo-Json -Compress -Depth 3
+"""
+
 # label -> (builder, required param names)
 WINDOWS_TEMPLATES = {
     'list_processes': (lambda params: _PROGRESS_SILENT + list_processes(), []),
@@ -571,6 +591,7 @@ WINDOWS_TEMPLATES = {
     'collect_forensic_timestamps': (lambda params: _PROGRESS_SILENT + collect_forensic_timestamps(), []),
     'collect_recent_file_changes': (lambda params: _PROGRESS_SILENT + collect_recent_file_changes(), []),
     'collect_live_forensics': (lambda params: _PROGRESS_SILENT + collect_live_forensics(), []),
+    'collect_software_inventory': (lambda params: _PROGRESS_SILENT + collect_software_inventory(), []),
     # 'hashes'/'md5_hashes'/'sha1_hashes' and 'patterns' are always server-populated
     # from the live IOC list / imported YARA rules right before dispatch (see app.py's
     # api_agent_commands()), never client-supplied — deliberately not in the required
@@ -1077,6 +1098,36 @@ augenrules --load 2>/dev/null
 echo "Exec auditing disabled and rule file removed."
 """
 
+# dpkg (Debian/Ubuntu) or rpm (RHEL/CentOS/Fedora/Amazon Linux) -- whichever package
+# manager is actually present, tried in that order. Feeds server-side CVE correlation
+# (see _correlate_software_vulnerabilities in app.py), same purpose as
+# collect_software_inventory() does for Windows.
+def collect_software_inventory_linux():
+    return r"""python3 - <<'PYEOF'
+import json, shutil, subprocess
+
+def run(cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout
+    except Exception:
+        return ''
+
+apps = []
+if shutil.which('dpkg-query'):
+    for line in run(['dpkg-query', '-W', '-f=${Package}\t${Version}\n']).splitlines():
+        parts = line.split('\t')
+        if len(parts) == 2 and parts[0]:
+            apps.append({'name': parts[0], 'version': parts[1], 'publisher': ''})
+elif shutil.which('rpm'):
+    for line in run(['rpm', '-qa', '--qf', '%{NAME}\t%{VERSION}-%{RELEASE}\n']).splitlines():
+        parts = line.split('\t')
+        if len(parts) == 2 and parts[0]:
+            apps.append({'name': parts[0], 'version': parts[1], 'publisher': ''})
+
+print(json.dumps({'count': len(apps), 'apps': apps}))
+PYEOF
+"""
+
 LINUX_TEMPLATES = {
     'list_processes': (lambda params: list_processes_linux(), []),
     'kill_process': (lambda params: kill_process_linux(params['pid']), ['pid']),
@@ -1086,6 +1137,7 @@ LINUX_TEMPLATES = {
     'persistence_sweep': (lambda params: persistence_sweep_linux(), []),
     'collect_file': (lambda params: collect_file_linux(params['path']), ['path']),
     'collect_ssh_artifacts': (lambda params: collect_ssh_artifacts_linux(), []),
+    'collect_software_inventory': (lambda params: collect_software_inventory_linux(), []),
     'ioc_sweep': (lambda params: ioc_sweep_linux(params.get('hashes', []), params.get('md5_hashes', []), params.get('sha1_hashes', [])), []),
     'string_sweep': (lambda params: string_sweep_linux(params.get('patterns', [])), []),
     'yara_condition_sweep': (lambda params: yara_condition_sweep_linux(params.get('rule_conditions', [])), []),
