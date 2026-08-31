@@ -38,6 +38,9 @@
     .cov-score-ring circle{fill:none; stroke-width:8;}
     .cov-score-ring .track{stroke:var(--bg-inset);}
     .cov-score-ring .fill{stroke:var(--accent); stroke-linecap:round; transition:stroke-dashoffset .4s ease;}
+    .cov-score-ring .fill.detection{stroke:var(--success);}
+    .cov-score-block.detection{padding-right:0; border-right:none; padding-left:28px; border-left:1px solid var(--border);}
+    .cov-score-note{font-size:.7rem; color:var(--text-muted); max-width:190px; line-height:1.3;}
     .cov-score-value{position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:1.35rem; font-weight:700; color:var(--text-primary); font-variant-numeric:tabular-nums;}
     .cov-score-meta{display:flex; flex-direction:column; gap:4px;}
     .cov-score-label{font-size:.72rem; text-transform:uppercase; letter-spacing:.05em; color:var(--text-muted); font-weight:700;}
@@ -690,6 +693,19 @@
                 <div class="cov-score-meta">
                     <div class="cov-score-label">Overall Coverage</div>
                     <div class="cov-score-delta flat" id="covScoreDelta">—</div>
+                </div>
+            </div>
+            <div class="cov-score-block detection">
+                <div class="cov-score-ring">
+                    <svg viewBox="0 0 88 88">
+                        <circle class="track" cx="44" cy="44" r="38"></circle>
+                        <circle class="fill detection" id="detScoreRingFill" cx="44" cy="44" r="38" stroke-dasharray="238.76" stroke-dashoffset="238.76"></circle>
+                    </svg>
+                    <div class="cov-score-value" id="detScoreValue">—</div>
+                </div>
+                <div class="cov-score-meta">
+                    <div class="cov-score-label">Detection Score</div>
+                    <div class="cov-score-note" id="detScoreNote">Techniques with a rule that has actually fired</div>
                 </div>
             </div>
             <div class="cov-chip-row" id="coverageChips"></div>
@@ -3827,6 +3843,17 @@ function renderCoverageHero() {
     document.getElementById('coverageChips').innerHTML = COVERAGE_TIERS.map(t => `
         <div class="cov-chip"><span class="dot ${t.dot}"></span><span class="num">${totals[t.key]}</span><span class="lbl">${t.label}</span></div>
     `).join('');
+
+    // Detection Score is the stricter sibling metric: validated (actually-fired)
+    // techniques over the full curated set, computed server-side in
+    // _build_mitre_coverage() so it stays consistent with the drill-down grid.
+    const detTotal = coverageData && coverageData.total_techniques;
+    const detPct = coverageData ? (coverageData.detection_score || 0) : 0;
+    document.getElementById('detScoreValue').textContent = detTotal ? `${detPct.toFixed(1)}%` : '—';
+    document.getElementById('detScoreRingFill').style.strokeDashoffset = detTotal ? COV_RING_CIRC * (1 - detPct / 100) : COV_RING_CIRC;
+    document.getElementById('detScoreNote').textContent = detTotal
+        ? `${coverageData.total_validated} of ${detTotal} techniques proven by a real alert`
+        : 'Techniques with a rule that has actually fired';
 }
 
 function loadCoverageTab() {
