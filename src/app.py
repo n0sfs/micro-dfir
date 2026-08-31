@@ -4186,17 +4186,18 @@ def api_case_analyze(cid):
 
 # ---- Playbooks (SOAR) ----
 PLAYBOOK_TRIGGERS = ('case_created', 'status_changed', 'queue_changed', 'assignee_changed', 'scheduled', 'alert_created')
-PLAYBOOK_ACTION_TYPES = ('apply_template', 'add_task', 'add_note', 'set_queue', 'analyze_entity', 'send_email', 'send_webhook', 'send_slack', 'isolate_host')
+PLAYBOOK_ACTION_TYPES = ('apply_template', 'add_task', 'add_note', 'set_queue', 'analyze_entity', 'send_email', 'send_webhook', 'send_slack', 'isolate_host', 'restore_network', 'collect_triage', 'quarantine_file', 'kill_scheduled_task')
 # alert_created playbooks are alert-scoped (no case_id exists yet -- see soar_alerts.py)
 # and get their own small, non-destructive action set instead of the case-scoped one
 # above; create_case is the bridge into the full case-scoped arsenal.
 ALERT_ACTION_TYPES = soar_alerts.PLAYBOOK_ALERT_ACTION_TYPES
 PLAYBOOK_APPROVAL_STATUSES = ('pending', 'approved', 'rejected')
-# isolate_host is the one playbook action type with real, physical consequences (it
-# cuts network access on a real endpoint) -- requires_approval is forced to 1 for it at
-# save time (see api_playbooks/api_playbook_detail below), never left to the editor's
-# checkbox, so there's no way to configure an unattended auto-isolate.
-PLAYBOOK_ACTION_TYPES_ALWAYS_GATED = {'isolate_host'}
+# These 5 are every Tier 1 EDR action offered as a playbook step -- each has real,
+# physical consequences on a real endpoint (cuts/restores network access, quarantines
+# or deletes something, pulls a forensic bundle). requires_approval is forced to 1 for
+# all of them at save time (see api_playbooks/api_playbook_detail below), never left to
+# the editor's checkbox, so there's no way to configure any of them to run unattended.
+PLAYBOOK_ACTION_TYPES_ALWAYS_GATED = {'isolate_host', 'restore_network', 'collect_triage', 'quarantine_file', 'kill_scheduled_task'}
 
 def _valid_action_types_for_trigger(trigger_event):
     return ALERT_ACTION_TYPES if trigger_event == 'alert_created' else PLAYBOOK_ACTION_TYPES
@@ -4436,6 +4437,60 @@ def _run_playbook_action(db, cid, action_type, params, dry_run=False):
             )
             queued.append(host)
         return f"queued isolate_host for {len(queued)} host(s): {', '.join(queued)}"
+
+    # The 4 actions below share isolate_host's exact targeting model (every Case Asset
+    # marked 'confirmed' compromised, one agent_commands row per host) but, unlike
+    # isolate_host, none of them need a per-call computed value like soc_ip -- their
+    # params (none, or one admin-typed literal) are the same for every targeted host,
+    # so this one small helper covers all 4 instead of repeating the lookup+loop 4x.
+    if action_type in ('restore_network', 'collect_triage', 'quarantine_file', 'kill_scheduled_task'):
+        confirmed_hosts = [r['host'] for r in db.execute(
+            "SELECT host FROM case_assets WHERE case_id = ? AND compromise_status = 'confirmed'", (cid,)
+        ).fetchall()]
+
+        if action_type == 'restore_network':
+            action_params, verb = {}, "restore network access on"
+        elif action_type == 'collect_triage':
+            action_params, verb = {}, "collect a triage bundle from"
+        elif action_type == 'quarantine_file':
+            path = (params.get('path') or '').strip()
+            if not path:
+                return "no file path configured, skipped"
+            action_params, verb = {'path': path}, f"quarantine '{path}' on"
+        else:  # kill_scheduled_task
+            task_name = (params.get('task_name') or '').strip()
+            if not task_name:
+                return "no task name configured, skipped"
+            action_params, verb = {'task_name': task_name}, f"remove the '{task_name}' scheduled task from"
+
+        if not confirmed_hosts:
+            return "no confirmed-compromised hosts in this case, skipped"
+        if dry_run:
+            return f"would {verb} {len(confirmed_hosts)} confirmed host(s): {', '.join(confirmed_hosts)}"
+        queued, unsupported = [], []
+        for host in confirmed_hosts:
+            # kill_scheduled_task is Windows-only (agent_scripts.py has no Linux/macOS
+            # equivalent -- Scheduled Tasks are a Windows concept) -- a confirmed host on
+            # another OS is skipped individually rather than crashing the whole action,
+            # same "skip what doesn't apply, don't abort the rest" convention used for
+            # the scheduled agent sweep loop hitting an OS without a given template.
+            entry = agent_scripts.TEMPLATES_BY_OS[_get_host_os(db, host)].get(action_type)
+            if entry is None:
+                unsupported.append(host)
+                continue
+            builder, _ = entry
+            script = builder(action_params)
+            db.execute(
+                "INSERT INTO agent_commands (hostname, label, script, queued_by) VALUES (?, ?, ?, 'playbook')",
+                (host, action_type, script)
+            )
+            queued.append(host)
+        if not queued:
+            return f"none of the confirmed hosts support {action_type}, skipped ({', '.join(unsupported)})"
+        detail = f"queued {action_type} for {len(queued)} host(s): {', '.join(queued)}"
+        if unsupported:
+            detail += f" (skipped {len(unsupported)} unsupported: {', '.join(unsupported)})"
+        return detail
 
     return f"unknown action type '{action_type}', skipped"
 

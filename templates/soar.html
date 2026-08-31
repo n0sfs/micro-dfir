@@ -328,7 +328,10 @@ const CASE_ACTION_LABELS = {
     apply_template: 'Apply case template', add_task: 'Add task', add_note: 'Add note',
     set_queue: 'Set queue', analyze_entity: 'Analyze entity', send_email: 'Send email',
     send_webhook: 'Send webhook', send_slack: 'Send Slack message',
-    isolate_host: 'Isolate confirmed hosts (EDR)'
+    isolate_host: 'Isolate confirmed hosts (EDR)', restore_network: 'Restore network on confirmed hosts (EDR)',
+    collect_triage: 'Collect triage bundle from confirmed hosts (EDR)',
+    quarantine_file: 'Quarantine a file on confirmed hosts (EDR)',
+    kill_scheduled_task: 'Remove a scheduled task on confirmed hosts (EDR, Windows only)'
 };
 const ALERT_ACTION_LABELS = {
     send_email: 'Send email', send_webhook: 'Send webhook', send_slack: 'Send Slack message',
@@ -342,7 +345,7 @@ function actionLabelsForTrigger(triggerEvent) {
 // for these in the editor, matching PLAYBOOK_ACTION_TYPES_ALWAYS_GATED server-side
 // (which re-forces it regardless of what's submitted, so this is a UI hint, not the
 // actual enforcement point).
-const ACTION_TYPES_ALWAYS_GATED = ['isolate_host'];
+const ACTION_TYPES_ALWAYS_GATED = ['isolate_host', 'restore_network', 'collect_triage', 'quarantine_file', 'kill_scheduled_task'];
 
 function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -530,6 +533,16 @@ function actionParamsFieldsHtml(seq, actionType, params) {
                 <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_message" placeholder="Message (optional -- case_id/case_title/status/tlp/pap placeholders supported)" value="${escHtml(params.message || '')}">`;
         case 'isolate_host':
             return `<div class="small text-muted">No params -- isolates every Case Asset marked <strong>Confirmed</strong> compromised when this action runs. Always requires approval.</div>`;
+        case 'restore_network':
+            return `<div class="small text-muted">No params -- restores network access on every Case Asset marked <strong>Confirmed</strong> compromised. Always requires approval.</div>`;
+        case 'collect_triage':
+            return `<div class="small text-muted">No params -- collects a forensic triage bundle from every Case Asset marked <strong>Confirmed</strong> compromised. Always requires approval.</div>`;
+        case 'quarantine_file':
+            return `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_path" placeholder="Full file path to quarantine, e.g. C:\\Users\\Public\\evil.exe" value="${escHtml(params.path || '')}">
+                <div class="small text-muted mt-1">Quarantines this exact path on every Case Asset marked <strong>Confirmed</strong> compromised. Always requires approval.</div>`;
+        case 'kill_scheduled_task':
+            return `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_task_name" placeholder="Scheduled task name, e.g. WindowsUpdateSvc" value="${escHtml(params.task_name || '')}">
+                <div class="small text-muted mt-1">Windows only -- skipped on any confirmed host that isn't Windows. Always requires approval.</div>`;
         case 'create_case':
             return `<div class="small text-muted">No params -- creates a new case from the triggering alert (title/severity carried over) and links it, then runs any matching "Case created" playbooks against it.</div>`;
         default:
@@ -615,6 +628,8 @@ function collectActionRow(row) {
             params.message = getVal('message');
             break;
         }
+        case 'quarantine_file': params.path = getVal('path'); break;
+        case 'kill_scheduled_task': params.task_name = getVal('task_name'); break;
     }
     return { action_type: actionType, params, requires_approval: requiresApproval };
 }
