@@ -1866,10 +1866,19 @@ function widgetPickerSection(title, entries) {
 
 function renderWidgetPicker() {
     const entries = Object.entries(WIDGET_REGISTRY);
-    const charts = entries.filter(([, def]) => def.category === 'chart');
+    // chart_custom gets its own prominent, full-width call-out above everything else --
+    // sitting in the regular grid below (same gray outline button as the other 22
+    // entries) made it easy to miss.
+    const charts = entries.filter(([type, def]) => def.category === 'chart' && type !== 'chart_custom');
     const apps = entries.filter(([, def]) => def.category === 'app');
+    const customDef = WIDGET_REGISTRY.chart_custom;
+    const customSection = `
+        <button type="button" class="btn btn-primary w-100 text-start mb-3 py-2" onclick="addWidget('chart_custom')">
+            <i class="fa-solid ${customDef.icon} me-2"></i><strong>${escHtml(customDef.label)}</strong>
+            <span class="d-block small fw-normal" style="opacity:0.85;">Build your own chart or number against raw log data -- pick the filters, grouping, and chart type.</span>
+        </button>`;
     document.getElementById('addWidgetBody').innerHTML =
-        widgetPickerSection('Charts & Analytics', charts) + widgetPickerSection('Live App Views', apps);
+        customSection + widgetPickerSection('Charts & Analytics', charts) + widgetPickerSection('Live App Views', apps);
 }
 
 function addWidget(widgetType) {
