@@ -2,6 +2,7 @@ import base64, json, mimetypes, os, sqlite3
 from datetime import datetime, timedelta
 from jinja2 import Environment, FileSystemLoader
 from weasyprint import HTML
+import vuln_matching
 
 BASE_DIR = "/opt/micro-dfir"
 DB_PATH = os.path.join(BASE_DIR, "siem.db")
@@ -332,6 +333,78 @@ def generate_audit_report():
     conn.close()
     return _render_and_write('report_template_audit.html', context, _report_filename('Audit'))
 
+# Distinct from CASE_SEVERITY_COLORS below (which collapses CRITICAL/HIGH into the
+# same red) -- CVE severity has 4 real tiers worth telling apart at a glance, matching
+# templates/threat_intel.html's own cveSeverityBadge color scheme (CRITICAL/HIGH/MEDIUM/
+# LOW -> danger/warning/info/secondary), just as hex for this PDF's inline-styled badges.
+CVE_SEVERITY_COLORS = {
+    'CRITICAL': '#dc3545', 'HIGH': '#e0a800', 'MEDIUM': '#0dcaf0', 'LOW': '#6c757d',
+}
+
+def generate_vulnerability_report():
+    conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
+
+    inventory = vuln_matching.latest_software_inventory(cursor)
+    findings = []  # one row per (host, match) -- real evidence, not just a count
+    host_summaries = []
+    severity_counts = {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0}
+    unique_cves = set()
+    severity_order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}
+
+    for host in inventory:
+        matches = vuln_matching.correlate_software_vulnerabilities(cursor, host['apps'])
+        host_highest = None
+        for m in matches:
+            sev = (m['severity'] or '').upper()
+            if sev in severity_counts:
+                severity_counts[sev] += 1
+            unique_cves.add(m['cve_id'])
+            if host_highest is None or severity_order.get(sev, 9) < severity_order.get(host_highest, 9):
+                host_highest = sev
+            findings.append({
+                'hostname': host['hostname'], 'cve_id': m['cve_id'], 'severity': m['severity'],
+                'cvss_score': m['cvss_score'], 'installed_name': m['installed_name'],
+                'installed_version': m['installed_version'], 'description': m['description'],
+            })
+        host_summaries.append({
+            'hostname': host['hostname'], 'apps_scanned': len(host['apps']),
+            'match_count': len(matches), 'highest_severity': host_highest,
+        })
+
+    findings.sort(key=lambda f: (severity_order.get((f['severity'] or '').upper(), 9), -(f['cvss_score'] or 0)))
+    findings_total = len(findings)
+    findings = findings[:AUDIT_REPORT_ROW_CAP]
+    host_summaries.sort(key=lambda h: (severity_order.get(h['highest_severity'], 9), -h['match_count']))
+
+    # Same "last CVE sync" freshness signal the Threat Intel tab's own sync-status
+    # button already surfaces -- carried into the report so a reader isn't left
+    # assuming this reflects today's CVE landscape when it might be a week stale.
+    last_sync = None
+    sync_row = cursor.execute("SELECT value FROM settings WHERE key = 'cve_feed_status'").fetchone()
+    if sync_row and sync_row['value']:
+        try:
+            last_sync = json.loads(sync_row['value']).get('last_sync')
+        except (ValueError, TypeError):
+            pass
+
+    context = {
+        "date_generated": datetime.now().strftime("%B %d, %Y"),
+        "report_title": "Vulnerability Report",
+        "branding": _branding_context(conn),
+        "hosts_assessed": len(inventory),
+        "unique_cve_count": len(unique_cves),
+        "severity_counts": severity_counts,
+        "findings": findings,
+        "findings_truncated": findings_total > AUDIT_REPORT_ROW_CAP,
+        "findings_total": findings_total,
+        "row_cap": AUDIT_REPORT_ROW_CAP,
+        "host_summaries": host_summaries,
+        "last_cve_sync": last_sync,
+        "severity_colors": CVE_SEVERITY_COLORS,
+    }
+    conn.close()
+    return _render_and_write('report_template_vulnerability.html', context, _report_filename('Vulnerability'))
+
 CASE_TLP_PAP_COLORS = {
     'clear': '#6c757d', 'green': '#198754', 'amber': '#e0a800',
     'amber-strict': '#e0a800', 'red': '#dc3545',
@@ -451,6 +524,7 @@ REPORT_GENERATORS = {
     # framework_key through), same as 'case' -- not listed here to avoid two dispatch
     # paths for the same type.
     'audit': generate_audit_report,
+    'vulnerability': generate_vulnerability_report,
 }
 
 def _record_history(conn, report_type, filename, status, started_at, completed_at,

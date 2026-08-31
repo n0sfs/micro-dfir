@@ -695,6 +695,42 @@ function renderComplianceCoverageWidget(container, widgetId, config) {
     WIDGET_INTERVALS[widgetId] = setInterval(load, 60000);
 }
 
+function renderVulnerabilitySummaryWidget(container, widgetId, config) {
+    container.innerHTML = `
+        <div class="row g-2">
+            <div class="col-5"><canvas></canvas></div>
+            <div class="col-7 vuln-widget-list small" style="max-height:220px; overflow-y:auto;"></div>
+        </div>
+        <p class="small text-muted mt-2 mb-0 widget-note"></p>`;
+    const canvas = container.querySelector('canvas');
+    const list = container.querySelector('.vuln-widget-list');
+    const note = container.querySelector('.widget-note');
+    const load = () => fetch('/api/dashboards/vulnerability-summary').then(r => r.json()).then(d => {
+        const c = chartTheme();
+        destroyChart(widgetId);
+        const sevLabels = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
+        DASH_CHARTS[widgetId] = new Chart(canvas.getContext('2d'), {
+            type: 'doughnut',
+            data: {
+                labels: sevLabels.map(titleCase),
+                datasets: [{ data: sevLabels.map(s => d.severity_counts[s] || 0), backgroundColor: sevLabels.map(s => severityColor(s, c)), borderColor: 'transparent' }],
+            },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: c.text, boxWidth: 12 } } } },
+        });
+        list.innerHTML = d.top_findings.length
+            ? d.top_findings.map(f => `
+                <div class="d-flex justify-content-between border-bottom border-secondary py-1">
+                    <span><span class="badge" style="background:${severityColor(f.severity, c)};">${(f.severity || 'UNKNOWN').toUpperCase()}</span> ${escHtml(f.cve_id)}</span>
+                    <span class="text-muted text-truncate ms-2" style="max-width:140px;" title="${escHtml(f.hostname)}">${escHtml(f.hostname)}</span>
+                </div>`).join('')
+            : '<div class="text-muted fst-italic">No vulnerability matches found.</div>';
+        note.textContent = `${d.hosts_assessed} host${d.hosts_assessed === 1 ? '' : 's'} assessed, ${d.unique_cve_count} unique CVE${d.unique_cve_count === 1 ? '' : 's'}`
+            + (d.last_sync ? ` · CVE data synced ${d.last_sync}` : ' · CVE data has never been synced');
+    }).catch(err => console.error('Error loading vulnerability summary:', err));
+    load();
+    WIDGET_INTERVALS[widgetId] = setInterval(load, 60000);
+}
+
 function renderCaseStatsWidget(container, widgetId, config) {
     container.innerHTML = `
         <div class="d-flex justify-content-end small text-muted mb-2">
@@ -1649,6 +1685,7 @@ const WIDGET_REGISTRY = {
     chart_compliance_coverage: { label: 'Compliance Framework Coverage', icon: 'fa-clipboard-check', category: 'chart', defaultW: 6, defaultH: 5, live: true, render: renderComplianceCoverageWidget },
     chart_fim_activity:       { label: 'File Integrity Activity', icon: 'fa-file-shield', category: 'chart', defaultW: 8, defaultH: 4, render: renderFimActivityWidget },
     chart_agent_health_trend: { label: 'Agent Fleet Health', icon: 'fa-heart-pulse', category: 'chart', defaultW: 8, defaultH: 4, render: renderAgentHealthTrendWidget },
+    chart_vulnerability_summary: { label: 'Vulnerability Summary', icon: 'fa-bug', category: 'chart', defaultW: 8, defaultH: 5, live: true, render: renderVulnerabilitySummaryWidget },
     // App widgets (Batch 2) -- compact live embeds, all reusing existing endpoints.
     app_alerts:        { label: 'Alerts', icon: 'fa-triangle-exclamation', category: 'app', defaultW: 4, defaultH: 5, render: renderAlertsWidget },
     app_cases:         { label: 'Cases', icon: 'fa-folder-open', category: 'app', defaultW: 4, defaultH: 5, render: renderCasesWidget },
