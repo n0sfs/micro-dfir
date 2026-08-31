@@ -69,6 +69,38 @@ $hash = (Get-FileHash $p -Algorithm SHA256).Hash
 @{{ path=$p; size=$size; sha256=$hash; content_b64=$b64 }} | ConvertTo-Json -Compress
 """
 
+# Contain, not just collect -- moves the file out of its original location (so it can no
+# longer be executed/loaded from there) into a locked-down folder, rather than only ever
+# pulling a copy for offline analysis while the original stays live. icacls grants SYSTEM/
+# Administrators full control explicitly (rather than denying Everyone, which would also
+# lock out the accounts that need to later restore or delete it) and denies execute to
+# Everyone else. A sidecar .manifest.json records the original path/hash/timestamp for
+# restoration, matching the FIM baseline's own "state lives next to the agent, survives
+# an upgrade" pattern.
+def quarantine_file(path):
+    esc = path.replace('`', '``').replace('"', '`"').replace('$', '`$')
+    return f"""$p = "{esc}"
+if (-not (Test-Path $p -PathType Leaf)) {{ '{{"error":"file not found"}}'; exit }}
+$hash = (Get-FileHash $p -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
+$qDir = "C:\\ProgramData\\MicroDFIR\\Quarantine"
+if (-not (Test-Path $qDir)) {{ New-Item -ItemType Directory -Path $qDir -Force | Out-Null }}
+$stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+$shortHash = 'nohash'
+if ($hash) {{ $shortHash = $hash.Substring(0, [Math]::Min(16, $hash.Length)) }}
+$destName = "${{stamp}}_${{shortHash}}_$(Split-Path $p -Leaf).quarantined"
+$dest = Join-Path $qDir $destName
+try {{
+    Move-Item -Path $p -Destination $dest -Force -ErrorAction Stop
+    icacls $dest /inheritance:r /grant:r "SYSTEM:(F)" "Administrators:(F)" /deny "Everyone:(RX)" | Out-Null
+    $manifest = @{{ original_path = $p; quarantined_path = $dest; sha256 = $hash; quarantined_at = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss') }}
+    $manifest | ConvertTo-Json -Compress | Out-File -FilePath "$dest.manifest.json" -Encoding utf8
+    $manifest | ConvertTo-Json -Compress
+}} catch {{
+    $errMsg = $_.Exception.Message -replace '"', "'"
+    "{{`"error`":`"failed to quarantine: $errMsg`"}}"
+}}
+"""
+
 def _ps_hashset_literal(values):
     return ','.join("'" + v + "'" for v in values)
 
@@ -742,6 +774,7 @@ WINDOWS_TEMPLATES = {
     'collect_triage': (lambda params: _PROGRESS_SILENT + collect_triage(), []),
     'persistence_sweep': (lambda params: _PROGRESS_SILENT + persistence_sweep(), []),
     'collect_file': (lambda params: _PROGRESS_SILENT + collect_file(params['path']), ['path']),
+    'quarantine_file': (lambda params: _PROGRESS_SILENT + quarantine_file(params['path']), ['path']),
     'collect_browser_artifacts': (lambda params: _PROGRESS_SILENT + collect_browser_artifacts(), []),
     'collect_forensic_timestamps': (lambda params: _PROGRESS_SILENT + collect_forensic_timestamps(), []),
     'collect_recent_file_changes': (lambda params: _PROGRESS_SILENT + collect_recent_file_changes(), []),
@@ -845,6 +878,50 @@ else:
         with open(p, 'rb') as f:
             data = f.read()
         print(json.dumps({{'path': p, 'size': size, 'sha256': hashlib.sha256(data).hexdigest(), 'content_b64': base64.b64encode(data).decode()}}))
+PYEOF
+"""
+
+# Same contain-not-just-collect rationale as the Windows quarantine_file(). chmod 000
+# alone is a real baseline (the agent runs as root -- see install_agent() -- but chmod
+# 000 still blocks every OTHER account, and blocks root's own accidental double-click/
+# execution via a path lookup). chattr +i (immutable) is attempted best-effort on top --
+# not all filesystems support it (tmpfs, some network mounts don't), so its real success
+# is reported back rather than assumed.
+def quarantine_file_linux(path):
+    esc = path.replace('\\', '\\\\').replace("'", "\\'")
+    return f"""python3 - <<'PYEOF'
+import hashlib, json, os, shutil, subprocess, datetime
+
+p = '{esc}'
+if not os.path.isfile(p):
+    print(json.dumps({{'error': 'file not found'}}))
+else:
+    h = hashlib.sha256()
+    with open(p, 'rb') as f:
+        for chunk in iter(lambda: f.read(65536), b''):
+            h.update(chunk)
+    sha256 = h.hexdigest()
+
+    qdir = '/opt/microdfir-agent/quarantine'
+    os.makedirs(qdir, exist_ok=True)
+    stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    dest_name = f'{{stamp}}_{{sha256[:16]}}_{{os.path.basename(p)}}.quarantined'
+    dest = os.path.join(qdir, dest_name)
+    try:
+        shutil.move(p, dest)
+        os.chmod(dest, 0o000)
+        immutable = False
+        try:
+            r = subprocess.run(['chattr', '+i', dest], capture_output=True, timeout=5)
+            immutable = (r.returncode == 0)
+        except Exception:
+            pass
+        manifest = {{'original_path': p, 'quarantined_path': dest, 'sha256': sha256, 'quarantined_at': stamp, 'immutable': immutable}}
+        with open(dest + '.manifest.json', 'w') as f:
+            json.dump(manifest, f)
+        print(json.dumps(manifest))
+    except Exception as e:
+        print(json.dumps({{'error': f'failed to quarantine: {{e}}'}}))
 PYEOF
 """
 
@@ -1480,6 +1557,7 @@ LINUX_TEMPLATES = {
     'collect_triage': (lambda params: collect_triage_linux(), []),
     'persistence_sweep': (lambda params: persistence_sweep_linux(), []),
     'collect_file': (lambda params: collect_file_linux(params['path']), ['path']),
+    'quarantine_file': (lambda params: quarantine_file_linux(params['path']), ['path']),
     'collect_ssh_artifacts': (lambda params: collect_ssh_artifacts_linux(), []),
     'collect_software_inventory': (lambda params: collect_software_inventory_linux(), []),
     'sca_check': (lambda params: sca_check_linux(), []),
