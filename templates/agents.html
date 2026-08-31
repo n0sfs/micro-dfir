@@ -994,6 +994,7 @@ const CONSOLE_ACTION_DISPLAY = {
         quarantine_file: 'Quarantine-File (move to a locked-down folder, deny execute -- contain, not just collect)',
         collect_registry_key: 'Collect-Registry-Key (arbitrary key -- values + subkeys, not just the fixed Run-key checks)',
         kill_scheduled_task: 'Kill-Scheduled-Task (Unregister-ScheduledTask -- remove a specific persistence mechanism found via Persistence Sweep)',
+        kill_process_by_name: 'Kill-Process-By-Name (terminates every process whose name or path matches, not just one live PID)',
         isolate_host: 'Isolate-Host (block all traffic except this SOC server)',
         restore_network: 'Restore-Network',
         upgrade: 'Upgrade-Agent (fetch latest agent, restart)'
@@ -1011,6 +1012,7 @@ const CONSOLE_ACTION_DISPLAY = {
         collect_network_connections: 'Collect-Network-Connections (ss/netstat: live TCP/UDP connections with owning process)',
         collect_dns_arp: 'Collect-DNS-ARP (ip neigh/arp ARP table + systemd-resolved cache stats if active)',
         check_process_injection_indicators: 'Check-Process-Injection-Indicators (deleted-but-running executables, anonymous executable memory mappings -- informational, not a verdict)',
+        kill_process_by_name: 'Kill-Process-By-Name (terminates every process whose name or command line matches, not just one live PID)',
         quarantine_file: 'Quarantine-File (move to a locked-down folder, chmod 000 + chattr +i if supported -- contain, not just collect)',
         isolate_host: 'Isolate-Host (iptables: block all traffic except this SOC server)',
         restore_network: 'Restore-Network (iptables: remove isolation rules)',
@@ -1022,6 +1024,7 @@ const CONSOLE_ACTION_DISPLAY = {
         list_processes: 'ps (list running processes)',
         collect_triage: 'Collect-Triage (processes, connections, LaunchAgents/LaunchDaemons, logged-in users)',
         collect_file: 'Collect-File (hash + base64 content, 4MB limit)',
+        kill_process_by_name: 'Kill-Process-By-Name (terminates every process whose name or command line matches, not just one live PID)',
         quarantine_file: 'Quarantine-File (move to a locked-down folder, chmod 000 + chflags uchg if supported -- contain, not just collect)',
         isolate_host: 'Isolate-Host (pfctl: block all traffic except this SOC server -- not yet live-verified on real macOS hardware)',
         restore_network: 'Restore-Network (pfctl: flush the isolation anchor)',
@@ -1036,6 +1039,10 @@ const CONSOLE_ACTION_DISPLAY = {
 const CONSOLE_DROPDOWN_ACTIONS = [
     { value: 'list_processes', label: 'List Processes', permission: 'edr.command.advanced' },
     { value: 'kill_process', label: 'Kill Process (PID)', permission: 'edr.command.basic', needsParams: true },
+    // Broader blast radius than a single PID (kills every match, not one known process) --
+    // gated at edr.command.advanced rather than kill_process's edr.command.basic, and
+    // deliberately left out of AGENT_COMMAND_TIER1_LABELS server-side to match.
+    { value: 'kill_process_by_name', label: 'Kill Process by Name/Path', permission: 'edr.command.advanced', needsParams: true },
     { value: 'collect_file', label: 'Collect File', permission: 'edr.command.advanced', needsParams: true },
     { value: 'quarantine_file', label: 'Quarantine File', permission: 'edr.command.basic', needsParams: true },
     { value: 'collect_registry_key', label: 'Registry Key', permission: 'edr.command.advanced', needsParams: true, osOnly: 'windows' },
@@ -1363,6 +1370,13 @@ function consoleShowParamForm(label) {
                 <input type="text" id="paramTaskName" class="form-control bg-dark text-light border-secondary" placeholder="EvilTask" onkeydown="if(event.key==='Enter') submitKillScheduledTask()">
                 <button class="btn btn-outline-danger" onclick="submitKillScheduledTask()">Run</button>
             </div>`;
+    } else if (label === 'kill_process_by_name') {
+        wrap.innerHTML = `
+            <label class="form-label small text-muted mb-1">Process name or path substring (kills every match, case-insensitive)</label>
+            <div class="input-group input-group-sm">
+                <input type="text" id="paramKillPattern" class="form-control bg-dark text-light border-secondary" placeholder="mimikatz" onkeydown="if(event.key==='Enter') submitKillProcessByName()">
+                <button class="btn btn-outline-danger" onclick="submitKillProcessByName()">Run</button>
+            </div>`;
     } else {
         return;
     }
@@ -1404,6 +1418,14 @@ async function submitKillScheduledTask() {
     if (!taskName) return;
     if (!(await confirmDialog(`Remove scheduled task "${taskName}" on ${consoleSelectedHost}? This cannot be undone.`, {title: 'Remove scheduled task', danger: true, confirmLabel: 'Remove'}))) return;
     queueConsoleCommand(consoleSelectedHost, 'kill_scheduled_task', {task_name: taskName}, `Unregister-ScheduledTask -TaskName "${taskName}"`);
+    document.getElementById('consoleParamForm').style.display = 'none';
+}
+
+async function submitKillProcessByName() {
+    const pattern = (document.getElementById('paramKillPattern').value || '').trim();
+    if (!pattern) return;
+    if (!(await confirmDialog(`Kill every process on ${consoleSelectedHost} whose name or path contains "${pattern}"? This can match more than one process and cannot be undone.`, {title: 'Kill matching processes', danger: true, confirmLabel: 'Kill All Matching'}))) return;
+    queueConsoleCommand(consoleSelectedHost, 'kill_process_by_name', {pattern}, `Kill-Process-By-Name "${pattern}"`);
     document.getElementById('consoleParamForm').style.display = 'none';
 }
 
