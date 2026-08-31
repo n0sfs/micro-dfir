@@ -1945,6 +1945,30 @@ def _extract_cvss(metrics):
             return cvss_data.get('baseScore'), (m.get('baseSeverity') or cvss_data.get('baseSeverity'))
     return None, None
 
+_CPE_RE = re.compile(r'^cpe:2\.3:[aoh]:([^:]+):([^:]+):([^:]+):')
+
+def _extract_affected_products(cve):
+    # Walks configurations[].nodes[].cpeMatch[].criteria for cpe:2.3:PART:vendor:
+    # product:version:... strings. Deduped since the same vendor/product/version
+    # combination often appears in multiple config nodes (AND/OR branches, different
+    # target platforms) -- one row per unique combination is enough for correlation.
+    seen = set()
+    out = []
+    for config in cve.get('configurations', []) or []:
+        for node in config.get('nodes', []) or []:
+            for match in node.get('cpeMatch', []) or []:
+                criteria = match.get('criteria', '')
+                m = _CPE_RE.match(criteria)
+                if not m:
+                    continue
+                vendor, product, version = m.group(1), m.group(2), m.group(3)
+                key = (vendor, product, version)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append({'vendor': vendor.replace('_', ' '), 'product': product.replace('_', ' '), 'version': version})
+    return out
+
 def _sync_cve_feed(db):
     # NVD's public CVE 2.0 API -- free, no API key needed at this request volume (one
     # bounded pull, not a polling loop). Pulls CVEs *published* in the last 7 days
@@ -1978,6 +2002,16 @@ def _sync_cve_feed(db):
             "severity=excluded.severity, last_modified=excluded.last_modified, fetched_at=excluded.fetched_at",
             (cve_id, desc, score, severity, cve.get('published'), cve.get('lastModified'))
         )
+        # No natural unique key across (cve_id, vendor, product, version) to upsert
+        # against, so a full delete-then-reinsert per CVE keeps this in sync with
+        # whatever NVD's configurations data says right now, instead of accumulating
+        # stale rows from a previous sync's now-superseded CPE data.
+        db.execute("DELETE FROM cve_affected_products WHERE cve_id = ?", (cve_id,))
+        for ap in _extract_affected_products(cve):
+            db.execute(
+                "INSERT INTO cve_affected_products (cve_id, vendor, product, version) VALUES (?, ?, ?, ?)",
+                (cve_id, ap['vendor'], ap['product'], ap['version'])
+            )
         count += 1
     db.commit()
     return count
@@ -2041,6 +2075,95 @@ def api_cve_sync():
     if status['last_status'] == 'error':
         return jsonify({'error': status['last_error']}), 502
     return jsonify(status)
+
+_SOFTWARE_NAME_JUNK_RE = re.compile(r'\s*\((?:x86|x64|32-bit|64-bit)\)\s*', re.IGNORECASE)
+_SOFTWARE_NAME_NONALNUM_RE = re.compile(r'[^a-z0-9]+')
+
+def _normalize_software_name(name):
+    n = _SOFTWARE_NAME_JUNK_RE.sub(' ', (name or '').lower())
+    return _SOFTWARE_NAME_NONALNUM_RE.sub(' ', n).strip()
+
+def _correlate_software_vulnerabilities(db, apps):
+    # Explicitly approximate, same caveat as migrate_cve_affected_products(): NVD's own
+    # CPE product names rarely match a vendor's installer-reported DisplayName exactly
+    # ("Google Chrome" vs CPE product "chrome"), so this checks BOTH a normalized exact
+    # match and "the CPE product name appears as a whole word in the app's normalized
+    # name" -- catches the common vendor-prefixed-name case ("chrome" inside "google
+    # chrome") without falling back to raw substring matching, which would flag almost
+    # anything against short/generic CPE product names and bury real findings in noise.
+    # A short (<4 char) CPE product name is skipped entirely for the same reason.
+    #
+    # Pulling the full cve_affected_products table into Python rather than pushing this
+    # matching into SQL is deliberate: word-boundary matching isn't expressible cleanly
+    # in a LIKE clause, and at this table's real size (a rolling ~7-day CVE window,
+    # a few thousand affected-product rows at most) a full in-memory pass per
+    # correlation call (not a hot path -- triggered on demand per host) is cheap.
+    candidates = db.execute(
+        "SELECT cap.cve_id, cap.vendor, cap.product, cap.version, cr.severity, cr.cvss_score, cr.description "
+        "FROM cve_affected_products cap JOIN cve_records cr ON cr.cve_id = cap.cve_id "
+        "WHERE LENGTH(cap.product) >= 4"
+    ).fetchall()
+
+    matches = []
+    seen = set()
+    for app in apps:
+        name_norm = _normalize_software_name(app.get('name', ''))
+        if not name_norm:
+            continue
+        version = (app.get('version') or '').strip()
+        for c in candidates:
+            product_norm = _normalize_software_name(c['product'])
+            if not product_norm:
+                continue
+            # Whole-word/whole-phrase containment, not `in name_words` (a set of
+            # single words can never contain a multi-word product like "7 zip") and
+            # not raw substring containment either (that would let a short product
+            # name match as part of an unrelated longer word). Padding both sides
+            # with spaces turns "is product_norm one of the space-separated tokens/
+            # phrases in name_norm" into a plain substring check.
+            if f' {product_norm} ' not in f' {name_norm} ':
+                continue
+            # '*' (or no version recorded) means NVD's CPE match wasn't pinned to one
+            # exact version -- treated as "no version constraint" here rather than
+            # attempting real version-range comparison (versionStartIncluding etc.),
+            # which this simplified extraction doesn't capture.
+            if c['version'] and c['version'] != '*' and c['version'] != version:
+                continue
+            key = (app.get('name'), c['cve_id'])
+            if key in seen:
+                continue
+            seen.add(key)
+            matches.append({
+                'installed_name': app.get('name'), 'installed_version': app.get('version'),
+                'cve_id': c['cve_id'], 'severity': c['severity'], 'cvss_score': c['cvss_score'],
+                'matched_product': c['product'], 'description': c['description'],
+            })
+    matches.sort(key=lambda m: (m['cvss_score'] or 0), reverse=True)
+    return matches
+
+@app.route('/api/vulnerabilities/<hostname>', methods=['GET'])
+@login_required
+def api_vulnerabilities_for_host(hostname):
+    db = get_db()
+    row = db.execute(
+        "SELECT stdout, completed_at FROM agent_commands "
+        "WHERE hostname = ? AND label = 'collect_software_inventory' AND status = 'done' AND stdout IS NOT NULL "
+        "ORDER BY id DESC LIMIT 1",
+        (hostname,)
+    ).fetchone()
+    if not row:
+        return jsonify({'error': 'No software inventory has been collected for this host yet. Run "Collect Software Inventory" first.'}), 404
+    import json
+    try:
+        inventory = json.loads(row['stdout'])
+    except (ValueError, TypeError):
+        return jsonify({'error': 'The stored inventory result is not valid JSON.'}), 500
+    apps = inventory.get('apps', []) if isinstance(inventory, dict) else []
+    matches = _correlate_software_vulnerabilities(db, apps)
+    return jsonify({
+        'hostname': hostname, 'inventory_collected_at': row['completed_at'],
+        'apps_scanned': len(apps), 'matches': matches,
+    })
 
 def invalidate_rules_cache():
     global RULES_CACHE, TUNING_CACHE
@@ -7286,6 +7409,31 @@ def migrate_cve_records():
     except Exception:
         pass
 
+def migrate_cve_affected_products():
+    # Extracted from each CVE's CPE match criteria (cpe:2.3:a:vendor:product:version:...)
+    # at sync time -- a separate table, not extra columns on cve_records, since one CVE
+    # commonly affects several distinct vendor/product/version combinations. This is
+    # explicitly approximate: real CPE matching also handles version RANGES
+    # (versionStartIncluding/versionEndExcluding) and edition/target_sw qualifiers this
+    # doesn't attempt -- version is stored as-is (including a literal '*' meaning "any
+    # version") and correlation treats '*' as "no version constraint", which is honest
+    # about the approximation rather than silently pretending to be exact.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS cve_affected_products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cve_id TEXT NOT NULL,
+            vendor TEXT,
+            product TEXT,
+            version TEXT
+        )''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cve_affected_product ON cve_affected_products(product)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cve_affected_cve_id ON cve_affected_products(cve_id)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_ueba_entities():
     # UEBA originally modeled hosts only, with a fixed 'HIGH' severity and no way to
     # quiet a legitimately bursty entity. Adds: entity_type on events (host vs user,
@@ -9997,6 +10145,7 @@ migrate_agent_versions()
 migrate_agent_tokens()
 migrate_agent_groups()
 migrate_cve_records()
+migrate_cve_affected_products()
 migrate_audit_log()
 migrate_risk_scoring()
 migrate_anomaly_rules()

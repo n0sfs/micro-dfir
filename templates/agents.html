@@ -180,6 +180,7 @@
                             <button type="button" class="btn btn-sm btn-outline-secondary console-action-btn" data-os-only="linux" data-permission="edr.command.advanced" onclick="consoleRun('disable_exec_auditing')"><i class="fa-solid fa-shield me-2"></i>Disable Exec Auditing</button>
                             <button type="button" class="btn btn-sm btn-outline-info console-action-btn" data-permission="edr.command.advanced" onclick="consoleUpgrade()"><i class="fa-solid fa-rotate me-2"></i>Upgrade Agent</button>
                             <button type="button" class="btn btn-sm btn-outline-danger console-action-btn" data-permission="edr.agent.manage" onclick="consoleUninstall()"><i class="fa-solid fa-trash me-2"></i>Uninstall Agent</button>
+                            <button type="button" class="btn btn-sm btn-outline-warning console-action-btn" onclick="checkHostVulnerabilities()"><i class="fa-solid fa-bug me-2"></i>Check for Vulnerabilities</button>
                         </div>
 
                         <div id="consoleParamForm" style="display:none;" class="border border-secondary rounded p-2 mt-2 bg-secondary bg-opacity-10"></div>
@@ -212,6 +213,9 @@
                 </div>
             </div>
         </div>
+
+        <!-- Vulnerability check results -->
+        <div id="vulnCheckResults" class="card-body py-2 px-3 border-bottom border-secondary" style="display:none;"></div>
 
         <!-- Automatic sweeps -->
         <div class="card-body py-2 px-3 border-bottom border-secondary">
@@ -951,6 +955,7 @@ const CONSOLE_ACTION_DISPLAY = {
         ioc_sweep: 'IOC-Sweep (hash recent files in Temp/Downloads/AppData/ProgramData against known-bad hashes)',
         string_sweep: 'String-Sweep (search recent files in Temp/Downloads/AppData/ProgramData for known-bad YARA strings)',
         yara_condition_sweep: 'YARA-Condition-Sweep (same files as String-Sweep, but requires each rule\'s actual any/all/N-of-them condition to be satisfied, not just one string hit)',
+        collect_software_inventory: 'Collect-Software-Inventory (installed apps from the registry Uninstall keys -- feeds the "Check for Vulnerabilities" CVE correlation)',
         collect_browser_artifacts: 'Collect-Browser-Artifacts (Chrome/Edge/Firefox history file metadata + recent downloads, all user profiles)',
         collect_forensic_timestamps: 'Collect-Forensic-Timestamps (Prefetch listing, Amcache/Shimcache metadata)',
         collect_recent_file_changes: 'Collect-Recent-File-Changes (files modified in the last 24h across common drop locations)',
@@ -966,6 +971,7 @@ const CONSOLE_ACTION_DISPLAY = {
         ioc_sweep: 'IOC-Sweep (hash recent files in /tmp, /var/tmp, ~/Downloads against known-bad hashes)',
         string_sweep: 'String-Sweep (search recent files in /tmp, /var/tmp, ~/Downloads for known-bad YARA strings)',
         yara_condition_sweep: 'YARA-Condition-Sweep (same files as String-Sweep, but requires each rule\'s actual any/all/N-of-them condition to be satisfied, not just one string hit)',
+        collect_software_inventory: 'Collect-Software-Inventory (dpkg/rpm package list -- feeds the "Check for Vulnerabilities" CVE correlation)',
         collect_ssh_artifacts: 'Collect-SSH-Artifacts (shell history, authorized_keys, known_hosts, all real users)',
         isolate_host: 'Isolate-Host (iptables: block all traffic except this SOC server)',
         restore_network: 'Restore-Network (iptables: remove isolation rules)',
@@ -988,6 +994,7 @@ const CONSOLE_DROPDOWN_ACTIONS = [
     { value: 'ioc_sweep', label: 'IOC Hash Sweep', permission: 'edr.command.advanced' },
     { value: 'string_sweep', label: 'String Sweep', permission: 'edr.command.advanced' },
     { value: 'yara_condition_sweep', label: 'YARA Condition Sweep', permission: 'edr.command.advanced' },
+    { value: 'collect_software_inventory', label: 'Software Inventory', permission: 'edr.command.advanced' },
     { value: 'collect_browser_artifacts', label: 'Browser Artifacts', permission: 'edr.command.advanced', osOnly: 'windows' },
     { value: 'collect_forensic_timestamps', label: 'Forensic Timestamps', permission: 'edr.command.advanced', osOnly: 'windows' },
     { value: 'collect_recent_file_changes', label: 'Recent File Changes', permission: 'edr.command.advanced', osOnly: 'windows' },
@@ -1181,6 +1188,45 @@ async function consoleRun(label, params, confirmMsg) {
     if (confirmMsg && !(await confirmDialog(confirmMsg, {title: 'Confirm action', danger: true}))) return;
     document.getElementById('consoleParamForm').style.display = 'none';
     queueConsoleCommand(consoleSelectedHost, label, params || {}, CONSOLE_ACTION_DISPLAY[consoleSelectedOS()][label] || label);
+}
+
+function vulnSeverityBadge(severity) {
+    if (!severity) return '<span class="text-muted small">Unscored</span>';
+    const map = {CRITICAL: 'bg-danger', HIGH: 'bg-warning text-dark', MEDIUM: 'bg-info text-dark', LOW: 'bg-secondary'};
+    return `<span class="badge ${map[severity] || 'bg-secondary'}">${escHtml(severity)}</span>`;
+}
+
+function checkHostVulnerabilities() {
+    if (!consoleSelectedHost) return;
+    const hostname = consoleSelectedHost;
+    const box = document.getElementById('vulnCheckResults');
+    box.style.display = 'block';
+    box.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i>Checking...';
+    fetch(`/api/vulnerabilities/${encodeURIComponent(hostname)}`).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (!ok) {
+            box.innerHTML = `<div class="text-muted small"><i class="fa-solid fa-circle-info me-1"></i>${escHtml(data.error || 'Failed to check.')}</div>`;
+            return;
+        }
+        const header = `<h6 class="small text-uppercase text-muted mb-2"><i class="fa-solid fa-bug me-1"></i>Vulnerabilities — ${escHtml(hostname)} <span class="text-muted" style="text-transform:none;">(${data.apps_scanned} apps scanned, inventory from ${escHtml(data.inventory_collected_at || 'unknown time')})</span></h6>`;
+        if (!data.matches.length) {
+            box.innerHTML = header + '<p class="text-muted small mb-0">No known-CVE product/version matches found. This is an approximate name-based match against a rolling ~7-day CVE window -- absence of a hit here is not a clean bill of health.</p>';
+            return;
+        }
+        const rows = data.matches.map(m => `
+            <tr>
+                <td class="small">${escHtml(m.installed_name)} <span class="text-muted">${escHtml(m.installed_version || '')}</span></td>
+                <td><a href="https://nvd.nist.gov/vuln/detail/${encodeURIComponent(m.cve_id)}" target="_blank" rel="noopener" class="font-monospace small">${escHtml(m.cve_id)}</a></td>
+                <td>${vulnSeverityBadge(m.severity)}</td>
+                <td class="small">${m.cvss_score != null ? m.cvss_score.toFixed(1) : '—'}</td>
+                <td class="small text-muted" style="max-width:420px;">${escHtml((m.description || '').slice(0, 150))}${(m.description || '').length > 150 ? '…' : ''}</td>
+            </tr>`).join('');
+        box.innerHTML = header + `
+            <div class="alert alert-warning py-2 px-3 small mb-2"><i class="fa-solid fa-triangle-exclamation me-1"></i>Name-based matching against NVD's CPE data -- approximate, not a definitive vulnerability scan. Verify before acting.</div>
+            <div class="table-responsive"><table class="table table-dark table-sm table-striped mb-0">
+                <thead><tr><th>Installed</th><th>CVE</th><th>Severity</th><th>CVSS</th><th>Description</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table></div>`;
+    }).catch(err => { box.innerHTML = `<div class="text-danger small">Error: ${escHtml(String(err))}</div>`; });
 }
 
 function consoleUpgrade() {
