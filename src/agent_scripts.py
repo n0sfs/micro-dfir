@@ -578,6 +578,88 @@ $apps = @($apps | Sort-Object name, version -Unique)
 [PSCustomObject]@{ count = $apps.Count; apps = $apps } | ConvertTo-Json -Compress -Depth 3
 """
 
+# A small, hand-authored set of CIS-Benchmark-flavored hardening checks, not the real
+# CIS content itself (that's a licensed, hundreds-of-checks-per-OS policy library --
+# see the comment on migrate_cve_affected_products for the same "approximate, not the
+# real thing" posture applied elsewhere this pass). Each check is independently
+# try/caught so one check that can't run on a given Windows edition/config (a cmdlet
+# not present, a registry value simply never set) reports 'error' with a reason
+# instead of aborting the whole sweep.
+def sca_check():
+    return r"""$results = @()
+function AddCheck($id, $title, $status, $detail) {
+    $script:results += [PSCustomObject]@{ id = $id; title = $title; status = $status; detail = $detail }
+}
+
+try {
+    $fw = Get-NetFirewallProfile -ErrorAction Stop
+    $allOn = @($fw | Where-Object { -not $_.Enabled }).Count -eq 0
+    AddCheck 'firewall_enabled' 'Windows Firewall enabled (all profiles)' $(if ($allOn) { 'pass' } else { 'fail' }) (($fw | ForEach-Object { "$($_.Name)=$($_.Enabled)" }) -join ', ')
+} catch { AddCheck 'firewall_enabled' 'Windows Firewall enabled (all profiles)' 'error' "$_" }
+
+try {
+    $smb1 = Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -ErrorAction Stop
+    AddCheck 'smb1_disabled' 'SMBv1 protocol disabled' $(if ($smb1.State -eq 'Disabled') { 'pass' } else { 'fail' }) "State=$($smb1.State)"
+} catch { AddCheck 'smb1_disabled' 'SMBv1 protocol disabled' 'error' "$_" }
+
+try {
+    $nla = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -ErrorAction Stop
+    AddCheck 'rdp_nla' 'RDP requires Network Level Authentication' $(if ($nla.UserAuthentication -eq 1) { 'pass' } else { 'fail' }) "UserAuthentication=$($nla.UserAuthentication)"
+} catch { AddCheck 'rdp_nla' 'RDP requires Network Level Authentication' 'error' "$_" }
+
+try {
+    $defender = Get-MpComputerStatus -ErrorAction Stop
+    AddCheck 'defender_realtime' 'Windows Defender real-time protection enabled' $(if ($defender.RealTimeProtectionEnabled) { 'pass' } else { 'fail' }) "RealTimeProtectionEnabled=$($defender.RealTimeProtectionEnabled)"
+} catch { AddCheck 'defender_realtime' 'Windows Defender real-time protection enabled' 'error' "$_" }
+
+try {
+    $guest = Get-LocalUser -Name 'Guest' -ErrorAction Stop
+    AddCheck 'guest_disabled' 'Guest account disabled' $(if (-not $guest.Enabled) { 'pass' } else { 'fail' }) "Enabled=$($guest.Enabled)"
+} catch { AddCheck 'guest_disabled' 'Guest account disabled' 'error' "$_" }
+
+try {
+    $uac = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name EnableLUA -ErrorAction Stop
+    AddCheck 'uac_enabled' 'User Account Control (UAC) enabled' $(if ($uac.EnableLUA -eq 1) { 'pass' } else { 'fail' }) "EnableLUA=$($uac.EnableLUA)"
+} catch { AddCheck 'uac_enabled' 'User Account Control (UAC) enabled' 'error' "$_" }
+
+try {
+    $lmhash = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name NoLMHash -ErrorAction Stop
+    AddCheck 'lm_hash_disabled' 'LM hash storage disabled' $(if ($lmhash.NoLMHash -eq 1) { 'pass' } else { 'fail' }) "NoLMHash=$($lmhash.NoLMHash)"
+} catch { AddCheck 'lm_hash_disabled' 'LM hash storage disabled' 'error' 'Registry value not set (default varies by Windows version/edition)' }
+
+try {
+    $autorun = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer' -Name NoDriveTypeAutoRun -ErrorAction Stop
+    AddCheck 'autorun_disabled' 'AutoRun disabled for all drive types' $(if ($autorun.NoDriveTypeAutoRun -ge 255) { 'pass' } else { 'fail' }) "NoDriveTypeAutoRun=$($autorun.NoDriveTypeAutoRun)"
+} catch { AddCheck 'autorun_disabled' 'AutoRun disabled for all drive types' 'error' 'Registry value not set (AutoRun is enabled by default when unset)' }
+
+try {
+    $policy = Get-ExecutionPolicy -Scope LocalMachine
+    AddCheck 'ps_execution_policy' 'PowerShell execution policy is not Unrestricted/Bypass' $(if ($policy -in @('Restricted', 'AllSigned', 'RemoteSigned')) { 'pass' } else { 'fail' }) "Policy=$policy"
+} catch { AddCheck 'ps_execution_policy' 'PowerShell execution policy is not Unrestricted/Bypass' 'error' "$_" }
+
+try {
+    $bitlocker = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop
+    AddCheck 'bitlocker_enabled' 'BitLocker enabled on the system drive' $(if ($bitlocker.ProtectionStatus -eq 'On') { 'pass' } else { 'fail' }) "ProtectionStatus=$($bitlocker.ProtectionStatus)"
+} catch { AddCheck 'bitlocker_enabled' 'BitLocker enabled on the system drive' 'error' "$_" }
+
+try {
+    $wu = Get-Service -Name wuauserv -ErrorAction Stop
+    AddCheck 'windows_update_service' 'Windows Update service is not disabled' $(if ($wu.StartType -ne 'Disabled') { 'pass' } else { 'fail' }) "Status=$($wu.Status), StartType=$($wu.StartType)"
+} catch { AddCheck 'windows_update_service' 'Windows Update service is not disabled' 'error' "$_" }
+
+try {
+    $lockoutLine = (net accounts) | Select-String 'Lockout threshold'
+    $threshold = ($lockoutLine -split ':')[-1].Trim()
+    $pass = ($threshold -ne 'Never') -and ([int]::TryParse($threshold, [ref]0)) -and ([int]$threshold -gt 0)
+    AddCheck 'account_lockout' 'Account lockout policy configured (threshold > 0)' $(if ($pass) { 'pass' } else { 'fail' }) "Threshold=$threshold"
+} catch { AddCheck 'account_lockout' 'Account lockout policy configured (threshold > 0)' 'error' "$_" }
+
+$passed = @($results | Where-Object { $_.status -eq 'pass' }).Count
+$failed = @($results | Where-Object { $_.status -eq 'fail' }).Count
+$errored = @($results | Where-Object { $_.status -eq 'error' }).Count
+[PSCustomObject]@{ checks = $results; passed = $passed; failed = $failed; errored = $errored; total = $results.Count } | ConvertTo-Json -Depth 4 -Compress
+"""
+
 # label -> (builder, required param names)
 WINDOWS_TEMPLATES = {
     'list_processes': (lambda params: _PROGRESS_SILENT + list_processes(), []),
@@ -592,6 +674,7 @@ WINDOWS_TEMPLATES = {
     'collect_recent_file_changes': (lambda params: _PROGRESS_SILENT + collect_recent_file_changes(), []),
     'collect_live_forensics': (lambda params: _PROGRESS_SILENT + collect_live_forensics(), []),
     'collect_software_inventory': (lambda params: _PROGRESS_SILENT + collect_software_inventory(), []),
+    'sca_check': (lambda params: _PROGRESS_SILENT + sca_check(), []),
     # 'hashes'/'md5_hashes'/'sha1_hashes' and 'patterns' are always server-populated
     # from the live IOC list / imported YARA rules right before dispatch (see app.py's
     # api_agent_commands()), never client-supplied — deliberately not in the required
@@ -1128,6 +1211,124 @@ print(json.dumps({'count': len(apps), 'apps': apps}))
 PYEOF
 """
 
+# Same "hand-authored, CIS-flavored, not the real licensed benchmark content" posture
+# as sca_check() (Windows) above -- each check is independently try/excepted so one
+# check that can't run (a config file that doesn't exist, a sysctl not present on this
+# kernel) reports 'error' with a reason instead of aborting the whole sweep.
+def sca_check_linux():
+    return r"""python3 - <<'PYEOF'
+import json, os, re, subprocess
+
+def run(cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=15).stdout
+    except Exception:
+        return ''
+
+def read_file(path):
+    try:
+        with open(path) as f:
+            return f.read()
+    except Exception:
+        return None
+
+checks = []
+def add(id_, title, status, detail):
+    checks.append({'id': id_, 'title': title, 'status': status, 'detail': detail})
+
+def sshd_config_value(key):
+    text = read_file('/etc/ssh/sshd_config')
+    if text is None:
+        return None
+    m = re.search(rf'^\s*{key}\s+(\S+)', text, re.IGNORECASE | re.MULTILINE)
+    return m.group(1).lower() if m else None
+
+val = sshd_config_value('PermitRootLogin')
+if val is None:
+    add('ssh_root_login', 'SSH root login disabled', 'error', '/etc/ssh/sshd_config not found or PermitRootLogin not set (default varies by distro/version)')
+else:
+    add('ssh_root_login', 'SSH root login disabled', 'pass' if val in ('no', 'prohibit-password') else 'fail', f'PermitRootLogin={val}')
+
+val = sshd_config_value('PasswordAuthentication')
+if val is None:
+    add('ssh_password_auth', 'SSH password authentication disabled', 'error', '/etc/ssh/sshd_config not found or PasswordAuthentication not set')
+else:
+    add('ssh_password_auth', 'SSH password authentication disabled', 'pass' if val == 'no' else 'fail', f'PasswordAuthentication={val}')
+
+if run(['which', 'ufw']).strip():
+    out = run(['ufw', 'status'])
+    add('firewall_active', 'A host firewall is active', 'pass' if 'active' in out.lower() else 'fail', out.strip().splitlines()[0] if out.strip() else 'no output')
+elif run(['which', 'firewall-cmd']).strip():
+    out = run(['firewall-cmd', '--state'])
+    add('firewall_active', 'A host firewall is active', 'pass' if 'running' in out.lower() else 'fail', out.strip())
+else:
+    rules = run(['iptables', '-L', '-n'])
+    has_rules = len([l for l in rules.splitlines() if l and not l.startswith('Chain') and not l.startswith('target')]) > 0
+    add('firewall_active', 'A host firewall is active', 'pass' if has_rules else 'error', 'ufw/firewalld not found; checked iptables directly' if rules else 'Unable to determine firewall state')
+
+try:
+    st = os.stat('/etc/passwd')
+    ok = oct(st.st_mode & 0o777) in ('0o644', '0o640', '0o444') and st.st_uid == 0
+    add('passwd_perms', '/etc/passwd has safe permissions, owned by root', 'pass' if ok else 'fail', f'mode={oct(st.st_mode & 0o777)}, uid={st.st_uid}')
+except Exception as e:
+    add('passwd_perms', '/etc/passwd has safe permissions, owned by root', 'error', str(e))
+
+try:
+    st = os.stat('/etc/shadow')
+    ok = (st.st_mode & 0o777) <= 0o640 and st.st_uid == 0
+    add('shadow_perms', '/etc/shadow is not world/group readable, owned by root', 'pass' if ok else 'fail', f'mode={oct(st.st_mode & 0o777)}, uid={st.st_uid}')
+except Exception as e:
+    add('shadow_perms', '/etc/shadow is not world/group readable, owned by root', 'error', str(e))
+
+shadow = read_file('/etc/shadow')
+if shadow is None:
+    add('no_empty_passwords', 'No accounts with an empty password hash', 'error', 'Cannot read /etc/shadow (needs root)')
+else:
+    empty = [line.split(':')[0] for line in shadow.splitlines() if len(line.split(':')) > 1 and line.split(':')[1] == '']
+    add('no_empty_passwords', 'No accounts with an empty password hash', 'pass' if not empty else 'fail', f'{len(empty)} account(s): {", ".join(empty[:10])}' if empty else 'none found')
+
+login_defs = read_file('/etc/login.defs')
+if login_defs is None:
+    add('password_min_len', 'Minimum password length policy set (>= 8)', 'error', '/etc/login.defs not found')
+else:
+    m = re.search(r'^\s*PASS_MIN_LEN\s+(\d+)', login_defs, re.MULTILINE)
+    n = int(m.group(1)) if m else 0
+    add('password_min_len', 'Minimum password length policy set (>= 8)', 'pass' if n >= 8 else 'fail', f'PASS_MIN_LEN={n if m else "not set"}')
+
+if login_defs is None:
+    # Every other check here reports 'error' (a real, counted entry) rather than
+    # silently vanishing when its underlying file is missing -- omitting this one
+    # entirely would make the total check count vary by host state, which breaks any
+    # attempt to compare coverage/scores across hosts or over time.
+    add('password_max_days', 'Password expiration policy set (not effectively disabled)', 'error', '/etc/login.defs not found')
+else:
+    m = re.search(r'^\s*PASS_MAX_DAYS\s+(\d+)', login_defs, re.MULTILINE)
+    n = int(m.group(1)) if m else 99999
+    add('password_max_days', 'Password expiration policy set (not effectively disabled)', 'pass' if 0 < n < 99999 else 'fail', f'PASS_MAX_DAYS={n}')
+
+def sysctl(name):
+    out = run(['sysctl', '-n', name]).strip()
+    return out if out else None
+
+v = sysctl('fs.suid_dumpable')
+add('core_dumps_restricted', 'SUID core dumps restricted (fs.suid_dumpable=0)', 'error' if v is None else ('pass' if v == '0' else 'fail'), f'fs.suid_dumpable={v}')
+
+v = sysctl('kernel.randomize_va_space')
+add('aslr_enabled', 'ASLR fully enabled (kernel.randomize_va_space=2)', 'error' if v is None else ('pass' if v == '2' else 'fail'), f'kernel.randomize_va_space={v}')
+
+active_services = []
+for svc in ('systemd-timesyncd', 'chronyd', 'ntpd'):
+    if run(['systemctl', 'is-active', svc]).strip() == 'active':
+        active_services.append(svc)
+add('time_sync_active', 'A time synchronization service is active', 'pass' if active_services else 'fail', ', '.join(active_services) if active_services else 'none of systemd-timesyncd/chronyd/ntpd are active')
+
+passed = sum(1 for c in checks if c['status'] == 'pass')
+failed = sum(1 for c in checks if c['status'] == 'fail')
+errored = sum(1 for c in checks if c['status'] == 'error')
+print(json.dumps({'checks': checks, 'passed': passed, 'failed': failed, 'errored': errored, 'total': len(checks)}))
+PYEOF
+"""
+
 LINUX_TEMPLATES = {
     'list_processes': (lambda params: list_processes_linux(), []),
     'kill_process': (lambda params: kill_process_linux(params['pid']), ['pid']),
@@ -1138,6 +1339,7 @@ LINUX_TEMPLATES = {
     'collect_file': (lambda params: collect_file_linux(params['path']), ['path']),
     'collect_ssh_artifacts': (lambda params: collect_ssh_artifacts_linux(), []),
     'collect_software_inventory': (lambda params: collect_software_inventory_linux(), []),
+    'sca_check': (lambda params: sca_check_linux(), []),
     'ioc_sweep': (lambda params: ioc_sweep_linux(params.get('hashes', []), params.get('md5_hashes', []), params.get('sha1_hashes', [])), []),
     'string_sweep': (lambda params: string_sweep_linux(params.get('patterns', [])), []),
     'yara_condition_sweep': (lambda params: yara_condition_sweep_linux(params.get('rule_conditions', [])), []),
