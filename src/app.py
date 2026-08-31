@@ -6335,7 +6335,7 @@ WIDGET_TYPES = {
     'chart_top_risk_entities': {}, 'chart_top_anomaly_rules': {}, 'chart_top_countries': {},
     'chart_agent_status': {}, 'chart_mitre_coverage': {}, 'chart_threat_actors': {},
     'chart_case_stats': {}, 'chart_case_aging': {}, 'chart_case_queue_backlog': {},
-    'chart_case_workload': {}, 'chart_case_close_trend': {},
+    'chart_case_workload': {}, 'chart_case_close_trend': {}, 'chart_compliance_coverage': {},
     # "App" widgets (Batch 2) -- compact live embeds of other pages, all reusing their
     # existing endpoints (/api/alerts, /api/cases, /api/logs/search, /api/ti/lookup,
     # /api/agent/commands) rather than any new backend logic. Purely additive to this
