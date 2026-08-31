@@ -368,7 +368,7 @@ function renderPlaybooksTable() {
                     : (p.enabled ? '<span class="badge bg-success">On</span>' : '<span class="badge bg-secondary">Off</span>')}
             </td>
             <td class="text-end pe-3">
-                <button type="button" class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="Test against a real case (no changes made)" onclick="showPlaybookTestModal(${p.id}, '${escJs(p.name)}')"><i class="fa-solid fa-flask"></i></button>
+                ${CAN_MANAGE_PLAYBOOKS ? `<button type="button" class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="Test against a real case (no changes made)" onclick="showPlaybookTestModal(${p.id}, '${escJs(p.name)}')"><i class="fa-solid fa-flask"></i></button>` : ''}
                 ${CAN_MANAGE_PLAYBOOKS ? `
                 <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 me-1" title="Edit" onclick="editPlaybook(${p.id})"><i class="fa-solid fa-pen"></i></button>
                 <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete" onclick="deletePlaybook(${p.id}, '${escJs(p.name)}')"><i class="fa-solid fa-trash"></i></button>` : ''}
