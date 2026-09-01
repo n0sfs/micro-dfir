@@ -2988,8 +2988,12 @@ def api_compliance_nist_800_53_controls():
     days = _dashboard_window_days(request)
     rules = _get_rules_cache(db)
     validated = _get_validated_technique_counts(db, days)
-    actor_techniques = _build_actor_technique_index(db)
-    mitre_result = _build_mitre_coverage(rules, validated, actor_techniques)
+    # _build_mitre_coverage()'s 3rd param only annotates gap-tier techniques with
+    # matching threat-actor names -- _build_nist_800_53_coverage() never reads that
+    # field, so skip _build_actor_technique_index(db) (iterates every TI entity,
+    # measurably the most expensive part of this endpoint on a live instance with a
+    # large IOC/entity catalog) rather than compute data nothing downstream uses.
+    mitre_result = _build_mitre_coverage(rules, validated, {})
     result = _build_nist_800_53_coverage(mitre_result)
     result['excluded_families'] = ['AU', 'AT', 'IR', 'MA', 'PE', 'PL', 'PM', 'PS', 'PT']
     result['source'] = "MITRE Center for Threat-Informed Defense ATT&CK-to-NIST-800-53 crosswalk (Apache-2.0)"
