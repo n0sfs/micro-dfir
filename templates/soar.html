@@ -915,7 +915,7 @@ function actionParamsFieldsHtml(seq, actionType, params) {
         case 'add_task':
             return `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_title" placeholder="Task title" value="${escHtml(params.title || '')}">`;
         case 'add_note':
-            return `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_text" placeholder="Note text (case_id/case_title/status/tlp/pap placeholders supported)" value="${escHtml(params.text || '')}">`;
+            return `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_text" placeholder="Note text (case_id/case_title/status/tlp placeholders supported)" value="${escHtml(params.text || '')}">`;
         case 'set_queue':
             return `<select class="form-select form-select-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_queue_id">
                 <option value="">Unassigned</option>
@@ -928,16 +928,16 @@ function actionParamsFieldsHtml(seq, actionType, params) {
             </select>`;
         case 'send_email':
             return `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_to" placeholder="To (optional -- defaults to the Email channel's To address)" value="${escHtml(params.to || '')}">
-                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_subject" placeholder="Subject (optional -- case_id/case_title/status/tlp/pap placeholders supported)" value="${escHtml(params.subject || '')}">
+                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_subject" placeholder="Subject (optional -- case_id/case_title/status/tlp placeholders supported)" value="${escHtml(params.subject || '')}">
                 <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_body" placeholder="Body (optional -- same placeholders supported)" value="${escHtml(params.body || '')}">`;
         case 'send_webhook':
             return urlSourceSelectHtml(seq, 'url', params.url_secret) +
                 `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_url" placeholder="https://&hellip;" value="${escHtml(params.url || '')}" style="${params.url_secret ? 'display:none;' : ''}">
-                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_body" placeholder="JSON body (optional -- case_id/case_title/status/tlp/pap placeholders supported)" value="${escHtml(params.body || '')}">`;
+                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_body" placeholder="JSON body (optional -- case_id/case_title/status/tlp placeholders supported)" value="${escHtml(params.body || '')}">`;
         case 'send_slack':
             return urlSourceSelectHtml(seq, 'webhook_url', params.webhook_url_secret) +
                 `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_webhook_url" placeholder="Slack incoming webhook URL" value="${escHtml(params.webhook_url || '')}" style="${params.webhook_url_secret ? 'display:none;' : ''}">
-                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_message" placeholder="Message (optional -- case_id/case_title/status/tlp/pap placeholders supported)" value="${escHtml(params.message || '')}">`;
+                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_message" placeholder="Message (optional -- case_id/case_title/status/tlp placeholders supported)" value="${escHtml(params.message || '')}">`;
         case 'isolate_host':
             return `<div class="small text-muted">No params -- isolates every Case Asset marked <strong>Confirmed</strong> compromised when this action runs. Always requires approval.</div>`;
         case 'restore_network':
