@@ -298,12 +298,17 @@ def _framework_focused_context(conn, cursor, framework_key):
     log_volume_by_app = []
     if relevant_apps:
         app_placeholders = ','.join('?' for _ in relevant_apps)
+        # LOWER(app) -- SIGMA_LOGSOURCE_INGESTED_APPS values are lowercase (matching
+        # app.py's _get_ingested_apps convention), but live_logs.app is stored in
+        # whatever case the source sent (e.g. 'Sysmon'); a bare `app IN (...)` silently
+        # matches nothing. GROUP BY app (not LOWER(app)) so the report displays the
+        # real casing as ingested.
         log_volume_total = cursor.execute(
-            f"SELECT COUNT(*) FROM live_logs WHERE app IN ({app_placeholders}) AND timestamp >= ?",
+            f"SELECT COUNT(*) FROM live_logs WHERE LOWER(app) IN ({app_placeholders}) AND timestamp >= ?",
             (*relevant_apps, thirty_days_ago)
         ).fetchone()[0]
         log_volume_by_app = [dict(r) for r in cursor.execute(
-            f"SELECT app, COUNT(*) as count FROM live_logs WHERE app IN ({app_placeholders}) AND timestamp >= ? "
+            f"SELECT app, COUNT(*) as count FROM live_logs WHERE LOWER(app) IN ({app_placeholders}) AND timestamp >= ? "
             f"GROUP BY app ORDER BY count DESC",
             (*relevant_apps, thirty_days_ago)
         ).fetchall()]
