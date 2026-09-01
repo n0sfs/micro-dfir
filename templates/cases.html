@@ -1304,7 +1304,17 @@ function loadKnownAgents() {
     }).catch(() => {});
 }
 
+// The funnel-icon dropdowns' checklist can be taller than the table's own scroll
+// container (.table-responsive), which clips a default-positioned Popper menu -- same
+// fix as dashboard.html's Detection Rules table.
+function initFilterDropdowns() {
+    document.querySelectorAll('#casesTable thead [data-bs-toggle="dropdown"]').forEach(el => {
+        bootstrap.Dropdown.getOrCreateInstance(el, { popperConfig: { strategy: 'fixed' } });
+    });
+}
+
 document.addEventListener("DOMContentLoaded", function() {
+    initFilterDropdowns();
     // Queues load first (and are awaited) since the case-detail queue picker needs
     // allQueues populated before it can render -- relevant on a fresh page load that
     // deep-links straight into a case via /cases?case=<id>. SLA hours and known agents
