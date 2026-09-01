@@ -9,6 +9,11 @@
 #settingsTabs .nav-link{color:var(--text-muted); border-color:transparent; background:transparent;}
 #settingsTabs .nav-link:hover{color:var(--text-secondary); border-color:transparent;}
 #settingsTabs .nav-link.active{color:var(--text-primary); background-color:var(--bg-card-alt); border-color:var(--border) var(--border) var(--bg-card-alt);}
+#usersTable .rule-th{position:relative; white-space:nowrap; padding-right:10px; vertical-align:middle;}
+#usersTable .th-inner{display:flex; align-items:center; justify-content:space-between; gap:4px;}
+#usersTable .th-icon-btn{background:none; border:none; color:var(--text-muted); padding:0 2px; font-size:.72rem; cursor:pointer; line-height:1;}
+#usersTable .th-icon-btn:hover{color:var(--text-secondary);}
+#usersTable .th-icon-btn.active-filter{color:var(--accent);}
 </style>
 
 <div class="card bg-dark border-secondary">
@@ -39,11 +44,14 @@
                 <button class="btn btn-sm btn-primary" onclick="showUserModal()"><i class="fa-solid fa-plus me-1"></i> Add User</button>
             </div>
             <div class="table-responsive">
-                <table class="table table-dark table-striped table-hover mb-0 align-middle border border-secondary">
+                <table class="table table-dark table-striped table-hover mb-0 align-middle border border-secondary" id="usersTable">
                     <thead>
                         <tr>
                             <th class="ps-3">Username</th>
-                            <th>Role / Group</th>
+                            <th class="rule-th"><div class="th-inner"><span>Role / Group</span><div class="dropdown">
+                                <button type="button" class="th-icon-btn" id="filterBtnRole" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuRole" style="min-width:190px;"></div>
+                            </div></div></th>
                             <th class="text-end pe-3">Actions</th>
                         </tr>
                     </thead>
@@ -622,6 +630,7 @@ function uploadCerts() {
 
 // User Management Logic
 let userModal = null;
+let allUsers = [];
 const USER_ROLE_BADGE = {
     admin: { cls: 'bg-danger', label: 'Admin' },
     senior_analyst: { cls: 'bg-warning text-dark', label: 'Tier 3' },
@@ -631,24 +640,87 @@ function userRoleBadge(role) {
     const b = USER_ROLE_BADGE[role] || { cls: 'bg-secondary', label: (ROLES_CACHE.find(r => r.slug === role) || {}).label || role || 'Tier 1/2' };
     return `<span class="badge ${b.cls}">${escHtml(b.label)}</span>`;
 }
+
+// ---- Per-column filter on the Users table's Role/Group column -- same th-icon-btn/
+// dropdown pattern as dashboard.html's Detection Rules table.
+let userFilters = { role: [] };
+
+function buildUserFilterMenu(menuId, colKey, options) {
+    const menu = document.getElementById(menuId);
+    let html = `<div class="d-flex justify-content-end mb-1 px-1">
+        <button type="button" class="btn btn-link btn-sm p-0 small text-secondary" onclick="clearUserMenuOptions('${menuId}','${colKey}')">Clear</button>
+    </div>`;
+    html += `<div class="menu-option-list" style="max-height:220px; overflow-y:auto;">`;
+    if (!options.length) {
+        html += `<div class="text-muted small px-1">No options</div>`;
+    }
+    options.forEach((o, i) => {
+        const checked = userFilters[colKey].includes(o.value) ? 'checked' : '';
+        const cbId = `${menuId}_chk${i}`;
+        const safeVal = String(o.value).replace(/"/g, '&quot;');
+        html += `<div class="form-check menu-option-item">
+            <input class="form-check-input" type="checkbox" data-value="${safeVal}" id="${cbId}" ${checked} onchange="toggleUserFilter('${colKey}', this.dataset.value, this.checked)">
+            <label class="form-check-label small" for="${cbId}">${escHtml(o.label)}</label>
+        </div>`;
+    });
+    html += `</div>`;
+    menu.innerHTML = html;
+}
+
+function updateUserFilterButtonState(colKey) {
+    const btn = document.getElementById('filterBtn' + colKey.charAt(0).toUpperCase() + colKey.slice(1));
+    if (btn) btn.classList.toggle('active-filter', userFilters[colKey].length > 0);
+}
+
+function toggleUserFilter(colKey, value, checked) {
+    const set = new Set(userFilters[colKey]);
+    if (checked) set.add(value); else set.delete(value);
+    userFilters[colKey] = Array.from(set);
+    updateUserFilterButtonState(colKey);
+    renderUsersTable();
+}
+
+function clearUserMenuOptions(menuId, colKey) {
+    document.querySelectorAll(`#${menuId} input[type=checkbox]`).forEach(cb => { cb.checked = false; });
+    userFilters[colKey] = [];
+    updateUserFilterButtonState(colKey);
+    renderUsersTable();
+}
+
 function loadUsers() {
     fetch('/api/settings/users')
         .then(r => r.json())
         .then(data => {
-            let tbody = document.getElementById('usersTableBody');
-            if(tbody && data.users) {
-                tbody.innerHTML = data.users.map(u => `
-                    <tr>
-                        <td class="ps-3 fw-bold">${u.username}</td>
-                        <td>${userRoleBadge(u.role)}</td>
-                        <td class="text-end pe-3">
-                            <button class="btn btn-sm btn-outline-warning py-0 px-2 me-1" title="Reset Password" onclick="showResetModal(${u.id}, '${u.username}')"><i class="fa-solid fa-key"></i></button>
-                            <button class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete User" onclick="deleteUser(${u.id}, '${u.username}')"><i class="fa-solid fa-trash"></i></button>
-                        </td>
-                    </tr>
-                `).join('');
-            }
-        });
+            allUsers = (data && data.users) || [];
+            const roles = Array.from(new Set(allUsers.map(u => u.role))).sort();
+            buildUserFilterMenu('filterMenuRole', 'role', roles.map(r => {
+                const b = USER_ROLE_BADGE[r] || { label: (ROLES_CACHE.find(x => x.slug === r) || {}).label || r || 'Tier 1/2' };
+                return {value: r, label: b.label};
+            }));
+            renderUsersTable();
+        })
+        .catch(err => console.error('Error loading users:', err));
+}
+
+function renderUsersTable() {
+    const tbody = document.getElementById('usersTableBody');
+    if (!tbody) return;
+    let rows = allUsers;
+    if (userFilters.role.length) rows = rows.filter(u => userFilters.role.includes(u.role));
+    if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="3" class="text-center text-muted py-3">No users match these filters.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = rows.map(u => `
+        <tr>
+            <td class="ps-3 fw-bold">${escHtml(u.username)}</td>
+            <td>${userRoleBadge(u.role)}</td>
+            <td class="text-end pe-3">
+                <button class="btn btn-sm btn-outline-warning py-0 px-2 me-1" title="Reset Password" onclick="showResetModal(${u.id}, '${escJs(u.username)}')"><i class="fa-solid fa-key"></i></button>
+                <button class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete User" onclick="deleteUser(${u.id}, '${escJs(u.username)}')"><i class="fa-solid fa-trash"></i></button>
+            </td>
+        </tr>
+    `).join('');
 }
 
 // ---- Roles / Groups (permission management) ----
@@ -1018,6 +1090,9 @@ function escHtml(str) {
     const d = document.createElement('div');
     d.innerText = str == null ? '' : String(str);
     return d.innerHTML;
+}
+function escJs(s) {
+    return String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
 const AUDIT_PAGE_SIZE = 50;

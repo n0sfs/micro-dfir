@@ -9,6 +9,11 @@
 #soarTabs .nav-link{color:var(--text-muted); border-color:transparent; background:transparent;}
 #soarTabs .nav-link:hover{color:var(--text-secondary); border-color:transparent;}
 #soarTabs .nav-link.active{color:var(--text-primary); background-color:var(--bg-card-alt); border-color:var(--border) var(--border) var(--bg-card-alt);}
+#playbooksTable .rule-th, #actionsCatalogTable .rule-th{position:relative; white-space:nowrap; padding-right:10px; vertical-align:middle;}
+#playbooksTable .th-inner, #actionsCatalogTable .th-inner{display:flex; align-items:center; justify-content:space-between; gap:4px;}
+#playbooksTable .th-icon-btn, #actionsCatalogTable .th-icon-btn{background:none; border:none; color:var(--text-muted); padding:0 2px; font-size:.72rem; cursor:pointer; line-height:1;}
+#playbooksTable .th-icon-btn:hover, #actionsCatalogTable .th-icon-btn:hover{color:var(--text-secondary);}
+#playbooksTable .th-icon-btn.active-filter, #actionsCatalogTable .th-icon-btn.active-filter{color:var(--accent);}
 </style>
 
 <div class="card bg-dark border-secondary">
@@ -68,10 +73,20 @@
 
             <div class="card bg-dark border-secondary">
                 <div class="table-responsive">
-                    <table class="table table-dark table-sm align-middle mb-0">
+                    <table class="table table-dark table-sm align-middle mb-0" id="playbooksTable">
                         <thead><tr>
-                            <th class="ps-3">Name</th><th>Trigger</th><th>Conditions</th><th>Actions</th>
-                            <th>Runs</th><th>Enabled</th><th class="text-end pe-3"></th>
+                            <th class="ps-3">Name</th>
+                            <th class="rule-th"><div class="th-inner"><span>Trigger</span><div class="dropdown">
+                                <button type="button" class="th-icon-btn" id="filterBtnTrigger" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuTrigger" style="min-width:190px;"></div>
+                            </div></div></th>
+                            <th>Conditions</th><th>Actions</th>
+                            <th>Runs</th>
+                            <th class="rule-th"><div class="th-inner"><span>Enabled</span><div class="dropdown">
+                                <button type="button" class="th-icon-btn" id="filterBtnEnabled" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuEnabled" style="min-width:190px;"></div>
+                            </div></div></th>
+                            <th class="text-end pe-3"></th>
                         </tr></thead>
                         <tbody id="playbooksTableBody"><tr><td colspan="7" class="text-center text-muted py-4">Loading&hellip;</td></tr></tbody>
                     </table>
@@ -146,8 +161,19 @@
         <div class="card-body">
             <p class="text-muted small mb-3">Every action type a playbook step can run -- read-only reference, not a queue. Build these into a playbook from the Playbooks tab.</p>
             <div class="table-responsive">
-                <table class="table table-dark table-sm align-middle mb-0">
-                    <thead><tr><th class="ps-3">Action</th><th>Scope</th><th>Approval</th><th>Description</th></tr></thead>
+                <table class="table table-dark table-sm align-middle mb-0" id="actionsCatalogTable">
+                    <thead><tr>
+                        <th class="ps-3">Action</th>
+                        <th class="rule-th"><div class="th-inner"><span>Scope</span><div class="dropdown">
+                            <button type="button" class="th-icon-btn" id="filterBtnScope" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                            <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuScope" style="min-width:190px;"></div>
+                        </div></div></th>
+                        <th class="rule-th"><div class="th-inner"><span>Approval</span><div class="dropdown">
+                            <button type="button" class="th-icon-btn" id="filterBtnApproval" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                            <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuApproval" style="min-width:190px;"></div>
+                        </div></div></th>
+                        <th>Description</th>
+                    </tr></thead>
                     <tbody id="actionsCatalogTableBody"></tbody>
                 </table>
             </div>
@@ -450,6 +476,76 @@ const TRIGGER_LABELS = {
     queue_changed: 'Queue changed', assignee_changed: 'Assignee changed',
     scheduled: 'Scheduled', alert_created: 'Alert created'
 };
+
+// ---- Per-column filters on the Playbooks table -- same th-icon-btn/dropdown pattern as
+// dashboard.html's Detection Rules table, prefixed "pb" since this page has a second,
+// independent filterable table (Actions catalog, "action"-prefixed below) on another tab.
+let pbFilters = { trigger: [], enabled: [] };
+
+function buildPbFilterMenu(menuId, colKey, options) {
+    const menu = document.getElementById(menuId);
+    let html = `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-2" placeholder="Search..." oninput="filterPbMenuOptions('${menuId}', this.value)">`;
+    html += `<div class="d-flex justify-content-between align-items-center mb-1 px-1">
+        <button type="button" class="btn btn-link btn-sm p-0 small" onclick="selectAllVisiblePbMenuOptions('${menuId}','${colKey}')">Select all visible</button>
+        <button type="button" class="btn btn-link btn-sm p-0 small text-secondary" onclick="clearPbMenuOptions('${menuId}','${colKey}')">Clear</button>
+    </div>`;
+    html += `<div class="menu-option-list" style="max-height:220px; overflow-y:auto;">`;
+    if (!options.length) {
+        html += `<div class="text-muted small px-1">No options</div>`;
+    }
+    options.forEach((o, i) => {
+        const checked = pbFilters[colKey].includes(o.value) ? 'checked' : '';
+        const cbId = `${menuId}_chk${i}`;
+        const safeVal = String(o.value).replace(/"/g, '&quot;');
+        html += `<div class="form-check menu-option-item" data-search="${o.label.toLowerCase()}">
+            <input class="form-check-input" type="checkbox" data-value="${safeVal}" id="${cbId}" ${checked} onchange="togglePbFilter('${colKey}', this.dataset.value, this.checked)">
+            <label class="form-check-label small" for="${cbId}">${o.label}</label>
+        </div>`;
+    });
+    html += `</div>`;
+    menu.innerHTML = html;
+}
+
+function filterPbMenuOptions(menuId, q) {
+    q = q.toLowerCase();
+    document.querySelectorAll(`#${menuId} .menu-option-item`).forEach(el => {
+        el.style.display = el.dataset.search.includes(q) ? '' : 'none';
+    });
+}
+
+function updatePbFilterButtonState(colKey) {
+    const btn = document.getElementById('filterBtn' + colKey.charAt(0).toUpperCase() + colKey.slice(1));
+    if (btn) btn.classList.toggle('active-filter', pbFilters[colKey].length > 0);
+}
+
+function togglePbFilter(colKey, value, checked) {
+    const set = new Set(pbFilters[colKey]);
+    if (checked) set.add(value); else set.delete(value);
+    pbFilters[colKey] = Array.from(set);
+    updatePbFilterButtonState(colKey);
+    renderPlaybooksTable();
+}
+
+function selectAllVisiblePbMenuOptions(menuId, colKey) {
+    const set = new Set(pbFilters[colKey]);
+    document.querySelectorAll(`#${menuId} .menu-option-item`).forEach(el => {
+        if (el.style.display !== 'none') {
+            const cb = el.querySelector('input[type=checkbox]');
+            cb.checked = true;
+            set.add(cb.dataset.value);
+        }
+    });
+    pbFilters[colKey] = Array.from(set);
+    updatePbFilterButtonState(colKey);
+    renderPlaybooksTable();
+}
+
+function clearPbMenuOptions(menuId, colKey) {
+    document.querySelectorAll(`#${menuId} input[type=checkbox]`).forEach(cb => { cb.checked = false; });
+    pbFilters[colKey] = [];
+    updatePbFilterButtonState(colKey);
+    renderPlaybooksTable();
+}
 // Playbooks are case-scoped except for alert_created, which has no case_id yet at fire
 // time -- it gets its own small, non-destructive action set (see soar_alerts.py)
 // instead of the case-shaped actions below. create_case is the bridge between them.
@@ -499,25 +595,89 @@ const ACTION_DESCRIPTIONS = {
     create_case: 'Creates a case from the triggering alert (title/severity carried over) and links it, cascading into any matching "Case created" playbooks.',
 };
 
+// ---- Per-column filters on the Actions catalog table -- second independent filterable
+// table on this page (see pbFilters/buildPbFilterMenu above for the Playbooks table),
+// "action"-prefixed. This table is fully static/computed from the consts above (no
+// fetch), so its filter menus have a fixed option set built once, in renderActionsCatalog
+// itself.
+let actionFilters = { scope: [], approval: [] };
+
+function buildActionFilterMenu(menuId, colKey, options) {
+    const menu = document.getElementById(menuId);
+    let html = `<div class="d-flex justify-content-end mb-1 px-1">
+        <button type="button" class="btn btn-link btn-sm p-0 small text-secondary" onclick="clearActionMenuOptions('${menuId}','${colKey}')">Clear</button>
+    </div>`;
+    html += `<div class="menu-option-list" style="max-height:220px; overflow-y:auto;">`;
+    options.forEach((o, i) => {
+        const checked = actionFilters[colKey].includes(o.value) ? 'checked' : '';
+        const cbId = `${menuId}_chk${i}`;
+        const safeVal = String(o.value).replace(/"/g, '&quot;');
+        html += `<div class="form-check menu-option-item">
+            <input class="form-check-input" type="checkbox" data-value="${safeVal}" id="${cbId}" ${checked} onchange="toggleActionFilter('${colKey}', this.dataset.value, this.checked)">
+            <label class="form-check-label small" for="${cbId}">${o.label}</label>
+        </div>`;
+    });
+    html += `</div>`;
+    menu.innerHTML = html;
+}
+
+function updateActionFilterButtonState(colKey) {
+    const btn = document.getElementById('filterBtn' + colKey.charAt(0).toUpperCase() + colKey.slice(1));
+    if (btn) btn.classList.toggle('active-filter', actionFilters[colKey].length > 0);
+}
+
+function toggleActionFilter(colKey, value, checked) {
+    const set = new Set(actionFilters[colKey]);
+    if (checked) set.add(value); else set.delete(value);
+    actionFilters[colKey] = Array.from(set);
+    updateActionFilterButtonState(colKey);
+    renderActionsCatalog();
+}
+
+function clearActionMenuOptions(menuId, colKey) {
+    document.querySelectorAll(`#${menuId} input[type=checkbox]`).forEach(cb => { cb.checked = false; });
+    actionFilters[colKey] = [];
+    updateActionFilterButtonState(colKey);
+    renderActionsCatalog();
+}
+
 function renderActionsCatalog() {
     const tbody = document.getElementById('actionsCatalogTableBody');
     if (!tbody) return;
     const keys = Array.from(new Set([...Object.keys(CASE_ACTION_LABELS), ...Object.keys(ALERT_ACTION_LABELS)])).sort();
-    tbody.innerHTML = keys.map(key => {
+    let rows = keys.map(key => {
         const inCase = key in CASE_ACTION_LABELS, inAlert = key in ALERT_ACTION_LABELS;
         const scope = inCase && inAlert ? 'Case + Alert' : (inCase ? 'Case' : 'Alert');
         // Alert-scoped playbooks have no approval-gate mechanism at all (see soar_alerts.py) --
         // "N/A" there is accurate, not just "Optional", so it doesn't read as a safety gap.
-        const approval = !inCase ? '<span class="text-muted">N/A (alert-scoped)</span>'
-            : (ACTION_TYPES_ALWAYS_GATED.includes(key) ? '<span class="badge bg-danger">Always</span>' : '<span class="badge bg-secondary">Optional</span>');
+        const approvalVal = !inCase ? 'na' : (ACTION_TYPES_ALWAYS_GATED.includes(key) ? 'always' : 'optional');
+        const approvalHtml = approvalVal === 'na' ? '<span class="text-muted">N/A (alert-scoped)</span>'
+            : (approvalVal === 'always' ? '<span class="badge bg-danger">Always</span>' : '<span class="badge bg-secondary">Optional</span>');
         const label = CASE_ACTION_LABELS[key] || ALERT_ACTION_LABELS[key];
-        return `<tr>
-            <td class="ps-3 small fw-bold">${escHtml(label)}</td>
-            <td class="small">${scope}</td>
-            <td class="small">${approval}</td>
-            <td class="small text-muted">${escHtml(ACTION_DESCRIPTIONS[key] || '')}</td>
-        </tr>`;
-    }).join('');
+        return {key, label, scope, approvalVal, approvalHtml};
+    });
+    if (actionFilters.scope.length) rows = rows.filter(r => actionFilters.scope.includes(r.scope));
+    if (actionFilters.approval.length) rows = rows.filter(r => actionFilters.approval.includes(r.approvalVal));
+    if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="4" class="text-center text-muted py-4">No actions match these filters.</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = rows.map(r => `<tr>
+            <td class="ps-3 small fw-bold">${escHtml(r.label)}</td>
+            <td class="small">${r.scope}</td>
+            <td class="small">${r.approvalHtml}</td>
+            <td class="small text-muted">${escHtml(ACTION_DESCRIPTIONS[r.key] || '')}</td>
+        </tr>`).join('');
+}
+
+// Fixed option sets (not derived from a fetch, unlike Playbooks' Trigger/Enabled menus) --
+// built once at page init rather than on every renderActionsCatalog() call, so the
+// dropdown's DOM isn't torn down and rebuilt underneath an open menu on every checkbox click.
+function initActionsCatalogFilters() {
+    buildActionFilterMenu('filterMenuScope', 'scope',
+        [{value: 'Case', label: 'Case'}, {value: 'Alert', label: 'Alert'}, {value: 'Case + Alert', label: 'Case + Alert'}]);
+    buildActionFilterMenu('filterMenuApproval', 'approval',
+        [{value: 'always', label: 'Always'}, {value: 'optional', label: 'Optional'}, {value: 'na', label: 'N/A (alert-scoped)'}]);
 }
 
 function escHtml(s) {
@@ -833,6 +993,10 @@ async function deleteSecret(sid, name) {
 function loadPlaybooks() {
     fetch('/api/playbooks').then(r => r.json()).then(data => {
         allPlaybooks = data || [];
+        buildPbFilterMenu('filterMenuTrigger', 'trigger',
+            Object.entries(TRIGGER_LABELS).map(([k, v]) => ({value: k, label: v})));
+        buildPbFilterMenu('filterMenuEnabled', 'enabled',
+            [{value: '1', label: 'Enabled'}, {value: '0', label: 'Disabled'}]);
         renderPlaybooksTable();
     }).catch(err => console.error('Error loading playbooks:', err));
 }
@@ -852,7 +1016,14 @@ function renderPlaybooksTable() {
         tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-4">No playbooks yet.${CAN_MANAGE_PLAYBOOKS ? ' Click "New Playbook" to create one.' : ''}</td></tr>`;
         return;
     }
-    tbody.innerHTML = allPlaybooks.map(p => `
+    let rows = allPlaybooks;
+    if (pbFilters.trigger.length) rows = rows.filter(p => pbFilters.trigger.includes(p.trigger_event));
+    if (pbFilters.enabled.length) rows = rows.filter(p => pbFilters.enabled.includes(String(p.enabled ? 1 : 0)));
+    if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-4">No playbooks match these filters.</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = rows.map(p => `
         <tr>
             <td class="ps-3 fw-bold">${escHtml(p.name)}${p.description ? `<div class="text-muted small fw-normal">${escHtml(p.description)}</div>` : ''}</td>
             <td class="small">${TRIGGER_LABELS[p.trigger_event] || escHtml(p.trigger_event)}</td>
@@ -1391,6 +1562,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadPendingApprovals();
     loadAlertNotifications();
     loadQueuesForSoar();
+    initActionsCatalogFilters();
     renderActionsCatalog();
     if (document.getElementById('caseTemplatesTableBody')) loadCaseTemplatesForSoar();
 });
