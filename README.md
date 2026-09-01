@@ -6,6 +6,7 @@ A Complete Edge Security Appliance integrating:
 3.  **UEBA:** DuckDB Behavioral Models
 4.  **SOAR:** Automated response playbooks, chained actions triggered by case lifecycle events (create/status/queue/assignee changes)
 5.  **Threat Intel:** TAXII 2.1 STIX Caching & ThreatFox Integration
+6.  **Coverage:** MITRE ATT&CK, compliance framework, and fleet vulnerability coverage in one place — a shared gap/inactive/active/validated tier model applied across all three
 
 ## Deployment
 `sudo bash install.sh`
