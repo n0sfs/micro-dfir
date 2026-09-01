@@ -9886,6 +9886,21 @@ def _build_log_response_rows(rows):
         })
     return logs
 
+# Real, live-queried Log Source / App list for Log Search's filter -- replaces a
+# hardcoded Windows-only checkbox list that had no relationship to what's actually
+# ingested. Deliberately NOT _get_ingested_apps() -- that helper lowercases every value
+# for its one existing consumer (MITRE log-source-gap matching), but live_logs.app IN (?)
+# filtering downstream (_build_log_filters) is case-sensitive with no COLLATE NOCASE, so
+# this needs the real-case values straight from the table.
+@app.route('/api/logs/apps', methods=['GET'])
+@login_required
+def api_logs_apps():
+    db = get_db()
+    apps = [r[0] for r in db.execute(
+        "SELECT DISTINCT app FROM live_logs WHERE app IS NOT NULL AND app != '' ORDER BY app"
+    ).fetchall()]
+    return jsonify({'apps': apps})
+
 @app.route('/api/logs/search', methods=['GET'])
 @login_required
 def api_logs_search():
