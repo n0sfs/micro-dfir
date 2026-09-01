@@ -632,8 +632,19 @@ def api_ingest():
 @login_required
 def dash():
     active_tab = request.args.get('tab', 'search')
+    # MITRE Coverage moved to its own top-level page -- redirect old ?tab=coverage
+    # bookmarks/links instead of rendering a dead tab (switchSiemTab would silently
+    # no-op against a tab no longer in SIEM_TABS, leaving the page blank).
+    if active_tab == 'coverage':
+        return redirect(url_for('coverage_page'))
     return render_template('dashboard.html', active_tab=active_tab, current_user=current_user,
                             compliance_frameworks=COMPLIANCE_FRAMEWORKS, log_search_allowed_fields=LOG_SEARCH_ALLOWED_FIELDS)
+
+@app.route('/coverage')
+@login_required
+def coverage_page():
+    active_tab = request.args.get('tab', 'mitre')
+    return render_template('coverage.html', active_tab=active_tab, current_user=current_user)
 
 # Home count queries reuse existing canonical data sources rather than new bookkeeping:
 # ueba_entity_baselines is already this app's registry of every host/user the UEBA
@@ -3014,6 +3025,46 @@ def api_mitre_coverage_history():
     ).fetchall()
     return jsonify({'snapshots': [dict(r) for r in rows]})
 
+# Fleet-wide vulnerability posture for Coverage > Vulnerability. Deliberately a separate
+# endpoint from /api/dashboards/vulnerability-summary (which stays capped to top-8
+# findings for widget display) rather than overloading that one -- this is the dedicated
+# page's own data need. Point-in-time recompute only (see vuln_matching.py) -- no
+# snapshot history exists for vulnerability posture the way coverage_snapshots exists
+# for MITRE, so there is deliberately no trend chart on this tab.
+@app.route('/api/vulnerabilities/coverage', methods=['GET'])
+@login_required
+def api_vulnerabilities_coverage():
+    db = get_db()
+    severity_counts = {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0}
+    severity_order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}
+    findings = []
+    hosts_assessed = 0
+    for host in vuln_matching.latest_software_inventory(db):
+        hosts_assessed += 1
+        for m in vuln_matching.correlate_software_vulnerabilities(db, host['apps']):
+            sev = (m['severity'] or '').upper()
+            if sev in severity_counts:
+                severity_counts[sev] += 1
+            findings.append({**m, 'hostname': host['hostname']})
+    findings.sort(key=lambda f: (severity_order.get((f['severity'] or '').upper(), 9), -(f['cvss_score'] or 0)))
+    # Same fleet-total denominator generate_report.py's per-framework Compliance Report
+    # uses -- agent_tokens is NOT reliable (most agents auth via the older shared-secret
+    # path and never bind a row there; confirmed live, fixed in commit f4c1928).
+    # agent_polls.user_agent is the hostname field actually populated for every host
+    # that has ever checked in.
+    total_hosts = db.execute("SELECT COUNT(DISTINCT user_agent) FROM agent_polls").fetchone()[0]
+    row = db.execute("SELECT value FROM settings WHERE key = 'cve_feed_status'").fetchone()
+    status = json.loads(row['value']) if row and row['value'] else {}
+    return jsonify({
+        'hosts_assessed': hosts_assessed,
+        'total_hosts': total_hosts,
+        'coverage_pct': round(hosts_assessed / total_hosts * 100, 1) if total_hosts else None,
+        'unique_cve_count': len({f['cve_id'] for f in findings}),
+        'severity_counts': severity_counts,
+        'findings': findings,
+        'last_sync': status.get('last_sync'),
+    })
+
 @app.route('/api/rules/<int:rid>', methods=['GET', 'PUT', 'DELETE'])
 @login_required
 def api_rule_detail(rid):
@@ -5136,12 +5187,17 @@ def _run_scheduled_agent_sweeps(db):
         # of hardening checks against whatever the host's config already is. See the
         # ALWAYS_RUN_SWEEP_LABELS carve-out below.
         'sca_check': {},
+        # Same reasoning as sca_check -- collect_software_inventory takes no live params,
+        # it just enumerates whatever's installed. Feeds Coverage > Vulnerability's
+        # fleet-assessed denominator (previously this was never auto-collected, only
+        # queued by hand -- see /api/vulnerabilities/coverage).
+        'collect_software_inventory': {},
     }
     # ioc_sweep/string_sweep/yara_condition_sweep are only worth queuing once something's
     # actually loaded to check against (empty params -> a guaranteed no-op command) --
-    # sca_check has no such live-data dependency, so it must never be caught by that same
-    # "nothing loaded" skip.
-    ALWAYS_RUN_SWEEP_LABELS = {'sca_check'}
+    # sca_check and collect_software_inventory have no such live-data dependency, so they
+    # must never be caught by that same "nothing loaded" skip.
+    ALWAYS_RUN_SWEEP_LABELS = {'sca_check', 'collect_software_inventory'}
     for h in hosts:
         os_name = h['os'] if h['os'] in ('windows', 'linux', 'macos') else 'windows'
         templates = agent_scripts.TEMPLATES_BY_OS[os_name]

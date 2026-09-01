@@ -1,6 +1,6 @@
 # Daily cron job (see update.sh) that snapshots today's MITRE ATT&CK coverage tier
-# counts into coverage_snapshots, so the Coverage tab (templates/dashboard.html,
-# ?tab=coverage) can show a trend over time instead of only ever-live numbers.
+# counts into coverage_snapshots, so the Coverage > MITRE tab (templates/coverage.html,
+# /coverage?tab=mitre) can show a trend over time instead of only ever-live numbers.
 # Mirrors archive_logs.py's pattern: a standalone script driven by cron, not a service.
 #
 # Deliberately self-contained rather than importing from app.py (which sets up
