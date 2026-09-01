@@ -6,7 +6,7 @@
         <div class="metric-box"><div class="metric-value" style="color:#dc3545;">{{ total_alerts }}</div><div>Alerts</div></div>
         <div class="metric-box"><div class="metric-value">{{ open_cases }}</div><div>Open Cases</div></div>
         <div class="metric-box"><div class="metric-value" style="color:#dc3545;">{{ sla_breaches }}</div><div>SLA Breaches</div></div>
-        <div class="metric-box"><div class="metric-value">{% if coverage_latest %}{{ coverage_latest.coverage_pct }}%{% else %}&mdash;{% endif %}</div><div>Detection Coverage</div></div>
+        <div class="metric-box"><div class="metric-value">{% if coverage_latest %}{{ "%.1f"|format(coverage_latest.coverage_pct) }}%{% else %}&mdash;{% endif %}</div><div>Detection Coverage</div></div>
     </div>
     <p style="margin-top:10px; font-size:9pt; color:#666;">This report summarizes alerting, case workload, and detection posture over the last 30 days across this appliance. It is an operational snapshot of this deployment, not an independent security assessment.</p>
 
@@ -52,9 +52,9 @@
 
     <h2 class="section-title">Detection Coverage</h2>
     {% if coverage_latest and coverage_delta is not none %}
-    <p>Detection coverage moved from {{ coverage_snapshots[0].coverage_pct }}% to {{ coverage_latest.coverage_pct }}% ({{ '+' if coverage_delta >= 0 else '' }}{{ coverage_delta }}pt) over the last 30 days, tracked across {{ coverage_latest.techniques_total }} curated MITRE ATT&amp;CK techniques.</p>
+    <p>Detection coverage moved from {{ "%.1f"|format(coverage_snapshots[0].coverage_pct) }}% to {{ "%.1f"|format(coverage_latest.coverage_pct) }}% ({{ '+' if coverage_delta >= 0 else '' }}{{ coverage_delta }}pt) over the last 30 days, tracked across {{ coverage_latest.techniques_total }} curated MITRE ATT&amp;CK techniques.</p>
     {% elif coverage_latest %}
-    <p>Detection coverage is currently {{ coverage_latest.coverage_pct }}% across {{ coverage_latest.techniques_total }} curated MITRE ATT&amp;CK techniques. Coverage trend tracking is still building up history &mdash; a comparison over time will be available after a few more days of snapshots.</p>
+    <p>Detection coverage is currently {{ "%.1f"|format(coverage_latest.coverage_pct) }}% across {{ coverage_latest.techniques_total }} curated MITRE ATT&amp;CK techniques. Coverage trend tracking is still building up history &mdash; a comparison over time will be available after a few more days of snapshots.</p>
     {% else %}<p>No coverage data recorded yet.</p>{% endif %}
     {% if coverage_latest %}
     <table>
