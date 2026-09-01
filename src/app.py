@@ -3313,6 +3313,50 @@ def api_rules_import_sigmahq():
     log_audit('sigmahq_import', 'rule', None, f"pack={pack}, inserted={stats['inserted']}, updated={stats['updated']}, skipped={stats['skipped']}, errors={stats['errors']}, upstream_drift={stats['upstream_drift']}")
     return jsonify({"status": "success", **stats})
 
+@app.route('/api/rules/import/sigmahq/preview', methods=['GET'])
+@login_required
+def api_rules_import_sigmahq_preview():
+    err = require_permission('rules.manage')
+    if err: return err
+    pack = request.args.get('pack') or 'all'
+    if pack not in SIGMAHQ_PACKS:
+        pack = 'all'
+    try:
+        rules = _list_sigmahq_pack_rules(pack)
+    except Exception as e:
+        return jsonify({"error": f"Failed to list pack: {e}"}), 500
+    db = get_db()
+    rows = db.execute("SELECT sigma_uuid, title FROM sigma_rules WHERE source='sigma'").fetchall()
+    uuids_present = {r['sigma_uuid'] for r in rows if r['sigma_uuid']}
+    titles_no_uuid = {r['title'] for r in rows if not r['sigma_uuid']}
+    for r in rules:
+        r['already_imported'] = (r['sigma_uuid'] in uuids_present) if r['sigma_uuid'] else (r['title'] in titles_no_uuid)
+    return jsonify({"status": "success", "pack": pack, "count": len(rules), "rules": rules})
+
+@app.route('/api/rules/import/sigmahq/selected', methods=['POST'])
+@login_required
+def api_rules_import_sigmahq_selected():
+    err = require_permission('rules.manage')
+    if err: return err
+    data = request.json or {}
+    pack = data.get('pack') or 'all'
+    if pack not in SIGMAHQ_PACKS:
+        pack = 'all'
+    paths = data.get('paths')
+    if not isinstance(paths, list) or not paths:
+        return jsonify({"error": "No rules selected."}), 400
+    try:
+        stats = _run_sigmahq_import(pack, only_paths=set(paths))
+    except Exception as e:
+        return jsonify({"error": f"Import failed: {e}"}), 500
+    stats['selected'] = len(paths)
+    invalidate_rules_cache()
+    log_audit('sigmahq_import', 'rule', None,
+              f"pack={pack}, selective, selected={stats['selected']}, inserted={stats['inserted']}, "
+              f"updated={stats['updated']}, skipped={stats['skipped']}, errors={stats['errors']}, "
+              f"upstream_drift={stats['upstream_drift']}, not_found={stats.get('not_found', 0)}")
+    return jsonify({"status": "success", **stats})
+
 @app.route('/api/rules/<int:rid>/toggle', methods=['PUT'])
 @login_required
 def api_r_tog(rid):
@@ -9132,79 +9176,159 @@ def _resolve_sigmahq_asset_url(asset_name):
             return asset['browser_download_url']
     raise ValueError(f"SigmaHQ's latest release ({release.get('tag_name', 'unknown')}) has no asset named {asset_name}")
 
-def _run_sigmahq_import(pack='all'):
-    import urllib.request, zipfile, tempfile, shutil, socket, sqlite3
-    import yaml as _yaml
+def _fetch_sigmahq_pack_files(pack='all'):
+    """Downloads+extracts pack_info['asset'] to a fresh temp dir; returns
+    (tempdir, [relpath, ...]) for every .yml/.yaml under rules/. Caller owns cleanup
+    (shutil.rmtree(tempdir)). Single source of truth for pack contents, shared by the
+    whole-pack importer, the selective importer, and the browse/preview listing."""
+    import urllib.request, zipfile, tempfile, socket
     pack_info = SIGMAHQ_PACKS.get(pack, SIGMAHQ_PACKS['all'])
     t = tempfile.mkdtemp()
-    stats = {'inserted': 0, 'updated': 0, 'skipped': 0, 'errors': 0, 'upstream_drift': 0}
+    zp = os.path.join(t, "sigma.zip")
+    download_url = _resolve_sigmahq_asset_url(pack_info['asset'])
+    old_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(60)
     try:
-        zp = os.path.join(t, "sigma.zip")
-        download_url = _resolve_sigmahq_asset_url(pack_info['asset'])
-        old_timeout = socket.getdefaulttimeout()
-        socket.setdefaulttimeout(60)
-        try:
-            urllib.request.urlretrieve(download_url, zp)
-        finally:
-            socket.setdefaulttimeout(old_timeout)
-        with zipfile.ZipFile(zp, 'r') as z:
-            z.extractall(t)
+        urllib.request.urlretrieve(download_url, zp)
+    finally:
+        socket.setdefaulttimeout(old_timeout)
+    with zipfile.ZipFile(zp, 'r') as z:
+        z.extractall(t)
+    # SigmaHQ's release-package ZIPs extract with rules/ directly at the top level
+    # (no "sigma-<branch>/" wrapper the old master-branch download had).
+    rules_dir = os.path.join(t, "rules")
+    relpaths = []
+    for root, _, files in os.walk(rules_dir):
+        for f in files:
+            if f.endswith(('.yml', '.yaml')):
+                relpaths.append(os.path.relpath(os.path.join(root, f), rules_dir))
+    return t, relpaths
+
+def _parse_sigma_candidate_meta(relpath, ry, parsed):
+    """title/sigma_uuid/level/platform/category/status/tags for ONE candidate rule file --
+    same extraction _get_rules_cache() uses (_extract_yaml_field + the tags-block regex),
+    so the browse/preview picker shows identical values to the main Detection Rules table."""
+    level = (_extract_yaml_field('level', ry) or 'medium').lower()
+    status = _normalize_rule_status(_extract_yaml_field('status', ry))
+    raw_product = _extract_yaml_field('product', ry)
+    platform = (raw_product or 'Global').title()
+    t_match = re.search(r'^tags:\s*\n((\s+-\s*[^\n\r]+\n?)+)', ry, re.MULTILINE)
+    tags = [t.strip().strip('- ') for t in t_match.group(1).split('\n') if t.strip()] if t_match else []
+    return {
+        'path': relpath,
+        'title': parsed['title'],
+        'sigma_uuid': parsed.get('id'),
+        'level': level,
+        'status': status,
+        'platform': platform,
+        'tags': tags,
+    }
+
+def _ingest_sigma_candidate(conn, ry, parsed, stats):
+    """Insert/update/drift-track ONE parsed candidate rule against sigma_rules. Shared by
+    the full-pack loop and the selected-subset loop in _run_sigmahq_import -- one code
+    path, no reimplementation."""
+    title = parsed['title']
+    uuid_ = parsed.get('id')
+    # A rule with no `id:` field has no sigma_uuid to dedup against -- fall back to an
+    # unambiguous title match among other id-less rows so re-importing the same id-less
+    # rule (e.g. via the selective picker, opened repeatedly) updates it in place instead
+    # of inserting a fresh duplicate every time.
+    existing = conn.execute(
+        "SELECT id, rule_yaml, original_yaml FROM sigma_rules WHERE sigma_uuid = ?", (uuid_,)
+    ).fetchone() if uuid_ else conn.execute(
+        "SELECT id, rule_yaml, original_yaml FROM sigma_rules WHERE sigma_uuid IS NULL AND title = ?", (title,)
+    ).fetchone()
+    if existing:
+        # Sigma rules are directly editable now (Revert to Default is the safety net) --
+        # a rule whose live content has diverged from its recorded default has real local
+        # edits an import must never silently clobber. Only rules still matching their own
+        # baseline get updated (and their baseline moves forward with them).
+        if existing['rule_yaml'] == existing['original_yaml'] and existing['rule_yaml'] != ry:
+            conn.execute(
+                "UPDATE sigma_rules SET title = ?, rule_yaml = ?, original_yaml = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (title, ry, ry, existing['id'])
+            )
+            stats['updated'] += 1
+        elif existing['rule_yaml'] != existing['original_yaml']:
+            # Locally modified -- rule_yaml/original_yaml are left untouched above, but the
+            # latest fetched content is tracked separately so the "upstream has drifted
+            # from your edit's baseline" indicator can compare it against original_yaml
+            # without a live fetch.
+            conn.execute("UPDATE sigma_rules SET upstream_yaml = ? WHERE id = ?", (ry, existing['id']))
+            if ry != existing['original_yaml']:
+                stats['upstream_drift'] += 1
+    else:
+        conn.execute(
+            "INSERT INTO sigma_rules (title, rule_yaml, original_yaml, enabled, source, sigma_uuid, created_at) VALUES (?, ?, ?, 0, 'sigma', ?, CURRENT_TIMESTAMP)",
+            (title, ry, ry, uuid_)
+        )
+        stats['inserted'] += 1
+
+def _run_sigmahq_import(pack='all', only_paths=None):
+    """only_paths: optional set of relpaths (from _fetch_sigmahq_pack_files) restricting
+    processing to that subset -- used by the selective-import route. None (default) is
+    today's full-pack behavior."""
+    import shutil, sqlite3
+    import yaml as _yaml
+    t, relpaths = _fetch_sigmahq_pack_files(pack)
+    stats = {'inserted': 0, 'updated': 0, 'skipped': 0, 'errors': 0, 'upstream_drift': 0}
+    if only_paths is not None:
+        stats['not_found'] = len(only_paths - set(relpaths))
+        relpaths = [p for p in relpaths if p in only_paths]
+    try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
         conn.row_factory = sqlite3.Row
-        # SigmaHQ's release-package ZIPs extract with rules/ directly at the top level
-        # (no "sigma-<branch>/" wrapper the old master-branch download had).
-        rules_dir = os.path.join(t, "rules")
-        for root, _, files in os.walk(rules_dir):
-            for f in files:
-                if not f.endswith(('.yml', '.yaml')):
+        for rp in relpaths:
+            try:
+                with open(os.path.join(t, 'rules', rp), 'r', encoding='utf-8') as fh:
+                    ry = fh.read()
+                parsed = _yaml.safe_load(ry)
+                if not parsed or 'title' not in parsed:
+                    stats['skipped'] += 1
                     continue
-                try:
-                    with open(os.path.join(root, f), 'r', encoding='utf-8') as fh:
-                        ry = fh.read()
-                    parsed = _yaml.safe_load(ry)
-                    if not parsed or 'title' not in parsed:
-                        stats['skipped'] += 1
-                        continue
-                    title = parsed['title']
-                    uuid_ = parsed.get('id')
-                    existing = conn.execute(
-                        "SELECT id, rule_yaml, original_yaml FROM sigma_rules WHERE sigma_uuid = ?", (uuid_,)
-                    ).fetchone() if uuid_ else None
-                    if existing:
-                        # Sigma rules are directly editable now (Revert to Default is the
-                        # safety net) -- a rule whose live content has diverged from its
-                        # recorded default has real local edits an import must never
-                        # silently clobber. Only rules still matching their own baseline
-                        # get updated (and their baseline moves forward with them), same
-                        # as this route's original "update if upstream differs" behavior.
-                        if existing['rule_yaml'] == existing['original_yaml'] and existing['rule_yaml'] != ry:
-                            conn.execute(
-                                "UPDATE sigma_rules SET title = ?, rule_yaml = ?, original_yaml = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                                (title, ry, ry, existing['id'])
-                            )
-                            stats['updated'] += 1
-                        elif existing['rule_yaml'] != existing['original_yaml']:
-                            # Locally modified -- rule_yaml/original_yaml are left untouched
-                            # above, but the latest fetched content is tracked separately so
-                            # the "upstream has drifted from your edit's baseline" indicator
-                            # can compare it against original_yaml without a live fetch.
-                            conn.execute("UPDATE sigma_rules SET upstream_yaml = ? WHERE id = ?", (ry, existing['id']))
-                            if ry != existing['original_yaml']:
-                                stats['upstream_drift'] += 1
-                    else:
-                        conn.execute(
-                            "INSERT INTO sigma_rules (title, rule_yaml, original_yaml, enabled, source, sigma_uuid, created_at) VALUES (?, ?, ?, 0, 'sigma', ?, CURRENT_TIMESTAMP)",
-                            (title, ry, ry, uuid_)
-                        )
-                        stats['inserted'] += 1
-                except Exception:
-                    stats['errors'] += 1
+                _ingest_sigma_candidate(conn, ry, parsed, stats)
+            except Exception:
+                stats['errors'] += 1
         conn.commit()
         conn.close()
     finally:
         shutil.rmtree(t, ignore_errors=True)
     stats['pack'] = pack
     return stats
+
+_SIGMAHQ_PACK_LIST_CACHE = {}       # pack -> {'data': [...], 'time': ts}
+_SIGMAHQ_PACK_LIST_CACHE_TTL = 600  # caches only immutable pack metadata (title/level/
+                                     # tags/etc), never already_imported -- so staleness
+                                     # here is cosmetic, never a correctness risk.
+
+def _list_sigmahq_pack_rules(pack):
+    """Downloads+parses a pack's rules (browse-only, no DB writes) into metadata dicts for
+    the selective-import picker, TTL-cached the same way _INGESTED_APPS_CACHE/
+    _LOG_SOURCE_GAP_CACHE are elsewhere in this file."""
+    import shutil, time as _time
+    import yaml as _yaml
+    now = _time.time()
+    cached = _SIGMAHQ_PACK_LIST_CACHE.get(pack)
+    if cached and (now - cached['time']) < _SIGMAHQ_PACK_LIST_CACHE_TTL:
+        return cached['data']
+    t, relpaths = _fetch_sigmahq_pack_files(pack)
+    out = []
+    try:
+        for rp in relpaths:
+            try:
+                with open(os.path.join(t, 'rules', rp), 'r', encoding='utf-8') as fh:
+                    ry = fh.read()
+                parsed = _yaml.safe_load(ry)
+                if not parsed or 'title' not in parsed:
+                    continue
+                out.append(_parse_sigma_candidate_meta(rp, ry, parsed))
+            except Exception:
+                continue
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+    _SIGMAHQ_PACK_LIST_CACHE[pack] = {'data': out, 'time': now}
+    return out
 
 @app.route('/api/audit-log', methods=['GET'])
 @login_required

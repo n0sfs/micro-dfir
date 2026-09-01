@@ -436,6 +436,7 @@
                     <option value="et_addon">Emerging Threats Add-On</option>
                 </select>
                 <button class="btn btn-sm btn-outline-info" id="importSigmaBtn" onclick="importSigmaHQ()"><i class="fa-solid fa-cloud-arrow-down"></i> Import SigmaHQ Rules</button>
+                <button class="btn btn-sm btn-outline-info" id="browseSigmaBtn" onclick="openSigmaPickerModal()"><i class="fa-solid fa-list-check"></i> Browse &amp; Select Rules...</button>
                 <button class="btn btn-sm btn-primary" onclick="openRuleModal()"><i class="fa-solid fa-plus"></i> New Rule</button>
             </div>
         </div>
@@ -818,6 +819,46 @@
       <div class="modal-body">
         <p class="text-muted small mb-3">Backtests each selected rule against real recent logs -- no alerts, cases, or notifications are created.</p>
         <div id="validateSelectedList"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Browse & Select SigmaHQ Rules modal -->
+<div class="modal fade" id="sigmaPickerModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title"><i class="fa-solid fa-list-check me-2"></i>Browse &amp; Select SigmaHQ Rules</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="d-flex gap-2 mb-3 align-items-center flex-wrap">
+          <select id="sigmaPickerPackSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" onchange="loadSigmaPickerPack()">
+            <option value="all" selected>All Rules</option>
+            <option value="core">Core (high-confidence only)</option>
+            <option value="core_plus">Core+ (adds medium-level rules)</option>
+            <option value="core_plus_plus">Core++ (adds experimental rules)</option>
+            <option value="et_addon">Emerging Threats Add-On</option>
+          </select>
+          <input type="text" id="sigmaPickerSearchBox" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width: 260px;" placeholder="Search rule names..." oninput="filterSigmaPicker()">
+          <button class="btn btn-sm btn-outline-secondary" onclick="toggleAllSigmaPicker(true)">Select All Visible</button>
+          <button class="btn btn-sm btn-outline-secondary" onclick="toggleAllSigmaPicker(false)">Clear Selection</button>
+          <span class="text-muted small ms-auto" id="sigmaPickerCount"></span>
+        </div>
+        <div id="sigmaPickerLoading" class="text-muted small">Loading pack contents...</div>
+        <div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
+          <table class="table table-dark table-hover table-sm align-middle" id="sigmaPickerTable" style="display:none;">
+            <thead><tr>
+              <th style="width:2rem;"></th><th>Title</th><th>Level</th><th>Platform</th><th>Status</th>
+            </tr></thead>
+            <tbody id="sigmaPickerBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="modal-footer border-secondary">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+        <button type="button" class="btn btn-info btn-sm" id="sigmaPickerImportBtn" onclick="importSigmaSelected()"><i class="fa-solid fa-cloud-arrow-down"></i> Import Selected</button>
       </div>
     </div>
   </div>
@@ -3256,6 +3297,102 @@ async function importSigmaHQ() {
         } else {
             toast(`Import complete: ${data.inserted} new, ${data.updated} updated, ${data.skipped} skipped, ${data.errors} errors.`, 'success', {duration: 8000});
             ld();
+        }
+    } catch (e) {
+        toast('Import failed: ' + e, 'danger');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = origHtml;
+    }
+}
+
+// ---- Browse & Select SigmaHQ Rules picker ----
+let sigmaPickerModal = null;
+let sigmaPickerRules = [];
+let sigmaPickerSelected = new Set();
+
+function openSigmaPickerModal() {
+    if (!sigmaPickerModal) sigmaPickerModal = new bootstrap.Modal(document.getElementById('sigmaPickerModal'));
+    sigmaPickerSelected.clear();
+    document.getElementById('sigmaPickerSearchBox').value = '';
+    sigmaPickerModal.show();
+    loadSigmaPickerPack();
+}
+
+async function loadSigmaPickerPack() {
+    const pack = document.getElementById('sigmaPickerPackSelect').value;
+    sigmaPickerSelected.clear();
+    sigmaPickerRules = [];
+    document.getElementById('sigmaPickerLoading').style.display = '';
+    document.getElementById('sigmaPickerLoading').textContent = 'Loading pack contents...';
+    document.getElementById('sigmaPickerTable').style.display = 'none';
+    try {
+        const res = await fetch(`/api/rules/import/sigmahq/preview?pack=${encodeURIComponent(pack)}`);
+        const data = await res.json();
+        if (!res.ok) {
+            document.getElementById('sigmaPickerLoading').textContent = data.error || 'Failed to load pack.';
+            return;
+        }
+        sigmaPickerRules = data.rules;
+        document.getElementById('sigmaPickerLoading').style.display = 'none';
+        document.getElementById('sigmaPickerTable').style.display = '';
+        renderSigmaPicker();
+    } catch (e) {
+        document.getElementById('sigmaPickerLoading').textContent = 'Failed to load pack: ' + e;
+    }
+}
+
+function filterSigmaPicker() {
+    renderSigmaPicker();
+}
+
+function renderSigmaPicker() {
+    const q = (document.getElementById('sigmaPickerSearchBox').value || '').toLowerCase();
+    const visible = q ? sigmaPickerRules.filter(r => r.title.toLowerCase().includes(q)) : sigmaPickerRules;
+    const tbody = document.getElementById('sigmaPickerBody');
+    tbody.innerHTML = visible.map(r => `<tr>
+        <td><input type="checkbox" class="sigma-pick-cb" value="${escAttr(r.path)}" ${sigmaPickerSelected.has(r.path) ? 'checked' : ''} onchange="toggleSigmaPick('${escAttr(r.path)}', this.checked)"></td>
+        <td>${escHtml(r.title)}${r.already_imported ? ' <span class="badge bg-secondary" style="font-size:.65rem;">Already imported</span>' : ''}</td>
+        <td><span class="badge ${LEVEL_BADGE[r.level] || 'bg-secondary'}">${escHtml(r.level)}</span></td>
+        <td>${escHtml(r.platform)}</td>
+        <td><span class="badge ${STATUS_BADGE[r.status] || 'bg-secondary'}">${escHtml(r.status)}</span></td>
+    </tr>`).join('') || `<tr><td colspan="5" class="text-muted text-center py-3">No rules match this search.</td></tr>`;
+    document.getElementById('sigmaPickerCount').textContent = `${sigmaPickerSelected.size} selected of ${sigmaPickerRules.length} rules`;
+}
+
+function toggleSigmaPick(path, checked) {
+    if (checked) sigmaPickerSelected.add(path);
+    else sigmaPickerSelected.delete(path);
+    document.getElementById('sigmaPickerCount').textContent = `${sigmaPickerSelected.size} selected of ${sigmaPickerRules.length} rules`;
+}
+
+function toggleAllSigmaPicker(state) {
+    document.querySelectorAll('.sigma-pick-cb').forEach(cb => {
+        cb.checked = state;
+        toggleSigmaPick(cb.value, state);
+    });
+}
+
+async function importSigmaSelected() {
+    const pack = document.getElementById('sigmaPickerPackSelect').value;
+    const paths = Array.from(sigmaPickerSelected);
+    if (paths.length === 0) return toast('Please select at least one rule.', 'warning');
+    if (!(await confirmDialog(`Import ${paths.length} selected rule(s) from the "${document.getElementById('sigmaPickerPackSelect').options[document.getElementById('sigmaPickerPackSelect').selectedIndex].text}" package? New rules are added disabled; existing ones are updated in place.`, {title: 'Import selected rules', confirmLabel: 'Import'}))) return;
+    const btn = document.getElementById('sigmaPickerImportBtn');
+    const origHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Importing...';
+    try {
+        const res = await fetch('/api/rules/import/sigmahq/selected', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({pack, paths})});
+        const data = await res.json();
+        if (!res.ok) {
+            toast(data.error || 'Import failed.', 'danger');
+        } else {
+            let msg = `Import complete: ${data.inserted} new, ${data.updated} updated, ${data.skipped} skipped, ${data.errors} errors.`;
+            if (data.not_found) msg += ` ${data.not_found} rule(s) were no longer available in the latest release.`;
+            toast(msg, 'success', {duration: 8000});
+            ld();
+            loadSigmaPickerPack();
         }
     } catch (e) {
         toast('Import failed: ' + e, 'danger');
