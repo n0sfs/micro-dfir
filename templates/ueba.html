@@ -1748,7 +1748,7 @@ function loadIdentities() {
             <td class="small text-muted">${escHtml(i.department || '')}</td>
             <td>${ASSET_IS_ADMIN
                 ? `<input type="checkbox" class="form-check-input" ${i.privileged ? 'checked' : ''} onchange="updateIdentityPrivileged(${i.id}, this.checked)">`
-                : (i.privileged ? '<span class="badge bg-warning">Privileged</span>' : '<span class="badge bg-secondary">Standard</span>')}</td>
+                : (i.privileged ? '<span class="badge bg-warning text-dark">Privileged</span>' : '<span class="badge bg-secondary">Standard</span>')}</td>
             <td>${ASSET_IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteIdentity(${i.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
         </tr>`).join('');
     }).catch(err => console.error('Error loading identities:', err));

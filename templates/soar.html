@@ -1324,7 +1324,7 @@ function loadAlertNotifications() {
             document.getElementById('notifWebhookUrl').value = cfg.webhook_url || '';
             document.getElementById('notifMinSeverity').value = cfg.min_severity || 'High';
         })
-        .catch(e => console.log('Error loading alert notification settings:', e));
+        .catch(e => console.error('Error loading alert notification settings:', e));
 }
 
 function collectAlertNotificationConfig() {
