@@ -7,8 +7,8 @@
             <td><span class="badge" style="background:{{ '#198754' if case.status == 'open' else '#6c757d' }};">{{ case.status|upper }}</span></td>
             <td class="label">TLP</td>
             <td><span class="badge" style="background:{{ tlp_pap_colors.get(case.tlp, '#6c757d') }};">TLP:{{ (case.tlp or 'clear')|upper }}</span></td>
-            <td class="label">PAP</td>
-            <td><span class="badge" style="background:{{ tlp_pap_colors.get(case.pap, '#6c757d') }};">PAP:{{ (case.pap or 'clear')|upper }}</span></td>
+            <td class="label">Severity</td>
+            <td><span class="badge" style="background:{{ severity_colors.get((case.severity or 'medium')|upper, '#6c757d') }};">{{ (case.severity or 'medium')|upper }}</span></td>
         </tr>
         <tr>
             <td class="label">Queue</td>

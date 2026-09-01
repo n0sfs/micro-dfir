@@ -114,10 +114,6 @@
                         <label class="form-label small text-muted mb-1">TLP</label>
                         <select id="newCaseTlp" class="form-select bg-dark text-light border-secondary"></select>
                     </div>
-                    <div class="col-md-3">
-                        <label class="form-label small text-muted mb-1">PAP</label>
-                        <select id="newCasePap" class="form-select bg-dark text-light border-secondary"></select>
-                    </div>
                 </div>
                 <div class="mb-2">
                     <label class="form-label small text-muted mb-1">Description (optional)</label>
@@ -384,16 +380,18 @@ function caseKillProcess(host) {
     queueCaseAssetCommand(host, 'kill_process', {pid: pid.trim()}, `Terminate PID ${pid.trim()} on ${host}? This cannot be undone.`);
 }
 
-// Standard TLP/PAP color convention -- red/amber/green/clear (TLP), same 4-step scale for PAP.
+// Standard TLP color convention -- red/amber/green/clear. PAP was captured here too at
+// one point but never actually surfaced anywhere in the UI, and isn't a convention used
+// consistently across comparable DFIR case-management tools (DFIR-IRIS doesn't have it
+// at all; TheHive does, but wires it into observables too, not just the case) -- pulled
+// from the case form rather than half-finishing it. The `pap` column/data is untouched.
 const TLP_VALUES = ['clear', 'green', 'amber', 'amber-strict', 'red'];
-const PAP_VALUES = ['clear', 'green', 'amber', 'red'];
 const TLP_PAP_COLORS = {clear: 'bg-secondary', green: 'bg-success', amber: 'bg-warning text-dark', 'amber-strict': 'bg-warning text-dark', red: 'bg-danger'};
 
 // Empty/falsy is "not set" (never assessed) -- deliberately NOT the same as an explicit
 // 'clear' classification ("assessed, no restriction"), so it gets its own muted badge
 // rather than silently displaying as CLEAR.
 function tlpBadge(v) { return v ? `<span class="badge ${TLP_PAP_COLORS[v] || 'bg-secondary'}" title="Traffic Light Protocol">TLP:${escHtml(v.toUpperCase())}</span>` : `<span class="badge bg-secondary bg-opacity-25 text-muted" title="Traffic Light Protocol -- not set">TLP: —</span>`; }
-function papBadge(v) { return v ? `<span class="badge ${TLP_PAP_COLORS[v] || 'bg-secondary'}" title="Permissible Actions Protocol">PAP:${escHtml(v.toUpperCase())}</span>` : `<span class="badge bg-secondary bg-opacity-25 text-muted" title="Permissible Actions Protocol -- not set">PAP: —</span>`; }
 
 function populateTlpPapSelect(elId, values, current) {
     const el = document.getElementById(elId);
@@ -492,7 +490,6 @@ function showNewCaseModal() {
     document.getElementById('newCaseError').style.display = 'none';
     document.getElementById('newCaseSeverity').value = 'medium';
     populateTlpPapSelect('newCaseTlp', TLP_VALUES, '');
-    populateTlpPapSelect('newCasePap', PAP_VALUES, '');
     populateQueueSelect('newCaseQueue', '');
     if (!caseTemplates.length) loadCaseTemplates();
     if (!newCaseModal) newCaseModal = new bootstrap.Modal(document.getElementById('newCaseModal'));
@@ -507,7 +504,6 @@ function createCase() {
         assignee: document.getElementById('newCaseAssignee').value.trim(),
         description: document.getElementById('newCaseDescription').value.trim(),
         tlp: document.getElementById('newCaseTlp').value,
-        pap: document.getElementById('newCasePap').value,
         severity: document.getElementById('newCaseSeverity').value,
         template_id: templateId ? parseInt(templateId, 10) : null,
         queue_id: queueId ? parseInt(queueId, 10) : null
@@ -708,10 +704,6 @@ function loadAndRenderCaseDetail(cid) {
                                     <select id="editCaseTlp" class="form-select bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}></select>
                                 </div>
                                 <div class="col-md-4">
-                                    <label class="form-label small text-muted mb-1">PAP</label>
-                                    <select id="editCasePap" class="form-select bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}></select>
-                                </div>
-                                <div class="col-md-4">
                                     <label class="form-label small text-muted mb-1">Severity</label>
                                     <select id="editCaseSeverity" class="form-select bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}>
                                         <option value="critical" ${c.severity === 'critical' ? 'selected' : ''}>Critical</option>
@@ -868,7 +860,6 @@ function loadAndRenderCaseDetail(cid) {
             </div>
         `;
         populateTlpPapSelect('editCaseTlp', TLP_VALUES, c.tlp);
-        populateTlpPapSelect('editCasePap', PAP_VALUES, c.pap);
         populateQueueSelect('editCaseQueue', c.queue_id);
         renderLinkToEntityControl();
         loadCaseReports(c.id);
@@ -901,7 +892,6 @@ function saveCaseDetail() {
         assignee: document.getElementById('editCaseAssignee').value.trim(),
         description: document.getElementById('editCaseDescription').value.trim(),
         tlp: document.getElementById('editCaseTlp').value,
-        pap: document.getElementById('editCasePap').value,
         severity: document.getElementById('editCaseSeverity').value,
         workflow_state: statusWorkflow === 'closed' ? 'resolved' : statusWorkflow,
         queue_id: queueVal ? parseInt(queueVal, 10) : null
