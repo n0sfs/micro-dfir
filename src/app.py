@@ -2505,6 +2505,14 @@ _LOG_SOURCE_GAP_LABELS = {
     ('github', None): 'GitHub Audit Log',
 }
 
+# Same TTL-cache shape as RULES_CACHE/_INGESTED_APPS_CACHE -- this function used to run
+# a full uncached pass over every enabled rule on EVERY /api/mitre/coverage request
+# (unlike _get_rules_cache, which at least amortizes across requests within its own
+# 30s window), confirmed as a real contributor to that endpoint's latency alongside the
+# separate mitre_attack.lookup() fix (see that function's own comment).
+_LOG_SOURCE_GAP_CACHE = {'data': None, 'time': 0}
+_LOG_SOURCE_GAP_CACHE_TTL = 30
+
 def _log_source_gap_summary(db):
     """The "what should we enable to improve Coverage" answer: what's actually being
     ingested right now (_get_ingested_apps -- ground truth from live_logs.app), plus
@@ -2514,6 +2522,10 @@ def _log_source_gap_summary(db):
     techniques are stuck behind it. A rule counted here can never leave 'active' by
     construction (see log_source_gap in _build_mitre_coverage) until that source is
     wired into ingestion -- these are the highest-leverage gaps to close."""
+    import time
+    now = time.time()
+    if _LOG_SOURCE_GAP_CACHE['data'] is not None and (now - _LOG_SOURCE_GAP_CACHE['time']) < _LOG_SOURCE_GAP_CACHE_TTL:
+        return _LOG_SOURCE_GAP_CACHE['data']
     from mitre_attack import techniques_for_tags
     groups = {}
     for r in db.execute("SELECT rule_yaml FROM sigma_rules WHERE enabled = 1").fetchall():
@@ -2543,13 +2555,16 @@ def _log_source_gap_summary(db):
                     g['technique_ids'].add(tech['id'])
         except Exception:
             pass
-    return {
+    result = {
         'ingested_apps': sorted(_get_ingested_apps(db)),
         'gaps': [
             {'label': label, 'rule_count': g['rule_count'], 'technique_count': len(g['technique_ids'])}
             for label, g in sorted(groups.items(), key=lambda kv: -len(kv[1]['technique_ids']))
         ],
     }
+    _LOG_SOURCE_GAP_CACHE['data'] = result
+    _LOG_SOURCE_GAP_CACHE['time'] = now
+    return result
 
 def _get_rules_cache(db):
     """Returns the rules_out list used by both /api/rules and /api/mitre/coverage,
