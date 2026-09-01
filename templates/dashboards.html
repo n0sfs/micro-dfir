@@ -1336,8 +1336,8 @@ function renderLogSearchWidget(container, widgetId, config) {
         fetch('/api/saved-searches').then(r => r.json()).then(data => { savedSearches = data || []; renderSavedMenu(); })
             .catch(err => console.error('Error loading saved searches:', err));
     }
-    function saveCurrentSearch() {
-        const name = prompt('Name this saved search:');
+    async function saveCurrentSearch() {
+        const name = await promptDialog('Name this saved search:', '', {title: 'Save Search', confirmLabel: 'Save'});
         if (!name || !name.trim()) return;
         fetch('/api/saved-searches', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },

@@ -272,7 +272,7 @@
                 <div class="col-md-5">
                     <label class="form-label small text-muted mb-1">Current Logo</label>
                     <div class="border border-secondary rounded p-3 text-center bg-black" style="min-height:100px;">
-                        <img id="logoPreview" src="{{ url_for('report_branding_logo') }}" style="max-height:80px; max-width:100%;" onerror="this.style.display='none'; document.getElementById('logoPreviewEmpty').style.display='block';">
+                        <img id="logoPreview" src="{{ url_for('report_branding_logo') }}" alt="Current report logo" style="max-height:80px; max-width:100%;" onerror="this.style.display='none'; document.getElementById('logoPreviewEmpty').style.display='block';">
                         <p id="logoPreviewEmpty" class="text-muted small mb-0" style="display:none;">No logo uploaded.</p>
                     </div>
                 </div>
@@ -513,7 +513,7 @@ function loadReportBranding() {
             document.getElementById('brandFooterText').value = cfg.footer_text || '';
             document.getElementById('brandAccentColor').value = cfg.accent_color || '#0d6efd';
         })
-        .catch(e => console.log('Error loading report branding:', e));
+        .catch(e => console.error('Error loading report branding:', e));
 }
 
 function saveBranding() {
@@ -551,7 +551,7 @@ function loadReportSchedule() {
                 sel.value = cfg[sel.dataset.reportType] || 'off';
             });
         })
-        .catch(e => console.log('Error loading report schedule:', e));
+        .catch(e => console.error('Error loading report schedule:', e));
 }
 
 function saveReportSchedule() {
@@ -595,7 +595,7 @@ function loadMetrics() {
             document.getElementById('bar_disk').style.width = data.disk_pct + '%';
             document.getElementById('met_disk_free').innerText = data.disk_free_gb;
             document.getElementById('met_db').innerText = data.db_size_mb + ' MB';
-        }).catch(e => console.log('Metrics polling issue:', e));
+        }).catch(e => console.error('Metrics polling issue:', e));
 }
 
 // Cert Upload Logic
@@ -893,7 +893,7 @@ function loadRetentionSettings() {
             document.getElementById('retentionAutoEnabled').checked = !!data.days;
             renderRetentionStatus(data);
         })
-        .catch(e => console.log('Retention settings load issue:', e));
+        .catch(e => console.error('Retention settings load issue:', e));
 }
 
 function renderRetentionStatus(data) {
@@ -966,7 +966,7 @@ function loadArchiveSettings() {
             document.getElementById('archiveAutoEnabled').checked = !!data.days;
             renderArchiveStatus(data);
         })
-        .catch(e => console.log('Archive settings load issue:', e));
+        .catch(e => console.error('Archive settings load issue:', e));
 }
 
 function renderArchiveStatus(data) {

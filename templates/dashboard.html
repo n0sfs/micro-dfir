@@ -1555,7 +1555,7 @@ async function addToCase(itemType, itemId) {
         msg.className = 'small mt-1 text-danger'; msg.innerText = 'Pick a case first.'; msg.style.display = 'block'; return;
     }
     if (caseId === '__new__') {
-        const title = prompt('New case title:');
+        const title = await promptDialog('New case title:', '', {title: 'New Case', confirmLabel: 'Create'});
         if (!title || !title.trim()) return;
         const createResp = await fetch('/api/cases', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title: title.trim()})});
         const createData = await createResp.json();
@@ -2007,7 +2007,7 @@ function loadSavedSearches() {
     fetch('/api/saved-searches')
         .then(r => r.json())
         .then(data => { savedSearches = data || []; renderSavedSearchMenu(); })
-        .catch(e => console.log('Error loading saved searches:', e));
+        .catch(e => console.error('Error loading saved searches:', e));
 }
 
 function renderSavedSearchMenu() {
@@ -2028,8 +2028,8 @@ function renderSavedSearchMenu() {
     `;
 }
 
-function saveCurrentSearch() {
-    const name = prompt('Name this saved search:');
+async function saveCurrentSearch() {
+    const name = await promptDialog('Name this saved search:', '', {title: 'Save Search', confirmLabel: 'Save'});
     if (!name || !name.trim()) return;
     fetch('/api/saved-searches', {
         method: 'POST', headers: {'Content-Type': 'application/json'},

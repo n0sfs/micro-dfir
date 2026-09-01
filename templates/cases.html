@@ -373,8 +373,8 @@ function caseIsolateHost(host) {
     queueCaseAssetCommand(host, 'isolate_host', {}, `Isolate ${host} from the network? Only traffic to/from this SOC server will be allowed.`);
 }
 
-function caseKillProcess(host) {
-    const pid = prompt(`PID to terminate on ${host}:`);
+async function caseKillProcess(host) {
+    const pid = await promptDialog(`PID to terminate on ${host}:`, '', {title: 'Kill Process', confirmLabel: 'Continue'});
     if (pid === null) return;
     if (!/^\d+$/.test(pid.trim())) { toast('PID must be a whole number.', 'danger'); return; }
     queueCaseAssetCommand(host, 'kill_process', {pid: pid.trim()}, `Terminate PID ${pid.trim()} on ${host}? This cannot be undone.`);

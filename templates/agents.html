@@ -1865,7 +1865,7 @@ async function addResultToCase(commandId) {
         msg.className = 'small mt-1 text-danger'; msg.innerText = 'Pick a case first.'; msg.style.display = 'block'; return;
     }
     if (caseId === '__new__') {
-        const title = prompt('New case title:');
+        const title = await promptDialog('New case title:', '', {title: 'New Case', confirmLabel: 'Create'});
         if (!title || !title.trim()) return;
         const createResp = await fetch('/api/cases', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title: title.trim()})});
         const createData = await createResp.json();
