@@ -692,6 +692,13 @@ function renderComplianceCoverageWidget(container, widgetId, config) {
                     <div class="progress" style="height:4px;">
                         <div class="progress-bar ${scaColor}" style="width:${sca.total === 0 ? 100 : scaPct}%;"></div>
                     </div>
+                    ${f.key === 'nist_800_53' ? `
+                    <div class="mt-1">
+                        <a href="#" class="small" style="font-size:.72rem;" onclick="toggleNist80053Detail(${widgetId}); return false;">
+                            <i class="fa-solid fa-diagram-project me-1"></i>ATT&amp;CK-derived control coverage&hellip;
+                        </a>
+                        <div id="nist80053Detail${widgetId}" style="display:none;" class="mt-1"></div>
+                    </div>` : ''}
                 </div>`;
             }).join('')}
             <h6 class="small text-uppercase text-muted mt-3 mb-1">Recent Changes</h6>
@@ -703,6 +710,49 @@ function renderComplianceCoverageWidget(container, widgetId, config) {
     }).catch(err => console.error('Error loading compliance coverage:', err));
     load();
     WIDGET_INTERVALS[widgetId] = setInterval(load, 60000);
+}
+
+// Derived, not manually tagged -- NIST 800-53 control coverage computed from data this
+// appliance already has (ATT&CK technique coverage), via MITRE Center for Threat-Informed
+// Defense's crosswalk. Fetched lazily (only on first expand, not on every widget render)
+// since the underlying computation re-derives MITRE coverage from scratch. Note the whole
+// block resets to collapsed on the widget's own 60s poll refresh (renderComplianceCoverage
+// Widget always rebuilds body.innerHTML wholesale) -- same pre-existing limitation every
+// other piece of this widget's interactive state already has, not new here.
+function toggleNist80053Detail(widgetId) {
+    const el = document.getElementById('nist80053Detail' + widgetId);
+    if (!el) return;
+    if (el.style.display !== 'none') { el.style.display = 'none'; return; }
+    el.style.display = 'block';
+    if (el.dataset.loaded) return;
+    el.innerHTML = '<div class="text-muted small">Loading&hellip;</div>';
+    fetch('/api/compliance/nist-800-53-controls').then(r => r.json()).then(d => {
+        const c = chartTheme();
+        const families = Object.entries(d.families).sort((a, b) => a[0].localeCompare(b[0]));
+        el.innerHTML = `
+            <div class="small text-muted mb-1">${d.covered_controls} / ${d.total_controls} in-scope controls covered</div>
+            ${families.map(([code, fam]) => {
+                const pct = fam.total > 0 ? Math.round(((fam.active + fam.validated) / fam.total) * 100) : 0;
+                const dominantTier = fam.validated > 0 ? 'validated' : (fam.active > 0 ? 'active' : (fam.inactive > 0 ? 'inactive' : 'gap'));
+                const barColor = mitreTierColor(dominantTier, c);
+                return `
+                <div class="d-flex justify-content-between align-items-center small mb-1">
+                    <span class="text-truncate" style="max-width:180px;" title="${escHtml(fam.label)}">${code} <span class="text-muted">${escHtml(fam.label)}</span></span>
+                    <span class="text-muted text-nowrap" style="font-size:.72rem;">${fam.active + fam.validated}/${fam.total}</span>
+                </div>
+                <div class="progress mb-1" style="height:4px;">
+                    <div class="progress-bar" style="width:${fam.total === 0 ? 0 : pct}%; background:${barColor};"></div>
+                </div>`;
+            }).join('')}
+            <div class="small text-muted mt-1" style="font-size:.68rem; opacity:.8;">
+                Derived from ATT&amp;CK technique coverage via ${escHtml(d.source)}. Does not cover: ${d.excluded_families.join(', ')}
+                (audit/logging, training, incident response, and other families outside this crosswalk's scope -- absence here means "not assessed by this method," not "zero coverage").
+            </div>`;
+        el.dataset.loaded = '1';
+    }).catch(err => {
+        el.innerHTML = '<div class="text-danger small">Error loading control coverage.</div>';
+        console.error('Error loading NIST 800-53 control coverage:', err);
+    });
 }
 
 function renderVulnerabilitySummaryWidget(container, widgetId, config) {

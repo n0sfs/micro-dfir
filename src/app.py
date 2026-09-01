@@ -2786,6 +2786,55 @@ def _build_compliance_coverage(rules, validated):
         }
     return out
 
+_NIST_TIER_RANK = {'gap': 0, 'inactive': 1, 'active': 2, 'validated': 3}
+
+def _build_nist_800_53_coverage(mitre_result):
+    """Derives NIST 800-53 control coverage from data this appliance already computes --
+    no new DB queries, no second tier-scoring pass. Reuses mitre_result (the same dict
+    _build_mitre_coverage() already returned for the MITRE Coverage tab/widget): flattens
+    its per-technique tiers into technique_id -> tier, then for each control in the
+    vendored CTID crosswalk (NIST_800_53_TECHNIQUE_CONTROLS), takes the BEST tier among
+    its mapped techniques -- a control is satisfied if ANY of the attacker behaviors it's
+    meant to catch is actually covered, an OR relationship, not an AND. A technique this
+    appliance's curated ATT&CK table doesn't carry at all (never seen in mitre_result)
+    defaults to 'gap' for any control it maps to, same as an unmapped technique would mean
+    for MITRE coverage itself.
+
+    Returns a per-family rollup (not a 109-row control-by-control list -- the UI shows
+    families) plus the total mapped-control count and which families the crosswalk
+    actually covers, since CTID's own methodology excludes AU/AT/IR/MA/PE/PL/PM/PS/PT
+    entirely and that must stay visible next to any number derived from this data."""
+    from nist_800_53_mappings import (
+        NIST_800_53_TECHNIQUE_CONTROLS, NIST_800_53_CONTROL_FAMILIES,
+    )
+    tech_tier = {}
+    for tactic in mitre_result['tactics']:
+        for t in tactic['techniques']:
+            tech_tier[t['id']] = t['tier']
+
+    control_best = {}
+    for tech_id, control_ids in NIST_800_53_TECHNIQUE_CONTROLS.items():
+        tier = tech_tier.get(tech_id, 'gap')
+        for control_id in control_ids:
+            current = control_best.get(control_id)
+            if current is None or _NIST_TIER_RANK[tier] > _NIST_TIER_RANK[current]:
+                control_best[control_id] = tier
+
+    families = {}
+    for fam, label in NIST_800_53_CONTROL_FAMILIES.items():
+        families[fam] = {'label': label, 'gap': 0, 'inactive': 0, 'active': 0, 'validated': 0, 'total': 0}
+    for control_id, tier in control_best.items():
+        fam = control_id.split('-')[0]
+        if fam in families:
+            families[fam][tier] += 1
+            families[fam]['total'] += 1
+
+    return {
+        'families': families,
+        'total_controls': len(control_best),
+        'covered_controls': sum(1 for t in control_best.values() if t in ('active', 'validated')),
+    }
+
 def _build_actor_technique_index(db):
     """technique_id -> [{id, name}] of threat/malware entities in the TI
     catalog known to use that technique, for cross-referencing against
@@ -2927,6 +2976,23 @@ def api_mitre_coverage():
     actor_techniques = _build_actor_technique_index(db)
     result = _build_mitre_coverage(rules, validated, actor_techniques)
     result['log_sources'] = _log_source_gap_summary(db)
+    return jsonify(result)
+
+# Separate endpoint from /api/mitre/coverage above (not folded into that response) so
+# this extra derivation only runs for callers that actually want the NIST 800-53 rollup
+# (the Compliance widget's expandable detail), not on every MITRE tab/widget load.
+@app.route('/api/compliance/nist-800-53-controls', methods=['GET'])
+@login_required
+def api_compliance_nist_800_53_controls():
+    db = get_db()
+    days = _dashboard_window_days(request)
+    rules = _get_rules_cache(db)
+    validated = _get_validated_technique_counts(db, days)
+    actor_techniques = _build_actor_technique_index(db)
+    mitre_result = _build_mitre_coverage(rules, validated, actor_techniques)
+    result = _build_nist_800_53_coverage(mitre_result)
+    result['excluded_families'] = ['AU', 'AT', 'IR', 'MA', 'PE', 'PL', 'PM', 'PS', 'PT']
+    result['source'] = "MITRE Center for Threat-Informed Defense ATT&CK-to-NIST-800-53 crosswalk (Apache-2.0)"
     return jsonify(result)
 
 @app.route('/api/mitre/coverage/history', methods=['GET'])
