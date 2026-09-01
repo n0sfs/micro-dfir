@@ -1,8 +1,72 @@
 <!DOCTYPE html><html><head><meta charset="UTF-8">{% include "_report_styles.html" %}</head><body>
     {% include "_report_branding_header.html" %}
     <h2>Executive Summary</h2>
-    <div><div class="metric-box"><div class="metric-value">{{ total_events }}</div><div>Logs Ingested</div></div><div class="metric-box"><div class="metric-value" style="color:#dc3545;">{{ total_alerts }}</div><div>Alerts</div></div></div>
+    <div>
+        <div class="metric-box"><div class="metric-value">{{ total_events }}</div><div>Logs Ingested</div></div>
+        <div class="metric-box"><div class="metric-value" style="color:#dc3545;">{{ total_alerts }}</div><div>Alerts</div></div>
+        <div class="metric-box"><div class="metric-value">{{ open_cases }}</div><div>Open Cases</div></div>
+        <div class="metric-box"><div class="metric-value" style="color:#dc3545;">{{ sla_breaches }}</div><div>SLA Breaches</div></div>
+        <div class="metric-box"><div class="metric-value">{% if coverage_latest %}{{ coverage_latest.coverage_pct }}%{% else %}&mdash;{% endif %}</div><div>Detection Coverage</div></div>
+    </div>
+    <p style="margin-top:10px; font-size:9pt; color:#666;">This report summarizes alerting, case workload, and detection posture over the last 30 days across this appliance. It is an operational snapshot of this deployment, not an independent security assessment.</p>
+
     <h2 class="section-title">Top Threats</h2>
-    {% if top_alerts %}<table><thead><tr><th>Rule</th><th>Severity</th><th>Hits</th></tr></thead><tbody>{% for a in top_alerts %}<tr><td>{{ a.title }}</td><td>{{ a.severity }}</td><td>{{ a.count }}</td></tr>{% endfor %}</tbody></table>{% else %}<p>No critical threats detected.</p>{% endif %}
+    {% if top_alerts %}
+    <table>
+        <thead><tr><th>Rule</th><th>Severity</th><th>Hits</th></tr></thead>
+        <tbody>
+        {% for a in top_alerts %}
+            <tr>
+                <td>{{ a.title }}</td>
+                <td><span class="badge" style="background:{{ security_severity_colors.get(a.severity, '#6c757d') }};">{{ a.severity }}</span></td>
+                <td>{{ a.count }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<p>No critical threats detected.</p>{% endif %}
+
+    <h2 class="section-title">Case Load &amp; SLA</h2>
+    {% if open_cases or cases_closed_30d %}
+    <p>{{ open_cases }} case{{ '' if open_cases == 1 else 's' }} {{ 'is' if open_cases == 1 else 'are' }} currently open. {{ cases_closed_30d }} case{{ '' if cases_closed_30d == 1 else 's' }} {{ 'was' if cases_closed_30d == 1 else 'were' }} closed in the last 30 days{% if avg_close_hours %}, averaging {{ avg_close_hours }} hours to close{% endif %}. {{ sla_breaches }} open case{{ '' if sla_breaches == 1 else 's' }} {{ 'has' if sla_breaches == 1 else 'have' }} breached the configured {{ sla_hours }}-hour SLA threshold.</p>
+    {% else %}<p>No case activity in the last 30 days.</p>{% endif %}
+
+    <h2 class="section-title">Detection Signals (UEBA)</h2>
+    {% if risk_trend_direction %}
+    <p>Fleet-wide risk-score activity was <strong>{{ risk_trend_direction }}</strong> over the last 30 days, totaling {{ risk_trend_total }} point{{ '' if risk_trend_total == 1 else 's' }}.</p>
+    {% else %}<p>Not enough history yet to characterize a risk-score trend ({{ risk_trend_total }} point{{ '' if risk_trend_total == 1 else 's' }} recorded so far).</p>{% endif %}
+    {% if top_anomaly_rules %}
+    <table>
+        <thead><tr><th>Rule</th><th>Entity Type</th><th>Matches (30 days)</th></tr></thead>
+        <tbody>
+        {% for r in top_anomaly_rules %}
+            <tr>
+                <td>{{ r.name }}</td>
+                <td>{{ r.entity_type }}</td>
+                <td>{{ r.matches }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<p>No anomaly rules have fired in the last 30 days.</p>{% endif %}
+
+    <h2 class="section-title">Detection Coverage</h2>
+    {% if coverage_latest and coverage_delta is not none %}
+    <p>Detection coverage moved from {{ coverage_snapshots[0].coverage_pct }}% to {{ coverage_latest.coverage_pct }}% ({{ '+' if coverage_delta >= 0 else '' }}{{ coverage_delta }}pt) over the last 30 days, tracked across {{ coverage_latest.techniques_total }} curated MITRE ATT&amp;CK techniques.</p>
+    {% elif coverage_latest %}
+    <p>Detection coverage is currently {{ coverage_latest.coverage_pct }}% across {{ coverage_latest.techniques_total }} curated MITRE ATT&amp;CK techniques. Coverage trend tracking is still building up history &mdash; a comparison over time will be available after a few more days of snapshots.</p>
+    {% else %}<p>No coverage data recorded yet.</p>{% endif %}
+    {% if coverage_latest %}
+    <table>
+        <thead><tr><th>Tier</th><th>Techniques</th></tr></thead>
+        <tbody>
+            <tr><td>Validated</td><td>{{ coverage_latest.validated_count }}</td></tr>
+            <tr><td>Active</td><td>{{ coverage_latest.active_count }}</td></tr>
+            <tr><td>Inactive</td><td>{{ coverage_latest.inactive_count }}</td></tr>
+            <tr><td>Gap</td><td>{{ coverage_latest.gap_count }}</td></tr>
+        </tbody>
+    </table>
+    {% endif %}
+
     {% include "_report_branding_footer.html" %}
 </body></html>
