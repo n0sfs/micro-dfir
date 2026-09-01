@@ -513,6 +513,13 @@
                 <button class="btn btn-sm btn-outline-danger" onclick="bulkAction(false)"><i class="fa-solid fa-stop"></i> Disable Selected</button>
                 <button class="btn btn-sm btn-outline-info" id="validateSelectedBtn" onclick="validateSelectedRules()" title="Backtest just the checked rules against real recent logs and see what they'd actually match, before enabling them"><i class="fa-solid fa-flask"></i> Validate Selected</button>
                 <button class="btn btn-sm btn-outline-warning" id="validateRulesBtn" onclick="validateAllRules()" title="Backtest every enabled rule against a 1-day log window to catch any that silently fail to convert or run"><i class="fa-solid fa-stethoscope"></i> Validate Rules</button>
+                <select id="sigmaPackSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" title="Which SigmaHQ release package to pull rules from">
+                    <option value="all" selected>All Rules</option>
+                    <option value="core">Core (high-confidence only)</option>
+                    <option value="core_plus">Core+ (adds medium-level rules)</option>
+                    <option value="core_plus_plus">Core++ (adds experimental rules)</option>
+                    <option value="et_addon">Emerging Threats Add-On</option>
+                </select>
                 <button class="btn btn-sm btn-outline-info" id="importSigmaBtn" onclick="importSigmaHQ()"><i class="fa-solid fa-cloud-arrow-down"></i> Import SigmaHQ Rules</button>
                 <button class="btn btn-sm btn-primary" onclick="openRuleModal()"><i class="fa-solid fa-plus"></i> New Rule</button>
             </div>
@@ -3400,13 +3407,16 @@ async function toggleHistory() {
 }
 
 async function importSigmaHQ() {
-    if (!(await confirmDialog('Pull the latest ruleset from SigmaHQ? This can take up to a minute — new rules are added disabled, existing ones are updated in place, and your enable/disable choices are preserved.', {title: 'Import SigmaHQ ruleset', confirmLabel: 'Import'}))) return;
+    const packSelect = document.getElementById('sigmaPackSelect');
+    const pack = packSelect.value;
+    const packLabel = packSelect.options[packSelect.selectedIndex].text;
+    if (!(await confirmDialog(`Pull the "${packLabel}" package from SigmaHQ? This can take up to a minute — new rules are added disabled, existing ones are updated in place, and your enable/disable choices are preserved.`, {title: 'Import SigmaHQ ruleset', confirmLabel: 'Import'}))) return;
     const btn = document.getElementById('importSigmaBtn');
     const origHtml = btn.innerHTML;
     btn.disabled = true;
     btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Importing...';
     try {
-        const res = await fetch('/api/rules/import/sigmahq', {method: 'POST'});
+        const res = await fetch('/api/rules/import/sigmahq', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({pack})});
         const data = await res.json();
         if (!res.ok) {
             toast(data.error || 'Import failed.', 'danger');
