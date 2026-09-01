@@ -1110,7 +1110,10 @@ function actionParamsFieldsHtml(seq, actionType, params) {
                 `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_webhook_url" placeholder="Slack incoming webhook URL" value="${escHtml(params.webhook_url || '')}" style="${params.webhook_url_secret ? 'display:none;' : ''}">
                 <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_message" placeholder="Message (optional -- case_id/case_title/status/tlp placeholders supported)" value="${escHtml(params.message || '')}">`;
         case 'isolate_host':
-            return `<div class="small text-muted">No params -- isolates every Case Asset marked <strong>Confirmed</strong> compromised when this action runs. Always requires approval.</div>`;
+            return `<div class="small text-muted mb-2">Isolates every Case Asset marked <strong>Confirmed</strong> compromised when this action runs. Always requires approval.</div>
+                <label class="form-label small mb-1">Auto-restore network after (hours, optional)</label>
+                <input type="number" min="1" max="720" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_auto_revert_hours" value="${params.auto_revert_hours || ''}" placeholder="Leave blank to require manual restore">
+                <div class="small text-muted mt-1">When set, a restore_network approval is auto-queued once this many hours have passed -- still requires a human to approve it, same as every gated action.</div>`;
         case 'restore_network':
             return `<div class="small text-muted">No params -- restores network access on every Case Asset marked <strong>Confirmed</strong> compromised. Always requires approval.</div>`;
         case 'collect_triage':
@@ -1212,6 +1215,11 @@ function collectActionRow(row) {
         case 'quarantine_file': params.path = getVal('path'); break;
         case 'kill_scheduled_task': params.task_name = getVal('task_name'); break;
         case 'kill_process_by_name': params.pattern = getVal('pattern'); break;
+        case 'isolate_host': {
+            const hrs = parseInt(getVal('auto_revert_hours'), 10);
+            if (hrs > 0) params.auto_revert_hours = hrs;
+            break;
+        }
     }
     return { action_type: actionType, params, requires_approval: requiresApproval };
 }
@@ -1423,18 +1431,27 @@ function loadPendingApprovals() {
         const tbody = document.getElementById('pendingApprovalsTableBody');
         document.getElementById('pendingApprovalsCount').innerText = rows.length;
         card.style.display = rows.length ? '' : 'none';
-        tbody.innerHTML = rows.map(a => `
+        tbody.innerHTML = rows.map(a => {
+            // A restore_network approval created by _run_due_auto_reverts (isolation
+            // expiry reached), not a human-authored playbook action -- shown distinctly
+            // so an approver understands why it's here instead of a raw params dump.
+            const isAutoRevert = a.action_type === 'restore_network' && a.params && a.params.auto_revert;
+            const actionCell = isAutoRevert
+                ? `<span class="badge bg-info text-dark me-1">Auto-revert</span>Isolation expiry reached for <strong>${escHtml(a.params.hostname)}</strong>`
+                : `<span class="badge bg-secondary me-1">${escHtml(CASE_ACTION_LABELS[a.action_type] || a.action_type)}</span>${escHtml(JSON.stringify(a.params))}`;
+            return `
             <tr>
                 <td class="ps-3 text-nowrap small">${escHtml(a.requested_at)}</td>
                 <td class="small">${escHtml(a.playbook_name || `#${a.playbook_id}`)}</td>
                 <td class="small">${a.case_title ? `<a href="/cases?case=${a.case_id}">${escHtml(a.case_title)}</a>` : '<span class="text-muted">(deleted)</span>'}</td>
-                <td class="small"><span class="badge bg-secondary me-1">${escHtml(CASE_ACTION_LABELS[a.action_type] || a.action_type)}</span>${escHtml(JSON.stringify(a.params))}</td>
+                <td class="small">${actionCell}</td>
                 <td class="text-end pe-3 text-nowrap">
                     <button type="button" class="btn btn-sm btn-outline-success py-0 px-2 me-1" title="Approve and run" onclick="decideApproval(${a.id}, 'approve')"><i class="fa-solid fa-check"></i></button>
                     <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Reject" onclick="decideApproval(${a.id}, 'reject')"><i class="fa-solid fa-xmark"></i></button>
                 </td>
             </tr>
-        `).join('');
+        `;
+        }).join('');
     }).catch(err => console.error('Error loading pending approvals:', err));
 }
 

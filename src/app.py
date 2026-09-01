@@ -5344,7 +5344,28 @@ def api_run_scheduled_playbooks():
     db = get_db()
     _run_scheduled_playbooks(db)
     _run_scheduled_agent_sweeps(db)
+    _run_due_auto_reverts(db)
     return jsonify({'status': 'success'})
+
+# Due isolation auto-reverts -- for each playbook_pending_reverts row past its revert_at,
+# creates the follow-up restore_network APPROVAL (never fires restore_network directly --
+# isolate_host/restore_network are always-gated actions, see
+# PLAYBOOK_ACTION_TYPES_ALWAYS_GATED, and an auto-revert doesn't get to skip that). Same
+# "cheap no-op unless due" shape as run_due_ioc_purge/sync_due_feeds.
+def _run_due_auto_reverts(db):
+    due = db.execute(
+        "SELECT id, playbook_id, case_id, hostname FROM playbook_pending_reverts "
+        "WHERE status = 'pending' AND revert_at <= datetime('now')"
+    ).fetchall()
+    for row in due:
+        db.execute(
+            "INSERT INTO playbook_approvals (playbook_id, case_id, action_type, params) VALUES (?, ?, 'restore_network', ?)",
+            (row['playbook_id'], row['case_id'],
+             json.dumps({'auto_revert': True, 'hostname': row['hostname'], 'pending_revert_id': row['id']}))
+        )
+        db.execute("UPDATE playbook_pending_reverts SET status = 'queued_for_approval' WHERE id = ?", (row['id'],))
+    if due:
+        db.commit()
 
 @app.route('/api/playbooks', methods=['GET', 'POST'])
 @login_required
@@ -5611,6 +5632,39 @@ def api_playbook_approvals():
         out.append(d)
     return jsonify(out)
 
+# Schedules the follow-up restore_network for each host an approved isolate_host action
+# actually isolated -- called right after that action executes successfully. Re-runs the
+# same confirmed-hosts query _run_playbook_action's isolate_host branch already uses
+# (small, deliberate duplication rather than a shared helper for this one extra call
+# site, matching this codebase's convention for simple queries).
+def _schedule_isolation_reverts(db, playbook_id, case_id, hours):
+    hosts = [r['host'] for r in db.execute(
+        "SELECT host FROM case_assets WHERE case_id = ? AND compromise_status = 'confirmed'", (case_id,)
+    ).fetchall()]
+    for host in hosts:
+        db.execute(
+            "INSERT INTO playbook_pending_reverts (playbook_id, case_id, hostname, revert_at) "
+            "VALUES (?, ?, ?, datetime('now', ?))",
+            (playbook_id, case_id, host, f'+{hours} hours')
+        )
+
+# Executes an APPROVED auto-revert restore_network -- targets exactly the host recorded
+# in playbook_pending_reverts, not a fresh confirmed-hosts re-query (case_assets
+# classification may have drifted since isolation; the revert should undo what was
+# actually done). Mirrors _run_playbook_action's restore_network dispatch (same
+# TEMPLATES_BY_OS/agent_commands shape) but scoped to one host, so it deliberately
+# doesn't go through that shared function.
+def _run_auto_revert_restore(db, case_id, params):
+    hostname = params['hostname']
+    builder, _ = agent_scripts.TEMPLATES_BY_OS[_get_host_os(db, hostname)]['restore_network']
+    script = builder({})
+    db.execute(
+        "INSERT INTO agent_commands (hostname, label, script, queued_by) VALUES (?, 'restore_network', ?, 'auto_revert')",
+        (hostname, script)
+    )
+    db.execute("UPDATE playbook_pending_reverts SET status = 'reverted' WHERE id = ?", (params['pending_revert_id'],))
+    return f"auto-reverted restore_network for {hostname}"
+
 # Approve executes the ONE gated action for real (through the same _run_playbook_action
 # every other action in this app runs through) and logs it to the case timeline;
 # reject just records the decision and never executes anything. Neither path re-checks
@@ -5663,12 +5717,27 @@ def api_playbook_approval_decide(approval_id):
     if decision == 'approve':
         params = json.loads(approval['params']) if approval['params'] else {}
         try:
-            result = _run_playbook_action(db, approval['case_id'], approval['action_type'], params)
+            # An auto-fired restore_network (see _run_due_auto_reverts) targets exactly
+            # the host that was isolated -- deliberately NOT the generic
+            # _run_playbook_action path, which would re-query "currently confirmed"
+            # case_assets instead (may have drifted since isolation).
+            if approval['action_type'] == 'restore_network' and params.get('auto_revert'):
+                result = _run_auto_revert_restore(db, approval['case_id'], params)
+            else:
+                result = _run_playbook_action(db, approval['case_id'], approval['action_type'], params)
+                if approval['action_type'] == 'isolate_host' and params.get('auto_revert_hours'):
+                    _schedule_isolation_reverts(db, approval['playbook_id'], approval['case_id'], params['auto_revert_hours'])
         except Exception as e:
             result = f"FAILED ({e})"
         _log_case_event(db, approval['case_id'], 'playbook_action_approved', f"{playbook_name} — {approval['action_type']}: {result}")
     else:
         _log_case_event(db, approval['case_id'], 'playbook_action_rejected', f"{playbook_name} — {approval['action_type']}")
+        # A rejected auto-revert leaves the host isolated (the correct outcome) --
+        # mark the pending-revert row cancelled instead of leaving it dangling in
+        # 'queued_for_approval' with no way to ever resolve.
+        params = json.loads(approval['params']) if approval['params'] else {}
+        if approval['action_type'] == 'restore_network' and params.get('pending_revert_id'):
+            db.execute("UPDATE playbook_pending_reverts SET status = 'cancelled' WHERE id = ?", (params['pending_revert_id'],))
     db.commit()
     return jsonify({'status': 'success'})
 
@@ -7960,6 +8029,31 @@ def migrate_playbook_approvals():
             decided_at DATETIME
         )''')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_playbook_approvals_status ON playbook_approvals(status)')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# Backs the optional "auto-restore network after N hours" setting on an isolate_host
+# playbook action -- one row per host actually isolated (matches isolate_host's own
+# per-host loop). status: pending (waiting for revert_at) -> queued_for_approval (the
+# follow-up restore_network approval was created by _run_due_auto_reverts) -> reverted
+# (approved and executed) or cancelled (the follow-up approval was rejected). A revert
+# targets the SPECIFIC host recorded here, not a fresh re-query of "currently confirmed"
+# case_assets (which may have drifted since isolation) -- see _run_auto_revert_restore.
+def migrate_playbook_pending_reverts():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS playbook_pending_reverts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            playbook_id INTEGER NOT NULL,
+            case_id INTEGER NOT NULL,
+            hostname TEXT NOT NULL,
+            isolated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            revert_at DATETIME NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_pending_reverts_due ON playbook_pending_reverts(status, revert_at)')
         conn.commit()
         conn.close()
     except Exception:
@@ -11525,6 +11619,7 @@ migrate_role_default_dashboard_v2()
 migrate_playbooks()
 migrate_playbook_secrets()
 migrate_playbook_approvals()
+migrate_playbook_pending_reverts()
 migrate_playbook_alert_runs()
 migrate_seed_legacy_notification_playbook()
 migrate_live_logs_archive()
