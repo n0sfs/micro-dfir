@@ -523,7 +523,7 @@ function loadFimPaths() {
             <td>${FIM_IS_ADMIN
                 ? `<input type="checkbox" class="form-check-input" ${p.enabled ? 'checked' : ''} onchange="toggleFimPath(${p.id}, this.checked)">`
                 : (p.enabled ? '<span class="badge bg-success">On</span>' : '<span class="badge bg-secondary">Off</span>')}</td>
-            <td>${FIM_IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteFimPath(${p.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
+            <td>${FIM_IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" title="Delete path" onclick="deleteFimPath(${p.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
         </tr>`).join('');
     }).catch(err => console.error('Error loading FIM paths:', err));
 }

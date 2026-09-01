@@ -279,9 +279,16 @@ function baseHBarOptions(c) {
 }
 
 function renderAlertTrendWidget(container, widgetId, config) {
-    container.innerHTML = '<canvas></canvas>';
-    const canvas = container.querySelector('canvas');
-    fetch(`/api/dashboards/alert-trend?range=${widgetRange(config)}`).then(r => r.json()).then(d => {
+    // A bare <canvas> with no loading text left a permanently blank widget on failure --
+    // no "Loading..." to get stuck on, just silent empty space with zero indication
+    // anything was ever attempted. Show a real loading placeholder first.
+    container.innerHTML = '<div class="text-muted small">Loading…</div>';
+    fetch(`/api/dashboards/alert-trend?range=${widgetRange(config)}`).then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(d => {
+        container.innerHTML = '<canvas></canvas>';
+        const canvas = container.querySelector('canvas');
         const c = chartTheme();
         destroyChart(widgetId);
         DASH_CHARTS[widgetId] = new Chart(canvas.getContext('2d'), {
@@ -293,7 +300,10 @@ function renderAlertTrendWidget(container, widgetId, config) {
             }] },
             options: baseLineOptions(c),
         });
-    }).catch(err => console.error('Error loading alert trend:', err));
+    }).catch(err => {
+        console.error('Error loading alert trend:', err);
+        container.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load.</div>';
+    });
 }
 
 function renderFimActivityWidget(container, widgetId, config) {
@@ -1862,7 +1872,8 @@ function addWidgetToGrid(w) {
     if (container) def.render(container, w.id, w.config || {});
 }
 
-function removeWidget(wid) {
+async function removeWidget(wid) {
+    if (!(await confirmDialog('Remove this widget? Its configuration will be lost.', {title: 'Remove widget', danger: true, confirmLabel: 'Remove'}))) return;
     const el = grid.getGridItems().find(item => item.gridstackNode && String(item.gridstackNode.id) === String(wid));
     if (el) grid.removeWidget(el);
     destroyChart(wid);

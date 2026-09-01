@@ -405,6 +405,10 @@
             <label class="form-label small" id="lblPassword">Password</label>
             <input type="password" class="form-control bg-dark text-light border-secondary" id="managePassword">
         </div>
+        <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="manageForceChange" checked>
+            <label class="form-check-label small" for="manageForceChange">Require a password change on next login</label>
+        </div>
       </div>
       <div class="modal-footer border-secondary">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
@@ -699,7 +703,10 @@ function clearUserMenuOptions(menuId, colKey) {
 
 function loadUsers() {
     fetch('/api/settings/users')
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
         .then(data => {
             allUsers = (data && data.users) || [];
             const roles = Array.from(new Set(allUsers.map(u => u.role))).sort();
@@ -709,7 +716,10 @@ function loadUsers() {
             }));
             renderUsersTable();
         })
-        .catch(err => console.error('Error loading users:', err));
+        .catch(err => {
+            console.error('Error loading users:', err);
+            renderLoadError('usersTableBody', 3, 'Failed to load users.');
+        });
 }
 
 function renderUsersTable() {
@@ -889,6 +899,7 @@ function showUserModal() {
     document.getElementById('manageUsername').value = '';
     document.getElementById('managePassword').value = '';
     document.getElementById('lblPassword').innerText = 'Password';
+    document.getElementById('manageForceChange').checked = true;
     userModal.show();
 }
 
@@ -901,12 +912,13 @@ function showResetModal(id, username) {
     document.getElementById('groupRole').style.display = 'none';
     document.getElementById('managePassword').value = '';
     document.getElementById('lblPassword').innerText = 'New Password';
+    document.getElementById('manageForceChange').checked = true;
     userModal.show();
 }
 
 function submitUserForm() {
     let action = document.getElementById('manageUserAction').value;
-    let payload = { action: action };
+    let payload = { action: action, force_change: document.getElementById('manageForceChange').checked };
 
     if(action === 'create') {
         payload.username = document.getElementById('manageUsername').value;
@@ -1100,6 +1112,15 @@ function escHtml(str) {
     const d = document.createElement('div');
     d.innerText = str == null ? '' : String(str);
     return d.innerHTML;
+}
+
+// A loader's initial "Loading..." table state has no failure counterpart today -- a
+// non-2xx response (still a resolved fetch()) leaves it stuck showing "Loading..."
+// forever with no visible sign anything went wrong. This renders an explicit, retriable
+// failure row in its place.
+function renderLoadError(tbodyId, colspan, message) {
+    const tbody = document.getElementById(tbodyId);
+    if (tbody) tbody.innerHTML = `<tr><td colspan="${colspan}" class="text-center text-danger small py-3"><i class="fa-solid fa-triangle-exclamation me-1"></i>${escHtml(message || 'Failed to load.')} <a href="#" onclick="location.reload(); return false;">Reload</a></td></tr>`;
 }
 function escJs(s) {
     return String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");

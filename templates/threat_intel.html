@@ -1244,6 +1244,15 @@ function escHtml(str) {
     return d.innerHTML;
 }
 
+// A loader's initial "Loading..." table state has no failure counterpart today -- a
+// non-2xx response (still a resolved fetch()) leaves it stuck showing "Loading..."
+// forever with no visible sign anything went wrong. This renders an explicit, retriable
+// failure row in its place.
+function renderLoadError(tbodyId, colspan, message) {
+    const tbody = document.getElementById(tbodyId);
+    if (tbody) tbody.innerHTML = `<tr><td colspan="${colspan}" class="text-center text-danger small py-3"><i class="fa-solid fa-triangle-exclamation me-1"></i>${escHtml(message || 'Failed to load.')} <a href="#" onclick="location.reload(); return false;">Reload</a></td></tr>`;
+}
+
 function statusBadge(status) {
     if (!status) return '<span class="badge bg-secondary">Never synced</span>';
     if (status === 'success') return '<span class="badge bg-success">OK</span>';
@@ -1274,7 +1283,10 @@ function syncIntervalLabel(mins) {
 
 function loadFeeds() {
     fetch('/api/ti/feeds')
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
         .then(feeds => {
             allFeeds = feeds;
             updateSharedStats();
@@ -1315,7 +1327,10 @@ function loadFeeds() {
                 </tr>
             `).join('');
         })
-        .catch(err => console.error('Error loading feeds:', err));
+        .catch(err => {
+            console.error('Error loading feeds:', err);
+            renderLoadError('feedsTableBody', 9, 'Failed to load threat feeds.');
+        });
 }
 
 // Populated by runIocLookup() so runIocEnrich() knows what to enrich and can pass
