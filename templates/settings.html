@@ -481,7 +481,17 @@ function switchSettingsTab(tab) {
     try { localStorage.setItem(SETTINGS_TAB_KEY, tab); } catch (e) {}
 }
 
+// The funnel-icon dropdown's checklist can be taller than the table's own scroll
+// container (.table-responsive), which clips a default-positioned Popper menu -- same
+// fix as dashboard.html's Detection Rules table.
+function initFilterDropdowns() {
+    document.querySelectorAll('#usersTable thead [data-bs-toggle="dropdown"]').forEach(el => {
+        bootstrap.Dropdown.getOrCreateInstance(el, { popperConfig: { strategy: 'fixed' } });
+    });
+}
+
 document.addEventListener("DOMContentLoaded", function() {
+    initFilterDropdowns();
     let savedTab = 'reports';
     try { savedTab = localStorage.getItem(SETTINGS_TAB_KEY) || 'reports'; } catch (e) {}
     switchSettingsTab(savedTab);

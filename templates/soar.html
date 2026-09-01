@@ -1554,7 +1554,17 @@ function testAlertNotifications() {
         .catch(err => { msg.className = 'mt-2 small text-danger'; msg.innerText = 'Error: ' + err; });
 }
 
+// The funnel-icon dropdowns' checklist can be taller than each table's own scroll
+// container (.table-responsive), which clips a default-positioned Popper menu -- same
+// fix as dashboard.html's Detection Rules table.
+function initFilterDropdowns() {
+    document.querySelectorAll('#playbooksTable thead [data-bs-toggle="dropdown"], #actionsCatalogTable thead [data-bs-toggle="dropdown"]').forEach(el => {
+        bootstrap.Dropdown.getOrCreateInstance(el, { popperConfig: { strategy: 'fixed' } });
+    });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+    initFilterDropdowns();
     let savedTab = 'playbooks';
     try { savedTab = localStorage.getItem(SOAR_TAB_KEY) || 'playbooks'; } catch (e) {}
     switchSoarTab(savedTab);
