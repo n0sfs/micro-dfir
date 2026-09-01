@@ -49,6 +49,7 @@
                     <button type="button" class="btn btn-outline-secondary" onclick="showSecretsModal()"><i class="fa-solid fa-key me-1"></i>Manage Secrets</button>
                     {% endif %}
                     {% if has_permission('soar.playbooks.manage') %}
+                    <button type="button" class="btn btn-outline-secondary" onclick="showCustomActionsModal()"><i class="fa-solid fa-bolt me-1"></i>Manage Custom Actions</button>
                     <button type="button" class="btn btn-primary" onclick="showPlaybookModal()"><i class="fa-solid fa-plus me-1"></i>New Playbook</button>
                     {% endif %}
                 </div>
@@ -460,6 +461,52 @@
     </div>
 </div>
 
+<!-- Manage Custom Actions modal -- admin-defined, reusable webhook-style actions (name +
+     URL-or-secret + templated JSON body) that show up as the 'custom_webhook' action type
+     in the playbook editor, so a new integration doesn't need a code change. -->
+<div class="modal fade" id="customActionsModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content bg-dark text-light border-secondary">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title"><i class="fa-solid fa-bolt me-2"></i>Custom Actions</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted small">A custom action POSTs a JSON body to a URL (or a named secret from Manage Secrets) -- the same primitive Send Webhook uses, saved as a named, reusable action any playbook can select. Editing one here updates every playbook using it.</p>
+                <div class="table-responsive mb-3">
+                    <table class="table table-dark table-sm align-middle mb-0">
+                        <thead><tr><th>Name</th><th>Description</th><th>URL Source</th><th></th></tr></thead>
+                        <tbody id="customActionsTableBody"><tr><td colspan="4" class="text-center text-muted small py-3">Loading&hellip;</td></tr></tbody>
+                    </table>
+                </div>
+                <div class="row g-2 align-items-end bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted mb-1">Name</label>
+                        <input type="text" id="caName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Notify PagerDuty">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted mb-1">Description (optional)</label>
+                        <input type="text" id="caDescription" class="form-control form-control-sm bg-dark text-light border-secondary">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small text-muted mb-1">URL source</label>
+                        <div id="caUrlSourceWrap"></div>
+                    </div>
+                    <div class="col-md-9">
+                        <label class="form-label small text-muted mb-1">Body (optional -- case_id/case_title/status/tlp placeholders supported)</label>
+                        <input type="text" id="caBody" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder='{"case_id": "{{case_id}}", "title": "{{case_title}}", "status": "{{status}}"}'>
+                    </div>
+                    <div class="col-md-3 d-flex gap-2">
+                        <button type="button" class="btn btn-sm btn-outline-primary w-100" id="caSaveBtn" onclick="saveCustomAction()"><i class="fa-solid fa-plus me-1"></i>Add</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="caCancelBtn" onclick="cancelEditCustomAction()" style="display:none;">Cancel</button>
+                    </div>
+                </div>
+                <div id="caError" class="text-danger small mt-1" style="display:none;"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
 const IS_ADMIN = hasPermission('soar.secrets.manage');
 const CAN_MANAGE_PLAYBOOKS = hasPermission('soar.playbooks.manage');
@@ -468,8 +515,10 @@ let allPlaybooks = [];
 let allQueuesForPb = [];
 let caseTemplatesForPb = [];
 let allPlaybookSecrets = [];
+let customActionsForPb = [];
 let pbActionSeq = 0;
-let playbookModal, playbookRunsModal, secretsModal;
+let playbookModal, playbookRunsModal, secretsModal, customActionsModal;
+let editingCustomActionId = null;
 
 const TRIGGER_LABELS = {
     case_created: 'Case created', status_changed: 'Status changed',
@@ -552,7 +601,7 @@ function clearPbMenuOptions(menuId, colKey) {
 const CASE_ACTION_LABELS = {
     apply_template: 'Apply case template', add_task: 'Add task', add_note: 'Add note',
     set_queue: 'Set queue', analyze_entity: 'Analyze entity', send_email: 'Send email',
-    send_webhook: 'Send webhook', send_slack: 'Send Slack message',
+    send_webhook: 'Send webhook', send_slack: 'Send Slack message', custom_webhook: 'Run custom action&hellip;',
     isolate_host: 'Isolate confirmed hosts (EDR)', restore_network: 'Restore network on confirmed hosts (EDR)',
     collect_triage: 'Collect triage bundle from confirmed hosts (EDR)',
     quarantine_file: 'Quarantine a file on confirmed hosts (EDR)',
@@ -586,6 +635,7 @@ const ACTION_DESCRIPTIONS = {
     send_email: 'Sends an email via the shared Notification Channels config (Notifications tab).',
     send_webhook: 'POSTs a JSON body to a URL, or a named secret from Manage Secrets.',
     send_slack: 'Posts a message to a Slack incoming webhook (URL or a named secret).',
+    custom_webhook: 'Runs an admin-defined, reusable webhook action (Manage Custom Actions) -- a named URL/secret + body template instead of typing one inline.',
     isolate_host: 'Cuts network access on every Case Asset marked Confirmed compromised.',
     restore_network: 'Restores network access on every Case Asset marked Confirmed compromised.',
     collect_triage: 'Collects a forensic triage bundle from every Case Asset marked Confirmed compromised.',
@@ -774,6 +824,10 @@ async function removeSoarQueueMember(qid, username) {
 
 function loadTemplatesForPlaybooks() {
     return fetch('/api/case-templates').then(r => r.json()).then(t => { caseTemplatesForPb = t || []; }).catch(() => { caseTemplatesForPb = []; });
+}
+
+function loadCustomActionsForPlaybooks() {
+    return fetch('/api/playbook-custom-actions').then(r => r.json()).then(c => { customActionsForPb = c || []; }).catch(() => { customActionsForPb = []; });
 }
 
 // ---- Case Templates tab -- full CRUD + typed custom fields. Own fetch/array (not
@@ -990,6 +1044,103 @@ async function deleteSecret(sid, name) {
     renderSecretsTable();
 }
 
+// ---- Custom Actions modal -- create/edit/delete admin-defined 'custom_webhook' actions.
+// Same URL-or-secret idiom as urlSourceSelectHtml/onPlaybookUrlSourceChange above, but
+// scoped to this modal's fixed field ids (one form, not one per playbook action row).
+function caUrlSourceHtml(currentSecretName) {
+    return `<select class="form-select form-select-sm bg-dark text-light border-secondary mb-1" id="caUrlSource" onchange="onCaUrlSourceChange()">
+        <option value="">Enter a URL directly&hellip;</option>
+        ${allPlaybookSecrets.map(s => `<option value="${escHtml(s.name)}" ${s.name === currentSecretName ? 'selected' : ''}>&#128273; ${escHtml(s.name)}</option>`).join('')}
+    </select>
+    <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="caUrl" placeholder="https://&hellip;" style="${currentSecretName ? 'display:none;' : ''}">`;
+}
+
+function onCaUrlSourceChange() {
+    const secretName = document.getElementById('caUrlSource').value;
+    const rawInput = document.getElementById('caUrl');
+    rawInput.style.display = secretName ? 'none' : '';
+    if (secretName) rawInput.value = '';
+}
+
+async function showCustomActionsModal() {
+    if (!allPlaybookSecrets.length) await loadPlaybookSecretsList();
+    await loadCustomActionsForPlaybooks();
+    renderCustomActionsTable();
+    cancelEditCustomAction();
+    if (!customActionsModal) customActionsModal = new bootstrap.Modal(document.getElementById('customActionsModal'));
+    customActionsModal.show();
+}
+
+function renderCustomActionsTable() {
+    const tbody = document.getElementById('customActionsTableBody');
+    if (!customActionsForPb.length) {
+        tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted small py-3">No custom actions yet.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = customActionsForPb.map(c => `
+        <tr>
+            <td class="small">${escHtml(c.name)}</td>
+            <td class="text-muted small">${escHtml(c.description || '')}</td>
+            <td class="small">${c.url_secret ? `&#128273; ${escHtml(c.url_secret)}` : `<span class="text-muted" title="${escHtml(c.url || '')}">${escHtml((c.url || '').length > 40 ? c.url.slice(0, 40) + '…' : (c.url || ''))}</span>`}</td>
+            <td class="text-end">
+                <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 me-1" title="Edit" onclick="editCustomAction(${c.id})"><i class="fa-solid fa-pen"></i></button>
+                <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete" onclick="deleteCustomAction(${c.id}, '${escJs(c.name)}')"><i class="fa-solid fa-trash"></i></button>
+            </td>
+        </tr>
+    `).join('');
+}
+
+function editCustomAction(caid) {
+    const c = customActionsForPb.find(x => x.id === caid);
+    if (!c) return;
+    editingCustomActionId = caid;
+    document.getElementById('caName').value = c.name;
+    document.getElementById('caDescription').value = c.description || '';
+    document.getElementById('caBody').value = c.body || '';
+    document.getElementById('caUrlSourceWrap').innerHTML = caUrlSourceHtml(c.url_secret);
+    if (!c.url_secret) document.getElementById('caUrl').value = c.url || '';
+    document.getElementById('caSaveBtn').innerHTML = '<i class="fa-solid fa-check me-1"></i>Save Changes';
+    document.getElementById('caCancelBtn').style.display = '';
+    document.getElementById('caError').style.display = 'none';
+}
+
+function cancelEditCustomAction() {
+    editingCustomActionId = null;
+    document.getElementById('caName').value = '';
+    document.getElementById('caDescription').value = '';
+    document.getElementById('caBody').value = '';
+    document.getElementById('caUrlSourceWrap').innerHTML = caUrlSourceHtml(null);
+    document.getElementById('caSaveBtn').innerHTML = '<i class="fa-solid fa-plus me-1"></i>Add';
+    document.getElementById('caCancelBtn').style.display = 'none';
+    document.getElementById('caError').style.display = 'none';
+}
+
+async function saveCustomAction() {
+    const errBox = document.getElementById('caError');
+    errBox.style.display = 'none';
+    const name = document.getElementById('caName').value.trim();
+    if (!name) { errBox.innerText = 'Name is required.'; errBox.style.display = 'block'; return; }
+    const urlSecret = document.getElementById('caUrlSource').value;
+    const url = urlSecret ? '' : document.getElementById('caUrl').value.trim();
+    if (!urlSecret && !url) { errBox.innerText = 'A URL or a secret is required.'; errBox.style.display = 'block'; return; }
+    const payload = { name, description: document.getElementById('caDescription').value.trim(), url, url_secret: urlSecret || null, body: document.getElementById('caBody').value.trim() };
+    const url_ = editingCustomActionId ? `/api/playbook-custom-actions/${editingCustomActionId}` : '/api/playbook-custom-actions';
+    const method = editingCustomActionId ? 'PUT' : 'POST';
+    const res = await fetch(url_, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const data = await res.json();
+    if (!res.ok) { errBox.innerText = data.error || 'Failed to save custom action.'; errBox.style.display = 'block'; return; }
+    cancelEditCustomAction();
+    await loadCustomActionsForPlaybooks();
+    renderCustomActionsTable();
+}
+
+async function deleteCustomAction(caid, name) {
+    if (!(await confirmDialog(`Delete the "${name}" custom action? Any playbook action still referencing it will skip cleanly ("custom action not found") the next time it runs, rather than sending anywhere.`, { title: 'Delete custom action', danger: true, confirmLabel: 'Delete' }))) return;
+    await fetch(`/api/playbook-custom-actions/${caid}`, { method: 'DELETE' });
+    await loadCustomActionsForPlaybooks();
+    renderCustomActionsTable();
+}
+
 function loadPlaybooks() {
     fetch('/api/playbooks').then(r => r.json()).then(data => {
         allPlaybooks = data || [];
@@ -1109,6 +1260,12 @@ function actionParamsFieldsHtml(seq, actionType, params) {
             return urlSourceSelectHtml(seq, 'webhook_url', params.webhook_url_secret) +
                 `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_webhook_url" placeholder="Slack incoming webhook URL" value="${escHtml(params.webhook_url || '')}" style="${params.webhook_url_secret ? 'display:none;' : ''}">
                 <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_message" placeholder="Message (optional -- case_id/case_title/status/tlp placeholders supported)" value="${escHtml(params.message || '')}">`;
+        case 'custom_webhook':
+            return `<select class="form-select form-select-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_custom_action_id">
+                <option value="">Select a custom action&hellip;</option>
+                ${customActionsForPb.map(c => `<option value="${c.id}" ${String(c.id) === String(params.custom_action_id) ? 'selected' : ''}>${escHtml(c.name)}</option>`).join('')}
+            </select>
+            <div class="small text-muted mt-1">Manage available custom actions via "Manage Custom Actions" above.</div>`;
         case 'isolate_host':
             return `<div class="small text-muted mb-2">Isolates every Case Asset marked <strong>Confirmed</strong> compromised when this action runs. Always requires approval.</div>
                 <label class="form-label small mb-1">Auto-restore network after (hours, optional)</label>
@@ -1212,6 +1369,7 @@ function collectActionRow(row) {
             params.message = getVal('message');
             break;
         }
+        case 'custom_webhook': params.custom_action_id = getVal('custom_action_id') ? parseInt(getVal('custom_action_id'), 10) : null; break;
         case 'quarantine_file': params.path = getVal('path'); break;
         case 'kill_scheduled_task': params.task_name = getVal('task_name'); break;
         case 'kill_process_by_name': params.pattern = getVal('pattern'); break;
@@ -1251,6 +1409,7 @@ async function showPlaybookModal() {
     if (!allQueuesForPb.length) await loadQueuesForPlaybooks();
     if (!caseTemplatesForPb.length) await loadTemplatesForPlaybooks();
     if (!allPlaybookSecrets.length) await loadPlaybookSecretsList();
+    if (!customActionsForPb.length) await loadCustomActionsForPlaybooks();
     populatePbConditionSelects({});
     addPlaybookActionRow('add_note', {});
     if (!playbookModal) playbookModal = new bootstrap.Modal(document.getElementById('playbookModal'));
@@ -1273,6 +1432,7 @@ async function editPlaybook(pid) {
     if (!allQueuesForPb.length) await loadQueuesForPlaybooks();
     if (!caseTemplatesForPb.length) await loadTemplatesForPlaybooks();
     if (!allPlaybookSecrets.length) await loadPlaybookSecretsList();
+    if (!customActionsForPb.length) await loadCustomActionsForPlaybooks();
     populatePbConditionSelects(p);
     (p.actions.length ? p.actions : [{ action_type: 'add_note', params: {} }]).forEach(a => addPlaybookActionRow(a.action_type, a.params, a.requires_approval));
     if (!playbookModal) playbookModal = new bootstrap.Modal(document.getElementById('playbookModal'));

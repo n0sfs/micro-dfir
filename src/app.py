@@ -4755,7 +4755,7 @@ def api_case_analyze(cid):
 
 # ---- Playbooks (SOAR) ----
 PLAYBOOK_TRIGGERS = ('case_created', 'status_changed', 'queue_changed', 'assignee_changed', 'scheduled', 'alert_created')
-PLAYBOOK_ACTION_TYPES = ('apply_template', 'add_task', 'add_note', 'set_queue', 'analyze_entity', 'send_email', 'send_webhook', 'send_slack', 'isolate_host', 'restore_network', 'collect_triage', 'quarantine_file', 'kill_scheduled_task', 'kill_process_by_name')
+PLAYBOOK_ACTION_TYPES = ('apply_template', 'add_task', 'add_note', 'set_queue', 'analyze_entity', 'send_email', 'send_webhook', 'send_slack', 'custom_webhook', 'isolate_host', 'restore_network', 'collect_triage', 'quarantine_file', 'kill_scheduled_task', 'kill_process_by_name')
 # alert_created playbooks are alert-scoped (no case_id exists yet -- see soar_alerts.py)
 # and get their own small, non-destructive action set instead of the case-scoped one
 # above; create_case is the bridge into the full case-scoped arsenal.
@@ -4977,6 +4977,37 @@ def _run_playbook_action(db, cid, action_type, params, dry_run=False):
         import requests
         requests.post(webhook_url, json={'text': message}, timeout=8)
         return f"sent Slack message via {url_display}"
+
+    if action_type == 'custom_webhook':
+        # Same generic HTTP-POST primitive as send_webhook, sourced from an admin-defined,
+        # reusable playbook_custom_actions row instead of typed inline -- one place to
+        # edit a URL/body used across many playbooks, and the same secret-safety
+        # convention (a resolved URL never appears in any returned string).
+        ca = db.execute(
+            "SELECT name, url, url_secret, body FROM playbook_custom_actions WHERE id = ?", (params.get('custom_action_id'),)
+        ).fetchone() if params.get('custom_action_id') else None
+        if not ca:
+            return "custom action not found or not selected, skipped"
+        if ca['url_secret']:
+            row = db.execute("SELECT value FROM playbook_secrets WHERE name = ?", (ca['url_secret'],)).fetchone()
+            if not row:
+                return f"secret '{ca['url_secret']}' not found, skipped"
+            url, url_display = row['value'], f"[secret: {ca['url_secret']}]"
+        else:
+            url = url_display = (ca['url'] or '').strip()
+        if not url:
+            return f"custom action '{ca['name']}' has no URL configured, skipped"
+        case = db.execute("SELECT title, status, tlp, pap FROM cases WHERE id = ?", (cid,)).fetchone()
+        body_text = _fill_playbook_template(ca['body'] or '{"case_id": "{{case_id}}", "title": "{{case_title}}", "status": "{{status}}"}', cid, case)
+        if dry_run:
+            return f"would run custom action '{ca['name']}': POST to {url_display} with body: {body_text}"
+        try:
+            payload = json.loads(body_text)
+        except (ValueError, TypeError):
+            payload = {"case_id": cid, "raw": body_text}
+        import requests
+        requests.post(url, json=payload, timeout=8)
+        return f"ran custom action '{ca['name']}' (posted to {url_display})"
 
     if action_type == 'isolate_host':
         # No params -- unlike analyze_entity, a playbook can't be authored against a
@@ -5847,6 +5878,68 @@ def api_playbook_secret_delete(sid):
     db.commit()
     log_audit('playbook_secret_delete', 'playbook_secret', existing['name'])
     return jsonify({'ok': 1})
+
+@app.route('/api/playbook-custom-actions', methods=['GET', 'POST'])
+@login_required
+def api_playbook_custom_actions():
+    db = get_db()
+    err = require_permission('soar.playbooks.manage')
+    if err: return err
+    if request.method == 'GET':
+        rows = db.execute(
+            "SELECT id, name, description, url, url_secret, body, created_by, created_at, updated_by, updated_at "
+            "FROM playbook_custom_actions ORDER BY name"
+        ).fetchall()
+        return jsonify([dict(r) for r in rows])
+    d = request.json or {}
+    name = (d.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'name is required'}), 400
+    url_secret = (d.get('url_secret') or '').strip() or None
+    url = '' if url_secret else (d.get('url') or '').strip()
+    if not url_secret and not url:
+        return jsonify({'error': 'a URL or a secret is required'}), 400
+    if db.execute("SELECT 1 FROM playbook_custom_actions WHERE name = ?", (name,)).fetchone():
+        return jsonify({'error': f'A custom action named "{name}" already exists'}), 400
+    db.execute(
+        "INSERT INTO playbook_custom_actions (name, description, url, url_secret, body, created_by) VALUES (?, ?, ?, ?, ?, ?)",
+        (name, (d.get('description') or '').strip(), url, url_secret, (d.get('body') or '').strip(), current_user.username)
+    )
+    db.commit()
+    log_audit('playbook_custom_action_create', 'playbook_custom_action', name)
+    return jsonify({'status': 'success'})
+
+@app.route('/api/playbook-custom-actions/<int:caid>', methods=['PUT', 'DELETE'])
+@login_required
+def api_playbook_custom_action_detail(caid):
+    err = require_permission('soar.playbooks.manage')
+    if err: return err
+    db = get_db()
+    existing = db.execute("SELECT name FROM playbook_custom_actions WHERE id = ?", (caid,)).fetchone()
+    if not existing:
+        return jsonify({'error': 'Custom action not found'}), 404
+    if request.method == 'DELETE':
+        db.execute("DELETE FROM playbook_custom_actions WHERE id = ?", (caid,))
+        db.commit()
+        log_audit('playbook_custom_action_delete', 'playbook_custom_action', existing['name'])
+        return jsonify({'ok': 1})
+    d = request.json or {}
+    name = (d.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'name is required'}), 400
+    url_secret = (d.get('url_secret') or '').strip() or None
+    url = '' if url_secret else (d.get('url') or '').strip()
+    if not url_secret and not url:
+        return jsonify({'error': 'a URL or a secret is required'}), 400
+    if db.execute("SELECT 1 FROM playbook_custom_actions WHERE name = ? AND id != ?", (name, caid)).fetchone():
+        return jsonify({'error': f'A custom action named "{name}" already exists'}), 400
+    db.execute(
+        "UPDATE playbook_custom_actions SET name = ?, description = ?, url = ?, url_secret = ?, body = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (name, (d.get('description') or '').strip(), url, url_secret, (d.get('body') or '').strip(), current_user.username, caid)
+    )
+    db.commit()
+    log_audit('playbook_custom_action_update', 'playbook_custom_action', name)
+    return jsonify({'status': 'success'})
 
 def _case_template_fields_out(db, template_id):
     rows = db.execute(
@@ -8054,6 +8147,30 @@ def migrate_playbook_secrets():
     except Exception:
         pass
 
+# Admin-defined, reusable webhook-style actions (name + URL-or-secret + templated JSON
+# body) that show up in the playbook editor's action-type list as 'custom_webhook' --
+# the same generic HTTP-POST primitive send_webhook already uses, just saved as a named
+# row instead of typed inline, so a new integration doesn't need a code change.
+def migrate_playbook_custom_actions():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS playbook_custom_actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            url TEXT,
+            url_secret TEXT,
+            body TEXT,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_by TEXT,
+            updated_at DATETIME
+        )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 # Approval gate for individual playbook actions -- an action flagged requires_approval
 # on the playbook editor is queued here instead of executing immediately, whether the
 # playbook fired from a real trigger (_run_playbooks_for_case) or a manual "Run Now"
@@ -8171,6 +8288,37 @@ def migrate_seed_legacy_notification_playbook():
                     (pid, pos, json.dumps({'url': cfg.get('webhook_url') or ''}))
                 )
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('legacy_notification_playbook_seeded', '1')")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# Seeds one safe, low-risk default playbook so a fresh install isn't a completely empty
+# SOAR with the 4 built-in case templates sitting unused. Guarded by a settings flag (same
+# reasoning as migrate_seed_legacy_notification_playbook above) so an admin who edits or
+# deletes it never gets it silently recreated. apply_template is append-only and not
+# gated, so this is safe to fire on every new case with no approval step.
+def migrate_seed_starter_playbook():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.row_factory = sqlite3.Row
+        seeded = conn.execute("SELECT value FROM settings WHERE key = 'starter_playbook_seeded'").fetchone()
+        if seeded and seeded['value'] == '1':
+            conn.close()
+            return
+        tpl = conn.execute("SELECT id FROM case_templates WHERE name = 'Generic Investigation'").fetchone()
+        if tpl:
+            cur = conn.execute(
+                "INSERT INTO playbooks (name, description, trigger_event, enabled, created_by) VALUES (?, ?, 'case_created', 1, 'system')",
+                ("New Case Checklist",
+                 "Applies the Generic Investigation checklist to every new case. Edit or delete freely.")
+            )
+            pid = cur.lastrowid
+            conn.execute(
+                "INSERT INTO playbook_actions (playbook_id, position, action_type, params) VALUES (?, 0, 'apply_template', ?)",
+                (pid, json.dumps({'template_id': tpl['id']}))
+            )
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('starter_playbook_seeded', '1')")
         conn.commit()
         conn.close()
     except Exception:
@@ -11757,10 +11905,12 @@ migrate_role_default_dashboard()
 migrate_role_default_dashboard_v2()
 migrate_playbooks()
 migrate_playbook_secrets()
+migrate_playbook_custom_actions()
 migrate_playbook_approvals()
 migrate_playbook_pending_reverts()
 migrate_playbook_alert_runs()
 migrate_seed_legacy_notification_playbook()
+migrate_seed_starter_playbook()
 migrate_live_logs_archive()
 migrate_fim_paths()
 migrate_ueba_priority_scores()
