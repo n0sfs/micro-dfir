@@ -2052,6 +2052,22 @@ def api_compliance_coverage():
     sca_agg = _sca_framework_aggregate(_get_latest_sca_results(db))
     for key, sca in sca_agg.items():
         coverage[key]['sca'] = sca
+    # Third addition, additive-only (total/enabled/sca above are untouched so any other
+    # consumer of this shape keeps working) -- the same gap/inactive/active/validated
+    # tiering + log_source_gap flag _build_mitre_coverage() already gives ATT&CK technique
+    # coverage, now for compliance frameworks. A rule tagged+enabled for a framework was
+    # counting as full coverage even with a log source this appliance can never ingest, or
+    # having never actually fired -- this surfaces both instead of hiding them behind a
+    # flat tagged/untagged percentage.
+    tiered = _build_compliance_coverage(_get_rules_cache(db), _get_validated_compliance_counts(db, 30))
+    for key, t in tiered.items():
+        # Only the 3 new fields -- 'enabled'/'disabled' from _build_compliance_coverage
+        # are a second, independently-sourced (TTL-cached) count of the same thing the
+        # raw SQL loop above already computed authoritatively; merging them in too would
+        # just risk overwriting a fresher number with a staler one for no benefit.
+        coverage[key]['tier'] = t['tier']
+        coverage[key]['validated'] = t['validated']
+        coverage[key]['log_source_gap'] = t['log_source_gap']
     frameworks = sorted(coverage.values(), key=lambda f: f['label'])
     return jsonify({
         'frameworks': frameworks,
@@ -2703,6 +2719,72 @@ def _get_validated_technique_counts(db, days):
             if tid:
                 counts[tid] = counts.get(tid, 0) + 1
     return counts
+
+def _get_validated_compliance_counts(db, days):
+    """framework_key -> count of alerts in the last `days` whose triggering rule is
+    CURRENTLY tagged for that framework. Unlike _get_validated_technique_counts, there's
+    no alerts.compliance_tags stamped-at-fire-time column to read (no equivalent of
+    mitre_techniques exists for compliance) -- so this is a live join against
+    sigma_rules.compliance_tags's current value, same current-state treatment
+    api_compliance_coverage() already gives compliance_tags elsewhere. Framework tags
+    change rarely enough that this is a pragmatic trade, not a historical-accuracy gap
+    worth a new stamped column for."""
+    counts = {}
+    rows = db.execute(
+        "SELECT sr.compliance_tags FROM alerts a JOIN sigma_rules sr ON a.rule_id = sr.id "
+        "WHERE a.timestamp >= datetime('now', ?) AND sr.compliance_tags IS NOT NULL AND sr.compliance_tags != ''",
+        (f'-{days} days',)
+    ).fetchall()
+    for r in rows:
+        for tag in (r['compliance_tags'] or '').split(','):
+            tag = tag.strip()
+            if tag:
+                counts[tag] = counts.get(tag, 0) + 1
+    return counts
+
+def _build_compliance_coverage(rules, validated):
+    """Same 4-tier model as _build_mitre_coverage, keyed by flat compliance framework
+    key instead of (tactic, technique_id):
+      gap       - no rule tagged to this framework at all
+      inactive  - tagged rule(s) exist, all currently disabled
+      active    - an enabled rule exists, hasn't produced a validated alert
+      validated - an enabled rule's alert actually fired (see `validated`, from
+                  _get_validated_compliance_counts)
+    Each framework also carries 'log_source_gap': True when every one of its enabled
+    rules needs a log source this appliance doesn't actually ingest (same
+    log_source_ingestible field _get_rules_cache() already computes per rule for MITRE) --
+    "looks covered by a tag, may never actually fire" is exactly as real a risk here as it
+    is for ATT&CK technique coverage."""
+    enabled_counts, disabled_counts, log_source_ok = {}, {}, {}
+    for r in rules:
+        for key in r['compliance_tags']:
+            if key not in COMPLIANCE_FRAMEWORKS:
+                continue
+            if r['enabled']:
+                enabled_counts[key] = enabled_counts.get(key, 0) + 1
+                if r.get('log_source_ingestible') is not False:
+                    log_source_ok[key] = True
+            else:
+                disabled_counts[key] = disabled_counts.get(key, 0) + 1
+    out = {}
+    for key in COMPLIANCE_FRAMEWORKS:
+        enabled_n = enabled_counts.get(key, 0)
+        disabled_n = disabled_counts.get(key, 0)
+        validated_n = validated.get(key, 0)
+        if enabled_n == 0 and disabled_n == 0:
+            tier = 'gap'
+        elif enabled_n == 0:
+            tier = 'inactive'
+        elif validated_n == 0:
+            tier = 'active'
+        else:
+            tier = 'validated'
+        out[key] = {
+            'tier': tier, 'enabled': enabled_n, 'disabled': disabled_n,
+            'validated': validated_n,
+            'log_source_gap': tier == 'active' and not log_source_ok.get(key, False),
+        }
+    return out
 
 def _build_actor_technique_index(db):
     """technique_id -> [{id, name}] of threat/malware entities in the TI

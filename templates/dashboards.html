@@ -652,12 +652,22 @@ function renderComplianceCoverageWidget(container, widgetId, config) {
         fetch('/api/compliance/coverage').then(r => r.json()),
         fetch('/api/compliance/audit-trail').then(r => r.ok ? r.json() : []).catch(() => []),
     ]).then(([d, trail]) => {
+        const c = chartTheme();
         body.innerHTML = `
             <div class="small text-muted mb-2">${d.full_coverage_count} / ${d.total_frameworks} frameworks fully enabled</div>
             ${d.frameworks.map(f => {
                 const pct = f.total > 0 ? Math.round((f.enabled / f.total) * 100) : 0;
                 const barColor = f.total === 0 ? 'bg-secondary' : (f.enabled === f.total ? 'bg-success' : 'bg-warning');
                 const status = f.total === 0 ? 'No rules tagged' : (f.enabled === f.total ? 'Fully enabled' : `${f.total - f.enabled} disabled`);
+                // Same gap/inactive/active/validated tiering as the MITRE Coverage tab --
+                // a framework can be "fully enabled" above and still never actually fire
+                // (log_source_gap) or never have been proven by a real alert (tier stuck
+                // at 'active', not 'validated'). Reuses MITRE_TIER_LABELS/mitreTierColor
+                // for the exact same vocabulary and colors, not a second color scheme.
+                const tier = f.tier || 'gap';
+                const tierColor = mitreTierColor(tier, c);
+                const tierBadge = `<span class="badge ms-1" style="background:${tierColor}29; color:${tierColor}; font-size:.62rem; font-weight:600;" title="${MITRE_TIER_LABELS[tier] || tier}${f.validated ? ' — ' + f.validated + ' alert(s) fired in the last 30 days' : ''}">${MITRE_TIER_LABELS[tier] || tier}</span>`;
+                const gapIcon = f.log_source_gap ? ` <i class="fa-solid fa-plug-circle-xmark" style="color:${c.warning}; font-size:.68rem;" title="Every enabled rule tagged to this framework needs a log source that isn't currently ingested -- may never fire"></i>` : '';
                 // Second, deliberately separate bar -- fleet-wide SCA hardening check pass
                 // rate for this framework, not blended into the rule-coverage bar above
                 // (same reasoning as MITRE's Coverage/Detection split: this answers "is the
@@ -669,7 +679,7 @@ function renderComplianceCoverageWidget(container, widgetId, config) {
                 return `
                 <div class="mb-2">
                     <div class="d-flex justify-content-between small">
-                        <span>${escHtml(f.label)}</span>
+                        <span>${escHtml(f.label)}${tierBadge}${gapIcon}</span>
                         <span class="text-muted">${f.enabled}/${f.total} &middot; ${status}</span>
                     </div>
                     <div class="progress" style="height:6px;">
