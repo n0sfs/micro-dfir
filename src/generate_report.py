@@ -1,4 +1,4 @@
-import base64, json, mimetypes, os, sqlite3
+import base64, json, mimetypes, os, re, sqlite3
 from datetime import datetime, timedelta
 from jinja2 import Environment, FileSystemLoader
 from weasyprint import HTML
@@ -46,6 +46,34 @@ SCA_CHECK_FRAMEWORKS = {
     'core_dumps_restricted': ['cis_controls', 'nist_800_53'],
     'aslr_enabled': ['cis_controls', 'nist_800_53'],
     'time_sync_active': ['cis_controls', 'nist_800_53', 'pci_dss'],
+}
+
+# Kept in sync with app.py's SIGMA_LOGSOURCE_INGESTED_APPS/_extract_yaml_field -- same
+# no-Flask-context reasoning as the two catalogs above. Used only by
+# _framework_relevant_apps() below, to answer "which live_logs.app values does this
+# framework's own tagged-rule set actually depend on" for the Log Volume report section.
+def _extract_yaml_field(key, text):
+    m = re.search(rf'^\s*{key}:\s*([^\n\r#]+)', text, re.MULTILINE)
+    return m.group(1).strip().strip("'\"") if m else None
+
+SIGMA_LOGSOURCE_INGESTED_APPS = {
+    ('windows', 'sysmon'): {'sysmon'},
+    ('windows', 'security'): {'security'},
+    ('windows', 'system'): {'system'},
+    ('windows', 'application'): {'application'},
+    ('windows', 'powershell'): {'powershell'},
+    ('windows', 'powershell-classic'): {'powershell'},
+    ('windows', 'windefend'): {'windows defender'},
+    ('windows', None): {'sysmon', 'security', 'system', 'application', 'powershell', 'windows defender'},
+    ('linux', 'auditd'): {'auditd'},
+    ('linux', 'syslog'): set(),
+    ('linux', None): {'systemd', 'sshd', 'kernel', 'cron', 'dbus-daemon', 'systemd-logind', 'wpa_supplicant', 'fwupd'},
+    ('aws', None): set(),
+    ('azure', None): set(),
+    ('gcp', None): set(),
+    ('okta', None): set(),
+    ('m365', None): set(),
+    ('github', None): set(),
 }
 
 def _latest_sca_results(cursor):
@@ -166,6 +194,32 @@ def generate_security_report():
 # duplication reasoning as COMPLIANCE_FRAMEWORK_LABELS/SCA_CHECK_FRAMEWORKS above.
 COMPLIANCE_AUDIT_ACTIONS = ('rule_compliance_tag', 'rule_toggle', 'rule_bulk_toggle')
 
+# "Relevant" here means: this framework's own tagged rules (enabled AND disabled -- a
+# disabled rule still represents detection intent for the framework, so its log-source
+# dependency still counts as evidence of what monitoring the framework's story rests on)
+# have a Sigma logsource that resolves to one or more real live_logs.app values. Answers
+# "is the underlying data even being collected", independent of whether any rule has
+# fired on it -- the same (product,service)->apps resolution _rule_log_source_ingestible()
+# uses in app.py, just walking rule_yaml directly since this script has no _get_rules_cache.
+def _framework_relevant_apps(cursor, framework_key):
+    like_pattern = f'%{framework_key}%'
+    apps = set()
+    for row in cursor.execute(
+        "SELECT rule_yaml FROM sigma_rules WHERE compliance_tags LIKE ?", (like_pattern,)
+    ).fetchall():
+        product = _extract_yaml_field('product', row['rule_yaml'])
+        service = _extract_yaml_field('service', row['rule_yaml'])
+        if not product:
+            continue
+        product = product.strip().lower()
+        service = service.strip().lower() if service else None
+        expected = SIGMA_LOGSOURCE_INGESTED_APPS.get((product, service))
+        if expected is None:
+            expected = SIGMA_LOGSOURCE_INGESTED_APPS.get((product, None))
+        if expected:
+            apps |= expected
+    return apps
+
 def _framework_focused_context(conn, cursor, framework_key):
     label = COMPLIANCE_FRAMEWORK_LABELS.get(framework_key, framework_key)
     like_pattern = f'%{framework_key}%'
@@ -233,6 +287,27 @@ def _framework_focused_context(conn, cursor, framework_key):
     ).fetchall()
     audit_trail = [dict(r) for r in audit_rows]
 
+    # Raw log-volume evidence -- distinct from everything above, which is all
+    # post-detection (alerts) or config-state (sigma_rules/SCA). Answers "is the data
+    # this framework's detections would need actually being collected" independent of
+    # whether anything has fired on it yet. Empty relevant_apps (no tagged rules, or
+    # every tagged rule's logsource resolves to a confirmed non-ingestible combo) means
+    # an empty IN (...) clause, so the queries are skipped entirely rather than issued.
+    relevant_apps = _framework_relevant_apps(cursor, framework_key)
+    log_volume_total = 0
+    log_volume_by_app = []
+    if relevant_apps:
+        app_placeholders = ','.join('?' for _ in relevant_apps)
+        log_volume_total = cursor.execute(
+            f"SELECT COUNT(*) FROM live_logs WHERE app IN ({app_placeholders}) AND timestamp >= ?",
+            (*relevant_apps, thirty_days_ago)
+        ).fetchone()[0]
+        log_volume_by_app = [dict(r) for r in cursor.execute(
+            f"SELECT app, COUNT(*) as count FROM live_logs WHERE app IN ({app_placeholders}) AND timestamp >= ? "
+            f"GROUP BY app ORDER BY count DESC",
+            (*relevant_apps, thirty_days_ago)
+        ).fetchall()]
+
     return {
         "date_generated": datetime.now().strftime("%B %d, %Y"),
         "report_title": f"Compliance Report — {label}",
@@ -251,6 +326,9 @@ def _framework_focused_context(conn, cursor, framework_key):
         "detections_truncated": total_detections > AUDIT_REPORT_ROW_CAP,
         "audit_trail": audit_trail,
         "row_cap": AUDIT_REPORT_ROW_CAP,
+        "log_volume_total": log_volume_total,
+        "log_volume_by_app": log_volume_by_app,
+        "log_volume_apps": sorted(relevant_apps),
     }
 
 def generate_compliance_report(framework_key=None):
