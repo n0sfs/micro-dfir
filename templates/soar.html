@@ -813,12 +813,22 @@ async function addSoarQueueMember(qid) {
     const sel = document.getElementById(`addSoarMemberSelect${qid}`);
     const username = sel.value;
     if (!username) return;
-    await fetch(`/api/case-queues/${qid}/members`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username})});
+    const res = await fetch(`/api/case-queues/${qid}/members`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username})});
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        toast(err.error || 'Failed to add queue member.', 'danger');
+        return;
+    }
     await loadQueuesForSoar();
 }
 
 async function removeSoarQueueMember(qid, username) {
-    await fetch(`/api/case-queues/${qid}/members`, {method: 'DELETE', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username})});
+    const res = await fetch(`/api/case-queues/${qid}/members`, {method: 'DELETE', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username})});
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        toast(err.error || 'Failed to remove queue member.', 'danger');
+        return;
+    }
     await loadQueuesForSoar();
 }
 

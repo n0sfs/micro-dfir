@@ -65,6 +65,22 @@ def unauthorized():
         return jsonify({'error': 'Session expired. Please log in again.'}), 401
     return redirect(url_for('login'))
 
+# Runs ahead of every one of this app's ~180 individually-@login_required-decorated
+# routes without touching each one -- the only before_request hook in this app. A user
+# flagged must_change_password (the seeded default admin account, or anyone an admin
+# reset with "require a password change" checked) can't do anything else until they've
+# changed it. Mirrors unauthorized()'s own API-vs-page branching immediately above, for
+# the same reason: a fetch() call needs a real error status it can handle, not HTML.
+@app.before_request
+def enforce_password_change():
+    if not current_user.is_authenticated or not getattr(current_user, 'must_change_password', False):
+        return
+    if request.endpoint in ('change_password', 'logout', 'static'):
+        return
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'Password change required.', 'redirect': url_for('change_password')}), 403
+    return redirect(url_for('change_password'))
+
 def csrf_token():
     from flask import session
     if 'csrf_token' not in session:
@@ -83,8 +99,9 @@ def validate_csrf():
 app.jinja_env.globals['csrf_token'] = csrf_token
 
 class User(UserMixin):
-    def __init__(self, id, username, role):
+    def __init__(self, id, username, role, must_change_password=False):
         self.id = id; self.username = username; self.role = role
+        self.must_change_password = bool(must_change_password)
 
 # Named-permission RBAC, replacing the old fixed analyst/senior_analyst/admin rank
 # ladder -- roles are now rows in the `roles` table (see migrate_role_permissions())
@@ -158,7 +175,7 @@ app.jinja_env.globals['current_role_label'] = current_role_label
 def load_user(user_id):
     db = get_db()
     u = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-    if u: return User(u['id'], u['username'], u['role'])
+    if u: return User(u['id'], u['username'], u['role'], u['must_change_password'])
     return None
 
 def get_db():
@@ -174,10 +191,19 @@ def init_db():
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.cursor().executescript(open(os.path.join(os.path.dirname(__file__), "schema.sql")).read())
     c = conn.cursor()
+    # schema.sql's CREATE TABLE users has no must_change_password column -- the real
+    # migration (migrate_users_must_change_password, below) only runs later, when the web
+    # service process next imports this module, which is too late for the seed INSERT
+    # right below. Add it here too, defensively, so this one-off install-time call (a
+    # separate process from the running service) can reference it immediately.
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0")
+    except Exception:
+        pass
     c.execute("SELECT COUNT(*) FROM users")
     if c.fetchone()[0] == 0:
         from werkzeug.security import generate_password_hash
-        c.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", ('admin', generate_password_hash('changeme123'), 'admin'))
+        c.execute("INSERT INTO users (username, password_hash, role, must_change_password) VALUES (?, ?, ?, 1)", ('admin', generate_password_hash('changeme123'), 'admin'))
     conn.commit()
     conn.close()
 
@@ -293,7 +319,7 @@ def login():
             return render_template('login.html')
         user = get_db().execute("SELECT * FROM users WHERE username = ?", (request.form['username'],)).fetchone()
         if user and check_password_hash(user['password_hash'], request.form['password']):
-            login_user(User(user['id'], user['username'], user['role']))
+            login_user(User(user['id'], user['username'], user['role'], user['must_change_password']))
             log_audit('login_success', 'user', user['username'])
             return redirect(url_for('home'))
         # current_user is still anonymous here -- target_id records what was *typed*,
@@ -302,6 +328,35 @@ def login():
         log_audit('login_failed', 'user', request.form.get('username', ''))
         flash('Invalid username or password', 'danger')
     return render_template('login.html')
+
+@app.route('/change-password', methods=['GET', 'POST'])
+@login_required
+def change_password():
+    if request.method == 'POST':
+        if not validate_csrf():
+            return render_template('change_password.html')
+        db = get_db()
+        row = db.execute("SELECT password_hash FROM users WHERE id = ?", (current_user.id,)).fetchone()
+        current_pw = request.form.get('current_password', '')
+        new_pw = request.form.get('new_password', '')
+        confirm_pw = request.form.get('confirm_password', '')
+        if not check_password_hash(row['password_hash'], current_pw):
+            flash('Current password is incorrect.', 'danger')
+        elif len(new_pw) < 8:
+            flash('New password must be at least 8 characters.', 'danger')
+        elif new_pw != confirm_pw:
+            flash("New password and confirmation don't match.", 'danger')
+        elif new_pw == current_pw:
+            flash('New password must be different from your current password.', 'danger')
+        else:
+            from werkzeug.security import generate_password_hash
+            db.execute("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?",
+                       (generate_password_hash(new_pw), current_user.id))
+            db.commit()
+            log_audit('password_changed', 'user', current_user.username)
+            flash('Password updated.', 'success')
+            return redirect(url_for('home'))
+    return render_template('change_password.html')
 
 @app.route('/logout')
 @login_required
@@ -7967,6 +8022,17 @@ _BUILTIN_ROLE_SEED = {
     'admin': ('Admin', 'Adds users, certs, backups, system settings', PERMISSION_KEYS),
 }
 
+def migrate_users_must_change_password():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if 'must_change_password' not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0")
+            conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_role_permissions():
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
@@ -10977,8 +11043,9 @@ def api_settings_users():
             valid_roles = {r['slug'] for r in db.execute("SELECT slug FROM roles").fetchall()}
             if role not in valid_roles:
                 return jsonify({'error': f"role must be one of {', '.join(sorted(valid_roles))}"}), 400
+            must_change = 1 if data.get('force_change') else 0
             try:
-                db.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", (username, password, role))
+                db.execute("INSERT INTO users (username, password_hash, role, must_change_password) VALUES (?, ?, ?, ?)", (username, password, role, must_change))
                 db.commit()
                 log_audit('user_create', 'user', username, f'role={role}')
                 return jsonify({'status': 'success'})
@@ -10988,8 +11055,9 @@ def api_settings_users():
         elif action == 'reset':
             user_id = data.get('id')
             new_password = generate_password_hash(data.get('password'))
+            must_change = 1 if data.get('force_change') else 0
             target_user = db.execute("SELECT username FROM users WHERE id = ?", (user_id,)).fetchone()
-            db.execute("UPDATE users SET password_hash = ? WHERE id = ?", (new_password, user_id))
+            db.execute("UPDATE users SET password_hash = ?, must_change_password = ? WHERE id = ?", (new_password, must_change, user_id))
             db.commit()
             log_audit('user_password_reset', 'user', target_user['username'] if target_user else user_id)
             return jsonify({'status': 'success'})
@@ -11899,6 +11967,7 @@ migrate_case_severity()
 migrate_case_iocs()
 migrate_dashboards()
 migrate_role_casing()
+migrate_users_must_change_password()
 migrate_role_permissions()
 migrate_case_templates_manage_permission()
 migrate_role_default_dashboard()

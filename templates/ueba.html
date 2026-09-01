@@ -575,6 +575,15 @@ function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// A loader's initial "Loading..." table state has no failure counterpart today -- a
+// non-2xx response (still a resolved fetch()) leaves it stuck showing "Loading..."
+// forever with no visible sign anything went wrong. This renders an explicit, retriable
+// failure row in its place.
+function renderLoadError(tbodyId, colspan, message) {
+    const tbody = document.getElementById(tbodyId);
+    if (tbody) tbody.innerHTML = `<tr><td colspan="${colspan}" class="text-center text-danger small py-3"><i class="fa-solid fa-triangle-exclamation me-1"></i>${escHtml(message || 'Failed to load.')} <a href="#" onclick="location.reload(); return false;">Reload</a></td></tr>`;
+}
+
 // ---- Tabs + shared stat row (repurposed per active tab, not two separate rows) ----
 const UEBA_TABS = ['timeline', 'risk', 'insights', 'tuning', 'rules', 'assetIdentity'];
 let activeUebaTab = 'timeline';
@@ -590,7 +599,15 @@ function switchUebaTab(tab) {
     if (tab === 'risk' && !riskScoresLoadedOnce) loadRiskScores();
     if (tab === 'rules' && !anomalyRulesLoadedOnce) loadAnomalyRules();
     if (tab === 'timeline' && !timelineLoadedOnce) loadTimeline();
-    if (tab === 'assetIdentity' && !assetIdentityLoadedOnce) { assetIdentityLoadedOnce = true; loadAssets(); loadIdentities(); }
+    // Only flip the once-loaded flag after both loads actually settle -- setting it
+    // before they resolve meant a failed first load could never be retried by switching
+    // tabs away and back (the flag was already true, so this branch would just never
+    // fire again), stranding the tables on their failure state until a full page reload.
+    if (tab === 'assetIdentity' && !assetIdentityLoadedOnce) {
+        Promise.allSettled([loadAssets(), loadIdentities()]).then(results => {
+            if (results.every(r => r.status === 'fulfilled')) assetIdentityLoadedOnce = true;
+        });
+    }
     updateSharedStats();
 }
 
@@ -1379,7 +1396,7 @@ function loadUebaExclusions() {
             <td>${IS_ADMIN
                 ? `<input type="checkbox" class="form-check-input" ${e.enabled ? 'checked' : ''} onchange="toggleUebaExclusion(${e.id}, this.checked)">`
                 : (e.enabled ? '<span class="badge bg-success">On</span>' : '<span class="badge bg-secondary">Off</span>')}</td>
-            <td>${IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteUebaExclusion(${e.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
+            <td>${IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" title="Delete exclusion" onclick="deleteUebaExclusion(${e.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
         </tr>`).join('');
     }).catch(err => console.error('Error loading UEBA exclusions:', err));
 }
@@ -1579,7 +1596,7 @@ function arRenderTable(rows) {
             : (r.enabled ? '<span class="badge bg-success">On</span>' : '<span class="badge bg-secondary">Off</span>')}</td>
         <td class="text-nowrap">${IS_ADMIN ? `
             <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="openAnomalyRuleModalById(${r.id})"><i class="fa-solid fa-pen"></i></button>
-            <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" onclick="deleteAnomalyRule(${r.id})"><i class="fa-solid fa-trash"></i></button>
+            <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete rule" onclick="deleteAnomalyRule(${r.id})"><i class="fa-solid fa-trash"></i></button>
         ` : ''}</td>
     </tr>`).join('');
 }
@@ -1679,7 +1696,10 @@ const CRITICALITY_LABELS = {standard: 'Standard (1x)', important: 'Important (1.
 const CRITICALITY_BADGE = {standard: 'secondary', important: 'warning', critical: 'danger'};
 
 function loadAssets() {
-    fetch('/api/assets').then(r => r.json()).then(rows => {
+    return fetch('/api/assets').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(rows => {
         const tbody = document.getElementById('assetsTableBody');
         if (!rows.length) {
             tbody.innerHTML = '<tr><td colspan="4" class="text-muted small">No assets yet. Fill in the form above to set a host\'s criticality.</td></tr>';
@@ -1693,9 +1713,13 @@ function loadAssets() {
                    </select>`
                 : `<span class="badge bg-${CRITICALITY_BADGE[a.criticality] || 'secondary'}">${CRITICALITY_LABELS[a.criticality] || a.criticality}</span>`}</td>
             <td class="small text-muted">${escHtml(a.owner || '')}</td>
-            <td>${ASSET_IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteAsset(${a.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
+            <td>${ASSET_IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" title="Delete asset" onclick="deleteAsset(${a.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
         </tr>`).join('');
-    }).catch(err => console.error('Error loading assets:', err));
+    }).catch(err => {
+        console.error('Error loading assets:', err);
+        renderLoadError('assetsTableBody', 4, 'Failed to load assets.');
+        throw err;
+    });
 }
 
 function addAsset() {
@@ -1737,7 +1761,10 @@ async function deleteAsset(aid) {
 }
 
 function loadIdentities() {
-    fetch('/api/identities').then(r => r.json()).then(rows => {
+    return fetch('/api/identities').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(rows => {
         const tbody = document.getElementById('identitiesTableBody');
         if (!rows.length) {
             tbody.innerHTML = '<tr><td colspan="4" class="text-muted small">No identities yet. Fill in the form above to flag a privileged user.</td></tr>';
@@ -1749,9 +1776,13 @@ function loadIdentities() {
             <td>${ASSET_IS_ADMIN
                 ? `<input type="checkbox" class="form-check-input" ${i.privileged ? 'checked' : ''} onchange="updateIdentityPrivileged(${i.id}, this.checked)">`
                 : (i.privileged ? '<span class="badge bg-warning text-dark">Privileged</span>' : '<span class="badge bg-secondary">Standard</span>')}</td>
-            <td>${ASSET_IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteIdentity(${i.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
+            <td>${ASSET_IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" title="Delete identity" onclick="deleteIdentity(${i.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
         </tr>`).join('');
-    }).catch(err => console.error('Error loading identities:', err));
+    }).catch(err => {
+        console.error('Error loading identities:', err);
+        renderLoadError('identitiesTableBody', 4, 'Failed to load identities.');
+        throw err;
+    });
 }
 
 function addIdentity() {
