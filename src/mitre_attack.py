@@ -938,19 +938,33 @@ def _display_id(key):
 
 _TECH_TAG_RE = re.compile(r'^attack\.t(\d{4})(?:\.(\d{3}))?$', re.IGNORECASE)
 
+# lookup() used to be a linear scan over TECHNIQUES.items() (872 entries) with a
+# _display_id() regex substitution per candidate -- called once per technique tag on
+# every Sigma rule (techniques_for_tags()), so this ran thousands of times per
+# /api/mitre/coverage request (~4050 rules in production) and was measured as the
+# dominant cost of that endpoint's 13-15s latency. Precomputed once at import time
+# instead: setdefault() preserves the original scan's "first entry in TECHNIQUES'
+# definition order wins" semantics for ids that appear more than once (e.g. T1078's
+# '1078'/'1078b'/'1078c'/'1078d' tactic-variants all display as '1078') -- the linear
+# scan always returned on the FIRST match it hit, so a later-defined entry must never
+# silently override an earlier one here either.
+_DISPLAY_ID_INDEX = {}
+for _key, _entry in TECHNIQUES.items():
+    _DISPLAY_ID_INDEX.setdefault(_display_id(_key), _entry)
+del _key, _entry
+
 
 def lookup(technique_id):
     """Look up a technique ID like '1059.001' or '1059'. Returns (name, tactic)
     or (None, 'unmapped') if not in the curated table. Falls back to the
     parent technique's tactic when only the sub-technique is unlisted."""
-    for key, (name, tactic) in TECHNIQUES.items():
-        if _display_id(key) == technique_id:
-            return name, tactic
+    entry = _DISPLAY_ID_INDEX.get(technique_id)
+    if entry:
+        return entry
     if '.' in technique_id:
-        parent = technique_id.split('.', 1)[0]
-        for key, (name, tactic) in TECHNIQUES.items():
-            if _display_id(key) == parent:
-                return None, tactic
+        parent_entry = _DISPLAY_ID_INDEX.get(technique_id.split('.', 1)[0])
+        if parent_entry:
+            return None, parent_entry[1]
     return None, 'unmapped'
 
 
