@@ -1,5 +1,12 @@
 {% extends "base.html" %}
 {% block content %}
+<style>
+    #casesTable .rule-th{position:relative; white-space:nowrap; padding-right:10px; vertical-align:middle;}
+    #casesTable .th-inner{display:flex; align-items:center; justify-content:space-between; gap:4px;}
+    #casesTable .th-icon-btn{background:none; border:none; color:var(--text-muted); padding:0 2px; font-size:.72rem; cursor:pointer; line-height:1;}
+    #casesTable .th-icon-btn:hover{color:var(--text-secondary);}
+    #casesTable .th-icon-btn.active-filter{color:var(--accent);}
+</style>
 <div id="casesListView">
     <div class="page-header d-flex justify-content-between align-items-start flex-wrap gap-2">
         <div>
@@ -30,15 +37,24 @@
             </div>
         </div>
         <div class="table-responsive">
-            <table class="table table-dark table-hover mb-0 align-middle">
+            <table class="table table-dark table-hover mb-0 align-middle" id="casesTable">
                 <thead>
                     <tr>
                         <th class="ps-3">Title</th>
-                        <th>Severity</th>
+                        <th class="rule-th"><div class="th-inner"><span>Severity</span><div class="dropdown">
+                            <button type="button" class="th-icon-btn" id="filterBtnSeverity" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                            <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuSeverity" style="min-width:190px;"></div>
+                        </div></div></th>
                         <th>Status</th>
                         <th>Queue</th>
-                        <th>TLP</th>
-                        <th>Assignee</th>
+                        <th class="rule-th"><div class="th-inner"><span>TLP</span><div class="dropdown">
+                            <button type="button" class="th-icon-btn" id="filterBtnTlp" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                            <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuTlp" style="min-width:190px;"></div>
+                        </div></div></th>
+                        <th class="rule-th"><div class="th-inner"><span>Assignee</span><div class="dropdown">
+                            <button type="button" class="th-icon-btn" id="filterBtnAssignee" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                            <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuAssignee" style="min-width:190px;"></div>
+                        </div></div></th>
                         <th>Items</th>
                         <th>Tasks</th>
                         <th>Created</th>
@@ -399,6 +415,78 @@ function populateTlpPapSelect(elId, values, current) {
     el.value = current || '';
 }
 
+// ---- Per-column filters (multi-select with in-menu search) on the Cases table --
+// same th-icon-btn/dropdown pattern as dashboard.html's Detection Rules table, copied
+// per this codebase's per-file-duplication convention. Combines (AND) with the 3
+// pre-existing page-level controls (caseFilter/queueFilterSelect/myQueuesOnlyToggle)
+// inside renderCases() itself, rather than introducing a parallel filter function.
+let colFilters = { severity: [], tlp: [], assignee: [] };
+
+function buildMultiFilterMenu(menuId, colKey, options) {
+    const menu = document.getElementById(menuId);
+    let html = `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-2" placeholder="Search..." oninput="filterMenuOptions('${menuId}', this.value)">`;
+    html += `<div class="d-flex justify-content-between align-items-center mb-1 px-1">
+        <button type="button" class="btn btn-link btn-sm p-0 small" onclick="selectAllVisibleMenuOptions('${menuId}','${colKey}')">Select all visible</button>
+        <button type="button" class="btn btn-link btn-sm p-0 small text-secondary" onclick="clearMenuOptions('${menuId}','${colKey}')">Clear</button>
+    </div>`;
+    html += `<div class="menu-option-list" style="max-height:220px; overflow-y:auto;">`;
+    if (!options.length) {
+        html += `<div class="text-muted small px-1">No options</div>`;
+    }
+    options.forEach((o, i) => {
+        const checked = colFilters[colKey].includes(o.value) ? 'checked' : '';
+        const cbId = `${menuId}_chk${i}`;
+        const safeVal = String(o.value).replace(/"/g, '&quot;');
+        html += `<div class="form-check menu-option-item" data-search="${o.label.toLowerCase()}">
+            <input class="form-check-input" type="checkbox" data-value="${safeVal}" id="${cbId}" ${checked} onchange="toggleMultiFilter('${colKey}', this.dataset.value, this.checked)">
+            <label class="form-check-label small" for="${cbId}">${o.label}</label>
+        </div>`;
+    });
+    html += `</div>`;
+    menu.innerHTML = html;
+}
+
+function filterMenuOptions(menuId, q) {
+    q = q.toLowerCase();
+    document.querySelectorAll(`#${menuId} .menu-option-item`).forEach(el => {
+        el.style.display = el.dataset.search.includes(q) ? '' : 'none';
+    });
+}
+
+function updateFilterButtonState(colKey) {
+    const btn = document.getElementById('filterBtn' + colKey.charAt(0).toUpperCase() + colKey.slice(1));
+    if (btn) btn.classList.toggle('active-filter', colFilters[colKey].length > 0);
+}
+
+function toggleMultiFilter(colKey, value, checked) {
+    const set = new Set(colFilters[colKey]);
+    if (checked) set.add(value); else set.delete(value);
+    colFilters[colKey] = Array.from(set);
+    updateFilterButtonState(colKey);
+    renderCases();
+}
+
+function selectAllVisibleMenuOptions(menuId, colKey) {
+    const set = new Set(colFilters[colKey]);
+    document.querySelectorAll(`#${menuId} .menu-option-item`).forEach(el => {
+        if (el.style.display !== 'none') {
+            const cb = el.querySelector('input[type=checkbox]');
+            cb.checked = true;
+            set.add(cb.dataset.value);
+        }
+    });
+    colFilters[colKey] = Array.from(set);
+    updateFilterButtonState(colKey);
+    renderCases();
+}
+
+function clearMenuOptions(menuId, colKey) {
+    document.querySelectorAll(`#${menuId} input[type=checkbox]`).forEach(cb => { cb.checked = false; });
+    colFilters[colKey] = [];
+    updateFilterButtonState(colKey);
+    renderCases();
+}
+
 let caseTemplates = [];
 function loadCaseTemplates() {
     return fetch('/api/case-templates').then(r => r.json()).then(templates => {
@@ -420,6 +508,13 @@ function setCaseFilter(f) {
 function loadCases() {
     fetch('/api/cases').then(r => r.json()).then(data => {
         allCases = data || [];
+        buildMultiFilterMenu('filterMenuSeverity', 'severity',
+            ['critical', 'high', 'medium', 'low'].map(s => ({value: s, label: s.charAt(0).toUpperCase() + s.slice(1)})));
+        buildMultiFilterMenu('filterMenuTlp', 'tlp',
+            [{value: '', label: 'Not set'}].concat(TLP_VALUES.map(v => ({value: v, label: v.toUpperCase()}))));
+        const assignees = Array.from(new Set(allCases.filter(c => c.assignee).map(c => c.assignee))).sort();
+        buildMultiFilterMenu('filterMenuAssignee', 'assignee',
+            [{value: '__unassigned__', label: '(Unassigned)'}].concat(assignees.map(a => ({value: a, label: a}))));
         renderCases();
     }).catch(err => console.error('Error loading cases:', err));
 }
@@ -453,6 +548,9 @@ function renderCases() {
         const myQueueIds = new Set(allQueues.filter(q => (q.members || []).includes(CURRENT_USERNAME)).map(q => q.id));
         rows = rows.filter(c => myQueueIds.has(c.queue_id));
     }
+    if (colFilters.severity.length) rows = rows.filter(c => colFilters.severity.includes(c.severity || 'medium'));
+    if (colFilters.tlp.length) rows = rows.filter(c => colFilters.tlp.includes(c.tlp || ''));
+    if (colFilters.assignee.length) rows = rows.filter(c => colFilters.assignee.includes(c.assignee || '__unassigned__'));
     if (!rows.length) {
         tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted py-4">No cases match these filters.</td></tr>';
         return;
