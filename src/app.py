@@ -1918,6 +1918,19 @@ COMPLIANCE_FRAMEWORKS = {
 
 COMPLIANCE_AUDIT_ACTIONS = ('rule_compliance_tag', 'rule_toggle', 'rule_bulk_toggle')
 
+# SigmaHQ's own officially-curated release packages (github.com/SigmaHQ/sigma/releases) --
+# key -> {asset filename in the release, human label}. Replaces pulling the entire master
+# branch on every import; resolved against the live "latest release" API response rather
+# than a hardcoded tag so a new SigmaHQ release is picked up automatically. See
+# _resolve_sigmahq_asset_url()/_run_sigmahq_import() below.
+SIGMAHQ_PACKS = {
+    'core': {'asset': 'sigma_core.zip', 'label': 'Core (high-confidence only)'},
+    'core_plus': {'asset': 'sigma_core+.zip', 'label': 'Core+ (adds medium-level rules)'},
+    'core_plus_plus': {'asset': 'sigma_core++.zip', 'label': 'Core++ (adds experimental rules)'},
+    'et_addon': {'asset': 'sigma_emerging_threats_addon.zip', 'label': 'Emerging Threats Add-On'},
+    'all': {'asset': 'sigma_all_rules.zip', 'label': 'All Rules'},
+}
+
 # Which framework(s) each SCA hardening check (agent_scripts.py's sca_check()/
 # sca_check_linux()) is relevant to -- same "no authoritative auto-mapping, assigned by
 # hand" situation as COMPLIANCE_FRAMEWORKS itself above, just for a fixed, code-defined
@@ -2997,12 +3010,15 @@ def api_rule_compliance(rid):
 def api_rules_import_sigmahq():
     err = require_permission('rules.manage')
     if err: return err
+    pack = (request.json or {}).get('pack') or 'all'
+    if pack not in SIGMAHQ_PACKS:
+        pack = 'all'
     try:
-        stats = _run_sigmahq_import()
+        stats = _run_sigmahq_import(pack)
     except Exception as e:
         return jsonify({"error": f"Import failed: {e}"}), 500
     invalidate_rules_cache()
-    log_audit('sigmahq_import', 'rule', None, f"inserted={stats['inserted']}, updated={stats['updated']}, skipped={stats['skipped']}, errors={stats['errors']}, upstream_drift={stats['upstream_drift']}")
+    log_audit('sigmahq_import', 'rule', None, f"pack={pack}, inserted={stats['inserted']}, updated={stats['updated']}, skipped={stats['skipped']}, errors={stats['errors']}, upstream_drift={stats['upstream_drift']}")
     return jsonify({"status": "success", **stats})
 
 @app.route('/api/rules/<int:rid>/toggle', methods=['PUT'])
@@ -8704,24 +8720,49 @@ def migrate_log_search_indexes():
     except Exception:
         pass
 
-def _run_sigmahq_import():
+# Resolves a SIGMAHQ_PACKS asset filename to its real download URL via the live "latest
+# release" API response, rather than a hardcoded release tag -- so a new SigmaHQ release
+# (a new r<date> tag) is picked up automatically on the next import with no code change.
+def _resolve_sigmahq_asset_url(asset_name):
+    import urllib.request, json as _json, socket
+    old_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(60)
+    try:
+        req = urllib.request.Request(
+            "https://api.github.com/repos/SigmaHQ/sigma/releases/latest",
+            headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'micro-dfir'}
+        )
+        with urllib.request.urlopen(req) as resp:
+            release = _json.loads(resp.read().decode('utf-8'))
+    finally:
+        socket.setdefaulttimeout(old_timeout)
+    for asset in release.get('assets', []):
+        if asset.get('name') == asset_name:
+            return asset['browser_download_url']
+    raise ValueError(f"SigmaHQ's latest release ({release.get('tag_name', 'unknown')}) has no asset named {asset_name}")
+
+def _run_sigmahq_import(pack='all'):
     import urllib.request, zipfile, tempfile, shutil, socket, sqlite3
     import yaml as _yaml
+    pack_info = SIGMAHQ_PACKS.get(pack, SIGMAHQ_PACKS['all'])
     t = tempfile.mkdtemp()
     stats = {'inserted': 0, 'updated': 0, 'skipped': 0, 'errors': 0, 'upstream_drift': 0}
     try:
         zp = os.path.join(t, "sigma.zip")
+        download_url = _resolve_sigmahq_asset_url(pack_info['asset'])
         old_timeout = socket.getdefaulttimeout()
         socket.setdefaulttimeout(60)
         try:
-            urllib.request.urlretrieve("https://github.com/SigmaHQ/sigma/archive/refs/heads/master.zip", zp)
+            urllib.request.urlretrieve(download_url, zp)
         finally:
             socket.setdefaulttimeout(old_timeout)
         with zipfile.ZipFile(zp, 'r') as z:
             z.extractall(t)
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
         conn.row_factory = sqlite3.Row
-        rules_dir = os.path.join(t, "sigma-master", "rules")
+        # SigmaHQ's release-package ZIPs extract with rules/ directly at the top level
+        # (no "sigma-<branch>/" wrapper the old master-branch download had).
+        rules_dir = os.path.join(t, "rules")
         for root, _, files in os.walk(rules_dir):
             for f in files:
                 if not f.endswith(('.yml', '.yaml')):
@@ -8771,6 +8812,7 @@ def _run_sigmahq_import():
         conn.close()
     finally:
         shutil.rmtree(t, ignore_errors=True)
+    stats['pack'] = pack
     return stats
 
 @app.route('/api/audit-log', methods=['GET'])
