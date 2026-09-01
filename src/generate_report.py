@@ -170,8 +170,21 @@ def _render_and_write(template_name, context, output_name):
     HTML(string=html_out).write_pdf(os.path.join(REPORT_OUTPUT_DIR, output_name))
     return output_name
 
+# alerts.severity is stored Title-Case (sigma_engine.py: severity =
+# (r['severity_override'] or '').capitalize() or ... or 'High') -- a third casing
+# convention distinct from CVE_SEVERITY_COLORS' UPPERCASE below and dashboard.html's
+# lowercase LEVEL_BADGE, so this needs its own dict keyed to match reality.
+SECURITY_SEVERITY_COLORS = {
+    'Critical': '#dc3545', 'High': '#e0a800', 'Medium': '#0dcaf0',
+    'Low': '#6c757d', 'Informational': '#6c757d',
+}
+
 def generate_security_report():
-    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
+    # Left as-is (UTC .isoformat() window, not this file's usual datetime.now() string) --
+    # already-working production behavior for these 3 queries specifically; not the
+    # concern of the narrative-enrichment work below, so not touched to avoid a
+    # regression risk with no functional upside.
     thirty_days_ago = (datetime.utcnow() - timedelta(days=30)).isoformat()
     total_events = cursor.execute("SELECT COUNT(*) FROM events WHERE timestamp >= ?", (thirty_days_ago,)).fetchone()[0]
     total_alerts = cursor.execute("SELECT COUNT(*) FROM alerts WHERE timestamp >= ?", (thirty_days_ago,)).fetchone()[0]
@@ -180,12 +193,87 @@ def generate_security_report():
         "WHERE a.timestamp >= ? GROUP BY sr.title, a.severity ORDER BY hit_count DESC LIMIT 5", (thirty_days_ago,)
     ).fetchall()]
 
+    # Everything below is new -- pulled from the same underlying data the Dashboards
+    # widgets already show (case load/SLA, top-firing UEBA anomaly rules, risk-score
+    # trend, detection coverage trend), ported from their live routes in app.py using
+    # SQLite's own datetime('now', ?)/date('now', ?) window (matching those routes
+    # verbatim) rather than a third Python-side date convention in this file.
+
+    # Case load & SLA -- ported from api_dashboard_case_stats (app.py:6660-6683) and
+    # _case_sla_hours (app.py:6653-6658).
+    sla_row = cursor.execute("SELECT value FROM settings WHERE key = 'case_sla_hours'").fetchone()
+    try:
+        sla_hours = int(sla_row['value']) if sla_row and sla_row['value'] else 24
+    except (ValueError, TypeError):
+        sla_hours = 24
+    open_cases = cursor.execute("SELECT COUNT(*) FROM cases WHERE status = 'open'").fetchone()[0]
+    cases_closed_30d = cursor.execute(
+        "SELECT COUNT(*) FROM cases WHERE status = 'closed' AND closed_at >= datetime('now', '-30 days')"
+    ).fetchone()[0]
+    avg_close_hours = cursor.execute(
+        "SELECT AVG((julianday(closed_at) - julianday(created_at)) * 24) FROM cases "
+        "WHERE status = 'closed' AND closed_at IS NOT NULL AND closed_at >= datetime('now', '-30 days')"
+    ).fetchone()[0]
+    sla_breaches = cursor.execute(
+        "SELECT COUNT(*) FROM cases WHERE status = 'open' AND (julianday('now') - julianday(created_at)) * 24 > ?",
+        (sla_hours,)
+    ).fetchone()[0]
+
+    # Top-firing UEBA anomaly rules -- ported from api_dashboard_top_anomaly_rules
+    # (app.py:6525-6536).
+    top_anomaly_rules = [dict(r) for r in cursor.execute(
+        "SELECT ar.name, ar.entity_type, COUNT(rse.id) as matches "
+        "FROM anomaly_rules ar JOIN risk_score_events rse ON rse.rule_id = ar.id "
+        "WHERE rse.computed_at >= datetime('now', '-30 days') AND ar.enabled = 1 "
+        "GROUP BY ar.id ORDER BY matches DESC LIMIT 10"
+    ).fetchall()]
+
+    # Risk-score trend -- ported from api_dashboard_risk_trend (app.py:6478-6487).
+    # Reduced to a narrative direction (first-half vs second-half daily average) rather
+    # than a day-by-day table -- this is a static PDF, not an interactive chart.
+    risk_days = [dict(r) for r in cursor.execute(
+        "SELECT date(computed_at) as day, SUM(points) as total_points FROM risk_score_events "
+        "WHERE computed_at >= datetime('now', '-30 days') GROUP BY day ORDER BY day ASC"
+    ).fetchall()]
+    risk_trend_total = sum(d['total_points'] for d in risk_days)
+    risk_trend_direction = None
+    if len(risk_days) >= 4:
+        mid = len(risk_days) // 2
+        first_avg = sum(d['total_points'] for d in risk_days[:mid]) / mid
+        second_avg = sum(d['total_points'] for d in risk_days[mid:]) / (len(risk_days) - mid)
+        if second_avg > first_avg * 1.15:
+            risk_trend_direction = 'rising'
+        elif second_avg < first_avg * 0.85:
+            risk_trend_direction = 'falling'
+        else:
+            risk_trend_direction = 'steady'
+
+    # Detection coverage trend -- ported from api_mitre_coverage_history (app.py:3087-3100).
+    coverage_snapshots = [dict(r) for r in cursor.execute(
+        "SELECT snapshot_date, coverage_pct, techniques_total, gap_count, inactive_count, "
+        "active_count, validated_count FROM coverage_snapshots "
+        "WHERE snapshot_date >= date('now', '-30 days') ORDER BY snapshot_date"
+    ).fetchall()]
+    coverage_latest = coverage_snapshots[-1] if coverage_snapshots else None
+    coverage_delta = (
+        round(coverage_snapshots[-1]['coverage_pct'] - coverage_snapshots[0]['coverage_pct'], 1)
+        if len(coverage_snapshots) >= 2 else None
+    )
+
     context = {
         "date_generated": datetime.now().strftime("%B %d, %Y"),
         "report_title": "Managed Security Report",
         "branding": _branding_context(conn),
         "total_events": f"{total_events:,}", "total_alerts": f"{total_alerts:,}",
         "top_alerts": top_alerts,
+        "security_severity_colors": SECURITY_SEVERITY_COLORS,
+        "open_cases": open_cases, "cases_closed_30d": cases_closed_30d,
+        "avg_close_hours": round(avg_close_hours, 1) if avg_close_hours else None,
+        "sla_hours": sla_hours, "sla_breaches": sla_breaches,
+        "top_anomaly_rules": top_anomaly_rules,
+        "risk_trend_total": risk_trend_total, "risk_trend_direction": risk_trend_direction,
+        "coverage_latest": coverage_latest, "coverage_delta": coverage_delta,
+        "coverage_snapshots": coverage_snapshots,
     }
     conn.close()
     return _render_and_write('report_template.html', context, _report_filename('Security'))
