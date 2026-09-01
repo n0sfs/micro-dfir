@@ -552,7 +552,9 @@ function renderCases() {
     if (colFilters.tlp.length) rows = rows.filter(c => colFilters.tlp.includes(c.tlp || ''));
     if (colFilters.assignee.length) rows = rows.filter(c => colFilters.assignee.includes(c.assignee || '__unassigned__'));
     if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted py-4">No cases match these filters.</td></tr>';
+        tbody.innerHTML = allCases.length
+            ? '<tr><td colspan="10" class="text-center text-muted py-4">No cases match these filters. Try clearing some of them above.</td></tr>'
+            : '<tr><td colspan="10" class="text-center text-muted py-4">No cases yet. Click "New Case" above to create one.</td></tr>';
         return;
     }
     tbody.innerHTML = rows.map(c => `

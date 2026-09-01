@@ -16,10 +16,10 @@
 </style>
 
 <div class="row g-3 mb-4">
-    <div class="col-6 col-lg-3" id="statTile0"><div class="stat-tile"><div class="stat-label" id="statLabel0">—</div><div class="stat-value" id="statValue0">—</div></div></div>
-    <div class="col-6 col-lg-3" id="statTile1"><div class="stat-tile"><div class="stat-label" id="statLabel1">—</div><div class="stat-value" id="statValue1">—</div></div></div>
-    <div class="col-6 col-lg-3" id="statTile2"><div class="stat-tile"><div class="stat-label" id="statLabel2">—</div><div class="stat-value" id="statValue2">—</div></div></div>
-    <div class="col-6 col-lg-3" id="statTile3"><div class="stat-tile"><div class="stat-label" id="statLabel3">—</div><div class="stat-value" id="statValue3" style="font-size:1.6rem;">—</div></div></div>
+    <div class="col-6 col-lg-3" id="statTile0"><div class="stat-tile"><div class="stat-label" id="statLabel0">Loading&hellip;</div><div class="stat-value" id="statValue0">&hellip;</div></div></div>
+    <div class="col-6 col-lg-3" id="statTile1"><div class="stat-tile"><div class="stat-label" id="statLabel1">Loading&hellip;</div><div class="stat-value" id="statValue1">&hellip;</div></div></div>
+    <div class="col-6 col-lg-3" id="statTile2"><div class="stat-tile"><div class="stat-label" id="statLabel2">Loading&hellip;</div><div class="stat-value" id="statValue2">&hellip;</div></div></div>
+    <div class="col-6 col-lg-3" id="statTile3"><div class="stat-tile"><div class="stat-label" id="statLabel3">Loading&hellip;</div><div class="stat-value" id="statValue3" style="font-size:1.6rem;">&hellip;</div></div></div>
 </div>
 
 <div class="card bg-dark border-secondary">
@@ -1682,7 +1682,7 @@ function loadAssets() {
     fetch('/api/assets').then(r => r.json()).then(rows => {
         const tbody = document.getElementById('assetsTableBody');
         if (!rows.length) {
-            tbody.innerHTML = '<tr><td colspan="4" class="text-muted small">No assets yet.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="4" class="text-muted small">No assets yet. Fill in the form above to set a host\'s criticality.</td></tr>';
             return;
         }
         tbody.innerHTML = rows.map(a => `<tr>
@@ -1740,7 +1740,7 @@ function loadIdentities() {
     fetch('/api/identities').then(r => r.json()).then(rows => {
         const tbody = document.getElementById('identitiesTableBody');
         if (!rows.length) {
-            tbody.innerHTML = '<tr><td colspan="4" class="text-muted small">No identities yet.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="4" class="text-muted small">No identities yet. Fill in the form above to flag a privileged user.</td></tr>';
             return;
         }
         tbody.innerHTML = rows.map(i => `<tr>

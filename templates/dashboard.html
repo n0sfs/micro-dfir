@@ -39,26 +39,26 @@
 <div class="row g-3 mb-3">
     <div class="col-6 col-lg-3">
         <div class="stat-tile">
-            <div class="stat-label" id="statLabel0">&nbsp;</div>
-            <div class="stat-value" id="statValue0">—</div>
+            <div class="stat-label" id="statLabel0">Loading&hellip;</div>
+            <div class="stat-value" id="statValue0">&hellip;</div>
         </div>
     </div>
     <div class="col-6 col-lg-3">
         <div class="stat-tile">
-            <div class="stat-label" id="statLabel1">&nbsp;</div>
-            <div class="stat-value" id="statValue1">—</div>
+            <div class="stat-label" id="statLabel1">Loading&hellip;</div>
+            <div class="stat-value" id="statValue1">&hellip;</div>
         </div>
     </div>
     <div class="col-6 col-lg-3">
         <div class="stat-tile">
-            <div class="stat-label" id="statLabel2">&nbsp;</div>
-            <div class="stat-value" id="statValue2">—</div>
+            <div class="stat-label" id="statLabel2">Loading&hellip;</div>
+            <div class="stat-value" id="statValue2">&hellip;</div>
         </div>
     </div>
     <div class="col-6 col-lg-3">
         <div class="stat-tile">
-            <div class="stat-label" id="statLabel3">&nbsp;</div>
-            <div class="stat-value" id="statValue3">—</div>
+            <div class="stat-label" id="statLabel3">Loading&hellip;</div>
+            <div class="stat-value" id="statValue3">&hellip;</div>
         </div>
     </div>
 </div>
@@ -369,7 +369,7 @@
                             </tr>
                         </thead>
                         <tbody id="dropRulesTableBody">
-                            <tr><td colspan="5" class="text-center text-muted py-3">No drop rules configured.</td></tr>
+                            <tr><td colspan="5" class="text-center text-muted py-3">No drop rules configured yet. Fill in the form above and click "Add Rule" to filter out noisy log sources.</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -2085,7 +2085,7 @@ function loadDropRules() {
             updateSharedStats('pipeline');
             let tbody = document.getElementById('dropRulesTableBody');
             if (!Array.isArray(data) || data.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">No drop rules configured.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">No drop rules configured yet. Fill in the form above and click "Add Rule" to filter out noisy log sources.</td></tr>';
                 return;
             }
             tbody.innerHTML = data.map(r => `
@@ -2765,6 +2765,10 @@ async function ld(){
 }
 
 function renderTable(rules) {
+    if (!rules.length) {
+        document.getElementById('rt').innerHTML = '<tr><td colspan="12" class="text-center text-muted py-4">No rules match the current filters. Clear filters above, or use "Import SigmaHQ Rules" / "New Rule" to add detection coverage.</td></tr>';
+        return;
+    }
     document.getElementById('rt').innerHTML = rules.map(rl => {
         const mitreTags = (rl.tags || []).filter(t => /^attack\./i.test(t));
         const shownTags = mitreTags.slice(0, 2);
