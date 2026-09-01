@@ -78,8 +78,17 @@
     .tier-inactive{background:color-mix(in srgb, var(--warning) 16%, transparent); color:var(--warning);}
     .tier-active{background:color-mix(in srgb, var(--info) 18%, transparent); color:var(--info); font-weight:600;}
     .tier-validated{background:color-mix(in srgb, var(--success) 20%, transparent); color:var(--success); font-weight:700;}
+    .tier-unmapped{background:var(--bg-inset); color:var(--text-muted); opacity:.65; font-style:italic;}
     .cov-legend{display:flex; flex-wrap:wrap; gap:16px; align-items:center; font-size:.76rem; color:var(--text-secondary);}
     .cov-legend .swatch{display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:5px; vertical-align:middle;}
+
+    /* ===== Intelligence tab ===== */
+    .intel-entity-row{display:flex; align-items:center; justify-content:space-between; gap:8px; padding:10px 14px; border-bottom:1px solid var(--border); cursor:pointer; transition:background .1s ease;}
+    .intel-entity-row:hover{background:var(--bg-card-alt);}
+    .intel-entity-row.active{background:var(--bg-card-alt); border-left:3px solid var(--accent);}
+    .intel-entity-name{font-weight:600; color:var(--text-primary); font-size:.86rem;}
+    .intel-entity-chips{display:flex; gap:4px; flex-wrap:wrap; flex-shrink:0;}
+    .intel-mini-chip{font-size:.62rem; font-weight:700; padding:2px 7px; border-radius:999px; font-variant-numeric:tabular-nums; white-space:nowrap;}
 </style>
 
 <div class="page-header">
@@ -91,6 +100,7 @@
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'mitre' else '' }}" id="tabBtnMitre" onclick="switchCoverageTab('mitre')"><i class="fa-solid fa-diagram-project me-1"></i>MITRE ATT&amp;CK</button></li>
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'compliance' else '' }}" id="tabBtnCompliance" onclick="switchCoverageTab('compliance')"><i class="fa-solid fa-clipboard-check me-1"></i>Compliance</button></li>
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'vulnerability' else '' }}" id="tabBtnVulnerability" onclick="switchCoverageTab('vulnerability')"><i class="fa-solid fa-bug me-1"></i>Vulnerability</button></li>
+    <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'intelligence' else '' }}" id="tabBtnIntelligence" onclick="switchCoverageTab('intelligence')"><i class="fa-solid fa-user-secret me-1"></i>Intelligence</button></li>
 </ul>
 
 <!-- ============================ MITRE PANE ============================= -->
@@ -237,6 +247,30 @@
 </div>
 </div>
 
+<!-- ========================= INTELLIGENCE PANE =========================== -->
+<div id="paneIntelligence" style="display: {{ 'block' if active_tab == 'intelligence' else 'none' }};">
+<div class="row g-3">
+    <div class="col-lg-5">
+        <div class="card shadow-sm border-secondary bg-dark text-light mb-4">
+            <div class="card-header border-secondary">
+                <h5 class="mb-0 text-warning"><i class="fa-solid fa-user-secret"></i> Threat Entities <span class="text-muted small fw-normal">— sorted by detection gap, highest exposure first</span></h5>
+            </div>
+            <div class="card-body p-0" style="max-height:640px; overflow-y:auto;" id="intelEntityList">
+                <div class="text-center text-muted py-4">Loading&hellip;</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-7">
+        <div class="card shadow-sm border-secondary bg-dark text-light mb-4">
+            <div class="card-header border-secondary"><h5 class="mb-0 text-info"><i class="fa-solid fa-crosshairs"></i> <span id="intelDetailTitle">Select an entity</span></h5></div>
+            <div class="card-body" id="intelDetailBody">
+                <div class="text-muted small">Click a threat actor or malware entity on the left to see their known techniques against your current detection coverage.</div>
+            </div>
+        </div>
+    </div>
+</div>
+</div>
+
 <script>
 function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -254,8 +288,8 @@ const CVE_SEVERITY_BADGE = { CRITICAL: 'bg-danger', HIGH: 'bg-danger', MEDIUM: '
 // =====================================================================
 // TAB SWITCHING
 // =====================================================================
-const COVERAGE_TABS = ['mitre', 'compliance', 'vulnerability'];
-let coverageTabLoaded = { mitre: false, compliance: false, vulnerability: false };
+const COVERAGE_TABS = ['mitre', 'compliance', 'vulnerability', 'intelligence'];
+let coverageTabLoaded = { mitre: false, compliance: false, vulnerability: false, intelligence: false };
 function coverageTabCap(t) { return t.charAt(0).toUpperCase() + t.slice(1); }
 function switchCoverageTab(tab) {
     if (!COVERAGE_TABS.includes(tab)) return;
@@ -268,6 +302,7 @@ function switchCoverageTab(tab) {
         if (tab === 'mitre') initCoverageTab();
         else if (tab === 'compliance') loadComplianceTab();
         else if (tab === 'vulnerability') loadVulnerabilityTab();
+        else if (tab === 'intelligence') loadIntelligenceTab();
     }
     try { localStorage.setItem('microdfir_coverage_active_tab', tab); } catch (e) {}
 }
@@ -821,6 +856,112 @@ function renderVulnerabilityFindings(findings) {
             <td class="text-truncate" style="max-width:220px;" title="${escHtml(f.installed_name || '')}">${escHtml(f.installed_name || '')}</td>
             <td>${escHtml(f.installed_version || '')}</td>
         </tr>`).join('');
+}
+
+// =====================================================================
+// INTELLIGENCE TAB (new -- fuses the existing TI entity catalog with the
+// MITRE coverage tiers computed above; read-only cross-reference only --
+// entity/relationship editing stays on the Threat Entities page)
+// =====================================================================
+let intelEntities = [];
+let intelActiveEntityId = null;
+
+function loadIntelligenceTab() {
+    fetch('/api/ti/entities/coverage-summary').then(r => r.json()).then(d => {
+        intelEntities = d;
+        renderIntelEntityList();
+    }).catch(err => {
+        document.getElementById('intelEntityList').innerHTML = '<div class="text-center text-danger py-4">Error loading threat entities.</div>';
+        console.error('Error loading TI coverage summary:', err);
+    });
+}
+
+function intelEntityTypeBadge(type) {
+    const map = { actor: 'bg-danger', ransomware: 'bg-danger', malware: 'bg-warning text-dark', tool: 'bg-info text-dark' };
+    return `<span class="badge ${map[type] || 'bg-secondary'}">${escHtml(type || '')}</span>`;
+}
+
+function renderIntelEntityList() {
+    const el = document.getElementById('intelEntityList');
+    if (!intelEntities.length) {
+        el.innerHTML = '<div class="text-center text-muted py-4">No threat entities in the catalog yet — add one on the Threat Entities page.</div>';
+        return;
+    }
+    el.innerHTML = intelEntities.map(e => `
+        <div class="intel-entity-row${e.id === intelActiveEntityId ? ' active' : ''}" onclick="openIntelEntity(${e.id})">
+            <div>
+                <div class="intel-entity-name">${escHtml(e.name)} ${intelEntityTypeBadge(e.entity_type)}</div>
+                <div class="text-muted small">${e.technique_count} technique${e.technique_count === 1 ? '' : 's'}</div>
+            </div>
+            <div class="intel-entity-chips">
+                ${e.gap ? `<span class="intel-mini-chip tier-gap">${e.gap} gap</span>` : ''}
+                ${e.inactive ? `<span class="intel-mini-chip tier-inactive">${e.inactive} inactive</span>` : ''}
+                ${e.active ? `<span class="intel-mini-chip tier-active">${e.active} active</span>` : ''}
+                ${e.validated ? `<span class="intel-mini-chip tier-validated">${e.validated} validated</span>` : ''}
+            </div>
+        </div>`).join('');
+}
+
+async function openIntelEntity(id) {
+    intelActiveEntityId = id;
+    renderIntelEntityList();
+    document.getElementById('intelDetailTitle').textContent = 'Loading…';
+    document.getElementById('intelDetailBody').innerHTML = '<div class="text-center text-muted py-4"><i class="fa-solid fa-spinner fa-spin"></i></div>';
+    try {
+        const res = await fetch(`/api/ti/entities/${id}/detail`);
+        const e = await res.json();
+        if (!res.ok) {
+            document.getElementById('intelDetailBody').innerHTML = `<div class="text-danger small">${escHtml(e.error || 'Failed to load entity.')}</div>`;
+            return;
+        }
+        renderIntelEntityDetail(e);
+    } catch (err) {
+        document.getElementById('intelDetailBody').innerHTML = `<div class="text-danger small">Error: ${escHtml(String(err))}</div>`;
+        console.error('Error loading entity detail:', err);
+    }
+}
+
+const INTEL_TIER_SORT_RANK = { validated: 0, active: 1, inactive: 2, gap: 3, unmapped: 4 };
+
+function renderIntelEntityDetail(e) {
+    document.getElementById('intelDetailTitle').innerHTML = `${escHtml(e.name)} ${intelEntityTypeBadge(e.entity_type)}`;
+    const techRows = (e.techniques || []).slice().sort((a, b) =>
+        (INTEL_TIER_SORT_RANK[a.tier] ?? 5) - (INTEL_TIER_SORT_RANK[b.tier] ?? 5)
+    ).map(t => `
+        <tr>
+            <td class="font-monospace small">T${escHtml(t.id)}</td>
+            <td class="small">${escHtml(t.name || '')}</td>
+            <td class="small text-muted">${escHtml(t.tactic_label || '')}</td>
+            <td><span class="badge tier-${t.tier}">${escHtml(t.tier)}</span></td>
+            <td class="small text-muted">${t.tier === 'unmapped' ? '—' : `${t.count} enabled / ${t.disabled_count} disabled${t.validated_count ? ` / ${t.validated_count} validated` : ''}`}</td>
+        </tr>`).join('');
+    const iocRows = (e.matched_iocs || []).map(i => `
+        <tr>
+            <td class="font-monospace small">${escHtml(i.pattern)}</td>
+            <td class="small">${escHtml(i.ioc_type || '')}</td>
+            <td class="small text-muted">${escHtml(i.source_name || 'Unknown')}</td>
+            <td class="small">${i.sighting_count > 0 ? `<span class="badge bg-warning text-dark">${i.sighting_count}</span>` : '<span class="text-muted">—</span>'}</td>
+        </tr>`).join('');
+    document.getElementById('intelDetailBody').innerHTML = `
+        ${(e.aliases || []).length ? `<div class="text-muted small mb-2">aka ${escHtml(e.aliases.join(', '))}</div>` : ''}
+        ${e.confidence ? `<div class="small mb-2"><span class="badge bg-secondary">${escHtml(e.confidence)}</span>${e.attribution_note ? ` <span class="text-muted">— ${escHtml(e.attribution_note)}</span>` : ''}</div>` : ''}
+        <p class="small">${escHtml(e.description || '')}</p>
+        <h6 class="small text-uppercase text-muted">Known Techniques (${(e.techniques || []).length})</h6>
+        <div class="table-responsive mb-3" style="max-height:260px; overflow-y:auto;">
+            <table class="table table-dark table-sm mb-0">
+                <thead><tr><th>ID</th><th>Technique</th><th>Tactic</th><th>Coverage</th><th>Detail</th></tr></thead>
+                <tbody>${techRows || '<tr><td colspan="5" class="text-center text-muted small py-2">No techniques listed for this entity.</td></tr>'}</tbody>
+            </table>
+        </div>
+        <h6 class="small text-uppercase text-muted">Matched IOCs (${(e.matched_iocs || []).length})</h6>
+        <div class="table-responsive" style="max-height:220px; overflow-y:auto;">
+            <table class="table table-dark table-sm mb-0">
+                <thead><tr><th>Indicator</th><th>Type</th><th>Source</th><th>Sightings</th></tr></thead>
+                <tbody>${iocRows || '<tr><td colspan="4" class="text-center text-muted small py-2">No matching IOCs in the currently-synced set.</td></tr>'}</tbody>
+            </table>
+        </div>
+        <div class="text-end mt-2"><a href="/threat-intel?tab=entities&entity=${e.id}" target="_blank" class="small">Edit entity / manage relationships on Threat Entities <i class="fa-solid fa-arrow-up-right-from-square ms-1"></i></a></div>
+    `;
 }
 
 // =====================================================================
