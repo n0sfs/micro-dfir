@@ -236,14 +236,8 @@
             <button class="btn btn-sm bg-dark text-light border-secondary text-start d-flex justify-content-between align-items-center dropdown-toggle w-100" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" title="Filter logs by one or more Windows event channels">
                 <span id="appFilterLabel" class="text-truncate">All Apps</span>
             </button>
-            <ul class="dropdown-menu dropdown-menu-dark shadow" style="min-width: 200px;">
-                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input app-chk" type="checkbox" value="Security" id="app_sec" onchange="updateFilters()"><label class="form-check-label w-100" for="app_sec">Windows Security</label></div></li>
-                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input app-chk" type="checkbox" value="System" id="app_sys" onchange="updateFilters()"><label class="form-check-label w-100" for="app_sys">Windows System</label></div></li>
-                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input app-chk" type="checkbox" value="Application" id="app_app" onchange="updateFilters()"><label class="form-check-label w-100" for="app_app">Windows Application</label></div></li>
-                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input app-chk" type="checkbox" value="Sysmon" id="app_sysmon" onchange="updateFilters()"><label class="form-check-label w-100" for="app_sysmon">Windows Sysmon</label></div></li>
-                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input app-chk" type="checkbox" value="PowerShell" id="app_ps" onchange="updateFilters()"><label class="form-check-label w-100" for="app_ps">Windows PowerShell</label></div></li>
-                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input app-chk" type="checkbox" value="Windows Defender" id="app_defender" onchange="updateFilters()"><label class="form-check-label w-100" for="app_defender">Windows Defender</label></div></li>
-                <li class="px-2 py-1"><div class="form-check"><input class="form-check-input app-chk" type="checkbox" value="Windows" id="app_windows" onchange="updateFilters()"><label class="form-check-label w-100" for="app_windows">Windows (other/unlabeled)</label></div></li>
+            <ul class="dropdown-menu dropdown-menu-dark shadow" id="appFilterMenu" style="min-width: 200px;">
+                <li class="px-2 py-1 text-muted small">Loading&hellip;</li>
             </ul>
         </div>
     </div>
@@ -2210,6 +2204,23 @@ function deleteField(key) {
 
 const TYPE_FILTER_LABELS = { log: 'Logs', alert: 'Alerts', anomaly: 'Anomalies' };
 
+// Log Source / App filter menu, built from what's actually being ingested
+// (GET /api/logs/apps -> DISTINCT live_logs.app) instead of a hardcoded Windows-only
+// list -- real case, since app IN (?) filtering downstream is case-sensitive.
+function buildAppFilterMenu(apps) {
+    const menu = document.getElementById('appFilterMenu');
+    const checked = new Set(Array.from(document.querySelectorAll('.app-chk:checked')).map(c => c.value));
+    menu.innerHTML = apps.length
+        ? apps.map((a, i) => `<li class="px-2 py-1"><div class="form-check"><input class="form-check-input app-chk" type="checkbox" value="${escHtml(a)}" id="app_chk_${i}" ${checked.has(a) ? 'checked' : ''} onchange="updateFilters()"><label class="form-check-label w-100" for="app_chk_${i}">${escHtml(a)}</label></div></li>`).join('')
+        : '<li class="px-2 py-1 text-muted small">No log sources ingested yet.</li>';
+}
+
+function loadAppFacets() {
+    fetch('/api/logs/apps').then(r => r.json()).then(data => {
+        buildAppFilterMenu(data.apps || []);
+    }).catch(err => console.error('Error loading log source facets:', err));
+}
+
 function updateFilters() {
     let apps = Array.from(document.querySelectorAll('.app-chk:checked')).map(c => c.value);
     document.getElementById('appFilterLabel').innerText = apps.length > 0 ? apps.join(', ') : 'All Apps';
@@ -2240,6 +2251,7 @@ function initSearchTab() {
     loadFieldPicklist();
     renderColumnPicker();
     loadSavedSearches();
+    loadAppFacets();
     renderLogsTableHead();
     loadDashboardData();
 }
