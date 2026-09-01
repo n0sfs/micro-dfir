@@ -6,6 +6,7 @@
         <div class="metric-box"><div class="metric-value">{% if sca.total %}{{ sca.passed }} / {{ sca.total }}{% else %}&mdash;{% endif %}</div><div>Hardening Checks Passed</div></div>
         <div class="metric-box"><div class="metric-value">{{ assessed_hosts }} / {{ total_hosts }}</div><div>Endpoints Assessed</div></div>
         <div class="metric-box"><div class="metric-value">{{ total_detections }}</div><div>Detections (30 days)</div></div>
+        <div class="metric-box"><div class="metric-value">{{ log_volume_total }}</div><div>Log Events (30 days)</div></div>
     </div>
     <p style="margin-top:20px; font-size:9pt; color:#666;">This report is scoped to {{ framework_label }} only: which detection rules are tagged and enabled for it, whether those rules have actually produced alerts, whether the endpoint hardening state {{ framework_label }} calls for is verified true across the fleet, and what fraction of the enrolled estate that hardening picture actually reflects. It is a snapshot of this deployment's own detection/configuration posture, not an independent compliance attestation or audit finding.</p>
 
@@ -42,6 +43,23 @@
     </table>
     {% elif sca.total %}<p>All hardening checks relevant to {{ framework_label }} are currently passing.</p>
     {% else %}<p>No SCA hardening check results are relevant to {{ framework_label }} yet.</p>{% endif %}
+
+    <h2 class="section-title">Log Volume</h2>
+    <p style="font-size:9pt; color:#666;">Raw log volume from sources {{ framework_label }}'s tagged rules depend on{% if log_volume_apps %} ({{ log_volume_apps|join(', ') }}){% endif %} over the last 30 days &mdash; evidence that the underlying data is actually being collected, independent of whether any rule has fired on it.</p>
+    {% if log_volume_by_app %}
+    <table>
+        <thead><tr><th>Log Source</th><th>Events (30 days)</th></tr></thead>
+        <tbody>
+        {% for row in log_volume_by_app %}
+            <tr>
+                <td>{{ row.app }}</td>
+                <td>{{ row.count }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% elif rules %}<p>None of the log sources {{ framework_label }}'s tagged rules depend on are currently ingestible by this appliance.</p>
+    {% else %}<p>No rules are tagged for {{ framework_label }} yet, so no relevant log sources are known.</p>{% endif %}
 
     <h2 class="section-title">Recent Detections{% if detections_truncated %} (most recent {{ row_cap }} of {{ total_detections }}){% endif %}</h2>
     {% if detections %}
