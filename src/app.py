@@ -1531,6 +1531,18 @@ def api_ti_entity_full_detail(eid):
         return jsonify({'error': 'Entity not found'}), 404
     entity = _entity_row_to_dict(row)
 
+    # Coverage-tier annotation per technique -- a fresh _build_mitre_coverage() call, same
+    # cost api_compliance_nist_800_53_controls already pays per-request (this endpoint
+    # opens per-entity-click, not a bulk listing, so no caching layer needed here either).
+    # Skip _build_actor_technique_index(db) (the 3rd param) for the exact reason that
+    # endpoint already documents -- nothing downstream of this route reads a technique's
+    # threat_actors field. Fixed 30-day validated window, matching /api/compliance/
+    # coverage's own fixed-window precedent (this tab has no range selector in the UI).
+    rules = _get_rules_cache(db)
+    validated = _get_validated_technique_counts(db, 30)
+    mitre_result = _build_mitre_coverage(rules, validated, {})
+    tier_lookup = _technique_tier_lookup(mitre_result)
+
     names = {entity['name']} | set(entity['aliases'])
     conditions, cond_params = [], []
     for n in names:
@@ -1578,7 +1590,14 @@ def api_ti_entity_full_detail(eid):
     techniques = []
     for tid in entity['techniques']:
         tname, tactic = mitre_lookup(tid)
-        techniques.append({'id': tid, 'name': tname, 'tactic': tactic, 'tactic_label': TACTIC_LABELS.get(tactic, tactic)})
+        tier_info = tier_lookup.get(tid)
+        techniques.append({
+            'id': tid, 'name': tname, 'tactic': tactic, 'tactic_label': TACTIC_LABELS.get(tactic, tactic),
+            'tier': tier_info['tier'] if tier_info else 'unmapped',
+            'count': tier_info['count'] if tier_info else 0,
+            'validated_count': tier_info['validated_count'] if tier_info else 0,
+            'disabled_count': tier_info['disabled_count'] if tier_info else 0,
+        })
 
     # Entity-to-entity links are stored as one directed row (entity_id -> target_id),
     # but shown on BOTH entities' detail pages -- the UNION's second branch is this
@@ -1599,6 +1618,37 @@ def api_ti_entity_full_detail(eid):
     ).fetchall()]
 
     return jsonify({**entity, 'techniques': techniques, 'matched_iocs': matched_iocs, 'relationships': relationships, 'last_seen_active': last_seen_active})
+
+# Per-entity tier-bucket counts (gap/inactive/active/validated/unmapped technique counts),
+# for the Coverage > Intelligence tab's master list -- lets it sort by exposure (highest
+# gap-count first) without opening every entity's full /detail endpoint. Deliberately NOT
+# added to plain GET /api/ti/entities above (used elsewhere, e.g. the Threat Entities
+# table in templates/threat_intel.html) so callers that don't need this extra
+# _build_mitre_coverage() cost never pay it.
+@app.route('/api/ti/entities/coverage-summary', methods=['GET'])
+@login_required
+def api_ti_entities_coverage_summary():
+    db = get_db()
+    rules = _get_rules_cache(db)
+    validated = _get_validated_technique_counts(db, 30)
+    # One shared _build_mitre_coverage()/_technique_tier_lookup() pair, reused across
+    # every entity below -- not one call per entity. Same {} skip of
+    # _build_actor_technique_index(db) as api_ti_entity_full_detail above.
+    mitre_result = _build_mitre_coverage(rules, validated, {})
+    tier_lookup = _technique_tier_lookup(mitre_result)
+
+    out = []
+    for e in _get_ti_entities(db):
+        counts = {'gap': 0, 'inactive': 0, 'active': 0, 'validated': 0, 'unmapped': 0}
+        for tid in e['techniques']:
+            tier_info = tier_lookup.get(tid)
+            counts[tier_info['tier'] if tier_info else 'unmapped'] += 1
+        out.append({
+            'id': e['id'], 'name': e['name'], 'entity_type': e['entity_type'],
+            'technique_count': len(e['techniques']), **counts,
+        })
+    out.sort(key=lambda e: (-e['gap'], -e['technique_count'], e['name']))
+    return jsonify(out)
 
 # A3: manual entity<->target links -- lets an analyst tie a specific alert/UEBA
 # event/case/IOC to an entity when the automatic name/alias regex match (used by
@@ -2976,6 +3026,30 @@ def _build_mitre_coverage(rules, validated, actor_techniques):
         'total_techniques': total_techniques,
         'total_validated': total_validated,
     }
+
+# Flattens _build_mitre_coverage()'s tactic-grouped technique tiers into a single
+# technique_id -> {tier, count, validated_count, disabled_count} dict. A technique id can
+# legitimately appear under more than one tactic (e.g. T1078's four internal
+# tactic-variants '1078'/'1078b'/'1078c'/'1078d', all displaying as '1078' via
+# mitre_attack._display_id) with a DIFFERENT tier per tactic, since enabled/disabled/
+# validated counts are tracked per (tactic, tid). Resolved here via real rank-compared
+# "best tier wins" (reusing _NIST_TIER_RANK) -- NOT the same as _build_nist_800_53_
+# coverage()'s own tech_tier dict above, which just overwrites last-tactic-wins; this is
+# the shape that dict would need to actually mean "best tier wins" per technique id.
+# A technique id never appearing in this lookup at all means the curated ATT&CK table
+# doesn't track it for coverage purposes -- callers should treat a miss as 'unmapped', a
+# distinct, honest state from 'gap' (tracked, zero rule coverage).
+def _technique_tier_lookup(mitre_result):
+    tier = {}
+    for tactic in mitre_result['tactics']:
+        for t in tactic['techniques']:
+            current = tier.get(t['id'])
+            if current is None or _NIST_TIER_RANK[t['tier']] > _NIST_TIER_RANK[current['tier']]:
+                tier[t['id']] = {
+                    'tier': t['tier'], 'count': t['count'],
+                    'validated_count': t['validated_count'], 'disabled_count': t['disabled_count'],
+                }
+    return tier
 
 @app.route('/api/mitre/coverage', methods=['GET'])
 @login_required
