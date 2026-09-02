@@ -1331,7 +1331,8 @@ function showLogDetail(idx) {
             </div>
             <button type="button" class="btn btn-sm btn-outline-primary" onclick="saveTriage(${log.id})"><i class="fa-solid fa-save me-1"></i>Save</button>
         </div>
-        <div id="triageMsg" class="small mb-2" style="display:none;"></div>` : ''}
+        <div id="triageMsg" class="small mb-2" style="display:none;"></div>
+        <div id="fpExclusionSuggest"></div>` : ''}
         ${showTriggeringEvent ? `
         <label class="form-label small text-muted mb-1">Triggering Log Event</label>
         <dl class="row mb-2 small">
@@ -1378,8 +1379,83 @@ function saveTriage(aid) {
             const log = currentLogs.find(l => l.type === 'alert' && String(l.id) === String(aid));
             if (log) { log.status = payload.status; log.assignee = payload.assignee || null; }
             renderLogsTableRows(currentLogs);
+            const suggestWrap = document.getElementById('fpExclusionSuggest');
+            if (suggestWrap) {
+                suggestWrap.innerHTML = (payload.status === 'false_positive' && log) ? renderFpExclusionSuggestion(log) : '';
+            }
         }
     }).catch(err => { msg.style.display = 'block'; msg.className = 'small mb-2 text-danger'; msg.innerText = 'Error: ' + err; });
+}
+
+// Field->value map for pre-filling a quick exclusion from the alert just marked a false
+// positive -- reuses TUNE_FIELDS/TUNE_OPS (the same catalogs the Detection Tuning modal's
+// own exclusion form uses) rather than a new one.
+function fpFieldValue(field, log) {
+    if (field === 'Host') return log.host || '';
+    if (field === 'User') return log.username || '';
+    if (field === 'SourceIp') return log.source_ip || '';
+    if (field === 'DestinationIp') return log.destination_ip || '';
+    if (field === 'Channel') return log.log_app || '';
+    if (field === 'EventID') return log.log_event_id || '';
+    return (log.message || '').slice(0, 120);
+}
+
+let fpSuggestLog = null;
+
+function renderFpExclusionSuggestion(log) {
+    if (!log.rule_id || !IS_ADMIN) return '';
+    fpSuggestLog = log;
+    const defaultField = log.host ? 'Host' : (log.username ? 'User' : (log.source_ip ? 'SourceIp' : 'Message'));
+    return `<div class="border border-secondary rounded p-2 mb-2 small" id="fpExclusionCard">
+        <div class="text-muted mb-1">Suppress future alerts like this?</div>
+        <div class="d-flex align-items-end gap-2 flex-wrap">
+            <div>
+                <label class="form-label small text-muted mb-1">Field</label>
+                <select id="fpExclField" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:150px;" onchange="document.getElementById('fpExclValue').value = fpFieldValue(this.value, fpSuggestLog);">
+                    ${TUNE_FIELDS.map(f => `<option value="${f.value}" ${f.value === defaultField ? 'selected' : ''}>${f.label}</option>`).join('')}
+                </select>
+            </div>
+            <div>
+                <label class="form-label small text-muted mb-1">Operator</label>
+                <select id="fpExclOp" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:110px;">
+                    ${TUNE_OPS.map(o => `<option value="${o.value}">${o.label}</option>`).join('')}
+                </select>
+            </div>
+            <div>
+                <label class="form-label small text-muted mb-1">Value</label>
+                <input type="text" id="fpExclValue" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:180px;" value="${escAttr(fpFieldValue(defaultField, log))}">
+            </div>
+            <div>
+                <label class="form-label small text-muted mb-1">Description</label>
+                <input type="text" id="fpExclDescription" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:200px;" value="${escAttr('False positive: ' + (log.app || ''))}">
+            </div>
+            <button type="button" class="btn btn-sm btn-outline-primary" onclick="addFpExclusion(${log.rule_id})">Add Exclusion</button>
+        </div>
+        <div id="fpExclMsg" class="small mt-1" style="display:none;"></div>
+    </div>`;
+}
+
+function addFpExclusion(ruleId) {
+    const msg = document.getElementById('fpExclMsg');
+    const payload = {
+        field: document.getElementById('fpExclField').value,
+        operator: document.getElementById('fpExclOp').value,
+        value: document.getElementById('fpExclValue').value.trim(),
+        description: document.getElementById('fpExclDescription').value.trim()
+    };
+    if (!payload.value) {
+        msg.style.display = 'block'; msg.className = 'small mt-1 text-danger'; msg.innerText = 'A value is required.'; return;
+    }
+    fetch(`/api/rules/${ruleId}/exclusions`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        const card = document.getElementById('fpExclusionCard');
+        if (ok && card) {
+            card.innerHTML = '<div class="text-success"><i class="fa-solid fa-check me-1"></i>Exclusion added.</div>';
+        } else {
+            msg.style.display = 'block'; msg.className = 'small mt-1 text-danger'; msg.innerText = data.error || 'Failed to add exclusion.';
+        }
+    }).catch(err => { msg.style.display = 'block'; msg.className = 'small mt-1 text-danger'; msg.innerText = 'Error: ' + err; });
 }
 
 // Only alerts and UEBA anomalies have a stable id to link (see item_id in

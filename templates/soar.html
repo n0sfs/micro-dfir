@@ -311,6 +311,7 @@
                             <option value="assignee_changed">Assignee changed</option>
                             <option value="scheduled">Scheduled (sweeps matching cases on an interval)</option>
                             <option value="alert_created">Alert created</option>
+                            <option value="sla_breached">SLA breached</option>
                         </select>
                     </div>
                 </div>
@@ -523,7 +524,7 @@ let editingCustomActionId = null;
 const TRIGGER_LABELS = {
     case_created: 'Case created', status_changed: 'Status changed',
     queue_changed: 'Queue changed', assignee_changed: 'Assignee changed',
-    scheduled: 'Scheduled', alert_created: 'Alert created'
+    scheduled: 'Scheduled', alert_created: 'Alert created', sla_breached: 'SLA breached'
 };
 
 // ---- Per-column filters on the Playbooks table -- same th-icon-btn/dropdown pattern as
@@ -1190,7 +1191,7 @@ function renderPlaybooksTable() {
             <td class="small">${TRIGGER_LABELS[p.trigger_event] || escHtml(p.trigger_event)}</td>
             <td class="small">${conditionSummary(p)}</td>
             <td class="small">${p.actions.length} step${p.actions.length === 1 ? '' : 's'}</td>
-            <td class="small"><a href="#" onclick="showPlaybookRuns(${p.id}, '${escJs(p.name)}'); return false;">${p.run_count}</a></td>
+            <td class="small"><a href="#" onclick="showPlaybookRuns(${p.id}, '${escJs(p.name)}'); return false;">${p.run_count}</a>${p.run_count > 0 ? ` <span class="badge bg-secondary" title="${p.success_count} of ${p.run_count} succeeded">${Math.round(p.success_count / p.run_count * 100)}%</span>` : ''}</td>
             <td>
                 ${CAN_MANAGE_PLAYBOOKS
                     ? `<div class="form-check form-switch mb-0"><input class="form-check-input" type="checkbox" role="switch" ${p.enabled ? 'checked' : ''} onchange="togglePlaybook(${p.id}, this.checked)"></div>`

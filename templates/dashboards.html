@@ -813,10 +813,11 @@ function renderCaseStatsWidget(container, widgetId, config) {
             </span>
         </div>
         <div class="row g-2 text-center">
-            <div class="col-3"><div class="fs-4 fw-bold widget-open">&mdash;</div><div class="small text-muted">Open Cases</div></div>
-            <div class="col-3"><div class="fs-4 fw-bold text-danger widget-breached">&mdash;</div><div class="small text-muted">SLA Breached</div></div>
-            <div class="col-3"><div class="fs-4 fw-bold widget-avg-close">&mdash;</div><div class="small text-muted">Avg Time to Close</div></div>
-            <div class="col-3"><div class="fs-4 fw-bold widget-closed-range">&mdash;</div><div class="small text-muted">Closed (range)</div></div>
+            <div class="col"><div class="fs-4 fw-bold widget-open">&mdash;</div><div class="small text-muted">Open Cases</div></div>
+            <div class="col"><div class="fs-4 fw-bold text-danger widget-breached">&mdash;</div><div class="small text-muted">SLA Breached</div></div>
+            <div class="col"><div class="fs-4 fw-bold widget-avg-close">&mdash;</div><div class="small text-muted">Avg Time to Close</div></div>
+            <div class="col"><div class="fs-4 fw-bold widget-avg-tta">&mdash;</div><div class="small text-muted">Avg Time to Acknowledge</div></div>
+            <div class="col"><div class="fs-4 fw-bold widget-closed-range">&mdash;</div><div class="small text-muted">Closed (range)</div></div>
         </div>`;
     loadCaseStatsInto(container, config);
 }
@@ -826,6 +827,7 @@ function loadCaseStatsInto(container, config) {
         container.querySelector('.widget-open').innerText = d.open_count;
         container.querySelector('.widget-breached').innerText = d.sla_breached_count;
         container.querySelector('.widget-avg-close').innerText = hoursLabel(d.avg_close_hours);
+        container.querySelector('.widget-avg-tta').innerText = hoursLabel(d.avg_tta_hours);
         container.querySelector('.widget-closed-range').innerText = d.closed_in_range_count;
         container.querySelector('.widget-sla-display').innerText = d.sla_target_hours;
         container.querySelector('.widget-sla-input').value = d.sla_target_hours;
