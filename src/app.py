@@ -7672,6 +7672,28 @@ def migrate_agent_offline_alerts():
     except Exception:
         pass
 
+def migrate_sigma_aggregation():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS sigma_aggregation_matches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_id INTEGER NOT NULL,
+            group_value TEXT,
+            matched_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_sigma_agg_matches_rule ON sigma_aggregation_matches(rule_id, matched_at)')
+        conn.execute('''CREATE TABLE IF NOT EXISTS sigma_aggregation_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_id INTEGER NOT NULL,
+            group_value TEXT,
+            alerted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_sigma_agg_alerts_rule ON sigma_aggregation_alerts(rule_id, group_value, alerted_at)')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_alerts_triage():
     # Adds the triage lifecycle (status + assignee) on top of the existing binary
     # acknowledged flag -- acknowledged is left untouched (still drives the Home widget's
@@ -12273,6 +12295,7 @@ migrate_alerts_enrichment()
 migrate_alerts_dedup_columns()
 migrate_alert_escalations()
 migrate_agent_offline_alerts()
+migrate_sigma_aggregation()
 migrate_sigma_rules_columns()
 migrate_rule_tuning()
 migrate_rule_autocase()
