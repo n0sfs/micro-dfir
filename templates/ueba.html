@@ -470,15 +470,21 @@
             <hr class="border-secondary my-4">
 
             <h6 class="text-info mb-3">Identities</h6>
-            <p class="text-muted small mb-3">Mark a user as privileged so their UEBA risk score is weighted up (&times;1.5) -- an admin account is a higher-value target than a standard one.</p>
+            <p class="text-muted small mb-3">Mark a user as privileged so their UEBA risk score is weighted up (&times;1.5) -- an admin account is a higher-value target than a standard one. Mark someone as <strong>watched</strong> to keep them on the standing list below and on the Insider Threat dashboard, independent of whatever their score happens to be this week -- a real investigation often runs for weeks past any one spike.</p>
             {% if has_permission('assets.manage') %}
-            <div class="row g-2 mb-3" style="max-width:640px;">
-                <div class="col-md-4"><input type="text" id="newIdentityUsername" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Username"></div>
+            <div class="row g-2 mb-3" style="max-width:760px;">
+                <div class="col-md-3"><input type="text" id="newIdentityUsername" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Username"></div>
                 <div class="col-md-3"><input type="text" id="newIdentityDepartment" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Department (optional)"></div>
-                <div class="col-md-3 d-flex align-items-center">
+                <div class="col-md-2 d-flex align-items-center">
                     <div class="form-check">
                         <input class="form-check-input" type="checkbox" id="newIdentityPrivileged">
                         <label class="form-check-label small" for="newIdentityPrivileged">Privileged</label>
+                    </div>
+                </div>
+                <div class="col-md-2 d-flex align-items-center">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="newIdentityWatched">
+                        <label class="form-check-label small" for="newIdentityWatched">Watch</label>
                     </div>
                 </div>
                 <div class="col-md-2"><button class="btn btn-outline-primary btn-sm w-100" onclick="addIdentity()"><i class="fa-solid fa-plus me-1"></i>Add</button></div>
@@ -487,8 +493,8 @@
             {% endif %}
             <div class="table-responsive">
                 <table class="table table-dark table-sm align-middle mb-0">
-                    <thead><tr><th>Username</th><th>Department</th><th>Privileged</th><th></th></tr></thead>
-                    <tbody id="identitiesTableBody"><tr><td colspan="4" class="text-center text-muted py-3">Loading…</td></tr></tbody>
+                    <thead><tr><th>Username</th><th>Department</th><th>Privileged</th><th>Watch</th><th>Reason</th><th></th></tr></thead>
+                    <tbody id="identitiesTableBody"><tr><td colspan="6" class="text-center text-muted py-3">Loading…</td></tr></tbody>
                 </table>
             </div>
         </div>
@@ -1844,7 +1850,7 @@ function loadIdentities() {
         updateAssetIdentityEmptyBanner();
         const tbody = document.getElementById('identitiesTableBody');
         if (!rows.length) {
-            tbody.innerHTML = '<tr><td colspan="4" class="text-muted small">No identities yet. Fill in the form above to flag a privileged user.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="6" class="text-muted small">No identities yet. Fill in the form above to flag a privileged or watched user.</td></tr>';
             return;
         }
         tbody.innerHTML = rows.map(i => `<tr>
@@ -1853,6 +1859,12 @@ function loadIdentities() {
             <td>${ASSET_IS_ADMIN
                 ? `<input type="checkbox" class="form-check-input" ${i.privileged ? 'checked' : ''} onchange="updateIdentityPrivileged(${i.id}, this.checked)">`
                 : (i.privileged ? '<span class="badge bg-warning text-dark">Privileged</span>' : '<span class="badge bg-secondary">Standard</span>')}</td>
+            <td>${ASSET_IS_ADMIN
+                ? `<input type="checkbox" class="form-check-input" ${i.watched ? 'checked' : ''} onchange="updateIdentityWatched(${i.id}, this.checked)" title="${i.watched && i.watched_at ? 'Watched since ' + escHtml(i.watched_at) + (i.watched_by ? ' by ' + escHtml(i.watched_by) : '') : 'Not currently watched'}">`
+                : (i.watched ? '<span class="badge bg-danger">Watched</span>' : '')}</td>
+            <td>${ASSET_IS_ADMIN
+                ? `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" style="min-width:180px;" value="${escHtml(i.watch_reason || '')}" placeholder="Why this person is watched" onblur="updateIdentityWatchReason(${i.id}, this.value)" onkeydown="if(event.key==='Enter') this.blur()">`
+                : `<span class="small text-muted">${escHtml(i.watch_reason || '')}</span>`}</td>
             <td>${ASSET_IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" title="Delete identity" onclick="deleteIdentity(${i.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
         </tr>`).join('');
     }).catch(err => {
@@ -1866,7 +1878,8 @@ function addIdentity() {
     const payload = {
         username: document.getElementById('newIdentityUsername').value.trim(),
         department: document.getElementById('newIdentityDepartment').value.trim(),
-        privileged: document.getElementById('newIdentityPrivileged').checked
+        privileged: document.getElementById('newIdentityPrivileged').checked,
+        watched: document.getElementById('newIdentityWatched').checked
     };
     const errBox = document.getElementById('identityError');
     errBox.style.display = 'none';
@@ -1880,6 +1893,7 @@ function addIdentity() {
             document.getElementById('newIdentityUsername').value = '';
             document.getElementById('newIdentityDepartment').value = '';
             document.getElementById('newIdentityPrivileged').checked = false;
+            document.getElementById('newIdentityWatched').checked = false;
             loadIdentities();
         } else {
             errBox.innerText = data.error || 'Failed to add identity.'; errBox.style.display = 'block';
@@ -1890,6 +1904,20 @@ function addIdentity() {
 function updateIdentityPrivileged(iid, privileged) {
     fetch(`/api/identities/${iid}`, {
         method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({privileged})
+    }).then(() => loadIdentities())
+      .catch(err => toast('Error updating identity: ' + err, 'danger'));
+}
+
+function updateIdentityWatched(iid, watched) {
+    fetch(`/api/identities/${iid}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({watched})
+    }).then(() => loadIdentities())
+      .catch(err => toast('Error updating identity: ' + err, 'danger'));
+}
+
+function updateIdentityWatchReason(iid, watch_reason) {
+    fetch(`/api/identities/${iid}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({watch_reason})
     }).then(() => loadIdentities())
       .catch(err => toast('Error updating identity: ' + err, 'danger'));
 }

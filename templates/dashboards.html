@@ -456,6 +456,41 @@ function renderTopRiskWidget(container, widgetId, config) {
     }).catch(err => console.error('Error loading top risk entities:', err));
 }
 
+// Not range-scoped like the other trend/summary widgets -- who's under watch is a
+// standing list independent of the dashboard's date range, same reasoning
+// /api/dashboards/watchlist itself documents.
+function renderWatchlistWidget(container, widgetId, config) {
+    container.innerHTML = `
+        <table class="table table-dark table-hover table-sm align-middle mb-0">
+            <thead><tr><th>Username</th><th>Department</th><th>Priority</th><th>Reason</th></tr></thead>
+            <tbody><tr><td colspan="4" class="text-center text-muted py-3">Loading…</td></tr></tbody>
+        </table>`;
+    fetch('/api/dashboards/watchlist').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(d => {
+        const body = container.querySelector('tbody');
+        if (!d.watchlist.length) {
+            body.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">No one is currently watched -- add someone on UEBA &gt; Asset &amp; Identity.</td></tr>';
+            return;
+        }
+        body.innerHTML = d.watchlist.map(w => {
+            const priorityDisplay = w.priority_score != null ? w.priority_score.toFixed(1) : '—';
+            const tierHtml = w.tier ? ` <span class="badge ${tierBadgeClass(w.tier)}">${escHtml(w.tier)}</span>` : '';
+            return `
+            <tr title="${escHtml(w.watched_at ? 'Watched since ' + w.watched_at + (w.watched_by ? ' by ' + w.watched_by : '') : '')}">
+                <td class="small">${entityIcon('user')}${escHtml(w.username)}</td>
+                <td class="small text-muted">${escHtml(w.department || '')}</td>
+                <td>${priorityDisplay}${w.priority_score != null ? '<span class="text-muted small">/10</span>' : ''}${tierHtml}</td>
+                <td class="small text-muted">${escHtml(w.watch_reason || '')}</td>
+            </tr>`;
+        }).join('');
+    }).catch(err => {
+        console.error('Error loading watchlist:', err);
+        container.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load.</div>';
+    });
+}
+
 function renderAnomalyRulesWidget(container, widgetId, config) {
     container.innerHTML = '<canvas></canvas>';
     const canvas = container.querySelector('canvas');
@@ -1787,6 +1822,7 @@ const WIDGET_REGISTRY = {
     app_log_search:    { label: 'Log Search', icon: 'fa-magnifying-glass-chart', category: 'app', defaultW: 12, defaultH: 9, render: renderLogSearchWidget },
     app_threat_hunter: { label: 'Threat Hunter', icon: 'fa-magnifying-glass-arrow-right', category: 'app', defaultW: 4, defaultH: 3, render: renderThreatHunterWidget },
     app_edr_actions:   { label: 'EDR Response Actions', icon: 'fa-laptop-medical', category: 'app', defaultW: 6, defaultH: 5, render: renderEdrActionsWidget },
+    app_watchlist:     { label: 'Watchlist', icon: 'fa-eye', category: 'app', defaultW: 12, defaultH: 4, render: renderWatchlistWidget },
     // Ported from the retired standalone Home page.
     app_stat_tiles:    { label: 'Stat Tiles', icon: 'fa-gauge', category: 'app', defaultW: 12, defaultH: 2, render: renderStatTilesWidget },
     // User-built widget: opens a config-builder modal instead of adding with a default,

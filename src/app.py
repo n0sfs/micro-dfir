@@ -4036,7 +4036,10 @@ def api_asset_detail(aid):
 def api_identities():
     db = get_db()
     if request.method == 'GET':
-        rows = db.execute("SELECT id, username, department, privileged, created_by, created_at FROM identities ORDER BY username").fetchall()
+        rows = db.execute(
+            "SELECT id, username, department, privileged, watched, watch_reason, watched_at, watched_by, "
+            "created_by, created_at FROM identities ORDER BY username"
+        ).fetchall()
         return jsonify([dict(r) for r in rows])
 
     err = require_permission('assets.manage')
@@ -4045,13 +4048,18 @@ def api_identities():
     username = (data.get('username') or '').strip()
     department = (data.get('department') or '').strip()
     privileged = bool(data.get('privileged'))
+    watched = bool(data.get('watched'))
+    watch_reason = (data.get('watch_reason') or '').strip()
     if not username:
         return jsonify({"error": "Username is required"}), 400
     if db.execute("SELECT 1 FROM identities WHERE username = ?", (username,)).fetchone():
         return jsonify({"error": f"'{username}' already has an identity entry -- edit it instead of adding a duplicate"}), 400
     db.execute(
-        "INSERT INTO identities (username, department, privileged, created_by) VALUES (?, ?, ?, ?)",
-        (username, department, privileged, current_user.username)
+        "INSERT INTO identities (username, department, privileged, watched, watch_reason, watched_at, watched_by, created_by) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (username, department, privileged, watched, watch_reason,
+         datetime.now().strftime('%Y-%m-%d %H:%M:%S') if watched else None,
+         current_user.username if watched else None, current_user.username)
     )
     db.commit()
     return jsonify({"status": "success"})
@@ -4062,7 +4070,8 @@ def api_identity_detail(iid):
     err = require_permission('assets.manage')
     if err: return err
     db = get_db()
-    if not db.execute("SELECT 1 FROM identities WHERE id = ?", (iid,)).fetchone():
+    existing = db.execute("SELECT department, privileged, watched, watch_reason FROM identities WHERE id = ?", (iid,)).fetchone()
+    if not existing:
         return jsonify({"error": "Identity not found"}), 404
 
     if request.method == 'DELETE':
@@ -4071,13 +4080,32 @@ def api_identity_detail(iid):
         return jsonify({"ok": 1})
 
     data = request.get_json() or {}
-    existing = db.execute("SELECT department, privileged FROM identities WHERE id = ?", (iid,)).fetchone()
     department = data['department'].strip() if 'department' in data else (existing['department'] or '')
     privileged = bool(data['privileged']) if 'privileged' in data else bool(existing['privileged'])
-    db.execute(
-        "UPDATE identities SET department = ?, privileged = ? WHERE id = ?",
-        (department, privileged, iid)
-    )
+    watch_reason = data['watch_reason'].strip() if 'watch_reason' in data else (existing['watch_reason'] or '')
+    watched = bool(data['watched']) if 'watched' in data else bool(existing['watched'])
+    # watched_at/watched_by are stamped only on the 0->1 transition (when this person is
+    # newly put under watch, not on every unrelated field edit while already watched) and
+    # cleared on 1->0 -- watch_reason itself is left alone on unwatch, so the context for
+    # why they were watched survives if the same person gets flagged again later.
+    if watched and not existing['watched']:
+        watched_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        watched_by = current_user.username
+    elif not watched:
+        watched_at = None
+        watched_by = None
+    else:
+        watched_at, watched_by = None, None  # left unchanged below when already watched and staying watched
+    if watched and existing['watched']:
+        db.execute(
+            "UPDATE identities SET department = ?, privileged = ?, watched = ?, watch_reason = ? WHERE id = ?",
+            (department, privileged, watched, watch_reason, iid)
+        )
+    else:
+        db.execute(
+            "UPDATE identities SET department = ?, privileged = ?, watched = ?, watch_reason = ?, watched_at = ?, watched_by = ? WHERE id = ?",
+            (department, privileged, watched, watch_reason, watched_at, watched_by, iid)
+        )
     db.commit()
     return jsonify({"status": "success"})
 
@@ -6999,6 +7027,30 @@ def api_dashboard_top_risk_entities():
         out.append(d)
     return jsonify({'entities': out})
 
+# Deliberately not window/range-scoped like the widget above -- who's under watch isn't
+# a trend over a period, it's a standing list independent of the dashboard's date range.
+# Same priority-tier-first, NULL-last ordering convention as top-risk-entities (a
+# watched person with no recent UEBA activity still appears, just without a score
+# pushing them up the list) and the identical LEFT JOIN shape for the same reason.
+@app.route('/api/dashboards/watchlist', methods=['GET'])
+@login_required
+def api_dashboard_watchlist():
+    db = get_db()
+    rows = db.execute(
+        "SELECT i.username, i.department, i.watch_reason, i.watched_at, i.watched_by, "
+        "ps.priority_score as priority_score "
+        "FROM identities i "
+        "LEFT JOIN ueba_priority_scores ps ON ps.entity_type = 'user' AND ps.entity_id = i.username "
+        "WHERE i.watched = 1 "
+        "ORDER BY (ps.priority_score IS NULL), ps.priority_score DESC, i.watched_at DESC"
+    ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d['tier'] = _priority_tier(r['priority_score']) if r['priority_score'] is not None else None
+        out.append(d)
+    return jsonify({'watchlist': out})
+
 @app.route('/api/dashboards/top-anomaly-rules', methods=['GET'])
 @login_required
 def api_dashboard_top_anomaly_rules():
@@ -7884,6 +7936,29 @@ def migrate_assets_identities():
     except Exception:
         pass
 
+# A watchlist for people under sustained, deliberate attention -- distinct from
+# whatever an entity's UEBA risk score happens to be this week (a real insider
+# investigation often runs for weeks, well past any one score spike). Piggybacks on the
+# existing identities record (same table `privileged` already lives on) rather than a
+# parallel system, per the same "extend what already exists" reasoning `privileged`
+# itself was built on.
+def migrate_identities_watchlist():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(identities)").fetchall()}
+        if 'watched' not in cols:
+            conn.execute("ALTER TABLE identities ADD COLUMN watched INTEGER DEFAULT 0")
+        if 'watch_reason' not in cols:
+            conn.execute("ALTER TABLE identities ADD COLUMN watch_reason TEXT")
+        if 'watched_at' not in cols:
+            conn.execute("ALTER TABLE identities ADD COLUMN watched_at DATETIME")
+        if 'watched_by' not in cols:
+            conn.execute("ALTER TABLE identities ADD COLUMN watched_by TEXT")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_cases():
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
@@ -8144,6 +8219,10 @@ WIDGET_TYPES = {
     'app_threat_hunter': {}, 'app_edr_actions': {},
     # Ported from the retired standalone Home page -- see DEFAULT_HOME_WIDGETS below.
     'app_stat_tiles': {},
+    # A standing list of people under deliberate, sustained watch -- see
+    # migrate_identities_watchlist() / /api/dashboards/watchlist. Not range-scoped like
+    # the chart widgets above; who's watched is independent of the dashboard's date range.
+    'app_watchlist': {},
     # User-built widget: a chart/number driven by a saved query config against live_logs,
     # reusing _build_log_filters (the same safe, parameterized filter builder Log Search
     # itself uses) rather than any new SQL-building code. See _validate_custom_widget_config
@@ -8270,6 +8349,36 @@ def migrate_dashboards():
                     "INSERT INTO dashboard_widgets (dashboard_id, widget_type, x, y, w, h) VALUES (?, ?, ?, ?, ?, ?)",
                     (did, widget_type, x, y, w, h)
                 )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# Retrofits the Watchlist widget onto an Insider Threat dashboard that was already
+# seeded by migrate_dashboards() before this widget existed -- that migration only
+# inserts the dashboard once (if missing), so a later addition to
+# DEFAULT_INSIDER_THREAT_WIDGETS alone would never reach an already-provisioned
+# instance. Idempotent (checks for the widget, not just the dashboard) and shifts every
+# existing widget down to make room at the top, since a standing watchlist is the single
+# most insider-threat-specific thing on this dashboard and belongs above the general
+# risk-scoring/alert widgets, not below them.
+def migrate_insider_threat_watchlist_widget():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.row_factory = sqlite3.Row
+        dash = conn.execute("SELECT id FROM dashboards WHERE name = 'Insider Threat'").fetchone()
+        if not dash:
+            conn.close()
+            return
+        did = dash['id']
+        if conn.execute("SELECT 1 FROM dashboard_widgets WHERE dashboard_id = ? AND widget_type = 'app_watchlist'", (did,)).fetchone():
+            conn.close()
+            return
+        conn.execute("UPDATE dashboard_widgets SET y = y + 4 WHERE dashboard_id = ?", (did,))
+        conn.execute(
+            "INSERT INTO dashboard_widgets (dashboard_id, widget_type, x, y, w, h) VALUES (?, 'app_watchlist', 0, 0, 12, 4)",
+            (did,)
+        )
         conn.commit()
         conn.close()
     except Exception:
@@ -12369,6 +12478,7 @@ migrate_compliance_tags()
 migrate_ueba_entities()
 migrate_ueba_math_v2()
 migrate_assets_identities()
+migrate_identities_watchlist()
 migrate_cases()
 migrate_case_upgrade()
 migrate_case_template_fields()
@@ -12384,6 +12494,7 @@ migrate_case_templates_manage_permission()
 migrate_role_default_dashboard()
 migrate_role_default_dashboard_v2()
 migrate_insider_threat_role()
+migrate_insider_threat_watchlist_widget()
 migrate_playbooks()
 migrate_playbook_secrets()
 migrate_playbook_custom_actions()
