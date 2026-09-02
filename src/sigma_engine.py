@@ -113,6 +113,38 @@ def _extract_mitre_technique_ids(rule_yaml):
     tags = [t.strip().strip('- ') for t in m.group(1).split('\n') if t.strip()]
     return ','.join(t['id'] for t in techniques_for_tags(tags))
 
+_AGG_CONDITION_RE = re.compile(
+    r'condition:\s*(?P<base>\S+)\s*\|\s*count\(\)\s*(?:by\s+(?P<by>\w+)\s*)?(?P<op>==|!=|<=|>=|<|>)\s*(?P<threshold>\d+)',
+    re.IGNORECASE
+)
+_TIMEFRAME_RE = re.compile(r'^\s*timeframe:\s*(\d+)([smhd])\s*$', re.MULTILINE | re.IGNORECASE)
+_TIMEFRAME_UNIT_SECONDS = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}
+
+# Classic Sigma aggregation-condition syntax (count() only -- sum/min/max/avg and the
+# newer separate `correlation:` rule type are out of scope, see the roadmap notes: 0
+# real SigmaHQ rules use ANY of this syntax today, and the correlation type has no
+# sqlite backend implementation to build on at all). pySigma's own parser hard-rejects
+# the "| count()" pipe syntax at the grammar level (SigmaConditionError: deprecated,
+# replaced by Sigma correlations) -- every backend hits this, not just sqlite. This
+# extracts and strips the aggregation suffix BEFORE pysigma ever sees the condition,
+# mirroring _normalize_rule_dates/_prepare_ioc_correlation's existing precedent of
+# pre-parse YAML text rewriting, so pysigma compiles only the bare selection logic
+# exactly like every other rule. The threshold/grouping itself is enforced by this
+# app's own second pass (see _check_aggregation_thresholds below), the same proven
+# "durable per-event table + windowed GROUP BY/HAVING + dedup cooldown" shape
+# _escalate_host/run_convergence_scoring already use elsewhere in this codebase.
+def _extract_aggregation_condition(rule_yaml):
+    m = _AGG_CONDITION_RE.search(rule_yaml or '')
+    if not m:
+        return None
+    tf = _TIMEFRAME_RE.search(rule_yaml)
+    window_seconds = int(tf.group(1)) * _TIMEFRAME_UNIT_SECONDS[tf.group(2).lower()] if tf else 300
+    return {'base_condition': m.group('base'), 'by': m.group('by'), 'op': m.group('op'),
+            'threshold': int(m.group('threshold')), 'window_seconds': window_seconds}
+
+def _strip_aggregation_condition(rule_yaml, agg):
+    return _AGG_CONDITION_RE.sub(f"condition: {agg['base_condition']}", rule_yaml, count=1)
+
 def _exclusion_matches(excl, row):
     # Exclusions are defined against the same field vocabulary as the guided rule
     # builder (Host/Channel/EventID/User/SourceIp/DestinationIp/Message), so they share
@@ -272,6 +304,55 @@ def _auto_create_case(cursor, rule_title, host, username, alert_id, template_id)
             cursor.execute("INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'system', 'template_applied', ?)", (cid, tpl['name']))
     return cid
 
+_AGG_GROUP_HOST_FIELDS = {'host', 'hostname', 'computername', 'computer', 'dvc'}
+_AGG_GROUP_USER_FIELDS = {'user', 'username', 'targetusername', 'accountname'}
+_AGG_OP_SQL = {'>': '>', '>=': '>=', '<': '<', '<=': '<=', '==': '=', '!=': '!='}
+
+# Turns the accumulated sigma_aggregation_matches rows (see run_detection_cycle's main
+# loop, which routes an aggregation rule's raw per-event matches here instead of
+# straight to pending_alerts) into a real alert once a group's count crosses the rule's
+# own threshold within its own timeframe window -- the same "windowed GROUP BY/HAVING +
+# dedup cooldown marker" shape _escalate_host below and UEBA's run_convergence_scoring
+# already use. Called once per cycle, after the main commit, so it sees a consistent,
+# fully-written sigma_aggregation_matches state.
+def _check_aggregation_thresholds(cursor, agg_by_rule, rule_titles, rule_severity):
+    for rule_id, agg in agg_by_rule.items():
+        groups = cursor.execute(
+            f"SELECT group_value, COUNT(*) as cnt FROM sigma_aggregation_matches "
+            f"WHERE rule_id = ? AND matched_at >= datetime('now', ?) "
+            f"GROUP BY group_value HAVING cnt {_AGG_OP_SQL[agg['op']]} ?",
+            (rule_id, f"-{agg['window_seconds']} seconds", agg['threshold'])
+        ).fetchall()
+        for g in groups:
+            already = cursor.execute(
+                "SELECT 1 FROM sigma_aggregation_alerts WHERE rule_id = ? AND group_value = ? "
+                "AND alerted_at >= datetime('now', ?)",
+                (rule_id, g['group_value'], f"-{agg['window_seconds']} seconds")
+            ).fetchone()
+            if already:
+                continue
+            title = rule_titles.get(rule_id, 'Custom Rule')
+            by_lower = (agg['by'] or '').lower()
+            has_group = agg['by'] and g['group_value'] != '__all__'
+            by_desc = f" by {agg['by']}='{g['group_value']}'" if has_group else ''
+            message = (f"Aggregation threshold crossed: {g['cnt']} matches of '{title}'{by_desc} "
+                       f"within {agg['window_seconds']}s (threshold: count() {agg['op']} {agg['threshold']}).")
+            host = g['group_value'] if has_group and by_lower in _AGG_GROUP_HOST_FIELDS else None
+            username = g['group_value'] if has_group and by_lower in _AGG_GROUP_USER_FIELDS else None
+            severity = rule_severity.get(rule_id, 'High')
+            cursor.execute(
+                "INSERT INTO alerts (rule_id, severity, host, username, message, occurrence_count, last_seen) "
+                "VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
+                (rule_id, severity, host, username, message, g['cnt'])
+            )
+            new_alert_id = cursor.lastrowid
+            cursor.execute("INSERT INTO sigma_aggregation_alerts (rule_id, group_value) VALUES (?, ?)", (rule_id, g['group_value']))
+            soar_alerts.run_playbooks_for_alert(cursor, {
+                'id': new_alert_id, 'rule_title': title, 'severity': severity, 'host': host,
+                'username': username, 'source_ip': None, 'message': message,
+                'timestamp': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            })
+
 # Cross-rule escalation: dedup only ever collapses repeats of the SAME rule on a host
 # (see the (rule_id, host, username) key above) -- this is the separate signal for N
 # DIFFERENT rules firing on one host in a short window, which single-rule dedup can't
@@ -376,6 +457,9 @@ def _rewrite_ioc_lookups(sql):
 def check_rule_converts(conn, rule_yaml, ioc_cache):
     cursor = conn.cursor()
     rule_yaml_text = _prepare_ioc_correlation(_normalize_rule_dates(rule_yaml), cursor, ioc_cache)
+    agg = _extract_aggregation_condition(rule_yaml)
+    if agg:
+        rule_yaml_text = _strip_aggregation_condition(rule_yaml_text, agg)
     backend = _make_backend()
     for q in backend.convert(SigmaCollection.from_yaml(rule_yaml_text)):
         _rewrite_ioc_lookups(q)
@@ -407,6 +491,9 @@ def dry_run_rule(conn, rule_yaml, days=7, exclusions=None, preview_limit=20, ioc
     # built at most once for the whole batch rather than once per rule (same restraint
     # check_rule_converts()/run_detection_cycle() apply).
     rule_yaml_text = _prepare_ioc_correlation(_normalize_rule_dates(rule_yaml), cursor, ioc_cache if ioc_cache is not None else {})
+    agg = _extract_aggregation_condition(rule_yaml)
+    if agg:
+        rule_yaml_text = _strip_aggregation_condition(rule_yaml_text, agg)
     backend = _make_backend()
     queries = backend.convert(SigmaCollection.from_yaml(rule_yaml_text))  # raises on invalid/unconvertible rule -- caller reports it
 
@@ -428,7 +515,13 @@ def dry_run_rule(conn, rule_yaml, days=7, exclusions=None, preview_limit=20, ioc
     matches.sort(key=lambda m: m['id'], reverse=True)
     total = len(matches)
     preview = [{k: m[k] for k in DRY_RUN_PREVIEW_FIELDS if k in m.keys()} for m in matches[:preview_limit]]
-    return {'total_matches': total, 'preview': preview, 'preview_truncated': total > preview_limit, 'window_days': days}
+    # For an aggregation rule, total_matches/preview reflect raw per-event matches of
+    # the bare selection -- NOT how many times the rule would have actually alerted
+    # (that depends on the grouped/windowed threshold check run_detection_cycle()'s
+    # _check_aggregation_thresholds() does separately). is_aggregation lets a caller
+    # avoid presenting a raw match count as if it were an alert count for such a rule.
+    return {'total_matches': total, 'preview': preview, 'preview_truncated': total > preview_limit,
+            'window_days': days, 'is_aggregation': agg is not None}
 
 def run_detection_cycle():
     if not os.path.exists(DB_PATH): return
@@ -449,6 +542,7 @@ def run_detection_cycle():
     rule_titles = {r['id']: r['title'] for r in rules}
     rule_mitre = {r['id']: _extract_mitre_technique_ids(r['rule_yaml']) for r in rules}
     rule_autocase = {r['id']: r['auto_case_template_id'] for r in rules if r['auto_case']}
+    rule_severity = {r['id']: (r['severity_override'] or '').capitalize() or _extract_level(r['rule_yaml']) or 'High' for r in rules}
     rule_uses_ioc_placeholder = {
         r['id']: {kind: placeholder in r['rule_yaml'] for kind, placeholder, *_ in _IOC_KINDS}
         for r in rules
@@ -471,16 +565,32 @@ def run_detection_cycle():
     # only the writes shrinks the lock-held window to milliseconds without changing
     # anything about which alerts get created.
     pending_alerts = []
+    pending_agg_matches = []
+    agg_by_rule = {}
     ioc_cache = {}
     for r in rules:
         try:
             rule_exclusions = exclusions_by_rule.get(r['id'], [])
             severity = (r['severity_override'] or '').capitalize() or _extract_level(r['rule_yaml']) or 'High'
+            agg = _extract_aggregation_condition(r['rule_yaml'])
             rule_yaml_text = _prepare_ioc_correlation(_normalize_rule_dates(r['rule_yaml']), cursor, ioc_cache)
+            if agg:
+                agg_by_rule[r['id']] = agg
+                rule_yaml_text = _strip_aggregation_condition(rule_yaml_text, agg)
             for q in backend.convert(SigmaCollection.from_yaml(rule_yaml_text)):
                 q = _rewrite_ioc_lookups(q)
                 for m in cursor.execute(q).fetchall():
                     if any(_exclusion_matches(e, m) for e in rule_exclusions):
+                        continue
+                    if agg:
+                        # An aggregation rule never alerts per-event -- its matches
+                        # accumulate here and are only turned into an alert by
+                        # _check_aggregation_thresholds() below, once the group's count
+                        # actually crosses the rule's own threshold.
+                        group_col = _FIELD_COLUMN_ALIASES.get((agg['by'] or '').lower()) if agg['by'] else None
+                        m_keys = m.keys()
+                        group_value = m[group_col] if group_col and group_col in m_keys and m[group_col] is not None else '__all__'
+                        pending_agg_matches.append((r['id'], group_value))
                         continue
                     # host/message/username/source_ip/log_event_id/log_app are duplicated onto
                     # the alert row itself (not just left as a join back to the triggering
@@ -509,6 +619,12 @@ def run_detection_cycle():
                         print(f"[-] SOAR webhook failed for rule '{r['title']}': {e}")
         except Exception as e:
             print(f"[-] Rule '{r['title']}' failed to convert/execute: {e}")
+
+    if pending_agg_matches:
+        cursor.executemany(
+            "INSERT INTO sigma_aggregation_matches (rule_id, group_value) VALUES (?, ?)",
+            pending_agg_matches
+        )
 
     if pending_alerts:
         # Collapse duplicate hits within THIS cycle's own batch by (rule_id, host,
@@ -576,6 +692,10 @@ def run_detection_cycle():
                     'timestamp': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 })
     conn.commit()
+
+    if agg_by_rule:
+        _check_aggregation_thresholds(cursor, agg_by_rule, rule_titles, rule_severity)
+        conn.commit()
 
     # Cross-rule escalation -- a second pass over the now-committed alerts table (not
     # pending_alerts, which only has this cycle's raw matches and is empty when nothing
