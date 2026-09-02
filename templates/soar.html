@@ -479,16 +479,16 @@
                         <tbody id="customActionsTableBody"><tr><td colspan="4" class="text-center text-muted small py-3">Loading&hellip;</td></tr></tbody>
                     </table>
                 </div>
-                <div class="row g-2 align-items-end bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
-                    <div class="col-md-3">
+                <div class="row g-2 align-items-start bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
+                    <div class="col-md-4">
                         <label class="form-label small text-muted mb-1">Name</label>
                         <input type="text" id="caName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Notify PagerDuty">
                     </div>
-                    <div class="col-md-3">
+                    <div class="col-md-8">
                         <label class="form-label small text-muted mb-1">Description (optional)</label>
                         <input type="text" id="caDescription" class="form-control form-control-sm bg-dark text-light border-secondary">
                     </div>
-                    <div class="col-md-6">
+                    <div class="col-md-12">
                         <label class="form-label small text-muted mb-1">URL source</label>
                         <div id="caUrlSourceWrap"></div>
                     </div>
@@ -496,8 +496,8 @@
                         <label class="form-label small text-muted mb-1">Body (optional -- case_id/case_title/status/tlp placeholders supported)</label>
                         <input type="text" id="caBody" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder='{"case_id": "{{case_id}}", "title": "{{case_title}}", "status": "{{status}}"}'>
                     </div>
-                    <div class="col-md-3 d-flex gap-2">
-                        <button type="button" class="btn btn-sm btn-outline-primary w-100" id="caSaveBtn" onclick="saveCustomAction()"><i class="fa-solid fa-plus me-1"></i>Add</button>
+                    <div class="col-md-3 d-flex gap-2 align-items-end">
+                        <button type="button" class="btn btn-sm btn-outline-primary flex-grow-1" id="caSaveBtn" onclick="saveCustomAction()"><i class="fa-solid fa-plus me-1"></i>Add</button>
                         <button type="button" class="btn btn-sm btn-outline-secondary" id="caCancelBtn" onclick="cancelEditCustomAction()" style="display:none;">Cancel</button>
                     </div>
                 </div>
