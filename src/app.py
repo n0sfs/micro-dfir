@@ -317,7 +317,13 @@ def login():
     if request.method == 'POST':
         if not validate_csrf():
             return render_template('login.html')
-        user = get_db().execute("SELECT * FROM users WHERE username = ?", (request.form['username'],)).fetchone()
+        # Trimmed once, used everywhere below -- an accidental trailing/leading space
+        # (a mis-tapped space bar, autofill artifact) would otherwise both fail the
+        # lookup silently (read as "wrong password" instead of a whitespace typo) and,
+        # on a failed attempt, log a distinct-looking audit_log target_id ('admin ' vs
+        # 'admin') that UEBA then tracks as a second, separate entity.
+        username = request.form.get('username', '').strip()
+        user = get_db().execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
         if user and check_password_hash(user['password_hash'], request.form['password']):
             login_user(User(user['id'], user['username'], user['role'], user['must_change_password']))
             log_audit('login_success', 'user', user['username'])
@@ -325,7 +331,7 @@ def login():
         # current_user is still anonymous here -- target_id records what was *typed*,
         # since that's the only identity available for a failed attempt, and repeated
         # failures against one username/IP is exactly what this is for spotting.
-        log_audit('login_failed', 'user', request.form.get('username', ''))
+        log_audit('login_failed', 'user', username)
         flash('Invalid username or password', 'danger')
     return render_template('login.html')
 
@@ -8190,6 +8196,19 @@ DEFAULT_SENIOR_ANALYST_WIDGETS = [
     ('app_cases', 6, 13, 6, 5),
 ]
 
+# A UEBA-first layout for a team watching specific people over time rather than
+# triaging a queue: Top Risky Entities and its trend lead (the actual watch surface),
+# Top-Firing Anomaly Rules gives behavioral pattern context, Alerts/Cases stay visible
+# for the investigation-tracking side of the job. Built entirely from existing widget
+# types -- no new widget/backend work, matching the other seeded dashboards' pattern.
+DEFAULT_INSIDER_THREAT_WIDGETS = [
+    ('chart_top_risk_entities', 0, 0, 6, 5),
+    ('chart_risk_trend', 6, 0, 6, 5),
+    ('chart_top_anomaly_rules', 0, 5, 6, 4),
+    ('app_alerts', 6, 5, 6, 4),
+    ('app_cases', 0, 9, 12, 5),
+]
+
 def migrate_dashboards():
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
@@ -8237,6 +8256,16 @@ def migrate_dashboards():
             cur = conn.execute("INSERT INTO dashboards (name, created_by) VALUES ('Senior Analyst', 'system')")
             did = cur.lastrowid
             for widget_type, x, y, w, h in DEFAULT_SENIOR_ANALYST_WIDGETS:
+                conn.execute(
+                    "INSERT INTO dashboard_widgets (dashboard_id, widget_type, x, y, w, h) VALUES (?, ?, ?, ?, ?, ?)",
+                    (did, widget_type, x, y, w, h)
+                )
+
+        it_row = conn.execute("SELECT id FROM dashboards WHERE name = 'Insider Threat'").fetchone()
+        if not it_row:
+            cur = conn.execute("INSERT INTO dashboards (name, created_by) VALUES ('Insider Threat', 'system')")
+            did = cur.lastrowid
+            for widget_type, x, y, w, h in DEFAULT_INSIDER_THREAT_WIDGETS:
                 conn.execute(
                     "INSERT INTO dashboard_widgets (dashboard_id, widget_type, x, y, w, h) VALUES (?, ?, ?, ?, ?, ?)",
                     (did, widget_type, x, y, w, h)
@@ -8406,6 +8435,43 @@ def migrate_role_default_dashboard_v2():
         repoint('admin', 'Overview')
         repoint('analyst', 'Analyst Triage')
         repoint('senior_analyst', 'Senior Analyst')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# A genuine custom role (is_builtin=0, same as anything an admin creates by hand via
+# Settings) rather than a 4th built-in tier -- scoped to the UEBA-heavy toolkit an
+# insider threat investigation actually uses (entity behavior tuning, identity/asset
+# context, threat entities, safe EDR lookups, the audit trail) without the case/rule/
+# SOAR/system-administration permissions that role has no particular need for. Runs
+# unconditionally (not folded into _BUILTIN_ROLE_SEED's one-time-if-empty seed) so it
+# appears even on an already-provisioned instance, and only inserts if a role with this
+# slug doesn't already exist -- an admin who renames/deletes it afterward is never
+# clobbered by a later restart.
+_INSIDER_THREAT_PERMISSIONS = {
+    'ueba.config.manage', 'assets.manage', 'threatintel.manage', 'edr.command.basic', 'audit.view',
+}
+
+def migrate_insider_threat_role():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.row_factory = sqlite3.Row
+        if conn.execute("SELECT 1 FROM roles WHERE slug = 'insider_threat'").fetchone():
+            conn.close()
+            return
+        dash = conn.execute("SELECT id FROM dashboards WHERE name = 'Insider Threat'").fetchone()
+        cur = conn.execute(
+            "INSERT INTO roles (slug, label, description, is_builtin, default_dashboard_id) VALUES (?, ?, ?, 0, ?)",
+            ('insider_threat', 'Insider Threat Analyst',
+             'UEBA-focused: entity behavior, identity risk, and threat-intel context, without full admin access',
+             dash['id'] if dash else None)
+        )
+        rid = cur.lastrowid
+        conn.executemany(
+            "INSERT INTO role_permissions (role_id, permission_key) VALUES (?, ?)",
+            [(rid, key) for key in _INSIDER_THREAT_PERMISSIONS]
+        )
         conn.commit()
         conn.close()
     except Exception:
@@ -12317,6 +12383,7 @@ migrate_role_permissions()
 migrate_case_templates_manage_permission()
 migrate_role_default_dashboard()
 migrate_role_default_dashboard_v2()
+migrate_insider_threat_role()
 migrate_playbooks()
 migrate_playbook_secrets()
 migrate_playbook_custom_actions()

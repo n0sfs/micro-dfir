@@ -322,6 +322,9 @@
                         </table>
                     </div>
                     {% if has_permission('ueba.config.manage') %}
+                    <button type="button" class="btn btn-sm btn-outline-secondary mb-2" onclick="excludeCommonServiceAccounts()" title="SYSTEM, LOCAL SERVICE, and NETWORK SERVICE generate constant background activity on every Windows host -- excluding them keeps Risk Scoring focused on real user/host behavior instead of built-in noise.">
+                        <i class="fa-solid fa-broom me-1"></i> Exclude Common Service Accounts
+                    </button>
                     <div class="row g-2 align-items-end bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
                         <div class="col-md-2">
                             <label class="form-label small text-muted mb-1">Type</label>
@@ -436,6 +439,10 @@
     <!-- Asset & Identity pane -->
     <div id="paneAssetIdentity" style="display:none;">
         <div class="card-body">
+            <div id="assetIdentityEmptyBanner" class="alert alert-info d-flex justify-content-between align-items-center" style="display:none;" role="alert">
+                <div><i class="fa-solid fa-circle-info me-2"></i>Host criticality and user department/privilege data sharpen every UEBA score on this page -- add your first few below.</div>
+                <button type="button" class="btn-close btn-close-white" onclick="dismissAssetIdentityBanner()" aria-label="Dismiss"></button>
+            </div>
             <h6 class="text-info mb-3">Assets</h6>
             <p class="text-muted small mb-3">Mark a host as more important than the fleet default so its UEBA risk score is weighted up -- a domain controller tripping the same indicator as a random workstation deserves more attention, not the same flat score.</p>
             {% if has_permission('assets.manage') %}
@@ -897,25 +904,52 @@ function viewRiskScoreDetail(entityType, entityId) {
     fetch(`/api/ueba/risk-scores/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`)
         .then(r => r.json())
         .then(data => {
-            const rows = (data.events || []).map(e => `
+            // A single noisy detection cycle can fire the same indicator dozens of times
+            // in the same second (e.g. a dev workstation with many one-off rare
+            // processes) -- each carries genuinely distinct detail text, so grouping
+            // collapses them into one row with a "xN" badge and up to 2 sample details
+            // instead of flattening (and losing) that distinction into a single count.
+            const groups = [];
+            const byKey = new Map();
+            for (const e of (data.events || [])) {
+                const key = `${e.indicator}|${e.computed_at}`;
+                if (!byKey.has(key)) {
+                    const g = {indicator: e.indicator, computed_at: e.computed_at, points: e.points, details: [e.detail || '']};
+                    byKey.set(key, g);
+                    groups.push(g);
+                } else {
+                    byKey.get(key).details.push(e.detail || '');
+                }
+            }
+            const rows = groups.map(g => {
+                const count = g.details.length;
+                const shown = g.details.slice(0, 2).filter(Boolean).join(' &middot; ');
+                const more = count > 2 ? ` <span class="text-muted">and ${count - 2} more</span>` : '';
+                return `
                 <tr>
-                    <td class="text-nowrap small text-muted">${escHtml(e.computed_at)}</td>
-                    <td class="small">${escHtml(e.indicator)}</td>
-                    <td class="fw-bold">${e.points}</td>
-                    <td class="small text-muted">${escHtml(e.detail || '')}</td>
+                    <td class="text-nowrap small text-muted">${escHtml(g.computed_at)}</td>
+                    <td class="small">${escHtml(g.indicator)}${count > 1 ? ` <span class="badge bg-secondary">&times;${count}</span>` : ''}</td>
+                    <td class="fw-bold">${g.points}${count > 1 ? '<span class="text-muted small fw-normal"> each</span>' : ''}</td>
+                    <td class="small text-muted">${escHtml(shown)}${more}</td>
                 </tr>
-            `).join('');
+            `;
+            }).join('');
             const p = data.priority;
+            // Priority (a normalized 0-10 "what to look at first" figure) leads -- it's
+            // the number that's actually comparable across entities. The raw cumulative
+            // score has no ceiling and can run into the hundreds of thousands on a busy
+            // entity, which reads as alarming but tells you little on its own; it's kept
+            // as supporting detail, not the headline.
             const priorityHtml = p ? `
                 <div class="mb-3 p-2 border border-secondary rounded">
-                    <strong>Priority:</strong> <span class="badge bg-info text-dark">${p.priority_score}</span>
-                    <span class="text-muted small ms-2">"what to look at first" — blends peak severity, signal breadth, and recency, separate from the raw score above</span>
+                    <strong>Priority:</strong> <span class="badge bg-info text-dark fs-6">${p.priority_score}</span><span class="text-muted">/10</span>
+                    <span class="text-muted small ms-2">"what to look at first" — blends peak severity, signal breadth, and recency</span>
                     <div class="small text-muted mt-1">Peak single indicator: <b>${p.peak_points}</b> pts &middot; Distinct signal types: <b>${p.distinct_indicators}</b> &middot; Recency-weighted total: <b>${p.decay_score}</b></div>
                 </div>` : '';
             document.getElementById('riskDetailModalBody').innerHTML = `
-                <div class="mb-3"><strong>Total score:</strong> ${data.score} ${riskTierBadge(data.tier)}
-                    <span class="text-muted small ms-2">over the trailing ${data.window_days} day(s)</span></div>
                 ${priorityHtml}
+                <div class="mb-3 small text-muted">Raw cumulative score: <b class="text-body">${data.score}</b> ${riskTierBadge(data.tier)}
+                    <span class="ms-2">over the trailing ${data.window_days} day(s) — unbounded sum of every point below, not normalized</span></div>
                 <div class="table-responsive">
                     <table class="table table-dark table-sm table-striped mb-0">
                         <thead><tr><th>When</th><th>Indicator</th><th>Points</th><th>Detail</th></tr></thead>
@@ -1402,6 +1436,27 @@ function loadUebaExclusions() {
     }).catch(err => console.error('Error loading UEBA exclusions:', err));
 }
 
+const WELL_KNOWN_SERVICE_ACCOUNTS = ['SYSTEM', 'LOCAL SERVICE', 'NETWORK SERVICE'];
+
+function excludeCommonServiceAccounts() {
+    fetch('/api/ueba/exclusions').then(r => r.json()).then(existing => {
+        const already = new Set(existing.filter(e => e.entity_type === 'user').map(e => e.entity_id.toUpperCase()));
+        const toAdd = WELL_KNOWN_SERVICE_ACCOUNTS.filter(name => !already.has(name.toUpperCase()));
+        if (!toAdd.length) {
+            toast('All common service accounts are already excluded.', 'info');
+            return;
+        }
+        Promise.all(toAdd.map(name => fetch('/api/ueba/exclusions', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({entity_type: 'user', entity_id: name, description: 'Built-in Windows service account'})
+        }))).then(() => {
+            loadUebaExclusions();
+            loadBaselines();
+            toast(`Excluded ${toAdd.length} common service account(s).`, 'success');
+        }).catch(err => toast('Error excluding service accounts: ' + err, 'danger'));
+    }).catch(err => toast('Error checking existing exclusions: ' + err, 'danger'));
+}
+
 function addUebaExclusion() {
     const payload = {
         entity_type: document.getElementById('ueExclType').value,
@@ -1696,11 +1751,30 @@ const ASSET_IS_ADMIN = hasPermission('assets.manage');
 const CRITICALITY_LABELS = {standard: 'Standard (1x)', important: 'Important (1.5x)', critical: 'Critical (2x)'};
 const CRITICALITY_BADGE = {standard: 'secondary', important: 'warning', critical: 'danger'};
 
+// Both tables start empty on a fresh install, and nothing else on this page says that
+// matters -- criticality/privileged weighting (and peer-tier-aware scoring) are
+// completely inert until an admin populates at least a few rows here.
+let assetsCount = null, identitiesCount = null;
+function updateAssetIdentityEmptyBanner() {
+    if (assetsCount === null || identitiesCount === null) return;
+    const banner = document.getElementById('assetIdentityEmptyBanner');
+    if (!banner) return;
+    let dismissed = false;
+    try { dismissed = localStorage.getItem('microdfir_asset_identity_banner_dismissed') === '1'; } catch (e) {}
+    banner.style.display = (assetsCount === 0 && identitiesCount === 0 && !dismissed) ? '' : 'none';
+}
+function dismissAssetIdentityBanner() {
+    try { localStorage.setItem('microdfir_asset_identity_banner_dismissed', '1'); } catch (e) {}
+    updateAssetIdentityEmptyBanner();
+}
+
 function loadAssets() {
     return fetch('/api/assets').then(r => {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
     }).then(rows => {
+        assetsCount = rows.length;
+        updateAssetIdentityEmptyBanner();
         const tbody = document.getElementById('assetsTableBody');
         if (!rows.length) {
             tbody.innerHTML = '<tr><td colspan="4" class="text-muted small">No assets yet. Fill in the form above to set a host\'s criticality.</td></tr>';
@@ -1766,6 +1840,8 @@ function loadIdentities() {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
     }).then(rows => {
+        identitiesCount = rows.length;
+        updateAssetIdentityEmptyBanner();
         const tbody = document.getElementById('identitiesTableBody');
         if (!rows.length) {
             tbody.innerHTML = '<tr><td colspan="4" class="text-muted small">No identities yet. Fill in the form above to flag a privileged user.</td></tr>';
