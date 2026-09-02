@@ -976,9 +976,14 @@ let pipelineStats = {};
 
 function updateSharedStats(tab) {
     if (tab === 'search') {
-        setStatTile(0, 'Total Matches', searchStats.totalMatches ?? '—');
-        setStatTile(1, 'Alerts/Anomalies (this page)', searchStats.alertCount ?? '—');
-        setStatTile(2, 'Unique Hosts (this page)', searchStats.uniqueHosts ?? '—');
+        // "Total Matches" and the next two tiles are easy to misread as directly
+        // comparable numbers -- they're not: the first is the full query result count,
+        // the other two are scoped to whatever's currently rendered. Spelling out "(All
+        // Results)" alongside the existing "(This Page)" qualifiers makes the scope
+        // difference explicit instead of implied.
+        setStatTile(0, 'Total Matches (All Results)', searchStats.totalMatches ?? '—');
+        setStatTile(1, 'Alerts/Anomalies (This Page)', searchStats.alertCount ?? '—');
+        setStatTile(2, 'Unique Hosts (This Page)', searchStats.uniqueHosts ?? '—');
         setStatTile(3, 'Time Window', searchStats.timeWindow ?? '—', true);
     } else if (tab === 'pipeline') {
         setStatTile(0, 'Active Drop Rules', pipelineStats.activeDropRules ?? '—');

@@ -256,15 +256,36 @@ function widgetRange(config) {
     return (config && config.range) || document.getElementById('dashRangeSelect').value;
 }
 
-function baseLineOptions(c) {
+// opts.logScale is opt-in and only ever passed by the two trend widgets that let the
+// user toggle it (Alert Volume Trend, Risk Score Trend) -- every other caller keeps
+// the exact linear behavior it already had. One busy day can otherwise flatten every
+// other day in the window down to a flat line near zero, hiding real variation right
+// when a genuine incident spike would make that variation worth seeing.
+function baseLineOptions(c, opts) {
+    opts = opts || {};
     return {
         responsive: true, maintainAspectRatio: false,
         plugins: { legend: { display: false } },
         scales: {
             x: { grid: { color: c.grid }, ticks: { color: c.text, maxTicksLimit: 10 } },
-            y: { grid: { color: c.grid }, ticks: { color: c.text }, beginAtZero: true },
+            y: opts.logScale
+                ? { type: 'logarithmic', grid: { color: c.grid }, ticks: { color: c.text } }
+                : { grid: { color: c.grid }, ticks: { color: c.text }, beginAtZero: true },
         },
     };
+}
+
+// Per-widget-instance log-scale preference -- not persisted, resets to linear (the
+// safer default, since a logarithmic axis can't plot a zero-count bucket at all) on
+// reload or navigating away and back.
+let trendLogScale = new Set();
+function toggleTrendLogScale(widgetId, kind) {
+    if (trendLogScale.has(widgetId)) trendLogScale.delete(widgetId); else trendLogScale.add(widgetId);
+    const container = document.getElementById(`widgetBody_${widgetId}`);
+    if (!container) return;
+    const config = RENDERED_WIDGETS[widgetId] ? RENDERED_WIDGETS[widgetId].config : {};
+    if (kind === 'alert') renderAlertTrendWidget(container, widgetId, config);
+    else renderRiskTrendWidget(container, widgetId, config);
 }
 
 function baseHBarOptions(c) {
@@ -287,7 +308,8 @@ function renderAlertTrendWidget(container, widgetId, config) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
     }).then(d => {
-        container.innerHTML = '<canvas></canvas>';
+        const isLog = trendLogScale.has(widgetId);
+        container.innerHTML = `<div class="d-flex justify-content-end"><button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 mb-1" style="font-size:.7rem;" onclick="toggleTrendLogScale(${widgetId}, 'alert')" title="A single busy day can otherwise flatten every other day in this window down to a flat line -- log scale trades that off for a more readable low end.">${isLog ? 'Linear scale' : 'Log scale'}</button></div><div style="height:calc(100% - 26px);"><canvas></canvas></div>`;
         const canvas = container.querySelector('canvas');
         const c = chartTheme();
         destroyChart(widgetId);
@@ -298,7 +320,7 @@ function renderAlertTrendWidget(container, widgetId, config) {
                 borderColor: c.accent, backgroundColor: c.accent + '26',
                 borderWidth: 2, fill: true, tension: 0.25, pointRadius: 2,
             }] },
-            options: baseLineOptions(c),
+            options: baseLineOptions(c, {logScale: isLog}),
         });
     }).catch(err => {
         console.error('Error loading alert trend:', err);
@@ -379,7 +401,8 @@ function renderSeverityWidget(container, widgetId, config) {
 }
 
 function renderRiskTrendWidget(container, widgetId, config) {
-    container.innerHTML = '<canvas></canvas>';
+    const isLog = trendLogScale.has(widgetId);
+    container.innerHTML = `<div class="d-flex justify-content-end"><button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 mb-1" style="font-size:.7rem;" onclick="toggleTrendLogScale(${widgetId}, 'risk')" title="A single busy day can otherwise flatten every other day in this window down to a flat line -- log scale trades that off for a more readable low end.">${isLog ? 'Linear scale' : 'Log scale'}</button></div><div style="height:calc(100% - 26px);"><canvas></canvas></div>`;
     const canvas = container.querySelector('canvas');
     fetch(`/api/dashboards/risk-trend?range=${widgetRange(config)}`).then(r => r.json()).then(d => {
         const c = chartTheme();
@@ -391,7 +414,7 @@ function renderRiskTrendWidget(container, widgetId, config) {
                 borderColor: c.warning, backgroundColor: c.warning + '26',
                 borderWidth: 2, fill: true, tension: 0.25, pointRadius: 2,
             }] },
-            options: baseLineOptions(c),
+            options: baseLineOptions(c, {logScale: isLog}),
         });
     }).catch(err => console.error('Error loading risk trend:', err));
 }
