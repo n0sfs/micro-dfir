@@ -61,6 +61,7 @@ RISK_SCORE_DEFAULTS = {
         'rare_process_population': 18,
         'multi_signal_convergence': 30,
         'sequence_chain_progression': 15,
+        'ioc_touch': 35,
     },
     'tiers': {'low': 0, 'medium': 20, 'high': 50, 'critical': 100},
 }
@@ -520,21 +521,52 @@ def _run_rare_process_population_model(con, cfg):
     ).fetchone()[0]
     if total_hosts <= cfg['rare_process_max_hosts']:
         return []
+    # Rarity is judged within the host's own criticality tier (assets.criticality) when
+    # that tier has enough of its own reporting population to be meaningful -- same
+    # "need a real population to be a minority within" reasoning as the fleet-wide gate
+    # above, just applied per-tier -- and falls back to the existing fleet-wide
+    # comparison when the tier is too small (never treating a tier-of-one as "rare" by
+    # default). A host with no assets row defaults to 'standard', matching that table's
+    # own DEFAULT 'standard'.
     query = (
-        "WITH host_counts AS (SELECT lower(process_image) as process_key, COUNT(DISTINCT host) as host_count FROM siem.live_logs "
+        "WITH host_pop AS (SELECT DISTINCT host FROM siem.live_logs "
+        f"    WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE - INTERVAL {cfg['lookback_days']} DAY "
+        "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN')), "
+        "host_tier AS (SELECT hp.host, COALESCE(a.criticality, 'standard') as tier "
+        "    FROM host_pop hp LEFT JOIN siem.assets a ON a.host = hp.host), "
+        "tier_pop AS (SELECT tier, COUNT(*) as tier_host_count FROM host_tier GROUP BY tier), "
+        "proc_by_host AS (SELECT host, lower(process_image) as process_key FROM siem.live_logs "
         f"    WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE - INTERVAL {cfg['lookback_days']} DAY "
         "      AND process_image IS NOT NULL AND process_image != '' "
-        "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN') GROUP BY 1), "
+        "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN') GROUP BY 1, 2), "
+        "fleet_counts AS (SELECT process_key, COUNT(DISTINCT host) as host_count FROM proc_by_host GROUP BY 1), "
+        "tier_counts AS (SELECT pbh.process_key, ht.tier, COUNT(DISTINCT pbh.host) as host_count "
+        "    FROM proc_by_host pbh JOIN host_tier ht ON ht.host = pbh.host GROUP BY 1, 2), "
         "today_hosts AS (SELECT host, process_image, lower(process_image) as process_key, any_value(command_line) as command_line "
         "    FROM siem.live_logs "
         "    WHERE CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE "
         "      AND process_image IS NOT NULL AND process_image != '' "
         "      AND host IS NOT NULL AND host NOT IN ('', 'UNKNOWN') GROUP BY 1, 2, 3) "
-        "SELECT th.host, th.process_image, hc.host_count, th.command_line FROM today_hosts th "
-        "JOIN host_counts hc ON th.process_key = hc.process_key "
-        f"WHERE hc.host_count <= {cfg['rare_process_max_hosts']} LIMIT 200"
+        "SELECT th.host, th.process_image, th.command_line, ht.tier, tp.tier_host_count, "
+        "       tc.host_count as tier_process_host_count, fc.host_count as fleet_process_host_count "
+        "FROM today_hosts th "
+        "JOIN host_tier ht ON ht.host = th.host "
+        "JOIN tier_pop tp ON tp.tier = ht.tier "
+        "LEFT JOIN fleet_counts fc ON fc.process_key = th.process_key "
+        "LEFT JOIN tier_counts tc ON tc.process_key = th.process_key AND tc.tier = ht.tier "
+        f"WHERE (tp.tier_host_count > {cfg['rare_process_max_hosts']} AND tc.host_count <= {cfg['rare_process_max_hosts']}) "
+        f"   OR (tp.tier_host_count <= {cfg['rare_process_max_hosts']} AND fc.host_count <= {cfg['rare_process_max_hosts']}) "
+        "LIMIT 200"
     )
-    return [{'host': h, 'process_image': p, 'host_count': hc, 'command_line': cl} for h, p, hc, cl in con.execute(query).fetchall()]
+    results = []
+    for host, proc, cmdline, tier, tier_host_count, tier_proc_count, fleet_proc_count in con.execute(query).fetchall():
+        if tier_host_count > cfg['rare_process_max_hosts']:
+            basis, host_count, population_size = f'tier:{tier}', tier_proc_count, tier_host_count
+        else:
+            basis, host_count, population_size = 'fleet', fleet_proc_count, total_hosts
+        results.append({'host': host, 'process_image': proc, 'command_line': cmdline,
+                         'host_count': host_count, 'population_basis': basis, 'population_size': population_size})
+    return results
 
 def run_ueba_models():
     try:
@@ -674,8 +706,14 @@ def run_ueba_models():
             )
         for h in rare_process_hits:
             cmd_note = f" Command line: {h['command_line']}" if h.get('command_line') else ""
-            message = (f"{h['host']} (host) is running a process rare across the whole fleet -- seen on only "
-                       f"{h['host_count']} host(s) in the past {cfg['lookback_days']} days: {h['process_image']}.{cmd_note}")
+            if h['population_basis'] == 'fleet':
+                basis_text = (f"rare across the whole fleet -- seen on only {h['host_count']} host(s) "
+                              f"in the past {cfg['lookback_days']} days")
+            else:
+                tier_name = h['population_basis'].split(':', 1)[1]
+                basis_text = (f"rare among its '{tier_name}'-criticality peers -- seen on only "
+                              f"{h['host_count']} of {h['population_size']} peer host(s) in the past {cfg['lookback_days']} days")
+            message = f"{h['host']} (host) is running a process {basis_text}: {h['process_image']}.{cmd_note}"
             conn.execute(
                 "INSERT INTO events (timestamp, hostname, entity_type, app_name, severity, message, raw_json) "
                 "VALUES (datetime('now'), ?, 'host', 'duckdb_ueba', 'Medium', ?, ?)",
@@ -700,6 +738,7 @@ _RISK_MARK_KEYS = {
     'alert': 'risk_scoring_last_alert_id',
     'audit': 'risk_scoring_last_audit_id',
     'sweep': 'risk_scoring_last_sweep_cmd_id',
+    'ioc': 'risk_scoring_last_ioc_sighting_id',
 }
 
 def _get_risk_marks(conn):
@@ -816,6 +855,30 @@ def _score_sweeps(conn, cfg, last_id):
                        f"{len(hits)} IOC match(es) found in a sweep", 'agent_commands', str(r['id']), None))
     return events, max_id
 
+# ioc_sightings is populated continuously by sigma_engine.py's _record_ioc_sightings()
+# whenever the seeded "Known-Bad IOC Matched" correlation rule fires a genuinely new
+# alert -- this just promotes that already-happening correlation into its own
+# higher-confidence risk indicator instead of letting it fall into the generic
+# alert_high bucket, indistinguishable from any other high-severity alert.
+def _score_ioc_touches(conn, cfg, last_id):
+    rows = conn.execute(
+        "SELECT s.id, s.stix_id, a.host, a.username, si.ioc_type, si.pattern "
+        "FROM ioc_sightings s JOIN alerts a ON a.id = s.alert_id "
+        "LEFT JOIN stix_indicators si ON si.stix_id = s.stix_id "
+        "WHERE s.id > ? AND s.alert_id IS NOT NULL",
+        (last_id,)
+    ).fetchall()
+    events, max_id = [], last_id
+    for r in rows:
+        max_id = max(max_id, r['id'])
+        detail = f"Matched known-bad {r['ioc_type'] or 'indicator'}: {r['pattern'] or r['stix_id']}"
+        for entity_type, entity_id in (('host', r['host']), ('user', r['username'])):
+            if not entity_id or entity_id in ('', '-', 'UNKNOWN'):
+                continue
+            events.append((entity_type, entity_id, 'ioc_touch', cfg['points']['ioc_touch'],
+                           detail, 'ioc_sightings', str(r['id']), None))
+    return events, max_id
+
 def run_risk_scoring():
     cfg = get_risk_score_config()
     ueba_cfg = get_ueba_config()
@@ -826,7 +889,8 @@ def run_risk_scoring():
         alert_events, marks['alert'] = _score_alerts(conn, cfg, ueba_cfg, marks['alert'])
         audit_events, marks['audit'] = _score_audit(conn, cfg, marks['audit'])
         sweep_events, marks['sweep'] = _score_sweeps(conn, cfg, marks['sweep'])
-        all_events = alert_events + audit_events + sweep_events
+        ioc_events, marks['ioc'] = _score_ioc_touches(conn, cfg, marks['ioc'])
+        all_events = alert_events + audit_events + sweep_events + ioc_events
         if all_events:
             conn.executemany(
                 "INSERT INTO risk_score_events (entity_type, entity_id, indicator, points, detail, source_table, source_id, rule_id) VALUES (?,?,?,?,?,?,?,?)",
