@@ -8390,36 +8390,6 @@ def migrate_seed_starter_playbook():
     except Exception:
         pass
 
-# TEMPORARY, ONE-TIME: n0s (the deploy SSH user) has no write access to siem.db (root:root,
-# only update.sh runs with sudo) so a locked-out admin can't be recovered by hand over SSH.
-# This runs once, as root (microsoc-web.service's own user), to reset the admin account
-# after the operator got logged out and didn't have the password to hand. Remove this
-# function and its call below in the very next commit after the reset is confirmed --
-# it must not linger in the codebase.
-#
-# _v2: the first temp password (a 16-char random string) didn't get typed correctly on
-# any of several attempts (audit log shows only login_failed since the first reset) --
-# reissuing a second, shorter/easier-to-type one under a new flag key, since the first
-# flag is already marked done and won't re-fire.
-def migrate_emergency_admin_reset_20260901_v2():
-    try:
-        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
-        conn.row_factory = sqlite3.Row
-        done = conn.execute("SELECT value FROM settings WHERE key = 'emergency_admin_reset_20260901_v2_done'").fetchone()
-        if done and done['value'] == '1':
-            conn.close()
-            return
-        from werkzeug.security import generate_password_hash
-        conn.execute(
-            "UPDATE users SET password_hash = ?, must_change_password = 1 WHERE username = 'admin'",
-            (generate_password_hash('stone-vapor-5555'),)
-        )
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('emergency_admin_reset_20260901_v2_done', '1')")
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
-
 def migrate_live_logs_archive():
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
@@ -12010,7 +11980,6 @@ migrate_playbook_pending_reverts()
 migrate_playbook_alert_runs()
 migrate_seed_legacy_notification_playbook()
 migrate_seed_starter_playbook()
-migrate_emergency_admin_reset_20260901_v2()
 migrate_live_logs_archive()
 migrate_fim_paths()
 migrate_ueba_priority_scores()
