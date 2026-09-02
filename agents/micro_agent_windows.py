@@ -4,7 +4,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, tem
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.08.25.2"
+AGENT_VERSION = "2026.09.02.1"
 
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
@@ -76,10 +76,44 @@ def install_agent():
         cmd = f'schtasks /create /tn "{TASK_NAME}" /tr "wscript.exe \\"{vbs_path}\\"" /sc ONSTART /rl HIGHEST /f'
         subprocess.run(cmd, shell=True)
         subprocess.run(f'schtasks /run /tn "{TASK_NAME}"', shell=True)
+        # A Scheduled Task's ONSTART trigger only fires at boot -- it does NOT restart on
+        # crash/kill/OOM the way systemd's Restart=always (Linux) or launchd's KeepAlive
+        # (macOS) do for their own installers. This second task is what actually gives
+        # Windows that same resilience: it runs watchdog_check() every 5 minutes, which
+        # relaunches the main task if the agent process it started has died.
+        watchdog_vbs_path = os.path.join(INSTALL_DIR, "run_watchdog.vbs")
+        with open(watchdog_vbs_path, 'w') as f:
+            f.write('Set objShell = WScript.CreateObject("WScript.Shell")\n')
+            f.write('objShell.Run """' + sys.executable + '"" ""' + target_path + '"" watchdog", 0, True\n')
+        watchdog_cmd = f'schtasks /create /tn "{TASK_NAME}Watchdog" /tr "wscript.exe \\"{watchdog_vbs_path}\\"" /sc MINUTE /mo 5 /rl HIGHEST /f'
+        subprocess.run(watchdog_cmd, shell=True)
     except: pass
+
+def watchdog_check():
+    # Invoked by the separate MicroDFIRAgentWatchdog scheduled task, NOT the long-lived
+    # agent process itself -- checks whether the PID the main process recorded at its
+    # own startup is still alive, and relaunches the main task if not. See the comment
+    # above the watchdog task creation in install_agent() for why this exists.
+    pid_path = os.path.join(INSTALL_DIR, "agent.pid")
+    try:
+        with open(pid_path, 'r') as f:
+            pid = int(f.read().strip())
+        result = subprocess.run(
+            ['tasklist', '/FI', f'PID eq {pid}', '/FI', 'IMAGENAME eq python.exe', '/FO', 'CSV', '/NH'],
+            capture_output=True, text=True, timeout=15
+        )
+        if str(pid) in result.stdout:
+            return  # still alive, nothing to do
+    except (FileNotFoundError, ValueError, OSError):
+        pass  # no pidfile yet, or unreadable -- treat as not running, relaunch below
+    try:
+        subprocess.run(f'schtasks /run /tn "{TASK_NAME}"', shell=True, timeout=15)
+    except Exception:
+        pass
 
 def uninstall_agent():
     subprocess.run(f'schtasks /delete /tn "{TASK_NAME}" /f', shell=True, capture_output=True)
+    subprocess.run(f'schtasks /delete /tn "{TASK_NAME}Watchdog" /f', shell=True, capture_output=True)
 
 def upgrade_agent(new_source):
     # Remote self-update: overwrite the installed copy with the source the server just
@@ -308,6 +342,13 @@ def run_fim_check(paths):
 def run_agent():
     global INGEST_URL
     print("[*] Agent starting up! Initializing...", flush=True)
+    # Read by the MicroDFIRAgentWatchdog task's watchdog_check() to detect a crashed/
+    # killed agent process and relaunch it -- see install_agent().
+    try:
+        with open(os.path.join(INSTALL_DIR, "agent.pid"), 'w') as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        pass
     context = build_ssl_context()
     active_channel_configs = [
         {'name': 'Security', 'capture_xml': False, 'where_clause': ''},
@@ -426,4 +467,5 @@ def run_agent():
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == 'install': install_agent()
     elif len(sys.argv) > 1 and sys.argv[1] == 'uninstall': uninstall_agent()
+    elif len(sys.argv) > 1 and sys.argv[1] == 'watchdog': watchdog_check()
     else: run_agent()
