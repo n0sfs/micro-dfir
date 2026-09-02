@@ -1,5 +1,11 @@
 import copy, os, json, sqlite3, duckdb, math
 DB_PATH = "/opt/micro-dfir/siem.db"
+# Mirrors app.py's _PRIORITY_TIERS['critical'] (0-10 normalized priority_score scale,
+# fixed by construction, not admin-configurable) -- duplicated here since this standalone
+# cron script has no shared import with app.py, same as UEBA_DEFAULTS below. Used only to
+# let run_autocase_check() also trigger on priority_score reaching Critical, independent
+# of the raw-sum threshold.
+_PRIORITY_TIER_CRITICAL = 7.5
 UEBA_DEFAULTS = {
     'ueba_lookback_days': 30, 'ueba_stddev_multiplier': 3.0, 'ueba_min_baseline': 50.0,
     'ueba_min_days_observed': 4, 'ueba_new_ip_enabled': 1,
@@ -990,6 +996,12 @@ def run_autocase_check():
     conn.row_factory = sqlite3.Row
     try:
         window = f"-{risk_cfg['window_days']} days"
+        # Additive OR, not a replacement: the raw-sum threshold stays exactly as it was
+        # (every case that already triggers today still triggers, unchanged), with a new
+        # condition so an entity whose decay-aware priority_score has independently
+        # reached Critical also qualifies -- even if its flat windowed sum hasn't crossed
+        # the admin's numeric threshold yet. Same wiring api_ueba_risk_scores/the
+        # dashboard's top-risk-entities widget already use for the tier badge itself.
         rows = conn.execute(
             "SELECT rse.entity_type as entity_type, rse.entity_id as entity_id, "
             "ROUND(SUM(rse.points) * COALESCE("
@@ -997,13 +1009,16 @@ def run_autocase_check():
             "        CASE a.criticality WHEN 'critical' THEN 2.0 WHEN 'important' THEN 1.5 ELSE 1.0 END "
             "    WHEN rse.entity_type = 'user' THEN "
             "        CASE WHEN i.privileged = 1 THEN 1.5 ELSE 1.0 END "
-            "    END, 1.0), 1) as score "
+            "    END, 1.0), 1) as score, "
+            "ps.priority_score as priority_score "
             "FROM risk_score_events rse "
             "LEFT JOIN assets a ON rse.entity_type = 'host' AND rse.entity_id = a.host "
             "LEFT JOIN identities i ON rse.entity_type = 'user' AND rse.entity_id = i.username "
+            "LEFT JOIN ueba_priority_scores ps ON rse.entity_type = ps.entity_type AND rse.entity_id = ps.entity_id "
             "WHERE rse.computed_at >= datetime('now', ?) "
-            "GROUP BY rse.entity_type, rse.entity_id HAVING score >= ?",
-            (window, cfg['autocase_threshold'])
+            "GROUP BY rse.entity_type, rse.entity_id "
+            "HAVING score >= ? OR (ps.priority_score IS NOT NULL AND ps.priority_score >= ?)",
+            (window, cfg['autocase_threshold'], _PRIORITY_TIER_CRITICAL)
         ).fetchall()
 
         cooldown_window = f"-{cfg['autocase_cooldown_hours']} hours"

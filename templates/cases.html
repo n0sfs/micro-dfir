@@ -651,7 +651,7 @@ async function deleteCase(cid) {
         .catch(err => toast('Error deleting case: ' + err, 'danger'));
 }
 
-const ITEM_KIND_LABELS = { alert: 'Alert', ueba_event: 'UEBA Anomaly', command_result: 'Response Action' };
+const ITEM_KIND_LABELS = { alert: 'Alert', ueba_event: 'UEBA Anomaly', command_result: 'Response Action', fim_event: 'FIM/EDR Event' };
 
 function itemSummaryLine(item) {
     if (!item.summary) return '<span class="text-muted small">(underlying record no longer exists)</span>';
@@ -665,6 +665,75 @@ function itemSummaryLine(item) {
            `<strong>${escHtml(s.label)}</strong> <span class="text-muted small">(${kind})</span>${viewResultBtn}<br>` +
            `<span class="text-muted small">${escHtml(s.host || '')}${s.username ? ' · ' + escHtml(s.username) : ''} · ${escHtml(s.timestamp)}${countryBadge}</span><br>` +
            `<span class="small">${escHtml((s.message || '').slice(0, 200))}</span>`;
+}
+
+// Surfaces alerts/UEBA anomalies/FIM events on this case's hosts (or users implied by
+// its linked alerts) that AREN'T linked into the case yet -- closes the "three related
+// signals landed as three unrelated items" gap without any new detection, just querying
+// data that already exists. "Add to case" reuses the same generic /items route the
+// existing Items card already posts to.
+const RELATED_ITEM_LABELS = { alert: 'Alert', ueba_event: 'UEBA Anomaly', fim_event: 'FIM/EDR Event' };
+
+function loadRelatedItems(cid) {
+    fetch(`/api/cases/${cid}/related-items`).then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(data => {
+        if (cid !== activeCaseId) return; // stale response from a since-navigated-away case
+        renderRelatedItems(data);
+    }).catch(err => {
+        console.error('Error loading related items:', err);
+        const el = document.getElementById('relatedItemsBody');
+        if (el) el.innerHTML = '<p class="text-danger small mb-0"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load related items.</p>';
+    });
+}
+
+function renderRelatedItems(data) {
+    const el = document.getElementById('relatedItemsBody');
+    if (!el) return;
+    if (!data.hosts.length && !data.usernames.length) {
+        el.innerHTML = '<p class="text-muted small mb-0">Add a Case Asset above to see related activity on that host.</p>';
+        return;
+    }
+    const categories = [
+        {type: 'alert', rows: data.alerts, total: data.alerts_total, label: 'Alerts'},
+        {type: 'ueba_event', rows: data.ueba_events, total: data.ueba_events_total, label: 'UEBA Anomalies'},
+        {type: 'fim_event', rows: data.fim_events, total: data.fim_events_total, label: 'FIM/EDR Events'},
+    ];
+    if (!categories.some(c => c.rows.length)) {
+        el.innerHTML = `<p class="text-muted small mb-0">Nothing else on ${escHtml(data.hosts.concat(data.usernames).join(', '))} in the last ${data.window_hours}h.</p>`;
+        return;
+    }
+    el.innerHTML = categories.filter(c => c.rows.length).map(c => `
+        <div class="mb-2">
+            <div class="text-muted small fw-bold mb-1">${c.label}${c.total > c.rows.length ? ` (showing ${c.rows.length} of ${c.total})` : ''}</div>
+            ${c.rows.map(row => relatedItemRow(c.type, row)).join('')}
+        </div>
+    `).join('');
+}
+
+function relatedItemRow(itemType, row) {
+    const kindLabel = RELATED_ITEM_LABELS[itemType] || itemType;
+    const heading = row.label ? `<strong>${escHtml(row.label)}</strong> ` : '';
+    return `<div class="d-flex justify-content-between align-items-start border border-secondary rounded p-2 mb-2">
+        <div>
+            <span class="badge ${severityBadgeClass(row.severity)} me-2">${escHtml((row.severity || '').toUpperCase())}</span>
+            ${heading}<span class="text-muted small">(${kindLabel})</span><br>
+            <span class="text-muted small">${escHtml(row.host || '')}${row.username ? ' · ' + escHtml(row.username) : ''} · ${escHtml(row.timestamp)}</span><br>
+            <span class="small">${escHtml((row.message || '').slice(0, 200))}</span>
+        </div>
+        <button type="button" class="btn btn-sm btn-outline-primary py-0 px-2 ms-2" title="Add to case" onclick="addRelatedItem('${itemType}', ${row.id})"><i class="fa-solid fa-plus"></i></button>
+    </div>`;
+}
+
+function addRelatedItem(itemType, itemId) {
+    fetch(`/api/cases/${activeCaseId}/items`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({item_type: itemType, item_id: itemId})
+    }).then(r => r.json()).then(res => {
+        if (res.error) { toast(res.error, 'danger'); return; }
+        openCaseDetail(activeCaseId);
+    }).catch(err => toast('Error adding item: ' + err, 'danger'));
 }
 
 function taskRow(t, isClosed) {
@@ -873,6 +942,10 @@ function loadAndRenderCaseDetail(cid) {
                         </div>
                     </div>
                     <div class="card bg-dark border-secondary mb-3">
+                        <div class="card-header border-secondary">Related Items <span class="text-muted small">— other alerts/anomalies/EDR events on this case's hosts, not yet linked</span></div>
+                        <div class="card-body" id="relatedItemsBody"><p class="text-muted small mb-0">Loading&hellip;</p></div>
+                    </div>
+                    <div class="card bg-dark border-secondary mb-3">
                         <div class="card-header border-secondary">Threat Intel Entities</div>
                         <div class="card-body"><div id="linkToEntityWrap"></div></div>
                     </div>
@@ -978,6 +1051,7 @@ function loadAndRenderCaseDetail(cid) {
         populateQueueSelect('editCaseQueue', c.queue_id);
         renderLinkToEntityControl();
         loadCaseReports(c.id);
+        loadRelatedItems(c.id);
         showDetailView();
         // Live-ish SLA/TTA chips -- re-render just that strip every 30s while the case
         // is open in the browser, rather than re-fetching/re-rendering the whole case.
