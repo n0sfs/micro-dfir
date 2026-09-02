@@ -4402,6 +4402,11 @@ def api_case_detail(cid):
         acknowledged_at = case['acknowledged_at']
         if workflow_state != 'new' and not acknowledged_at:
             acknowledged_at = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        # A reopened case gets a fresh SLA clock -- otherwise it could never breach again
+        # (sla_breach_notified_at IS NULL is the sweep's own "not yet notified" guard).
+        sla_breach_notified_at = case['sla_breach_notified_at']
+        if status == 'open' and case['status'] != 'open':
+            sla_breach_notified_at = None
         # Timeline entries only for what actually CHANGED -- a save that only edits the
         # description shouldn't manufacture a spurious "status changed to open" event.
         status_changed = status != case['status']
@@ -4423,8 +4428,8 @@ def api_case_detail(cid):
             queue_name = db.execute("SELECT name FROM case_queues WHERE id = ?", (queue_id,)).fetchone()['name'] if queue_id else '(none)'
             _log_case_event(db, cid, 'queue_change', queue_name)
         db.execute(
-            "UPDATE cases SET title = ?, status = ?, assignee = ?, description = ?, closed_at = ?, tlp = ?, pap = ?, severity = ?, workflow_state = ?, acknowledged_at = ?, queue_id = ? WHERE id = ?",
-            (title, status, assignee, description, closed_at, tlp, pap, severity, workflow_state, acknowledged_at, queue_id, cid)
+            "UPDATE cases SET title = ?, status = ?, assignee = ?, description = ?, closed_at = ?, tlp = ?, pap = ?, severity = ?, workflow_state = ?, acknowledged_at = ?, sla_breach_notified_at = ?, queue_id = ? WHERE id = ?",
+            (title, status, assignee, description, closed_at, tlp, pap, severity, workflow_state, acknowledged_at, sla_breach_notified_at, queue_id, cid)
         )
         if status_changed:
             _run_playbooks_for_case(db, cid, 'status_changed', queue_id, tlp, status, severity)
@@ -4913,7 +4918,7 @@ def api_case_analyze(cid):
     return jsonify({'status': 'success', 'summary': summary})
 
 # ---- Playbooks (SOAR) ----
-PLAYBOOK_TRIGGERS = ('case_created', 'status_changed', 'queue_changed', 'assignee_changed', 'scheduled', 'alert_created')
+PLAYBOOK_TRIGGERS = ('case_created', 'status_changed', 'queue_changed', 'assignee_changed', 'scheduled', 'alert_created', 'sla_breached')
 PLAYBOOK_ACTION_TYPES = ('apply_template', 'add_task', 'add_note', 'set_queue', 'analyze_entity', 'send_email', 'send_webhook', 'send_slack', 'custom_webhook', 'isolate_host', 'restore_network', 'collect_triage', 'quarantine_file', 'kill_scheduled_task', 'kill_process_by_name')
 # alert_created playbooks are alert-scoped (no case_id exists yet -- see soar_alerts.py)
 # and get their own small, non-destructive action set instead of the case-scoped one
@@ -5594,6 +5599,7 @@ def api_run_scheduled_playbooks():
     _run_scheduled_playbooks(db)
     _run_scheduled_agent_sweeps(db)
     _run_due_auto_reverts(db)
+    _run_due_sla_breach_playbooks(db)
     return jsonify({'status': 'success'})
 
 # Due isolation auto-reverts -- for each playbook_pending_reverts row past its revert_at,
@@ -5616,6 +5622,24 @@ def _run_due_auto_reverts(db):
     if due:
         db.commit()
 
+# Same "cheap no-op unless due" shape as _run_due_auto_reverts -- sla_breach_notified_at
+# IS NULL is the one-time-fire guard (reset on reopen in api_case_detail's PUT handler),
+# so a still-breached case is never re-notified on every 30s poll cycle.
+def _run_due_sla_breach_playbooks(db):
+    sla_hours = _case_sla_hours(db)
+    due_cases = db.execute(
+        "SELECT id, queue_id, tlp, status, severity FROM cases WHERE status = 'open' "
+        "AND sla_breach_notified_at IS NULL "
+        "AND (julianday('now') - julianday(created_at)) * 24 > ?",
+        (sla_hours,)
+    ).fetchall()
+    if not due_cases:
+        return
+    for c in due_cases:
+        _run_playbooks_for_case(db, c['id'], 'sla_breached', c['queue_id'], c['tlp'], c['status'], c['severity'])
+        db.execute("UPDATE cases SET sla_breach_notified_at = datetime('now') WHERE id = ?", (c['id'],))
+    db.commit()
+
 @app.route('/api/playbooks', methods=['GET', 'POST'])
 @login_required
 def api_playbooks():
@@ -5624,7 +5648,9 @@ def api_playbooks():
         rows = db.execute(
             "SELECT p.*, q.name as condition_queue_name, "
             "(SELECT COUNT(*) FROM playbook_runs WHERE playbook_id = p.id) + "
-            "(SELECT COUNT(*) FROM playbook_alert_runs WHERE playbook_id = p.id) as run_count "
+            "(SELECT COUNT(*) FROM playbook_alert_runs WHERE playbook_id = p.id) as run_count, "
+            "(SELECT COUNT(*) FROM playbook_runs WHERE playbook_id = p.id AND status = 'success') + "
+            "(SELECT COUNT(*) FROM playbook_alert_runs WHERE playbook_id = p.id AND status = 'success') as success_count "
             "FROM playbooks p LEFT JOIN case_queues q ON q.id = p.condition_queue_id ORDER BY p.name"
         ).fetchall()
         out = []
@@ -7065,6 +7091,12 @@ def api_dashboard_case_stats():
         "SELECT AVG((julianday(closed_at) - julianday(created_at)) * 24) FROM cases "
         "WHERE status = 'closed' AND closed_at IS NOT NULL AND closed_at >= datetime('now', ?)", (f'-{days} days',)
     ).fetchone()[0]
+    # TTA (time to acknowledge) -- filtered on acknowledged_at's own window, not
+    # closed_at's, since a case can be acknowledged well before (or without ever) closing.
+    avg_tta_hours = db.execute(
+        "SELECT AVG((julianday(acknowledged_at) - julianday(created_at)) * 24) FROM cases "
+        "WHERE acknowledged_at IS NOT NULL AND acknowledged_at >= datetime('now', ?)", (f'-{days} days',)
+    ).fetchone()[0]
     sla_breached = db.execute(
         "SELECT COUNT(*) FROM cases WHERE status = 'open' AND (julianday('now') - julianday(created_at)) * 24 > ?", (sla_hours,)
     ).fetchone()[0]
@@ -7072,6 +7104,7 @@ def api_dashboard_case_stats():
         'open_count': open_count,
         'closed_in_range_count': closed_in_range,
         'avg_close_hours': round(avg_close_hours, 1) if avg_close_hours is not None else None,
+        'avg_tta_hours': round(avg_tta_hours, 1) if avg_tta_hours is not None else None,
         'sla_target_hours': sla_hours,
         'sla_breached_count': sla_breached,
     })
@@ -7970,6 +8003,8 @@ def migrate_case_severity():
             conn.execute("ALTER TABLE cases ADD COLUMN workflow_state TEXT NOT NULL DEFAULT 'new'")
         if 'acknowledged_at' not in cols:
             conn.execute("ALTER TABLE cases ADD COLUMN acknowledged_at DATETIME")
+        if 'sla_breach_notified_at' not in cols:
+            conn.execute("ALTER TABLE cases ADD COLUMN sla_breach_notified_at DATETIME")
         conn.commit()
         conn.close()
     except Exception:
