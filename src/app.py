@@ -4078,7 +4078,7 @@ def api_identity_detail(iid):
 # 'ueba_event' rather than 'anomaly' to match the events table this actually points at --
 # UNIFIED_LOGS_SQL's log_type for these rows is 'anomaly', but that's a display label,
 # not the underlying table name, so the two are kept intentionally distinct here.
-CASE_ITEM_TYPES = {'alert': 'alerts', 'ueba_event': 'events', 'command_result': 'agent_commands'}
+CASE_ITEM_TYPES = {'alert': 'alerts', 'ueba_event': 'events', 'command_result': 'agent_commands', 'fim_event': 'live_logs'}
 CASE_TLP_VALUES = ('clear', 'green', 'amber', 'amber-strict', 'red')
 CASE_PAP_VALUES = ('clear', 'green', 'amber', 'red')
 # 'suspected' is the default starting state for anything an analyst adds to a case's
@@ -4309,6 +4309,10 @@ def _case_item_summary(db, item_type, item_id):
             r['severity'] = 'INFO'
             r['message'] = "Completed successfully"
         del r['status'], r['exit_code']
+    elif item_type == 'fim_event':
+        r = db.execute(
+            "SELECT timestamp, severity, host, username, source_ip, 'FIM/EDR Event' as label, message FROM live_logs WHERE id = ?", (item_id,)
+        ).fetchone()
     else:
         r = db.execute(
             "SELECT timestamp, severity, hostname as host, NULL as username, NULL as source_ip, 'UEBA Anomaly' as label, message FROM events WHERE id = ?", (item_id,)
@@ -4494,6 +4498,106 @@ def api_case_remove_item(cid, item_row_id):
     _log_case_event(db, cid, 'item_removed', f"{item['item_type']}:{item['item_id']}")
     db.commit()
     return jsonify({"ok": 1})
+
+# Surfaces alerts/UEBA anomalies/FIM events near this case's hosts (and any usernames
+# already implied by its linked alerts) that AREN'T linked into the case yet -- the point
+# is closing the "three related signals landed as three unrelated items" gap without any
+# new detection engineering, just querying data that already exists. Host scope is EVERY
+# tracked case_assets row regardless of compromise_status (that restriction is specific to
+# destructive EDR actions, see isolate_host et al. -- informational surfacing shouldn't
+# hide activity on a host just because it's still only "suspected"). Each category is
+# capped so this stays fast; total_available is returned alongside so a cap never silently
+# reads as "nothing more happened."
+@app.route('/api/cases/<int:cid>/related-items', methods=['GET'])
+@login_required
+def api_case_related_items(cid):
+    db = get_db()
+    case = db.execute("SELECT id FROM cases WHERE id = ?", (cid,)).fetchone()
+    if not case:
+        return jsonify({"error": "Case not found"}), 404
+
+    hosts = sorted({r['host'] for r in db.execute("SELECT DISTINCT host FROM case_assets WHERE case_id = ?", (cid,)).fetchall()})
+    usernames = sorted({r['username'] for r in db.execute(
+        "SELECT DISTINCT a.username FROM case_items ci JOIN alerts a ON ci.item_type = 'alert' AND CAST(a.id AS TEXT) = ci.item_id "
+        "WHERE ci.case_id = ? AND a.username IS NOT NULL AND a.username != ''", (cid,)
+    ).fetchall()})
+
+    row = db.execute("SELECT value FROM settings WHERE key = 'related_items_window_hours'").fetchone()
+    try:
+        window_hours = int(row['value']) if row and row['value'] else 24
+    except (TypeError, ValueError):
+        window_hours = 24
+
+    CAP = 20
+    result = {'hosts': hosts, 'usernames': usernames, 'window_hours': window_hours,
+              'alerts': [], 'alerts_total': 0, 'ueba_events': [], 'ueba_events_total': 0,
+              'fim_events': [], 'fim_events_total': 0}
+    if not hosts and not usernames:
+        return jsonify(result)
+
+    window_clause = f'-{window_hours} hours'
+
+    if hosts or usernames:
+        conds, params = [], []
+        if hosts:
+            conds.append(f"a.host IN ({','.join('?' for _ in hosts)})")
+            params.extend(hosts)
+        if usernames:
+            conds.append(f"a.username IN ({','.join('?' for _ in usernames)})")
+            params.extend(usernames)
+        alert_rows = db.execute(
+            "SELECT a.id, a.timestamp, a.severity, a.host, a.username, a.source_ip, "
+            "COALESCE(s.title, a.rule_name, 'Custom/YARA Rule') as label, a.message "
+            "FROM alerts a LEFT JOIN sigma_rules s ON a.rule_id = s.id "
+            f"WHERE ({' OR '.join(conds)}) AND COALESCE(a.last_seen, a.timestamp) >= datetime('now', ?) "
+            "AND NOT EXISTS (SELECT 1 FROM case_items ci WHERE ci.case_id = ? AND ci.item_type = 'alert' AND ci.item_id = CAST(a.id AS TEXT)) "
+            "ORDER BY a.timestamp DESC",
+            (*params, window_clause, cid)
+        ).fetchall()
+        result['alerts_total'] = len(alert_rows)
+        result['alerts'] = [dict(r) for r in alert_rows[:CAP]]
+
+    if hosts:
+        host_ph = ','.join('?' for _ in hosts)
+        ueba_host_rows = db.execute(
+            "SELECT id, timestamp, severity, hostname as host, NULL as username, message FROM events "
+            f"WHERE app_name = 'duckdb_ueba' AND entity_type = 'host' AND hostname IN ({host_ph}) "
+            "AND timestamp >= datetime('now', ?) "
+            "AND NOT EXISTS (SELECT 1 FROM case_items ci WHERE ci.case_id = ? AND ci.item_type = 'ueba_event' AND ci.item_id = CAST(events.id AS TEXT)) "
+            "ORDER BY timestamp DESC",
+            (*hosts, window_clause, cid)
+        ).fetchall()
+    else:
+        ueba_host_rows = []
+    if usernames:
+        user_ph = ','.join('?' for _ in usernames)
+        ueba_user_rows = db.execute(
+            "SELECT id, timestamp, severity, NULL as host, hostname as username, message FROM events "
+            f"WHERE app_name = 'duckdb_ueba' AND entity_type = 'user' AND hostname IN ({user_ph}) "
+            "AND timestamp >= datetime('now', ?) "
+            "AND NOT EXISTS (SELECT 1 FROM case_items ci WHERE ci.case_id = ? AND ci.item_type = 'ueba_event' AND ci.item_id = CAST(events.id AS TEXT)) "
+            "ORDER BY timestamp DESC",
+            (*usernames, window_clause, cid)
+        ).fetchall()
+    else:
+        ueba_user_rows = []
+    ueba_rows = sorted(list(ueba_host_rows) + list(ueba_user_rows), key=lambda r: r['timestamp'], reverse=True)
+    result['ueba_events_total'] = len(ueba_rows)
+    result['ueba_events'] = [dict(r) for r in ueba_rows[:CAP]]
+
+    if hosts:
+        host_ph = ','.join('?' for _ in hosts)
+        fim_rows = db.execute(
+            "SELECT id, timestamp, severity, host, username, message FROM live_logs "
+            f"WHERE app = 'FIM' AND host IN ({host_ph}) AND timestamp >= datetime('now', ?) "
+            "AND NOT EXISTS (SELECT 1 FROM case_items ci WHERE ci.case_id = ? AND ci.item_type = 'fim_event' AND ci.item_id = CAST(live_logs.id AS TEXT)) "
+            "ORDER BY timestamp DESC",
+            (*hosts, window_clause, cid)
+        ).fetchall()
+        result['fim_events_total'] = len(fim_rows)
+        result['fim_events'] = [dict(r) for r in fim_rows[:CAP]]
+
+    return jsonify(result)
 
 @app.route('/api/cases/<int:cid>/assets', methods=['POST'])
 @login_required
@@ -6367,10 +6471,19 @@ def api_ueba_risk_scores():
         "LEFT JOIN identities i ON rse.entity_type = 'user' AND rse.entity_id = i.username "
         "LEFT JOIN ueba_priority_scores ps ON rse.entity_type = ps.entity_type AND rse.entity_id = ps.entity_id "
         "WHERE rse.computed_at >= datetime('now', ?) "
-        "GROUP BY rse.entity_type, rse.entity_id HAVING score > 0 ORDER BY score DESC LIMIT 200",
+        "GROUP BY rse.entity_type, rse.entity_id HAVING score > 0 "
+        "ORDER BY (priority_score IS NULL), priority_score DESC, score DESC LIMIT 200",
         (f"-{cfg['window_days']} days",)
     ).fetchall()
-    out = [{**dict(r), 'tier': _risk_tier(r['score'], cfg['tiers'])} for r in rows]
+    # Same priority-first-with-fallback pattern /api/dashboards/top-risk-entities already
+    # proved out: rank/tier by the decay-aware priority_score when available (a stale old
+    # alert flood doesn't pin an entity at Critical with zero current activity), falling
+    # back to the flat windowed sum's tier only when no priority row exists yet.
+    out = []
+    for r in rows:
+        d = dict(r)
+        d['tier'] = _priority_tier(r['priority_score']) if r['priority_score'] is not None else _risk_tier(r['score'], cfg['tiers'])
+        out.append(d)
     return jsonify({'entities': out, 'window_days': cfg['window_days']})
 
 @app.route('/api/ueba/risk-scores/<entity_type>/<path:entity_id>', methods=['GET'])
@@ -6389,8 +6502,13 @@ def api_ueba_risk_score_detail(entity_type, entity_id):
         "SELECT priority_score, distinct_indicators, peak_points, decay_score, computed_at FROM ueba_priority_scores "
         "WHERE entity_type = ? AND entity_id = ?", (entity_type, entity_id)
     ).fetchone()
+    # Same priority-first-with-fallback tier resolution as api_ueba_risk_scores/the
+    # dashboard's top-risk-entities widget -- keeps this detail view's tier consistent
+    # with whatever tier the list view showed for the same entity.
+    priority_score = priority_row['priority_score'] if priority_row else None
+    tier = _priority_tier(priority_score) if priority_score is not None else _risk_tier(score, cfg['tiers'])
     return jsonify({'entity_type': entity_type, 'entity_id': entity_id, 'score': score,
-                     'tier': _risk_tier(score, cfg['tiers']), 'events': events, 'window_days': cfg['window_days'],
+                     'tier': tier, 'events': events, 'window_days': cfg['window_days'],
                      'priority': dict(priority_row) if priority_row else None})
 
 @app.route('/api/ueba/risk-config', methods=['GET', 'POST'])
@@ -7431,6 +7549,26 @@ def migrate_alerts_dedup_columns():
             conn.execute("ALTER TABLE alerts ADD COLUMN occurrence_count INTEGER DEFAULT 1")
         if 'last_seen' not in cols:
             conn.execute("ALTER TABLE alerts ADD COLUMN last_seen DATETIME")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# Cooldown ledger for cross-rule escalation (sigma_engine.py's run_detection_cycle) --
+# when N distinct rules fire on one host within a short window, that's a real correlation
+# signal a single-rule dedup can't catch (dedup only collapses repeats of the SAME rule).
+# One row per escalation event; _escalate_host checks this before re-escalating an
+# already-flagged host so a still-active cluster gets one case, not one every 30s cycle.
+def migrate_alert_escalations():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS alert_escalations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            host TEXT NOT NULL,
+            escalated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            rule_count INTEGER NOT NULL
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_alert_escalations_host ON alert_escalations(host, escalated_at)')
         conn.commit()
         conn.close()
     except Exception:
@@ -9687,6 +9825,43 @@ def api_settings_retention():
     db.commit()
     log_audit('retention_policy_change', 'settings', None, f'{days} days')
     return jsonify({'status': 'success', 'days': days})
+
+DEFAULT_ALERT_ESCALATION_RULE_THRESHOLD = 3
+DEFAULT_ALERT_ESCALATION_WINDOW_MINUTES = 15
+
+# Controls sigma_engine.py's cross-rule escalation pass (see run_detection_cycle) -- when
+# this many DISTINCT rules fire on one host within the window, a case gets created (or
+# an existing open one annotated). Same settings-table key/value pattern as retention
+# above; sigma_engine.py reads these keys directly (it has no shared import with this
+# file), so the defaults here and there are duplicated on purpose, not by oversight.
+@app.route('/api/settings/alert-escalation', methods=['GET', 'POST'])
+@login_required
+def api_settings_alert_escalation():
+    from flask import request, jsonify
+    db = get_db()
+
+    if request.method == 'GET':
+        threshold_row = db.execute("SELECT value FROM settings WHERE key = 'alert_escalation_rule_threshold'").fetchone()
+        window_row = db.execute("SELECT value FROM settings WHERE key = 'alert_escalation_window_minutes'").fetchone()
+        threshold = int(threshold_row['value']) if threshold_row and threshold_row['value'] else DEFAULT_ALERT_ESCALATION_RULE_THRESHOLD
+        window_minutes = int(window_row['value']) if window_row and window_row['value'] else DEFAULT_ALERT_ESCALATION_WINDOW_MINUTES
+        return jsonify({'rule_threshold': threshold, 'window_minutes': window_minutes})
+
+    err = require_permission('settings.system.manage')
+    if err: return err
+    d = request.json or {}
+    try:
+        threshold = int(d.get('rule_threshold'))
+        window_minutes = int(d.get('window_minutes'))
+        if threshold < 2 or window_minutes < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({'error': 'rule_threshold must be an integer >= 2, and window_minutes must be a positive integer'}), 400
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('alert_escalation_rule_threshold', ?)", (str(threshold),))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('alert_escalation_window_minutes', ?)", (str(window_minutes),))
+    db.commit()
+    log_audit('alert_escalation_config_change', 'settings', None, f'threshold={threshold}, window={window_minutes}m')
+    return jsonify({'status': 'success', 'rule_threshold': threshold, 'window_minutes': window_minutes})
 
 # Mirrors archive_logs.py's own DEFAULT_ARCHIVE_DAYS -- duplicated rather than imported
 # since this route only needs the number for display, not the archiving logic itself.
@@ -11951,6 +12126,7 @@ migrate_agent_commands()
 migrate_alerts_columns()
 migrate_alerts_enrichment()
 migrate_alerts_dedup_columns()
+migrate_alert_escalations()
 migrate_sigma_rules_columns()
 migrate_rule_tuning()
 migrate_rule_autocase()

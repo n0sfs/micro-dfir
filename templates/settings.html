@@ -223,6 +223,26 @@
 
             <hr class="border-secondary my-4">
 
+            <!-- Alert Escalation -->
+            <h6 class="text-info mb-3">Alert Escalation</h6>
+            <p class="text-muted small mb-3">Single-rule dedup already collapses repeats of the same rule on a host. This is the separate, cross-rule signal: when this many <em>distinct</em> rules fire on one host within the window, a case is created automatically (or an existing open case for that host gets a note) — surfacing a correlation an analyst would otherwise have to notice by hand.</p>
+            <div class="row g-2 align-items-end mb-3">
+                <div class="col-auto">
+                    <label class="form-label small text-muted mb-1">Distinct rules</label>
+                    <input type="number" min="2" id="escalationThreshold" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:100px;">
+                </div>
+                <div class="col-auto">
+                    <label class="form-label small text-muted mb-1">Window (minutes)</label>
+                    <input type="number" min="1" id="escalationWindow" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;">
+                </div>
+                <div class="col-auto">
+                    <button class="btn btn-outline-primary btn-sm" onclick="saveEscalationConfig()"><i class="fa-solid fa-save me-1"></i> Save</button>
+                </div>
+            </div>
+            <div class="small text-muted" id="escalationStatus"></div>
+
+            <hr class="border-secondary my-4">
+
             <!-- Hot/Cold Log Archiving -->
             <h6 class="text-info mb-3">Log Archiving</h6>
             <p class="text-muted small mb-3">Move logs older than the archive window out of the live search index into cold storage in the same database, so Log Search stays fast without losing older data outright. Independent of Log Retention above -- if both are enabled, keep the retention period longer than the archive window, or retention will purge logs before they get a chance to be archived.</p>
@@ -503,6 +523,7 @@ document.addEventListener("DOMContentLoaded", function() {
     loadMetrics();
     loadRoles().then(loadUsers);
     loadRetentionSettings();
+    loadEscalationConfig();
     loadArchiveSettings();
     loadReportBranding();
     loadReportSchedule();
@@ -1049,6 +1070,40 @@ function saveRetentionPolicy() {
             toast(res.error || 'Failed to save retention policy.', 'danger');
         }
     }).catch(err => toast('Error saving retention policy: ' + err, 'danger'));
+}
+
+// ---- Alert Escalation ----
+function loadEscalationConfig() {
+    fetch('/api/settings/alert-escalation')
+        .then(r => r.json())
+        .then(data => {
+            document.getElementById('escalationThreshold').value = data.rule_threshold;
+            document.getElementById('escalationWindow').value = data.window_minutes;
+            document.getElementById('escalationStatus').innerText =
+                `Currently: ${data.rule_threshold}+ distinct rules on one host within ${data.window_minutes} minute(s) creates or annotates a case.`;
+        })
+        .catch(e => console.error('Alert escalation settings load issue:', e));
+}
+
+function saveEscalationConfig() {
+    const threshold = parseInt(document.getElementById('escalationThreshold').value, 10);
+    const windowMinutes = parseInt(document.getElementById('escalationWindow').value, 10);
+    if (!(threshold >= 2) || !(windowMinutes >= 1)) {
+        toast('Distinct rules must be at least 2, and window must be a positive number of minutes.', 'warning');
+        return;
+    }
+    fetch('/api/settings/alert-escalation', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({rule_threshold: threshold, window_minutes: windowMinutes})
+    }).then(r => r.json()).then(res => {
+        if (res.status === 'success') {
+            loadEscalationConfig();
+            toast('Alert escalation settings saved.', 'success');
+        } else {
+            toast(res.error || 'Failed to save alert escalation settings.', 'danger');
+        }
+    }).catch(err => toast('Error saving alert escalation settings: ' + err, 'danger'));
 }
 
 // ---- Log Archiving ----

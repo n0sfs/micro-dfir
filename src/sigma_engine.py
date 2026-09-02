@@ -140,6 +140,13 @@ def _get_soar_api_key(cursor):
     row = cursor.execute("SELECT value FROM settings WHERE key = 'soar_api_key'").fetchone()
     return row['value'] if row and row['value'] else None
 
+def _get_int_setting(cursor, key, default):
+    row = cursor.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    try:
+        return int(row['value']) if row and row['value'] else default
+    except (TypeError, ValueError):
+        return default
+
 # The guided rule builder's "Source IP / Destination IP — matches live IOC list"
 # fields emit this literal token as an unquoted YAML scalar (e.g. `SourceIp:
 # __IOC_IP_LIST__`) rather than a typed-in value -- unchanged rule-authoring surface.
@@ -264,6 +271,45 @@ def _auto_create_case(cursor, rule_title, host, username, alert_id, template_id)
             )
             cursor.execute("INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'system', 'template_applied', ?)", (cid, tpl['name']))
     return cid
+
+# Cross-rule escalation: dedup only ever collapses repeats of the SAME rule on a host
+# (see the (rule_id, host, username) key above) -- this is the separate signal for N
+# DIFFERENT rules firing on one host in a short window, which single-rule dedup can't
+# catch. Deliberately creates/annotates a CASE rather than mutating individual alerts'
+# severity -- the correlating case is the escalation signal itself. Same known limitation
+# as _auto_create_case above: doesn't cascade into case_created SOAR playbooks (that
+# engine only lives in app.py, driven by Flask request-time mutations).
+def _escalate_host(cursor, host, rule_count, window_minutes):
+    recent = cursor.execute(
+        "SELECT 1 FROM alert_escalations WHERE host = ? AND escalated_at >= datetime('now', ?)",
+        (host, f'-{window_minutes} minutes')
+    ).fetchone()
+    if recent:
+        return  # already flagged this host within the window -- one case per cluster, not one per cycle
+    detail = f"{rule_count} distinct rules fired on {host} in the last {window_minutes} minutes."
+    open_case = cursor.execute(
+        "SELECT ca.case_id FROM case_assets ca JOIN cases c ON ca.case_id = c.id "
+        "WHERE ca.host = ? AND c.status = 'open' LIMIT 1",
+        (host,)
+    ).fetchone()
+    if open_case:
+        cursor.execute(
+            "INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'system', 'escalation', ?)",
+            (open_case['case_id'], detail)
+        )
+    else:
+        cursor.execute(
+            "INSERT INTO cases (title, status, description, created_by, tlp, pap) VALUES (?, 'open', ?, 'system:escalation', 'amber', 'amber')",
+            (f"Multiple rules fired on {host}", detail)
+        )
+        cid = cursor.lastrowid
+        cursor.execute("INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'system', 'created', ?)", (cid, detail))
+        cursor.execute(
+            "INSERT INTO case_assets (case_id, host, compromise_status, added_by) VALUES (?, ?, 'suspected', 'system')",
+            (cid, host)
+        )
+        cursor.execute("INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'system', 'asset_added', ?)", (cid, host))
+    cursor.execute("INSERT INTO alert_escalations (host, rule_count) VALUES (?, ?)", (host, rule_count))
 
 # kind -> (rule-facing placeholder token, internal sentinel scalar, TEMP TABLE name, value builder).
 # The sentinel is deliberately alphanumeric-only (no underscores/percent) so pysigma's
@@ -529,7 +575,28 @@ def run_detection_cycle():
                     'source_ip': source_ip, 'message': message,
                     'timestamp': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 })
-    conn.commit(); conn.close()
+    conn.commit()
+
+    # Cross-rule escalation -- a second pass over the now-committed alerts table (not
+    # pending_alerts, which only has this cycle's raw matches and is empty when nothing
+    # new fired) so it sees a consistent, fully-written state. See _escalate_host's
+    # comment for why this creates/annotates a case rather than mutating alert severity.
+    esc_threshold = _get_int_setting(cursor, 'alert_escalation_rule_threshold', 3)
+    esc_window = _get_int_setting(cursor, 'alert_escalation_window_minutes', 15)
+    escalated_hosts = cursor.execute(
+        "SELECT host, COUNT(DISTINCT rule_id) as rule_count FROM alerts "
+        "WHERE COALESCE(last_seen, timestamp) >= datetime('now', ?) AND host IS NOT NULL AND host != '' "
+        "GROUP BY host HAVING rule_count >= ?",
+        (f'-{esc_window} minutes', esc_threshold)
+    ).fetchall()
+    for row in escalated_hosts:
+        try:
+            _escalate_host(cursor, row['host'], row['rule_count'], esc_window)
+        except Exception as e:
+            print(f"[-] Escalation failed for host '{row['host']}': {e}")
+    if escalated_hosts:
+        conn.commit()
+    conn.close()
     json.dump({"last_id": current_max}, open(STATE_FILE, 'w'))
 
 # Same piggyback rationale as sync_due_feeds() below: automatic log retention has no
