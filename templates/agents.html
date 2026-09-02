@@ -831,7 +831,7 @@ function renderEndpoints() {
                 <tr data-hostname="${escHtml(dev.hostname)}">
                     <td><input class="form-check-input endpoint-select-cb" type="checkbox" ${selectedEndpoints.has(dev.hostname) ? 'checked' : ''} onchange="toggleEndpointSelection(rowHost(this), this.checked)"></td>
                     <td>
-                        <strong class="hostname-cell" title="${escHtml(hostInfoText(dev))}" oncontextmenu="showHostInfoMenu(event, rowHost(this)); return false;">${escHtml(dev.hostname)}</strong>
+                        <strong class="hostname-cell" title="${escHtml(hostInfoText(dev))}" oncontextmenu="showHostInfoMenu(event, rowHost(this)); return false;">${escHtml(dev.hostname)}</strong>${dev.legacy_auth ? ` <i class="fa-solid fa-triangle-exclamation text-warning" title="Authenticating via the legacy shared secret, not a per-agent token. Re-download and redeploy the installer (Deployment tab) to upgrade this agent -- a remote 'Upgrade Agent' alone does not migrate it."></i>` : ''}
                     </td>
                     <td>${osIcon(dev.os)}</td>
                     <td><span class="text-info">${escHtml(dev.endpoint_ip)}</span></td>

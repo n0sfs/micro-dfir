@@ -5600,6 +5600,7 @@ def api_run_scheduled_playbooks():
     _run_scheduled_agent_sweeps(db)
     _run_due_auto_reverts(db)
     _run_due_sla_breach_playbooks(db)
+    _run_due_offline_agent_alerts(db)
     return jsonify({'status': 'success'})
 
 # Due isolation auto-reverts -- for each playbook_pending_reverts row past its revert_at,
@@ -5638,6 +5639,55 @@ def _run_due_sla_breach_playbooks(db):
     for c in due_cases:
         _run_playbooks_for_case(db, c['id'], 'sla_breached', c['queue_id'], c['tlp'], c['status'], c['severity'])
         db.execute("UPDATE cases SET sla_breach_notified_at = datetime('now') WHERE id = ?", (c['id'],))
+    db.commit()
+
+# agent_polls.timestamp is local SERVER time (datetime.now(), not UTC/CURRENT_TIMESTAMP
+# -- see the INSERT in api_agent_config) -- comparisons here use datetime.now() too,
+# matching agent_checkins()'s own established convention, not utcnow(), or every delta
+# would be skewed by the server's UTC offset.
+def _run_due_offline_agent_alerts(db):
+    threshold_row = db.execute("SELECT value FROM settings WHERE key = 'agent_offline_alert_minutes'").fetchone()
+    cooldown_row = db.execute("SELECT value FROM settings WHERE key = 'agent_offline_alert_cooldown_minutes'").fetchone()
+    try:
+        threshold_min = int(threshold_row['value']) if threshold_row and threshold_row['value'] else DEFAULT_AGENT_OFFLINE_ALERT_MINUTES
+    except (ValueError, TypeError):
+        threshold_min = DEFAULT_AGENT_OFFLINE_ALERT_MINUTES
+    try:
+        cooldown_min = int(cooldown_row['value']) if cooldown_row and cooldown_row['value'] else DEFAULT_AGENT_OFFLINE_ALERT_COOLDOWN_MINUTES
+    except (ValueError, TypeError):
+        cooldown_min = DEFAULT_AGENT_OFFLINE_ALERT_COOLDOWN_MINUTES
+
+    rows = db.execute(
+        "SELECT user_agent as hostname, MAX(timestamp) as last_seen FROM agent_polls "
+        "WHERE user_agent IS NOT NULL AND user_agent != '' GROUP BY user_agent"
+    ).fetchall()
+    now = datetime.now()
+    for r in rows:
+        try:
+            last_seen = datetime.strptime(r['last_seen'], '%Y-%m-%d %H:%M:%S')
+        except (ValueError, TypeError):
+            continue
+        age_minutes = (now - last_seen).total_seconds() / 60
+        if age_minutes < threshold_min:
+            continue
+        already = db.execute(
+            "SELECT 1 FROM agent_offline_alerts WHERE hostname = ? AND alerted_at >= datetime('now', ?)",
+            (r['hostname'], f'-{cooldown_min} minutes')
+        ).fetchone()
+        if already:
+            continue
+        msg = f"Agent on {r['hostname']} has not checked in for over {int(age_minutes)} minutes (last seen {r['last_seen']})."
+        ins_cur = db.execute(
+            "INSERT INTO alerts (timestamp, rule_name, severity, host, message, occurrence_count, last_seen) "
+            "VALUES (datetime('now'), 'Agent Offline', 'MEDIUM', ?, ?, 1, datetime('now'))",
+            (r['hostname'], msg)
+        )
+        new_alert_id = ins_cur.lastrowid
+        db.execute("INSERT INTO agent_offline_alerts (hostname, alerted_at) VALUES (?, datetime('now'))", (r['hostname'],))
+        soar_alerts.run_playbooks_for_alert(db, {
+            'id': new_alert_id, 'rule_title': 'Agent Offline', 'severity': 'MEDIUM', 'host': r['hostname'],
+            'username': None, 'source_ip': None, 'message': msg, 'timestamp': None,
+        }, run_case_playbooks_fn=lambda cid, qid, tlp, st, sev: _run_playbooks_for_case(db, cid, 'case_created', qid, tlp, st, sev))
     db.commit()
 
 @app.route('/api/playbooks', methods=['GET', 'POST'])
@@ -7603,6 +7653,20 @@ def migrate_alert_escalations():
             rule_count INTEGER NOT NULL
         )''')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_alert_escalations_host ON alert_escalations(host, escalated_at)')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_agent_offline_alerts():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS agent_offline_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hostname TEXT NOT NULL,
+            alerted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_offline_alerts_host ON agent_offline_alerts(hostname, alerted_at)')
         conn.commit()
         conn.close()
     except Exception:
@@ -9899,6 +9963,39 @@ def api_settings_alert_escalation():
     log_audit('alert_escalation_config_change', 'settings', None, f'threshold={threshold}, window={window_minutes}m')
     return jsonify({'status': 'success', 'rule_threshold': threshold, 'window_minutes': window_minutes})
 
+DEFAULT_AGENT_OFFLINE_ALERT_MINUTES = 15
+DEFAULT_AGENT_OFFLINE_ALERT_COOLDOWN_MINUTES = 60
+
+# Controls _run_due_offline_agent_alerts (see near _run_due_sla_breach_playbooks) -- a
+# host silent for offline_minutes gets an "Agent Offline" alert (rule_id left NULL, same
+# shape as the inline heuristic ingest path's own alerts), which can trigger an
+# alert_created SOAR playbook. cooldown_minutes prevents re-alerting the same host every
+# 30s poll cycle while it stays offline. Read only by app.py itself (the sweep this
+# feeds lives here too), unlike alert-escalation above which sigma_engine.py also reads.
+@app.route('/api/settings/agent-offline-alert', methods=['GET', 'POST'])
+@login_required
+def api_settings_agent_offline_alert():
+    db = get_db()
+    if request.method == 'GET':
+        threshold_row = db.execute("SELECT value FROM settings WHERE key = 'agent_offline_alert_minutes'").fetchone()
+        cooldown_row = db.execute("SELECT value FROM settings WHERE key = 'agent_offline_alert_cooldown_minutes'").fetchone()
+        threshold = int(threshold_row['value']) if threshold_row and threshold_row['value'] else DEFAULT_AGENT_OFFLINE_ALERT_MINUTES
+        cooldown = int(cooldown_row['value']) if cooldown_row and cooldown_row['value'] else DEFAULT_AGENT_OFFLINE_ALERT_COOLDOWN_MINUTES
+        return jsonify({'offline_minutes': threshold, 'cooldown_minutes': cooldown})
+    err = require_permission('settings.system.manage')
+    if err: return err
+    d = request.json or {}
+    try:
+        threshold = int(d.get('offline_minutes')); cooldown = int(d.get('cooldown_minutes'))
+        if threshold < 1 or cooldown < 1: raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({'error': 'offline_minutes and cooldown_minutes must both be positive integers'}), 400
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('agent_offline_alert_minutes', ?)", (str(threshold),))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('agent_offline_alert_cooldown_minutes', ?)", (str(cooldown),))
+    db.commit()
+    log_audit('agent_offline_alert_config_change', 'settings', None, f'offline_minutes={threshold}, cooldown={cooldown}m')
+    return jsonify({'status': 'success', 'offline_minutes': threshold, 'cooldown_minutes': cooldown})
+
 # Mirrors archive_logs.py's own DEFAULT_ARCHIVE_DAYS -- duplicated rather than imported
 # since this route only needs the number for display, not the archiving logic itself.
 DEFAULT_LOG_ARCHIVE_DAYS = 90
@@ -11800,6 +11897,18 @@ def agent_checkins():
             for m in mapped:
                 m['group'] = group_by_host.get(m['hostname'], '')
 
+            # A host with active check-ins but no bound agent_tokens row can only be
+            # authenticating via _validate_agent_auth's shared-secret branch -- that's
+            # the only other path it accepts, and it returns True immediately without
+            # ever touching agent_tokens at all. No new tracking needed, fully derivable
+            # from data the app already has.
+            bound_hosts = {r['hostname'] for r in db.execute(
+                f"SELECT DISTINCT hostname FROM agent_tokens WHERE hostname IN ({placeholders}) AND hostname IS NOT NULL",
+                hostnames
+            ).fetchall()}
+            for m in mapped:
+                m['legacy_auth'] = m['hostname'] not in bound_hosts
+
         # Recent check-in timestamps per host, for the heartbeat sparkline on the Agents
         # page — one bulk query bounded to the last 2000 polls across the visible hosts,
         # rather than a separate query per row.
@@ -12163,6 +12272,7 @@ migrate_alerts_columns()
 migrate_alerts_enrichment()
 migrate_alerts_dedup_columns()
 migrate_alert_escalations()
+migrate_agent_offline_alerts()
 migrate_sigma_rules_columns()
 migrate_rule_tuning()
 migrate_rule_autocase()
