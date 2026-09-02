@@ -6372,6 +6372,7 @@ RISK_SCORE_DEFAULTS = {
         'rare_process_population': 18,
         'multi_signal_convergence': 30,
         'sequence_chain_progression': 15,
+        'ioc_touch': 35,
     },
     'tiers': {'low': 0, 'medium': 20, 'high': 50, 'critical': 100},
 }
