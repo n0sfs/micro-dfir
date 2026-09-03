@@ -776,11 +776,18 @@ function renderRelatedCases(cases) {
 
 function taskRow(t, isClosed) {
     const done = t.status === 'done';
+    // Compares as plain ISO date strings (YYYY-MM-DD) -- no Date() parsing needed, and
+    // "today" is the browser's own local date, matching the <input type="date"> the
+    // due-date value itself came from.
+    const today = new Date().toISOString().slice(0, 10);
+    const overdue = !done && t.due_date && t.due_date < today;
     return `
-        <div class="d-flex align-items-center border border-secondary rounded p-2 mb-1">
+        <div class="d-flex align-items-center border ${overdue ? 'border-danger' : 'border-secondary'} rounded p-2 mb-1">
             <input type="checkbox" class="form-check-input me-2" ${done ? 'checked' : ''} onchange="toggleCaseTask(${t.id}, '${t.status}')" ${isClosed ? 'disabled' : ''}>
             <span class="flex-grow-1 ${done ? 'text-decoration-line-through text-muted' : ''}">${escHtml(t.title)}</span>
-            ${t.assignee ? `<span class="badge bg-secondary me-2">${escHtml(t.assignee)}</span>` : ''}
+            ${overdue ? `<span class="badge bg-danger me-2" title="Due ${escHtml(t.due_date)}">Overdue</span>` : ''}
+            <input type="date" class="form-control form-control-sm bg-dark text-light border-secondary me-2" style="width:150px;" value="${escHtml(t.due_date || '')}" title="Due date" onchange="updateCaseTaskField(${t.id}, 'due_date', this.value)" ${isClosed ? 'disabled' : ''}>
+            <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary me-2" style="width:120px;" value="${escHtml(t.assignee || '')}" placeholder="Assignee" title="Assignee" onchange="updateCaseTaskField(${t.id}, 'assignee', this.value)" ${isClosed ? 'disabled' : ''}>
             <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove task" onclick="deleteCaseTask(${t.id})" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-xmark"></i></button>
         </div>`;
 }
@@ -1207,6 +1214,17 @@ function toggleCaseTask(tid, currentStatus) {
     fetch(`/api/cases/${activeCaseId}/tasks/${tid}`, {
         method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({status: newStatus})
     }).then(() => { openCaseDetail(activeCaseId); loadCases(); })
+      .catch(err => toast('Error updating task: ' + err, 'danger'));
+}
+
+// Assignee/due-date inline edits -- auto-save on blur/change, same idiom as Case Assets'
+// own inline status/notes controls elsewhere on this page. A full openCaseDetail()
+// refresh (not just a DOM patch) keeps the overdue badge/highlight and the rest of the
+// row in sync with whatever was just saved.
+function updateCaseTaskField(tid, field, value) {
+    fetch(`/api/cases/${activeCaseId}/tasks/${tid}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({[field]: value})
+    }).then(() => { openCaseDetail(activeCaseId); })
       .catch(err => toast('Error updating task: ' + err, 'danger'));
 }
 
