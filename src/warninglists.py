@@ -10,6 +10,7 @@ set (some of which, like public-dns-v4, run to 60,000+ CIDR entries) -- these th
 cover the highest-value, lowest-risk false-positive sources for a single appliance
 without needing a live warninglist-repo sync.
 """
+import bisect
 import ipaddress
 
 # Confirmed live against github.com/MISP/misp-warninglists/blob/main/lists/rfc1918/list.json
@@ -50,13 +51,71 @@ SEED_WARNINGLISTS = [
 ]
 
 
-def _ip_matches(ip_str, entry_value, entry_type):
+def _merge_intervals(intervals):
+    """Sorts and merges overlapping/nested (start_int, end_int) ranges into the minimal
+    disjoint set, so containment can later be answered with one bisect instead of a
+    linear scan across every original (possibly nested, e.g. a /8 containing many /16s)
+    CIDR range."""
+    if not intervals:
+        return []
+    intervals = sorted(intervals)
+    merged = [intervals[0]]
+    for start, end in intervals[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end + 1:
+            if end > last_end:
+                merged[-1] = (last_start, end)
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _build_ip_matcher(cursor):
+    """Builds a reusable matcher from every currently-enabled warninglist entry: an
+    exact-match set for 'ip'-type entries, plus merged/sorted (start_int, end_int)
+    ranges per address family for 'cidr'-type entries -- kept separate per family since
+    plain integer comparison alone can't distinguish a v4 address's int value from a v6
+    range's. This replaces the old O(ips * entries) scan that constructed a fresh
+    ipaddress object for every (ip, entry) pair: a single large vendored CIDR list
+    (e.g. a full AWS-ranges warninglist, ~3,900 entries) crossed against a few thousand
+    IOC IPs meant tens of millions of object constructions per detection cycle -- this
+    parses every entry exactly once, then answers each IP with a single bisect.
+    Returns (exact_set, {4: (starts, merged), 6: (starts, merged)})."""
+    entries = cursor.execute(
+        "SELECT e.value, w.type FROM warninglist_entries e "
+        "JOIN warninglists w ON w.id = e.warninglist_id WHERE w.enabled = 1"
+    ).fetchall()
+    exact = set()
+    raw_intervals = {4: [], 6: []}
+    for val, typ in entries:
+        try:
+            if typ == 'cidr':
+                net = ipaddress.ip_network(val, strict=False)
+                raw_intervals[net.version].append((int(net.network_address), int(net.broadcast_address)))
+            else:
+                exact.add(val)
+        except ValueError:
+            continue
+    by_version = {}
+    for version, intervals in raw_intervals.items():
+        merged = _merge_intervals(intervals)
+        by_version[version] = ([iv[0] for iv in merged], merged)
+    return exact, by_version
+
+
+def _ip_matches_matcher(ip_str, exact, by_version):
+    if ip_str in exact:
+        return True
     try:
-        if entry_type == 'cidr':
-            return ipaddress.ip_address(ip_str) in ipaddress.ip_network(entry_value, strict=False)
-        return ip_str == entry_value
+        addr = ipaddress.ip_address(ip_str)
     except ValueError:
         return False
+    starts, merged = by_version.get(addr.version, ([], []))
+    if not merged:
+        return False
+    addr_int = int(addr)
+    idx = bisect.bisect_right(starts, addr_int) - 1
+    return idx >= 0 and addr_int <= merged[idx][1]
 
 
 def filter_warninglisted_ips(cursor, ips):
@@ -66,10 +125,7 @@ def filter_warninglisted_ips(cursor, ips):
     ips = list(ips)
     if not ips:
         return []
-    entries = cursor.execute(
-        "SELECT e.value, w.type FROM warninglist_entries e "
-        "JOIN warninglists w ON w.id = e.warninglist_id WHERE w.enabled = 1"
-    ).fetchall()
-    if not entries:
+    exact, by_version = _build_ip_matcher(cursor)
+    if not exact and not any(merged for _, merged in by_version.values()):
         return ips
-    return [ip for ip in ips if not any(_ip_matches(ip, val, typ) for val, typ in entries)]
+    return [ip for ip in ips if not _ip_matches_matcher(ip, exact, by_version)]

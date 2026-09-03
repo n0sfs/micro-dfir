@@ -654,7 +654,7 @@ def api_ingest():
                 # rule_id-based alerts), so rule_name is the match key here instead.
                 existing = db.execute(
                     "SELECT id FROM alerts WHERE rule_id IS NULL AND rule_name = ? AND host = ? "
-                    "AND COALESCE(last_seen, timestamp) >= datetime('now', '-15 minutes') ORDER BY id DESC LIMIT 1",
+                    "AND effective_seen >= datetime('now', '-15 minutes') ORDER BY id DESC LIMIT 1",
                     (triggered_rule, hst)
                 ).fetchone()
                 if existing:
@@ -4588,7 +4588,7 @@ def api_case_related_items(cid):
             "SELECT a.id, a.timestamp, a.severity, a.host, a.username, a.source_ip, "
             "COALESCE(s.title, a.rule_name, 'Custom/YARA Rule') as label, a.message "
             "FROM alerts a LEFT JOIN sigma_rules s ON a.rule_id = s.id "
-            f"WHERE ({' OR '.join(conds)}) AND COALESCE(a.last_seen, a.timestamp) >= datetime('now', ?) "
+            f"WHERE ({' OR '.join(conds)}) AND a.effective_seen >= datetime('now', ?) "
             "AND NOT EXISTS (SELECT 1 FROM case_items ci WHERE ci.case_id = ? AND ci.item_type = 'alert' AND ci.item_id = CAST(a.id AS TEXT)) "
             "ORDER BY a.timestamp DESC",
             (*params, window_clause, cid)
@@ -4837,7 +4837,7 @@ def _run_case_analysis(db, cid, entity_type, entity_id):
         f"SELECT a.severity, COALESCE(s.title, a.rule_name, 'Custom/YARA Rule') as rule_title, a.source_ip, "
         f"a.timestamp, a.last_seen, a.occurrence_count "
         f"FROM alerts a LEFT JOIN sigma_rules s ON a.rule_id = s.id "
-        f"WHERE a.{host_or_user_col} = ? AND COALESCE(a.last_seen, a.timestamp) >= datetime('now', ?) "
+        f"WHERE a.{host_or_user_col} = ? AND a.effective_seen >= datetime('now', ?) "
         f"ORDER BY a.timestamp DESC",
         (entity_id, window)
     ).fetchall()
@@ -7691,6 +7691,38 @@ def migrate_alerts_dedup_columns():
             conn.execute("ALTER TABLE alerts ADD COLUMN occurrence_count INTEGER DEFAULT 1")
         if 'last_seen' not in cols:
             conn.execute("ALTER TABLE alerts ADD COLUMN last_seen DATETIME")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# COALESCE(last_seen, timestamp) -- "the most recent time this alert was seen, whether
+# or not it's ever been re-fired" -- is computed inline at 5 call sites (the dedup
+# lookups above, the cross-rule escalation query, and 2 case-analysis/related-items
+# queries) against a table that reached 850K+ rows this session; being a computed
+# expression rather than a plain column, none of those queries could use an index on
+# it, forcing a row-by-row scan every time. A VIRTUAL generated column recomputes for
+# free on every read (no write-path change, no backfill, no stored-data rewrite) while
+# finally being indexable.
+def migrate_alerts_effective_seen():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        # PRAGMA table_info() deliberately omits generated columns (confirmed live --
+        # it never lists one, even freshly added and fully queryable); PRAGMA
+        # table_xinfo() is the variant that includes them (its trailing 'hidden' field
+        # is 2 for a VIRTUAL generated column). Using table_info here would make this
+        # guard always false, silently turning the ALTER below into a
+        # duplicate-column error caught by the bare except on every single restart.
+        cols = {row[1] for row in conn.execute("PRAGMA table_xinfo(alerts)").fetchall()}
+        if 'effective_seen' not in cols:
+            conn.execute("ALTER TABLE alerts ADD COLUMN effective_seen DATETIME GENERATED ALWAYS AS (COALESCE(last_seen, timestamp)) VIRTUAL")
+        # Covers the dedup lookup's exact (rule_id, host, username) + recency shape;
+        # effective_seen alone (used bare in the escalation/case-analysis queries) is
+        # covered by SQLite reusing this same index's leading columns being absent --
+        # a second single-column index gets those too without a 4-column index forcing
+        # a less selective scan for a query that only filters on time.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_dedup ON alerts(rule_id, host, username, effective_seen)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_effective_seen ON alerts(effective_seen)")
         conn.commit()
         conn.close()
     except Exception:
@@ -12521,6 +12553,7 @@ migrate_agent_commands()
 migrate_alerts_columns()
 migrate_alerts_enrichment()
 migrate_alerts_dedup_columns()
+migrate_alerts_effective_seen()
 migrate_alert_escalations()
 migrate_agent_offline_alerts()
 migrate_sigma_aggregation()

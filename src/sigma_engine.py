@@ -12,6 +12,15 @@ from sigma.processing.pipeline import ProcessingPipeline, ProcessingItem
 DB_PATH = "/opt/micro-dfir/siem.db"
 STATE_FILE = os.path.join(os.path.dirname(DB_PATH), "sigma_state.json")
 
+# Caps how many new live_logs rows a single run_detection_cycle() pass will evaluate.
+# Without a cap, a cycle that falls behind (a slow rule, a load spike, an oversized
+# warninglist -- see warninglists.py) picks up an ever-larger [last_id, current_max]
+# window next time, which takes even longer, which grows the backlog further: an
+# unrecoverable feedback loop. Capping the window means a bad cycle costs one bounded
+# batch, not a growing one, and the next scheduled invocation (still ~30s later, driven
+# externally) picks up right where this one left off instead of skipping ahead.
+DETECTION_BATCH_SIZE = 50000
+
 # pysigma's SQLite backend correctly translates a Sigma rule's |re field modifier into
 # SQLite's `value REGEXP 'pattern'` syntax -- but SQLite only recognizes REGEXP as sugar
 # for a registered function, it doesn't implement one itself, so every |re rule silently
@@ -531,11 +540,14 @@ def run_detection_cycle():
     last_id = json.load(open(STATE_FILE)).get("last_id", 0) if os.path.exists(STATE_FILE) else 0
     soar_api_key = _get_soar_api_key(cursor)
 
-    try: current_max = cursor.execute("SELECT MAX(id) as m FROM live_logs").fetchone()['m'] or 0
+    try: real_max = cursor.execute("SELECT MAX(id) as m FROM live_logs").fetchone()['m'] or 0
     except Exception as e:
         print(f"[-] Could not read live_logs: {e}")
         return
-    if current_max <= last_id: return
+    if real_max <= last_id: return
+    current_max = min(real_max, last_id + DETECTION_BATCH_SIZE)
+    if current_max < real_max:
+        print(f"[*] Backlog of {real_max - last_id} rows exceeds the {DETECTION_BATCH_SIZE}-row batch cap -- processing id {last_id+1}..{current_max} this cycle, {real_max - current_max} rows still queued.")
 
     cursor.execute(f"CREATE TEMP VIEW recent_events AS SELECT * FROM live_logs WHERE id > {last_id} AND id <= {current_max}")
     rules = cursor.execute("SELECT id, title, rule_yaml, severity_override, auto_case, auto_case_template_id FROM sigma_rules WHERE enabled = 1").fetchall()
@@ -649,7 +661,7 @@ def run_detection_cycle():
              file_hash, query_name) = g['latest']
             existing = cursor.execute(
                 "SELECT id, occurrence_count FROM alerts WHERE rule_id IS ? AND host = ? AND username IS ? "
-                "AND COALESCE(last_seen, timestamp) >= datetime('now', '-15 minutes') ORDER BY id DESC LIMIT 1",
+                "AND effective_seen >= datetime('now', '-15 minutes') ORDER BY id DESC LIMIT 1",
                 (rule_id, host, username)
             ).fetchone()
             if existing:
@@ -705,7 +717,7 @@ def run_detection_cycle():
     esc_window = _get_int_setting(cursor, 'alert_escalation_window_minutes', 15)
     escalated_hosts = cursor.execute(
         "SELECT host, COUNT(DISTINCT rule_id) as rule_count FROM alerts "
-        "WHERE COALESCE(last_seen, timestamp) >= datetime('now', ?) AND host IS NOT NULL AND host != '' "
+        "WHERE effective_seen >= datetime('now', ?) AND host IS NOT NULL AND host != '' "
         "GROUP BY host HAVING rule_count >= ?",
         (f'-{esc_window} minutes', esc_threshold)
     ).fetchall()
