@@ -4384,6 +4384,13 @@ def api_case_detail(cid):
         db.execute("DELETE FROM case_items WHERE case_id = ?", (cid,))
         db.execute("DELETE FROM case_tasks WHERE case_id = ?", (cid,))
         db.execute("DELETE FROM case_events WHERE case_id = ?", (cid,))
+        # No FKs/cascades exist on any of cases' child tables -- these 4 used to be
+        # left behind as orphaned rows on every case delete (harmless today since
+        # AUTOINCREMENT never reuses a case id, but still a real leak).
+        db.execute("DELETE FROM case_assets WHERE case_id = ?", (cid,))
+        db.execute("DELETE FROM case_iocs WHERE case_id = ?", (cid,))
+        db.execute("DELETE FROM case_field_values WHERE case_id = ?", (cid,))
+        db.execute("DELETE FROM ti_relationships WHERE target_type = 'case' AND target_id = ?", (str(cid),))
         db.execute("DELETE FROM cases WHERE id = ?", (cid,))
         db.commit()
         return jsonify({"ok": 1})
@@ -4419,6 +4426,8 @@ def api_case_detail(cid):
         if case['status'] == 'closed' and status == 'closed':
             return jsonify({"error": "This case is closed. Reopen it (change Status) before making changes."}), 403
         closed_at = case['closed_at']
+        last_closed_at = case['last_closed_at']
+        reopened_count = case['reopened_count'] or 0
         if status == 'closed' and case['status'] != 'closed':
             # UTC, not local time -- must match created_at's SQLite CURRENT_TIMESTAMP
             # default (also UTC) or every time-to-close calculation (case metrics/SLA
@@ -4430,6 +4439,15 @@ def api_case_detail(cid):
             if 'workflow_state' not in data:
                 workflow_state = 'resolved'
         elif status == 'open':
+            # A genuine reopen (was closed, now isn't) preserves its close timestamp in
+            # last_closed_at and counts it, rather than nulling closed_at outright --
+            # otherwise the case retroactively vanishes from Cases Closed Trend/
+            # avg_close_hours, and a subsequent re-close loses the original close time
+            # for good. A case that was already open is untouched (closed_at is already
+            # NULL, nothing to preserve).
+            if case['status'] == 'closed' and case['closed_at']:
+                last_closed_at = case['closed_at']
+                reopened_count += 1
             closed_at = None
         # TTA (time to acknowledge): stamped once, the first time a case's workflow
         # moves off the 'new' starting state -- never re-stamped after that.
@@ -4462,8 +4480,8 @@ def api_case_detail(cid):
             queue_name = db.execute("SELECT name FROM case_queues WHERE id = ?", (queue_id,)).fetchone()['name'] if queue_id else '(none)'
             _log_case_event(db, cid, 'queue_change', queue_name)
         db.execute(
-            "UPDATE cases SET title = ?, status = ?, assignee = ?, description = ?, closed_at = ?, tlp = ?, pap = ?, severity = ?, workflow_state = ?, acknowledged_at = ?, sla_breach_notified_at = ?, queue_id = ? WHERE id = ?",
-            (title, status, assignee, description, closed_at, tlp, pap, severity, workflow_state, acknowledged_at, sla_breach_notified_at, queue_id, cid)
+            "UPDATE cases SET title = ?, status = ?, assignee = ?, description = ?, closed_at = ?, tlp = ?, pap = ?, severity = ?, workflow_state = ?, acknowledged_at = ?, sla_breach_notified_at = ?, queue_id = ?, last_closed_at = ?, reopened_count = ? WHERE id = ?",
+            (title, status, assignee, description, closed_at, tlp, pap, severity, workflow_state, acknowledged_at, sla_breach_notified_at, queue_id, last_closed_at, reopened_count, cid)
         )
         if status_changed:
             _run_playbooks_for_case(db, cid, 'status_changed', queue_id, tlp, status, severity)
@@ -5635,6 +5653,7 @@ def api_run_scheduled_playbooks():
     _run_due_auto_reverts(db)
     _run_due_sla_breach_playbooks(db)
     _run_due_offline_agent_alerts(db)
+    _run_due_case_created_playbooks(db)
     return jsonify({'status': 'success'})
 
 # Due isolation auto-reverts -- for each playbook_pending_reverts row past its revert_at,
@@ -5673,6 +5692,20 @@ def _run_due_sla_breach_playbooks(db):
     for c in due_cases:
         _run_playbooks_for_case(db, c['id'], 'sla_breached', c['queue_id'], c['tlp'], c['status'], c['severity'])
         db.execute("UPDATE cases SET sla_breach_notified_at = datetime('now') WHERE id = ?", (c['id'],))
+    db.commit()
+
+# Drains case_playbook_outbox (see migrate_case_playbook_outbox) -- the bridge that lets
+# sigma_engine.py's/ueba_engine.py's auto-created cases finally cascade into
+# case_created playbooks, same as a manually-created case already does.
+def _run_due_case_created_playbooks(db):
+    rows = db.execute("SELECT id, case_id, trigger_event FROM case_playbook_outbox ORDER BY id").fetchall()
+    if not rows:
+        return
+    for row in rows:
+        case = db.execute("SELECT queue_id, tlp, status, severity FROM cases WHERE id = ?", (row['case_id'],)).fetchone()
+        if case:
+            _run_playbooks_for_case(db, row['case_id'], row['trigger_event'], case['queue_id'], case['tlp'], case['status'], case['severity'])
+        db.execute("DELETE FROM case_playbook_outbox WHERE id = ?", (row['id'],))
     db.commit()
 
 # agent_polls.timestamp is local SERVER time (datetime.now(), not UTC/CURRENT_TIMESTAMP
@@ -7748,6 +7781,30 @@ def migrate_alert_escalations():
     except Exception:
         pass
 
+# sigma_engine.py's and ueba_engine.py's own auto-case-creation paths (a rule's
+# auto_case checkbox, cross-rule escalation, a UEBA priority-score threshold) have
+# always bypassed case_created SOAR playbooks entirely -- the playbook engine
+# (_run_playbooks_for_case) only exists here in the Flask process, and those two
+# scripts are separate processes with their own raw sqlite3 connections, no way to call
+# into it directly. This is the queue that closes that gap: sigma_engine.py/
+# ueba_engine.py write a marker row the moment they create a case; the already-existing
+# ~30s poll from sigma_engine.py to /api/internal/run-scheduled-playbooks (this process,
+# which CAN call _run_playbooks_for_case) drains it. Same "small outbox table + a
+# scheduled drain" shape as playbook_pending_reverts.
+def migrate_case_playbook_outbox():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS case_playbook_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id INTEGER NOT NULL,
+            trigger_event TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_agent_offline_alerts():
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
@@ -8205,6 +8262,24 @@ def migrate_case_severity():
             conn.execute("ALTER TABLE cases ADD COLUMN acknowledged_at DATETIME")
         if 'sla_breach_notified_at' not in cols:
             conn.execute("ALTER TABLE cases ADD COLUMN sla_breach_notified_at DATETIME")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# Reopening a case (status closed -> open) has always nulled closed_at outright with no
+# record of the fact -- the case would silently vanish from Cases Closed Trend and
+# avg_close_hours retroactively, and if re-closed, the original close time was gone for
+# good. last_closed_at preserves the most recent real close timestamp across a reopen;
+# reopened_count is a simple lifetime counter for a future reopen-rate metric.
+def migrate_case_reopen_tracking():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(cases)").fetchall()}
+        if 'last_closed_at' not in cols:
+            conn.execute("ALTER TABLE cases ADD COLUMN last_closed_at DATETIME")
+        if 'reopened_count' not in cols:
+            conn.execute("ALTER TABLE cases ADD COLUMN reopened_count INTEGER NOT NULL DEFAULT 0")
         conn.commit()
         conn.close()
     except Exception:
@@ -12555,6 +12630,7 @@ migrate_alerts_enrichment()
 migrate_alerts_dedup_columns()
 migrate_alerts_effective_seen()
 migrate_alert_escalations()
+migrate_case_playbook_outbox()
 migrate_agent_offline_alerts()
 migrate_sigma_aggregation()
 migrate_sigma_rules_columns()
@@ -12571,6 +12647,7 @@ migrate_case_template_fields()
 migrate_case_queues()
 migrate_case_assets()
 migrate_case_severity()
+migrate_case_reopen_tracking()
 migrate_case_iocs()
 migrate_dashboards()
 migrate_role_casing()

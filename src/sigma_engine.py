@@ -291,6 +291,16 @@ def _record_ioc_sightings(cursor, rule_id, host, source_ip, destination_ip, file
 # dedup guard this needs. A rule that keeps re-triggering on the same host/user just
 # keeps bumping occurrence_count on the one alert already linked into the one case
 # already created, rather than spawning a new case every cycle.
+def _queue_case_created_playbooks(cursor, cid):
+    # Marks a just-created case for the case_created playbook cascade -- this process
+    # (a standalone detection loop, no Flask context) can't call _run_playbooks_for_case
+    # directly, since that function only exists in app.py's process. app.py's own
+    # ~30s-scheduled /api/internal/run-scheduled-playbooks poll (which this same
+    # process already calls on that cadence) drains case_playbook_outbox and runs the
+    # cascade there instead. See migrate_case_playbook_outbox's comment in app.py.
+    cursor.execute("INSERT INTO case_playbook_outbox (case_id, trigger_event) VALUES (?, 'case_created')", (cid,))
+
+
 def _auto_create_case(cursor, rule_title, host, username, alert_id, template_id):
     title = f"{rule_title} — {host}"
     detail = f"Auto-created because rule '{rule_title}' fired on {host}" + (f" (user: {username})" if username else "") + "."
@@ -360,15 +370,13 @@ def _check_aggregation_thresholds(cursor, agg_by_rule, rule_titles, rule_severit
                 'id': new_alert_id, 'rule_title': title, 'severity': severity, 'host': host,
                 'username': username, 'source_ip': None, 'message': message,
                 'timestamp': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            })
+            }, run_case_playbooks_fn=lambda cid, qid, tlp, st, sev: _queue_case_created_playbooks(cursor, cid))
 
 # Cross-rule escalation: dedup only ever collapses repeats of the SAME rule on a host
 # (see the (rule_id, host, username) key above) -- this is the separate signal for N
 # DIFFERENT rules firing on one host in a short window, which single-rule dedup can't
 # catch. Deliberately creates/annotates a CASE rather than mutating individual alerts'
-# severity -- the correlating case is the escalation signal itself. Same known limitation
-# as _auto_create_case above: doesn't cascade into case_created SOAR playbooks (that
-# engine only lives in app.py, driven by Flask request-time mutations).
+# severity -- the correlating case is the escalation signal itself.
 def _escalate_host(cursor, host, rule_count, window_minutes):
     recent = cursor.execute(
         "SELECT 1 FROM alert_escalations WHERE host = ? AND escalated_at >= datetime('now', ?)",
@@ -399,6 +407,7 @@ def _escalate_host(cursor, host, rule_count, window_minutes):
             (cid, host)
         )
         cursor.execute("INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'system', 'asset_added', ?)", (cid, host))
+        _queue_case_created_playbooks(cursor, cid)
     cursor.execute("INSERT INTO alert_escalations (host, rule_count) VALUES (?, ?)", (host, rule_count))
 
 # kind -> (rule-facing placeholder token, internal sentinel scalar, TEMP TABLE name, value builder).
@@ -683,26 +692,23 @@ def run_detection_cycle():
                                        new_alert_id, rule_titles.get(rule_id, 'Custom/YARA Rule'), rule_uses_ioc_placeholder)
                 if rule_id in rule_autocase:
                     try:
-                        _auto_create_case(cursor, rule_titles.get(rule_id, 'Custom/YARA Rule'), host, username,
-                                           new_alert_id, rule_autocase[rule_id])
+                        auto_cid = _auto_create_case(cursor, rule_titles.get(rule_id, 'Custom/YARA Rule'), host, username,
+                                                      new_alert_id, rule_autocase[rule_id])
+                        _queue_case_created_playbooks(cursor, auto_cid)
                     except Exception as e:
                         print(f"[-] Auto-case creation failed for rule '{rule_titles.get(rule_id)}': {e}")
                 # Only a brand-new alert notifies, not a re-occurrence within the same
                 # 15-minute dedup window (the `existing` branch above) -- otherwise a noisy
                 # rule would re-notify every cycle it keeps matching instead of once per burst.
-                # run_case_playbooks_fn is omitted (None) here: the case-scoped playbook
-                # engine (_run_playbooks_for_case) lives only in app.py, driven by Flask
-                # request-time case mutations -- this process is a standalone detection loop,
-                # not the case-management surface, same limitation _auto_create_case() above
-                # already has for the per-rule auto-case feature. An alert_created playbook's
-                # create_case action still creates the case and links the alert here; it just
-                # doesn't cascade into a case_created playbook from this process.
+                # run_case_playbooks_fn queues into case_playbook_outbox rather than calling
+                # _run_playbooks_for_case directly -- that function only exists in app.py's
+                # process; see _queue_case_created_playbooks.
                 soar_alerts.run_playbooks_for_alert(cursor, {
                     'id': new_alert_id, 'rule_title': rule_titles.get(rule_id, 'Custom/YARA Rule'),
                     'severity': severity, 'host': host, 'username': username,
                     'source_ip': source_ip, 'message': message,
                     'timestamp': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                })
+                }, run_case_playbooks_fn=lambda cid, qid, tlp, st, sev: _queue_case_created_playbooks(cursor, cid))
     conn.commit()
 
     if agg_by_rule:
