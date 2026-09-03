@@ -5058,7 +5058,7 @@ def api_case_analyze(cid):
     return jsonify({'status': 'success', 'summary': summary})
 
 # ---- Playbooks (SOAR) ----
-PLAYBOOK_TRIGGERS = ('case_created', 'status_changed', 'queue_changed', 'assignee_changed', 'scheduled', 'alert_created', 'sla_breached', 'asset_confirmed', 'severity_changed')
+PLAYBOOK_TRIGGERS = ('case_created', 'status_changed', 'queue_changed', 'assignee_changed', 'scheduled', 'alert_created', 'sla_breached', 'asset_confirmed', 'severity_changed', 'case_stale')
 PLAYBOOK_ACTION_TYPES = ('apply_template', 'add_task', 'add_note', 'set_queue', 'analyze_entity', 'send_email', 'send_webhook', 'send_slack', 'custom_webhook', 'isolate_host', 'restore_network', 'collect_triage', 'quarantine_file', 'kill_scheduled_task', 'kill_process_by_name')
 # alert_created playbooks are alert-scoped (no case_id exists yet -- see soar_alerts.py)
 # and get their own small, non-destructive action set instead of the case-scoped one
@@ -5756,6 +5756,7 @@ def api_run_scheduled_playbooks():
     _run_due_sla_breach_playbooks(db)
     _run_due_offline_agent_alerts(db)
     _run_due_case_created_playbooks(db)
+    _run_due_case_stale_playbooks(db)
     return jsonify({'status': 'success'})
 
 # Due isolation auto-reverts -- for each playbook_pending_reverts row past its revert_at,
@@ -5808,6 +5809,40 @@ def _run_due_case_created_playbooks(db):
         if case:
             _run_playbooks_for_case(db, row['case_id'], row['trigger_event'], case['queue_id'], case['tlp'], case['status'], case['severity'])
         db.execute("DELETE FROM case_playbook_outbox WHERE id = ?", (row['id'],))
+    db.commit()
+
+DEFAULT_CASE_STALE_HOURS = 72
+
+def _case_stale_hours(db):
+    row = db.execute("SELECT value FROM settings WHERE key = 'case_stale_hours'").fetchone()
+    try:
+        return int(row['value']) if row and row['value'] else DEFAULT_CASE_STALE_HOURS
+    except (ValueError, TypeError):
+        return DEFAULT_CASE_STALE_HOURS
+
+# "Stale" = no case_events activity (falls back to created_at for a case with none yet)
+# for stale_hours. stale_notified_at < last_activity (rather than a plain IS NULL guard,
+# like sla_breach_notified_at's simpler one-shot) is what lets this re-fire: after a
+# nudge fires, stale_notified_at is stamped "now" -- past last_activity -- so the same
+# silence never re-fires on every 30s poll. If the case later gets a fresh case_event,
+# last_activity moves past the old stale_notified_at, and a *new* silent period can nudge
+# again once it too crosses the threshold. Same "cheap no-op unless due" shape as
+# _run_due_sla_breach_playbooks; the correlated subquery is trivial at this table's
+# single-appliance scale (same reasoning already used elsewhere in this file, e.g. the
+# SigmaHQ picker's already_imported check).
+def _run_due_case_stale_playbooks(db):
+    stale_hours = _case_stale_hours(db)
+    due_cases = db.execute(
+        "SELECT c.id, c.queue_id, c.tlp, c.status, c.severity FROM cases c WHERE c.status = 'open' "
+        "AND (julianday('now') - julianday(COALESCE((SELECT MAX(ts) FROM case_events WHERE case_id = c.id), c.created_at))) * 24 > ? "
+        "AND (c.stale_notified_at IS NULL OR c.stale_notified_at < COALESCE((SELECT MAX(ts) FROM case_events WHERE case_id = c.id), c.created_at))",
+        (stale_hours,)
+    ).fetchall()
+    if not due_cases:
+        return
+    for c in due_cases:
+        _run_playbooks_for_case(db, c['id'], 'case_stale', c['queue_id'], c['tlp'], c['status'], c['severity'])
+        db.execute("UPDATE cases SET stale_notified_at = datetime('now') WHERE id = ?", (c['id'],))
     db.commit()
 
 # agent_polls.timestamp is local SERVER time (datetime.now(), not UTC/CURRENT_TIMESTAMP
@@ -8364,6 +8399,8 @@ def migrate_case_severity():
             conn.execute("ALTER TABLE cases ADD COLUMN acknowledged_at DATETIME")
         if 'sla_breach_notified_at' not in cols:
             conn.execute("ALTER TABLE cases ADD COLUMN sla_breach_notified_at DATETIME")
+        if 'stale_notified_at' not in cols:
+            conn.execute("ALTER TABLE cases ADD COLUMN stale_notified_at DATETIME")
         conn.commit()
         conn.close()
     except Exception:
@@ -10454,6 +10491,29 @@ def api_settings_agent_offline_alert():
     db.commit()
     log_audit('agent_offline_alert_config_change', 'settings', None, f'offline_minutes={threshold}, cooldown={cooldown}m')
     return jsonify({'status': 'success', 'offline_minutes': threshold, 'cooldown_minutes': cooldown})
+
+# Controls _run_due_case_stale_playbooks (see near _run_due_sla_breach_playbooks) -- an
+# open case with no case_events activity for stale_hours fires the case_stale trigger,
+# a proactive nudge distinct from sla_breached (which only tracks the case's AGE, not
+# whether anyone has touched it since).
+@app.route('/api/settings/case-stale-nudge', methods=['GET', 'POST'])
+@login_required
+def api_settings_case_stale_nudge():
+    db = get_db()
+    if request.method == 'GET':
+        return jsonify({'stale_hours': _case_stale_hours(db)})
+    err = require_permission('settings.system.manage')
+    if err: return err
+    try:
+        hours = int((request.json or {}).get('stale_hours'))
+        if hours < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({'error': 'stale_hours must be a positive integer'}), 400
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('case_stale_hours', ?)", (str(hours),))
+    db.commit()
+    log_audit('case_stale_nudge_config_change', 'settings', None, f'stale_hours={hours}')
+    return jsonify({'status': 'success', 'stale_hours': hours})
 
 # Mirrors archive_logs.py's own DEFAULT_ARCHIVE_DAYS -- duplicated rather than imported
 # since this route only needs the number for display, not the archiving logic itself.

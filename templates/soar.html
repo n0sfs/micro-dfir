@@ -314,6 +314,7 @@
                             <option value="scheduled">Scheduled (sweeps matching cases on an interval)</option>
                             <option value="alert_created">Alert created</option>
                             <option value="sla_breached">SLA breached</option>
+                            <option value="case_stale">Case gone stale (no activity)</option>
                         </select>
                     </div>
                 </div>
@@ -527,7 +528,8 @@ const TRIGGER_LABELS = {
     case_created: 'Case created', status_changed: 'Status changed',
     queue_changed: 'Queue changed', assignee_changed: 'Assignee changed',
     severity_changed: 'Severity changed', asset_confirmed: 'Case asset confirmed compromised',
-    scheduled: 'Scheduled', alert_created: 'Alert created', sla_breached: 'SLA breached'
+    scheduled: 'Scheduled', alert_created: 'Alert created', sla_breached: 'SLA breached',
+    case_stale: 'Case gone stale (no activity)'
 };
 
 // ---- Per-column filters on the Playbooks table -- same th-icon-btn/dropdown pattern as
