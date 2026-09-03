@@ -4344,9 +4344,19 @@ def _case_item_summary(db, item_type, item_id):
             r['message'] = "Completed successfully"
         del r['status'], r['exit_code']
     elif item_type == 'fim_event':
+        # Falls back to live_logs_archive when the row is no longer in the hot table --
+        # archive_logs.py moves rows out of live_logs (deleting the original) once
+        # they age past the archive window, preserving the same id (see its
+        # ARCHIVE_COLUMNS) -- without this fallback, a log row pinned to a case would
+        # silently render as "item not found" the moment it got archived, even though
+        # the row still genuinely exists.
         r = db.execute(
             "SELECT timestamp, severity, host, username, source_ip, 'FIM/EDR Event' as label, message FROM live_logs WHERE id = ?", (item_id,)
         ).fetchone()
+        if not r:
+            r = db.execute(
+                "SELECT timestamp, severity, host, username, source_ip, 'FIM/EDR Event' as label, message FROM live_logs_archive WHERE id = ?", (item_id,)
+            ).fetchone()
     else:
         r = db.execute(
             "SELECT timestamp, severity, hostname as host, NULL as username, NULL as source_ip, 'UEBA Anomaly' as label, message FROM events WHERE id = ?", (item_id,)
@@ -10743,7 +10753,7 @@ def agent_config():
 _LOG_BRANCH_SQL = """SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type,
        NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
        process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
-       NULL as occurrence_count, NULL as last_seen, NULL as item_id, NULL as entity_type,
+       NULL as occurrence_count, NULL as last_seen, id as item_id, NULL as entity_type,
        NULL as status, NULL as assignee, file_hash, query_name
 FROM live_logs"""
 
