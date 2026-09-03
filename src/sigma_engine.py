@@ -177,10 +177,6 @@ def _make_backend():
     backend.table = "recent_events"  # the backend's default table is a literal "<TABLE_NAME>" placeholder
     return backend
 
-def _get_soar_api_key(cursor):
-    row = cursor.execute("SELECT value FROM settings WHERE key = 'soar_api_key'").fetchone()
-    return row['value'] if row and row['value'] else None
-
 def _get_int_setting(cursor, key, default):
     row = cursor.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
     try:
@@ -547,7 +543,6 @@ def run_detection_cycle():
     conn.create_function('REGEXP', 2, _sqlite_regexp)
     cursor = conn.cursor()
     last_id = json.load(open(STATE_FILE)).get("last_id", 0) if os.path.exists(STATE_FILE) else 0
-    soar_api_key = _get_soar_api_key(cursor)
 
     try: real_max = cursor.execute("SELECT MAX(id) as m FROM live_logs").fetchone()['m'] or 0
     except Exception as e:
@@ -633,11 +628,6 @@ def run_detection_cycle():
                         m['file_hash'] if 'file_hash' in m_keys else None,
                         m['query_name'] if 'query_name' in m_keys else None
                     ))
-                    try:
-                        if soar_api_key:
-                            requests.post("http://127.0.0.1:8000/webhook/alert", json={"rule_title": r['title'], "severity": severity, "hostname": m['host'], "agent_id": m['host'], "raw_log": m['message']}, headers={"Authorization": f"Bearer {soar_api_key}"}, timeout=2)
-                    except Exception as e:
-                        print(f"[-] SOAR webhook failed for rule '{r['title']}': {e}")
         except Exception as e:
             print(f"[-] Rule '{r['title']}' failed to convert/execute: {e}")
 
