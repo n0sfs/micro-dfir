@@ -692,6 +692,22 @@ function renderComplianceHeadline(d) {
 
 const TIER_BAR_CLASS = { gap: 'bg-secondary', inactive: 'bg-warning', active: 'bg-info', validated: 'bg-success' };
 
+// Independent 4th signal alongside rule tag coverage/tier/hardening above -- "is the raw
+// log data this framework's tagged rules depend on actually flowing in real volume",
+// from /api/compliance/coverage's new evidence block (see _framework_evidence in
+// app.py). Deliberately its own line, not blended into the tier badge or progress bars.
+function evidenceStatusLine(ev) {
+    if (!ev) return { cls: 'text-muted', text: 'Not assessed' };
+    switch (ev.status) {
+        case 'not_tagged': return { cls: 'text-muted', text: 'No rules tagged' };
+        case 'not_ingestible': return { cls: 'text-warning', text: 'Tagged rules need a log source not currently ingested' };
+        case 'none': return { cls: 'text-danger', text: '0 events (30d)' };
+        case 'sparse': return { cls: 'text-warning', text: `${ev.total_events.toLocaleString()} events (30d) — sparse` };
+        case 'sufficient': return { cls: 'text-success', text: `${ev.total_events.toLocaleString()} events (30d)` };
+        default: return { cls: 'text-muted', text: 'Not assessed' };
+    }
+}
+
 function renderComplianceFrameworks(d) {
     document.getElementById('complianceFrameworks').innerHTML = d.frameworks.map(f => {
         const pct = f.total > 0 ? Math.round((f.enabled / f.total) * 100) : 0;
@@ -703,6 +719,7 @@ function renderComplianceFrameworks(d) {
         const scaPct = sca.total > 0 ? Math.round((sca.passed / sca.total) * 100) : 0;
         const scaColor = sca.total === 0 ? 'bg-secondary' : (sca.passed === sca.total ? 'bg-success' : (sca.passed === 0 ? 'bg-danger' : 'bg-warning'));
         const scaStatus = sca.total === 0 ? 'No hardening checks yet' : `${sca.passed}/${sca.total} checks passing`;
+        const evidence = evidenceStatusLine(f.evidence);
         return `
         <div class="mb-3 pb-3 border-bottom border-secondary">
             <div class="d-flex justify-content-between align-items-center mb-1 flex-wrap gap-1">
@@ -715,6 +732,10 @@ function renderComplianceFrameworks(d) {
                 <span class="text-muted">${scaStatus}</span>
             </div>
             <div class="progress" style="height:4px;"><div class="progress-bar ${scaColor}" style="width:${sca.total === 0 ? 100 : scaPct}%;"></div></div>
+            <div class="d-flex justify-content-between small mt-1" style="opacity:.85;" title="Raw log volume from the sources this framework's tagged rules depend on -- evidence the underlying data is being collected, independent of whether any rule has fired on it">
+                <span class="text-muted"><i class="fa-solid fa-database me-1"></i>Evidence</span>
+                <span class="${evidence.cls}">${evidence.text}</span>
+            </div>
             ${f.key === 'nist_800_53' ? `
             <div class="mt-2">
                 <a href="#" class="small" onclick="toggleNist80053Detail(); return false;"><i class="fa-solid fa-diagram-project me-1"></i>ATT&amp;CK-derived control coverage&hellip;</a>
