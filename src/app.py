@@ -11118,7 +11118,29 @@ def agent_config():
     return jsonify({
         'channels': channels, 'channel_config': channel_config, 'ingest_url': dynamic_ingest_url,
         'fim_paths': fim_paths, 'fim_interval_seconds': fim_interval_seconds,
+        # Toggling the Sysmon channel on (Log Pipeline tab) is the entire trigger -- every
+        # Windows agent picks this up on its next config poll (~8s) and installs Sysmon
+        # itself if it isn't already present (see _ensure_sysmon_installed() in
+        # micro_agent_windows.py). No separate "push install" action needed.
+        'sysmon_required': bool(all_channels.get('Sysmon', {}).get('enabled')),
     })
+
+# Same auth as /api/agent/config above -- served content isn't secret, but there's no
+# reason for this to be reachable by anything that couldn't already read the rest of an
+# agent's config. Kept as a real repo file (agents/sysmon_config.xml), not a Python
+# string constant, so it's easy to review/diff/tune independent of any code change.
+@app.route('/api/agent/sysmon-config', methods=['GET'])
+def api_agent_sysmon_config():
+    from flask import request, Response
+    db = get_db()
+    ua = request.headers.get('X-Agent-Hostname') or request.headers.get('User-Agent', 'Unknown')
+    if not _validate_agent_auth(db, request.headers.get('X-Agent-Token'), ua):
+        return jsonify({'error': 'Unauthorized'}), 401
+    try:
+        with open('/opt/micro-dfir/agents/sysmon_config.xml', 'r', encoding='utf-8') as f:
+            return Response(f.read(), mimetype='application/xml')
+    except OSError:
+        return jsonify({'error': 'Sysmon config not found on server'}), 404
 
 # Log Search spans three tables that were previously siloed from each other: raw
 # ingested events (live_logs), Sigma/custom detection-rule hits (alerts), and UEBA

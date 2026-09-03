@@ -1,5 +1,5 @@
 # Micro DFIR Windows Agent
-import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, tempfile, threading, hashlib
+import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, tempfile, threading, hashlib, zipfile, shutil
 
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
@@ -42,6 +42,7 @@ _INGEST_HOST_URL = _EXTERNAL_CONFIG.get('ingest_host_url') or _HOST_URL
 SERVER_URL = f'https://{_HOST_URL}/api/agent/config' if _HOST_URL else 'https://__HOST_URL__/api/agent/config'
 RESULT_URL = f'https://{_HOST_URL}/api/agent/result' if _HOST_URL else 'https://__HOST_URL__/api/agent/result'
 INGEST_URL = f'https://{_INGEST_HOST_URL}/api/ingest' if _INGEST_HOST_URL else 'https://__HOST_URL__/api/ingest'
+SYSMON_CONFIG_URL = f'https://{_HOST_URL}/api/agent/sysmon-config' if _HOST_URL else 'https://__HOST_URL__/api/agent/sysmon-config'
 SOC_TOKEN = _EXTERNAL_CONFIG.get('soc_token') or '__SOC_TOKEN__'
 # The server's own cert, pinned so the agent can verify it without a real CA (it's
 # self-signed) — see build_ssl_context() below. Left as the literal placeholder if the
@@ -93,9 +94,119 @@ def _kill_other_agent_instances():
     except Exception:
         pass
 
+# Neither is on by default in Windows, and neither needs Sysmon (that's a separate
+# concern, see _ensure_sysmon_installed) -- these are the two built-in-Windows settings
+# the already-enabled "Security" and "PowerShell" log channels need turned on before
+# they'll actually produce anything. Safe and fully reversible (`auditpol .../success:
+# disable`, delete the registry keys) -- no new software installed. Each setting is
+# independently try/excepted (not one big try/except around all four) -- these are 3
+# unrelated settings, so one failing (e.g. a locked-down machine rejecting the auditpol
+# change) is no reason to skip the other two.
+def _configure_windows_audit_logging():
+    def _run(cmd):
+        try:
+            subprocess.run(cmd, shell=True, timeout=15)
+        except Exception:
+            pass
+    # Security log Event ID 4688 (process creation) is off by default.
+    _run('auditpol /set /subcategory:"Process Creation" /success:enable')
+    # Without this, 4688 events omit the actual command line -- most of the value of
+    # process-creation auditing in the first place.
+    _run(
+        'reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\\Audit" '
+        '/v ProcessCreationIncludeCmdLine_Enabled /t REG_DWORD /d 1 /f'
+    )
+    # PowerShell Module Logging (Event ID 4103, classic "Windows PowerShell" log -- the
+    # exact channel this agent watches, see _CHANNEL_LOG_NAMES['powershell'] below). "*"
+    # logs every module's pipeline execution detail, not just a hand-picked subset.
+    _run(
+        'reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\PowerShell\\ModuleLogging" '
+        '/v EnableModuleLogging /t REG_DWORD /d 1 /f'
+    )
+    _run(
+        'reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\PowerShell\\ModuleLogging\\ModuleNames" '
+        '/v "*" /t REG_SZ /d "*" /f'
+    )
+
+# Distinct from the audit-policy settings above -- Sysmon is real third-party software
+# (Sysinternals), not a Windows setting, so it's never silently bundled into install().
+# Instead, this is checked on every regular config poll (see run_agent()) and only acts
+# when the server reports the Sysmon channel is enabled (Log Pipeline tab) -- toggling
+# that checkbox IS the install trigger, on whatever cadence agents already poll at, no
+# separate "push install" mechanism needed.
+SYSMON_RETRY_COOLDOWN_SECONDS = 1800  # 30 min -- a failed attempt (no internet, blocked
+# download, AV interference) shouldn't retry on every ~8s config poll
+
+def _sysmon_already_installed():
+    try:
+        for svc in ('Sysmon64', 'Sysmon'):
+            result = subprocess.run(['sc', 'query', svc], capture_output=True, text=True, timeout=10)
+            if 'RUNNING' in result.stdout or 'STOPPED' in result.stdout:
+                return True
+    except Exception:
+        pass
+    return False
+
+def _ensure_sysmon_installed(context):
+    if _sysmon_already_installed():
+        return
+    marker_path = os.path.join(INSTALL_DIR, "sysmon_install_attempt.json")
+    try:
+        if os.path.exists(marker_path):
+            with open(marker_path, 'r') as f:
+                last_attempt = json.load(f).get('last_attempt', 0)
+            if time.time() - last_attempt < SYSMON_RETRY_COOLDOWN_SECONDS:
+                return
+    except Exception:
+        pass
+    try:
+        with open(marker_path, 'w') as f:
+            json.dump({'last_attempt': time.time()}, f)
+    except Exception:
+        pass
+
+    tmp_dir = tempfile.mkdtemp(prefix="microdfir_sysmon_")
+    try:
+        print("[*] Sysmon channel enabled but not installed -- installing now...", flush=True)
+        zip_path = os.path.join(tmp_dir, "Sysmon.zip")
+        req = urllib.request.Request("https://download.sysinternals.com/files/Sysmon.zip", headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=60) as resp, open(zip_path, 'wb') as f:
+            f.write(resp.read())
+
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(tmp_dir)
+
+        sysmon_exe = os.path.join(tmp_dir, "Sysmon64.exe")
+        if not os.path.exists(sysmon_exe):
+            sysmon_exe = os.path.join(tmp_dir, "Sysmon.exe")
+        if not os.path.exists(sysmon_exe):
+            print("[-] Sysmon.zip didn't contain the expected executable -- aborting install.", flush=True)
+            return
+
+        # Config comes from the server, not bundled in this script -- editable/tunable
+        # server-side (agents/sysmon_config.xml) without redistributing a new agent
+        # install to every endpoint.
+        config_path = os.path.join(tmp_dir, "sysmon_config.xml")
+        config_req = urllib.request.Request(SYSMON_CONFIG_URL, headers={'X-Agent-Hostname': socket.gethostname(), 'X-Agent-Token': SOC_TOKEN})
+        with urllib.request.urlopen(config_req, context=context, timeout=15) as resp, open(config_path, 'wb') as f:
+            f.write(resp.read())
+
+        result = subprocess.run(f'"{sysmon_exe}" -accepteula -i "{config_path}"', shell=True, capture_output=True, text=True, timeout=60)
+        print(f"[*] Sysmon install output: {(result.stdout or '')[-500:]}", flush=True)
+
+        if _sysmon_already_installed():
+            print("[+] Sysmon successfully installed and running.", flush=True)
+        else:
+            print("[-] Sysmon install command completed but the service isn't showing as installed -- check permissions/AV interference.", flush=True)
+    except Exception as e:
+        print(f"[-] Sysmon auto-install failed: {e}", flush=True)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
 def install_agent():
     try:
         _kill_other_agent_instances()
+        _configure_windows_audit_logging()
         if not os.path.exists(INSTALL_DIR): os.makedirs(INSTALL_DIR)
         target_path = os.path.join(INSTALL_DIR, "micro_agent_windows.py")
         with open(os.path.abspath(__file__), 'r', encoding='utf-8') as src, open(target_path, 'w', encoding='utf-8') as dst:
@@ -456,6 +567,15 @@ def run_agent():
 
                         if data.get('fim_interval_seconds'):
                             fim_interval = data['fim_interval_seconds']
+
+                        # Toggling the Sysmon channel on (Log Pipeline tab) is the whole
+                        # trigger -- no separate "push install" action exists. Dispatched
+                        # on its own thread (same pattern as run_remote_script above) so
+                        # a slow download/install can never delay this agent's own
+                        # check-ins or log shipping. _ensure_sysmon_installed() itself
+                        # no-ops immediately if Sysmon is already installed.
+                        if data.get('sysmon_required'):
+                            threading.Thread(target=_ensure_sysmon_installed, args=(context,), daemon=True).start()
 
                     print("[+] Check-in successful!", flush=True)
                     break
