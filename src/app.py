@@ -8384,6 +8384,59 @@ def migrate_insider_threat_watchlist_widget():
     except Exception:
         pass
 
+# Retrofit for the 3 case-analytics widget types (Case Aging, Open Cases by Queue,
+# Cases Closed Trend) -- all 3 have existed as selectable widget types since Phase 1's
+# Case Metrics & SLA work, but were never seeded onto any default dashboard, so an
+# analyst would only ever see them by already knowing to add them via "Add Widget".
+# 'Analyst Triage' and 'Senior Analyst' aren't built from a DEFAULT_*_WIDGETS list
+# (hand-arranged dashboards, per migrate_role_default_dashboard_v2()'s own comment) --
+# appended below each dashboard's current lowest widget instead of inserting/shifting,
+# so this never disturbs an admin's existing hand-tuned layout above it. Idempotent
+# (checks for the specific widget type, not just the dashboard) and a no-op if either
+# dashboard doesn't exist (e.g. deleted by an admin).
+def migrate_case_analytics_widgets():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.row_factory = sqlite3.Row
+
+        def max_bottom(did):
+            row = conn.execute("SELECT MAX(y + h) as m FROM dashboard_widgets WHERE dashboard_id = ?", (did,)).fetchone()
+            return row['m'] if row and row['m'] is not None else 0
+
+        triage = conn.execute("SELECT id FROM dashboards WHERE name = 'Analyst Triage'").fetchone()
+        if triage:
+            did = triage['id']
+            existing = {r['widget_type'] for r in conn.execute(
+                "SELECT widget_type FROM dashboard_widgets WHERE dashboard_id = ?", (did,)
+            ).fetchall()}
+            row_y = max_bottom(did)
+            if 'chart_case_aging' not in existing:
+                conn.execute(
+                    "INSERT INTO dashboard_widgets (dashboard_id, widget_type, x, y, w, h) VALUES (?, 'chart_case_aging', 0, ?, 4, 4)",
+                    (did, row_y)
+                )
+            if 'chart_case_queue_backlog' not in existing:
+                conn.execute(
+                    "INSERT INTO dashboard_widgets (dashboard_id, widget_type, x, y, w, h) VALUES (?, 'chart_case_queue_backlog', 4, ?, 4, 4)",
+                    (did, row_y)
+                )
+
+        senior = conn.execute("SELECT id FROM dashboards WHERE name = 'Senior Analyst'").fetchone()
+        if senior:
+            did = senior['id']
+            if not conn.execute(
+                "SELECT 1 FROM dashboard_widgets WHERE dashboard_id = ? AND widget_type = 'chart_case_close_trend'", (did,)
+            ).fetchone():
+                conn.execute(
+                    "INSERT INTO dashboard_widgets (dashboard_id, widget_type, x, y, w, h) VALUES (?, 'chart_case_close_trend', 0, ?, 12, 4)",
+                    (did, max_bottom(did))
+                )
+
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 # One-time cleanup for the 'Analyst'/'Admin' (capitalized) role-casing bug: the old
 # ALTER TABLE default and the user-create route both wrote capitalized values, but
 # every real permission check in this app compares lowercase ('admin', now also
@@ -12495,6 +12548,7 @@ migrate_role_default_dashboard()
 migrate_role_default_dashboard_v2()
 migrate_insider_threat_role()
 migrate_insider_threat_watchlist_widget()
+migrate_case_analytics_widgets()
 migrate_playbooks()
 migrate_playbook_secrets()
 migrate_playbook_custom_actions()

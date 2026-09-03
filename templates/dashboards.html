@@ -2,11 +2,19 @@
 {% block content %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
-.mitre-grid { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(160px, 1fr); gap: 10px; overflow-x: auto; padding-bottom: 4px; }
+.mitre-grid { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(190px, 1fr); gap: 10px; overflow-x: auto; padding-bottom: 4px; }
 .mitre-col { min-width: 0; }
 .mitre-col-header { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary, #96a0b0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 6px; display: flex; justify-content: space-between; gap: 6px; }
 .mitre-cells { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow-y: auto; }
-.mitre-cell { border-radius: 3px; padding: 2px 6px; font-size: 0.7rem; font-family: var(--bs-font-monospace, monospace); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: default; }
+.mitre-cell { border-radius: 3px; padding: 2px 6px; font-size: 0.7rem; cursor: default; }
+.mitre-cell-content { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.mitre-cell-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mitre-cell-id { font-family: var(--bs-font-monospace, monospace); flex-shrink: 0; white-space: nowrap; }
+.mitre-cell-caret { cursor: pointer; opacity: 0.7; flex-shrink: 0; }
+.mitre-cell-caret:hover { opacity: 1; }
+.mitre-cell-subcount { font-size: 0.62rem; opacity: 0.75; flex-shrink: 0; }
+.mitre-cell-group { display: flex; flex-direction: column; gap: 2px; margin-left: 14px; margin-top: 2px; }
+.mitre-cell-sub { font-size: 0.68rem; }
 
 /* Widget grid -- each widget is a full-height card filling its grid cell; the card
    body gets an explicit height (grid cell height minus the header) rather than
@@ -560,6 +568,64 @@ function mitreCellStyle(tech, c) {
     return `background:${color}${alpha}; color:${color}; font-weight:${weight};`;
 }
 
+// Same sub-technique nesting the Coverage page's own MITRE tab uses
+// (coverage.html's groupTechniquesForNesting) -- ported rather than shared, per this
+// repo's per-template duplication convention. Without it this widget dumped every
+// sub-technique (T1589, T1589.001, T1589.002, ...) as its own flat row, which is what
+// made it look overwhelming/"off" next to the real Coverage page's collapsed view.
+function mitreGroupTechniques(techniques) {
+    const byId = {};
+    techniques.forEach(t => { byId[t.id] = t; });
+    const childrenByParent = {};
+    const consumed = new Set();
+    techniques.forEach(t => {
+        if (t.id.includes('.')) {
+            const parentId = t.id.split('.')[0];
+            if (byId[parentId]) {
+                (childrenByParent[parentId] = childrenByParent[parentId] || []).push(t);
+                consumed.add(t.id);
+            }
+        }
+    });
+    Object.values(childrenByParent).forEach(arr => arr.sort((a, b) => (b.count - a.count) || a.id.localeCompare(b.id)));
+    const topLevel = techniques.filter(t => !consumed.has(t.id));
+    return { topLevel, childrenByParent };
+}
+
+function mitreCellTitle(tech) {
+    return `T${escHtml(tech.id)} ${escHtml(tech.name || '')} — ${MITRE_TIER_LABELS[tech.tier]}${tech.count ? `, ${tech.count} enabled rule${tech.count === 1 ? '' : 's'}` : ''}${tech.log_source_gap ? ' — log source not ingested, may never fire' : ''}`;
+}
+
+function mitreCellContent(tech) {
+    return `<span class="mitre-cell-name">${escHtml(tech.name || ('T' + tech.id))}</span><span class="mitre-cell-id">${tech.log_source_gap ? '<i class="fa-solid fa-plug-circle-xmark me-1"></i>' : ''}T${escHtml(tech.id)}${tech.count > 0 ? ` (${tech.count})` : ''}</span>`;
+}
+
+function mitreRenderCell(widgetId, tactic, tech, children, c) {
+    const hasChildren = children && children.length;
+    const groupId = `mitregrp-${widgetId}-${tactic}-${tech.id}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const caret = hasChildren ? `<i class="fa-solid fa-caret-right mitre-cell-caret" onclick="event.stopPropagation(); toggleMitreGroup('${groupId}', this)"></i>` : '';
+    const subcount = hasChildren ? `<span class="mitre-cell-subcount">${children.length}</span>` : '';
+    const cell = `
+        <div class="mitre-cell" style="${mitreCellStyle(tech, c)}" title="${mitreCellTitle(tech)}">
+            <div class="mitre-cell-content">${caret}${mitreCellContent(tech)}${subcount}</div>
+        </div>`;
+    if (!hasChildren) return cell;
+    const childCells = children.map(ch => `
+        <div class="mitre-cell mitre-cell-sub" style="${mitreCellStyle(ch, c)}" title="${mitreCellTitle(ch)}">
+            <div class="mitre-cell-content">${mitreCellContent(ch)}</div>
+        </div>`).join('');
+    return `${cell}<div class="mitre-cell-group" id="${groupId}" style="display:none;">${childCells}</div>`;
+}
+
+function toggleMitreGroup(groupId, caretEl) {
+    const el = document.getElementById(groupId);
+    if (!el) return;
+    const opening = el.style.display === 'none';
+    el.style.display = opening ? 'flex' : 'none';
+    caretEl.classList.toggle('fa-caret-right', !opening);
+    caretEl.classList.toggle('fa-caret-down', opening);
+}
+
 function renderMitreCoverageWidget(container, widgetId, config) {
     container.innerHTML = `
         <div class="d-flex flex-wrap align-items-center gap-3 mb-2 mitre-headline"></div>
@@ -591,19 +657,19 @@ function renderMitreCoverageWidget(container, widgetId, config) {
                 <span class="small text-muted"><span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${mitreTierColor(key, c)}; margin-right:4px;"></span>${label} (${tierTotals[key]})</span>
             `).join('')}`;
 
-        grid.innerHTML = d.tactics.map(t => `
+        grid.innerHTML = d.tactics.map(t => {
+            const { topLevel, childrenByParent } = mitreGroupTechniques(t.techniques);
+            return `
             <div class="mitre-col">
                 <div class="mitre-col-header" title="${escHtml(t.label)}">
                     <span>${escHtml(t.label)}</span>
                     <span>${t.covered}/${t.total}</span>
                 </div>
                 <div class="mitre-cells">
-                    ${t.techniques.map(tech => `
-                        <div class="mitre-cell" style="${mitreCellStyle(tech, c)}" title="T${escHtml(tech.id)} ${escHtml(tech.name || '')} — ${MITRE_TIER_LABELS[tech.tier]}${tech.count ? `, ${tech.count} enabled rule${tech.count === 1 ? '' : 's'}` : ''}${tech.log_source_gap ? ' — log source not ingested, may never fire' : ''}">
-                            T${escHtml(tech.id)}${tech.count > 0 ? ` (${tech.count})` : ''}${tech.log_source_gap ? ' <i class="fa-solid fa-plug-circle-xmark"></i>' : ''}
-                        </div>`).join('')}
+                    ${topLevel.map(tech => mitreRenderCell(widgetId, t.tactic, tech, childrenByParent[tech.id], c)).join('')}
                 </div>
-            </div>`).join('');
+            </div>`;
+        }).join('');
 
         if (d.unmapped && d.unmapped.length) {
             unmappedEl.style.display = 'block';
