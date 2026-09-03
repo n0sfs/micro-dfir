@@ -4,7 +4,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, tem
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.09.03.1"
+AGENT_VERSION = "2026.09.03.2"
 
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
@@ -13,9 +13,16 @@ TASK_NAME = "MicroDFIRAgent"
 # installer/agent_installer.nsi) BEFORE it runs `install` -- that installer bundles a
 # generic, un-substituted copy of this script (built once, not per download), so the
 # per-deployment host/token/cert can't be baked into the .py source the way the plain-
-# script .zip download does. When present, its values win; the __HOST_URL__/__SOC_TOKEN__/
-# __SERVER_CERT_PEM__ placeholders below stay as the fallback for that existing plain-
-# script path, unchanged. Deliberately keyed on the fixed INSTALL_DIR constant, not
+# script .zip download does. When present, its values win over the per-download HOST
+# URL, SOC TOKEN and SERVER CERT PEM placeholders below, which stay as the fallback for
+# that existing plain-script path, unchanged. (Deliberately NOT spelled with the actual
+# double-underscore placeholder tokens here -- src/app.py's download-time substitution
+# does a blind str.replace() for each one across this whole file's text, so writing the
+# literal token in an explanatory comment like this one would get silently replaced too,
+# and a multi-line replacement value -- e.g. the PEM cert -- corrupts the file structure
+# by splicing unprefixed lines into what was a single-line comment. Real bug, really
+# happened: found via a crashed agent, SyntaxError at the injected cert body.)
+# Deliberately keyed on the fixed INSTALL_DIR constant, not
 # os.path.dirname(__file__) -- install_agent() below copies this same script's own
 # source into INSTALL_DIR\micro_agent_windows.py by opening that exact path for both
 # read and write, so having the installer stage the source script anywhere OTHER than
