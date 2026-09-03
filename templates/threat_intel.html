@@ -14,6 +14,17 @@
 #iocTable .th-icon-btn:hover{color:var(--text-secondary);}
 #iocTable .th-icon-btn.active-filter{color:var(--accent);}
 .yara-mode-btn.active-filter, .sweep-target-btn.active-filter{background-color:var(--accent); border-color:var(--accent); color:#fff;}
+/* Detection-coverage tier badges -- same 4-tier model/colors as the Coverage page's
+   MITRE tab (coverage.html's COVERAGE_TIER_CELL_CLASS), duplicated per this repo's
+   per-template convention rather than shared. Used on entity technique chips so this
+   page alone answers "is this entity's technique actually detected here" without a
+   separate Coverage > Intelligence destination. */
+.tier-gap{background:var(--bg-inset); color:var(--text-muted);}
+.tier-inactive{background:color-mix(in srgb, var(--warning) 16%, transparent); color:var(--warning);}
+.tier-active{background:color-mix(in srgb, var(--info) 18%, transparent); color:var(--info); font-weight:600;}
+.tier-validated{background:color-mix(in srgb, var(--success) 20%, transparent); color:var(--success); font-weight:700;}
+.tier-unmapped{background:var(--bg-inset); color:var(--text-muted); opacity:.65; font-style:italic;}
+.tier-mini-chip{font-size:.62rem; font-weight:700; padding:2px 7px; border-radius:999px; font-variant-numeric:tabular-nums; white-space:nowrap; display:inline-block;}
 </style>
 
 <div class="row g-3 mb-4">
@@ -246,6 +257,10 @@
                             <option value="malware">Malware</option>
                             <option value="ransomware">Ransomware</option>
                             <option value="tool">Tool</option>
+                        </select>
+                        <select id="entitySort" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:200px;" onchange="filterEntities()" title="Gap exposure = how many of this entity's known techniques have no enabled detection rule">
+                            <option value="">Sort: default</option>
+                            <option value="gap">Sort: most gap exposure first</option>
                         </select>
                     </div>
                 </div>
@@ -1581,6 +1596,10 @@ function entityTypeBadge(type) {
     return `<span class="badge ${map[type] || 'bg-secondary'}">${escHtml(type || '')}</span>`;
 }
 
+// Validated-first ordering for the technique chips in the entity detail modal --
+// surfaces "this is actually detected and has fired" before "this has no rule at all".
+const TECHNIQUE_TIER_SORT_RANK = { validated: 0, active: 1, inactive: 2, gap: 3, unmapped: 4 };
+
 function confidenceBadge(confidence) {
     if (!confidence) return '<span class="text-muted small">Not assessed</span>';
     const map = {confirmed: 'bg-success', probable: 'bg-info text-dark', possible: 'bg-secondary'};
@@ -1641,14 +1660,37 @@ function loadEntities() {
     Promise.all([
         fetch('/api/ti/entities').then(r => r.json()),
         fetch('/api/ti/actor-summary').then(r => r.json()).catch(() => ({actors: []})),
-    ]).then(([entities, summary]) => {
+        // Same per-entity gap/inactive/active/validated technique-tier counts the old
+        // Coverage > Intelligence tab computed -- merged in here instead of living on a
+        // separate page, since both pulled from this exact same entity catalog.
+        fetch('/api/ti/entities/coverage-summary').then(r => r.json()).catch(() => []),
+    ]).then(([entities, summary, coverage]) => {
         entityLastSeenById = {};
         (summary.actors || []).forEach(a => {
             if (a.sightings && a.sightings.length) entityLastSeenById[a.id] = a.sightings[0].seen_at;
         });
-        allEntities = entities;
+        const coverageById = {};
+        (coverage || []).forEach(c => { coverageById[c.id] = c; });
+        allEntities = entities.map(e => ({ ...e, coverage: coverageById[e.id] || null }));
         renderEntitiesTable(allEntities);
     }).catch(err => console.error('Error loading entities:', err));
+}
+
+// Compact "N gap / N inactive / N active / N validated" pills -- how many of this
+// entity's known techniques currently have no enabled rule vs. an active/validated one.
+// Falls back to a flat "no techniques" note rather than blank when coverage data hasn't
+// loaded (e.g. the coverage-summary fetch above failed) instead of silently showing
+// nothing where the old flat technique-id chips used to be.
+function entityCoverageChips(coverage) {
+    if (!coverage) return '<span class="text-muted small">—</span>';
+    if (!coverage.technique_count) return '<span class="text-muted small">No techniques listed</span>';
+    const chips = [
+        coverage.gap ? `<span class="tier-mini-chip tier-gap me-1" title="${coverage.gap} technique(s) with no enabled rule">${coverage.gap} gap</span>` : '',
+        coverage.inactive ? `<span class="tier-mini-chip tier-inactive me-1" title="${coverage.inactive} technique(s) whose rule(s) are disabled">${coverage.inactive} inactive</span>` : '',
+        coverage.active ? `<span class="tier-mini-chip tier-active me-1" title="${coverage.active} technique(s) with an enabled rule">${coverage.active} active</span>` : '',
+        coverage.validated ? `<span class="tier-mini-chip tier-validated" title="${coverage.validated} technique(s) that have actually fired an alert in the last 30 days">${coverage.validated} validated</span>` : '',
+    ].filter(Boolean).join('');
+    return chips || '<span class="text-muted small">—</span>';
 }
 
 function renderEntitiesTable(entities) {
@@ -1663,7 +1705,7 @@ function renderEntitiesTable(entities) {
             <td class="ps-3"><a href="#" onclick="openEntityDetail(${e.id}); return false;">${escHtml(e.name)}</a></td>
             <td>${entityTypeBadge(e.entity_type)}</td>
             <td class="text-muted small">${escHtml((e.aliases || []).join(', ')) || '—'}</td>
-            <td class="text-muted small">${(e.techniques || []).map(t => `<span class="badge bg-secondary me-1">T${escHtml(t)}</span>`).join('') || '—'}</td>
+            <td class="text-nowrap">${entityCoverageChips(e.coverage)}</td>
             <td><span class="badge ${e.source === 'admin' ? 'bg-info text-dark' : 'bg-secondary'}">${escHtml(e.source)}</span></td>
             <td title="${escHtml(e.attribution_note || '')}">${confidenceBadge(e.confidence)}</td>
             <td class="small" title="${escHtml(entityLastSeenById[e.id] || '')}">${entityLastSeenById[e.id] ? `<span class="badge bg-danger">${relativeTime(entityLastSeenById[e.id])}</span>` : '<span class="text-muted">Never</span>'}</td>
@@ -1681,12 +1723,24 @@ function renderEntitiesTable(entities) {
 function filterEntities() {
     const q = (document.getElementById('entitySearch').value || '').toLowerCase().trim();
     const type = document.getElementById('entityTypeFilter').value;
-    const filtered = allEntities.filter(e => {
+    const sort = document.getElementById('entitySort').value;
+    let filtered = allEntities.filter(e => {
         if (type && e.entity_type !== type) return false;
         if (!q) return true;
         const haystack = [e.name, ...(e.aliases || [])].join(' ').toLowerCase();
         return haystack.includes(q);
     });
+    if (sort === 'gap') {
+        // Highest gap-exposure first (ties broken by technique count, then name) --
+        // same ordering the old Coverage > Intelligence tab used for its entity list.
+        filtered = filtered.slice().sort((a, b) => {
+            const ag = (a.coverage && a.coverage.gap) || 0, bg = (b.coverage && b.coverage.gap) || 0;
+            if (bg !== ag) return bg - ag;
+            const ac = (a.coverage && a.coverage.technique_count) || 0, bc = (b.coverage && b.coverage.technique_count) || 0;
+            if (bc !== ac) return bc - ac;
+            return a.name.localeCompare(b.name);
+        });
+    }
     renderEntitiesTable(filtered);
 }
 
@@ -1874,7 +1928,7 @@ async function openEntityDetail(id) {
             ${attributionLine}
             <p class="small">${escHtml(e.description || '')}</p>
             <div class="mb-3">
-                ${(e.techniques || []).map(t => `<span class="badge bg-secondary me-1 mb-1" title="${escHtml(t.tactic_label)}">T${escHtml(t.id)}${t.name ? ' — ' + escHtml(t.name) : ''}</span>`).join('') || '<span class="text-muted small">No techniques listed.</span>'}
+                ${(e.techniques || []).slice().sort((a, b) => (TECHNIQUE_TIER_SORT_RANK[a.tier] ?? 5) - (TECHNIQUE_TIER_SORT_RANK[b.tier] ?? 5)).map(t => `<span class="badge tier-${t.tier || 'gap'} me-1 mb-1" title="${escHtml(t.tactic_label)} — ${escHtml(t.tier || 'gap')}${t.tier && t.tier !== 'unmapped' ? `, ${t.count} enabled rule${t.count === 1 ? '' : 's'}${t.disabled_count ? `, ${t.disabled_count} disabled` : ''}${t.validated_count ? `, ${t.validated_count} validated in the last 30 days` : ''}` : ''}">T${escHtml(t.id)}${t.name ? ' — ' + escHtml(t.name) : ''}</span>`).join('') || '<span class="text-muted small">No techniques listed.</span>'}
             </div>
             ${renderExternalRefs(e.external_references)}
             <h6 class="small text-uppercase text-muted">Matching IOCs (${(e.matched_iocs || []).length})</h6>
