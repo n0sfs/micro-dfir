@@ -22,6 +22,13 @@ config/*.key
 
 agent_config.json
 
+# Windows agent installer build inputs -- reproducible via installer/build.ps1 (downloads
+# Python's embeddable distribution fresh), no reason to carry ~30MB of extracted vendor
+# files in git history. installer/dist/MicroDFIRAgentSetup.exe (the BUILD OUTPUT) is
+# checked in on purpose -- it's what the production appliance actually serves, and the
+# Linux appliance itself has no way to (re)compile a Windows installer.
+installer/vendor/
+
 # OS Specific
 .DS_Store
 Thumbs.db
