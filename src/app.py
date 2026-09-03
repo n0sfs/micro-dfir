@@ -4669,6 +4669,77 @@ def api_case_related_items(cid):
 
     return jsonify(result)
 
+# Every case is otherwise a fully isolated island -- no route/table/UI anywhere
+# surfaces "another case already touches this same host/indicator/threat actor". Unlike
+# related-items (nearby SIGNALS not yet linked in), this is about nearby CASES: two
+# analysts independently opening cases on the same host a day apart, with nothing
+# surfacing the overlap. Built entirely from data that already exists -- case_assets
+# (shared host), case_iocs (shared indicator), and ti_relationships (both cases linked
+# to the same threat entity) -- no new schema, no new detection logic.
+@app.route('/api/cases/<int:cid>/related-cases', methods=['GET'])
+@login_required
+def api_case_related_cases(cid):
+    db = get_db()
+    case = db.execute("SELECT id FROM cases WHERE id = ?", (cid,)).fetchone()
+    if not case:
+        return jsonify({"error": "Case not found"}), 404
+
+    reasons_by_case = {}
+
+    def add_reason(other_id, reason_text):
+        other_id = int(other_id)
+        if other_id == cid:
+            return
+        reasons_by_case.setdefault(other_id, []).append(reason_text)
+
+    hosts = [r['host'] for r in db.execute("SELECT DISTINCT host FROM case_assets WHERE case_id = ?", (cid,)).fetchall()]
+    if hosts:
+        placeholders = ','.join('?' for _ in hosts)
+        for r in db.execute(
+            f"SELECT DISTINCT case_id, host FROM case_assets WHERE host IN ({placeholders}) AND case_id != ?",
+            (*hosts, cid)
+        ).fetchall():
+            add_reason(r['case_id'], f"host {r['host']}")
+
+    for ioc in db.execute("SELECT ioc_type, value FROM case_iocs WHERE case_id = ?", (cid,)).fetchall():
+        for r in db.execute(
+            "SELECT DISTINCT case_id FROM case_iocs WHERE ioc_type = ? AND value = ? AND case_id != ?",
+            (ioc['ioc_type'], ioc['value'], cid)
+        ).fetchall():
+            add_reason(r['case_id'], f"indicator {ioc['value']}")
+
+    entity_ids = [r['entity_id'] for r in db.execute(
+        "SELECT DISTINCT entity_id FROM ti_relationships WHERE target_type = 'case' AND target_id = ?", (str(cid),)
+    ).fetchall()]
+    if entity_ids:
+        placeholders = ','.join('?' for _ in entity_ids)
+        for r in db.execute(
+            f"SELECT DISTINCT tr.target_id as other_case_id, e.name as entity_name FROM ti_relationships tr "
+            f"JOIN ti_entities e ON e.id = tr.entity_id "
+            f"WHERE tr.target_type = 'case' AND tr.entity_id IN ({placeholders}) AND tr.target_id != ?",
+            (*entity_ids, str(cid))
+        ).fetchall():
+            add_reason(r['other_case_id'], f"threat entity {r['entity_name']}")
+
+    if not reasons_by_case:
+        return jsonify([])
+
+    other_ids = list(reasons_by_case.keys())
+    placeholders = ','.join('?' for _ in other_ids)
+    case_rows = {r['id']: r for r in db.execute(
+        f"SELECT id, title, status, severity, created_at FROM cases WHERE id IN ({placeholders})", other_ids
+    ).fetchall()}
+
+    out = []
+    for oid, reasons in reasons_by_case.items():
+        c = case_rows.get(oid)
+        if not c:  # a matched case was deleted between the two queries above -- skip, don't 500
+            continue
+        out.append({'id': c['id'], 'title': c['title'], 'status': c['status'], 'severity': c['severity'],
+                     'created_at': c['created_at'], 'reasons': sorted(set(reasons))})
+    out.sort(key=lambda x: (-len(x['reasons']), x['created_at']))
+    return jsonify(out)
+
 @app.route('/api/cases/<int:cid>/assets', methods=['POST'])
 @login_required
 def api_case_add_asset(cid):

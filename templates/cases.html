@@ -736,6 +736,44 @@ function addRelatedItem(itemType, itemId) {
     }).catch(err => toast('Error adding item: ' + err, 'danger'));
 }
 
+// Every case is otherwise a fully isolated island -- surfaces other cases sharing a
+// host (case_assets), an indicator (case_iocs), or a threat entity (ti_relationships)
+// with this one, so two analysts independently opening cases on the same host don't
+// stay unaware of each other. Read-only cross-reference; no "merge" or "link" action,
+// just click through to the other case.
+function loadRelatedCases(cid) {
+    fetch(`/api/cases/${cid}/related-cases`).then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(data => {
+        if (cid !== activeCaseId) return; // stale response from a since-navigated-away case
+        renderRelatedCases(data);
+    }).catch(err => {
+        console.error('Error loading related cases:', err);
+        const el = document.getElementById('relatedCasesBody');
+        if (el) el.innerHTML = '<p class="text-danger small mb-0"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load related cases.</p>';
+    });
+}
+
+function renderRelatedCases(cases) {
+    const el = document.getElementById('relatedCasesBody');
+    if (!el) return;
+    if (!cases.length) {
+        el.innerHTML = '<p class="text-muted small mb-0">No other case shares a host, indicator, or threat entity with this one yet.</p>';
+        return;
+    }
+    el.innerHTML = cases.map(c => `
+        <div class="d-flex justify-content-between align-items-start border border-secondary rounded p-2 mb-2" style="cursor:pointer;" onclick="openCaseDetail(${c.id})">
+            <div>
+                <span class="badge ${severityBadgeClass(c.severity)} me-2">${escHtml((c.severity || '').toUpperCase())}</span>
+                ${caseStatusBadge(c.status)}
+                <strong class="ms-1">${escHtml(c.title)}</strong><br>
+                <span class="text-muted small">Shared: ${c.reasons.map(escHtml).join(', ')}</span>
+            </div>
+            <i class="fa-solid fa-arrow-up-right-from-square text-muted small mt-1"></i>
+        </div>`).join('');
+}
+
 function taskRow(t, isClosed) {
     const done = t.status === 'done';
     return `
@@ -946,6 +984,10 @@ function loadAndRenderCaseDetail(cid) {
                         <div class="card-body" id="relatedItemsBody"><p class="text-muted small mb-0">Loading&hellip;</p></div>
                     </div>
                     <div class="card bg-dark border-secondary mb-3">
+                        <div class="card-header border-secondary">Related Cases <span class="text-muted small">— other cases sharing a host, indicator, or threat entity with this one</span></div>
+                        <div class="card-body" id="relatedCasesBody"><p class="text-muted small mb-0">Loading&hellip;</p></div>
+                    </div>
+                    <div class="card bg-dark border-secondary mb-3">
                         <div class="card-header border-secondary">Threat Intel Entities</div>
                         <div class="card-body"><div id="linkToEntityWrap"></div></div>
                     </div>
@@ -1052,6 +1094,7 @@ function loadAndRenderCaseDetail(cid) {
         renderLinkToEntityControl();
         loadCaseReports(c.id);
         loadRelatedItems(c.id);
+        loadRelatedCases(c.id);
         showDetailView();
         // Live-ish SLA/TTA chips -- re-render just that strip every 30s while the case
         // is open in the browser, rather than re-fetching/re-rendering the whole case.
