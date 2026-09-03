@@ -319,6 +319,7 @@
                         <h6 class="text-warning font-monospace mb-0"><i class="fa-brands fa-windows me-2"></i>Windows</h6>
                         <a href="/api/agent/download/windows" class="btn btn-outline-success btn-sm"><i class="fa-solid fa-download me-1"></i> Download Agent (.zip)</a>
                     </div>
+                    <p class="text-muted small mb-2"><i class="fa-solid fa-circle-info me-1"></i>Requires <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">Python 3.10+</a> already installed on the endpoint (check "Add python.exe to PATH" during install) -- the agent is a plain script, not a bundled .exe. If `python` isn't recognized after installing, open a new terminal window (PATH changes don't apply to one already open).</p>
                     <p class="text-muted small mb-2">To run the agent persistently in the background, open PowerShell as Administrator and run:</p>
                     <div class="bg-black p-2 rounded mb-3 font-monospace text-success small border border-secondary">python micro_agent_windows.py install</div>
                     <p class="text-muted small mb-2">To stop and remove the background service:</p>
