@@ -4464,6 +4464,7 @@ def api_case_detail(cid):
         status_changed = status != case['status']
         assignee_changed = assignee != (case['assignee'] or '')
         queue_changed = queue_id != case['queue_id']
+        severity_changed = severity != case['severity']
         if status_changed:
             _log_case_event(db, cid, 'status_change', status)
         if assignee_changed:
@@ -4472,7 +4473,7 @@ def api_case_detail(cid):
             _log_case_event(db, cid, 'tlp_change', tlp)
         if pap != case['pap']:
             _log_case_event(db, cid, 'pap_change', pap)
-        if severity != case['severity']:
+        if severity_changed:
             _log_case_event(db, cid, 'severity_change', severity)
         if workflow_state != case['workflow_state']:
             _log_case_event(db, cid, 'workflow_state_change', workflow_state)
@@ -4489,6 +4490,8 @@ def api_case_detail(cid):
             _run_playbooks_for_case(db, cid, 'queue_changed', queue_id, tlp, status, severity)
         if assignee_changed:
             _run_playbooks_for_case(db, cid, 'assignee_changed', queue_id, tlp, status, severity)
+        if severity_changed:
+            _run_playbooks_for_case(db, cid, 'severity_changed', queue_id, tlp, status, severity)
         db.commit()
         return jsonify({"status": "success"})
 
@@ -4678,6 +4681,8 @@ def api_case_add_asset(cid):
         (cid, host, status, related_indicator, notes, current_user.username)
     )
     _log_case_event(db, cid, 'asset_added', f"{host} ({status})")
+    if status == 'confirmed':
+        _fire_asset_confirmed_playbooks(db, cid)
     db.commit()
     return jsonify({"status": "success"})
 
@@ -4710,6 +4715,8 @@ def api_case_asset_detail(cid, asset_id):
     )
     if status_changed:
         _log_case_event(db, cid, 'asset_status_change', f"{asset['host']} → {status}")
+        if status == 'confirmed':
+            _fire_asset_confirmed_playbooks(db, cid)
     db.commit()
     return jsonify({"status": "success"})
 
@@ -4970,7 +4977,7 @@ def api_case_analyze(cid):
     return jsonify({'status': 'success', 'summary': summary})
 
 # ---- Playbooks (SOAR) ----
-PLAYBOOK_TRIGGERS = ('case_created', 'status_changed', 'queue_changed', 'assignee_changed', 'scheduled', 'alert_created', 'sla_breached')
+PLAYBOOK_TRIGGERS = ('case_created', 'status_changed', 'queue_changed', 'assignee_changed', 'scheduled', 'alert_created', 'sla_breached', 'asset_confirmed', 'severity_changed')
 PLAYBOOK_ACTION_TYPES = ('apply_template', 'add_task', 'add_note', 'set_queue', 'analyze_entity', 'send_email', 'send_webhook', 'send_slack', 'custom_webhook', 'isolate_host', 'restore_network', 'collect_triage', 'quarantine_file', 'kill_scheduled_task', 'kill_process_by_name')
 # alert_created playbooks are alert-scoped (no case_id exists yet -- see soar_alerts.py)
 # and get their own small, non-destructive action set instead of the case-scoped one
@@ -5455,6 +5462,20 @@ def _run_playbooks_for_case(db, cid, trigger_event, queue_id, tlp, status, sever
             (pb['id'], cid, overall_status, detail)
         )
         _log_case_event(db, cid, 'playbook_run', f"{pb['name']}: {detail}")
+
+# All 6 EDR response actions (isolate_host, restore_network, collect_triage,
+# quarantine_file, kill_scheduled_task, kill_process_by_name) only ever target
+# case_assets rows already marked compromise_status='confirmed' -- but marking one
+# confirmed has never itself fired a trigger, and case_created fires before any asset
+# exists. So "when an analyst confirms a host is compromised, queue an isolate_host
+# approval" -- arguably the single most valuable automation this product can do --
+# was only ever reachable via manual Run Now. Called from both places an asset can
+# become confirmed: adding one already-confirmed, or transitioning an existing one to
+# confirmed.
+def _fire_asset_confirmed_playbooks(db, cid):
+    case = db.execute("SELECT queue_id, tlp, status, severity FROM cases WHERE id = ?", (cid,)).fetchone()
+    if case:
+        _run_playbooks_for_case(db, cid, 'asset_confirmed', case['queue_id'], case['tlp'], case['status'], case['severity'])
 
 # A scheduled playbook has no single case_id from a trigger event to act on -- its
 # condition_queue_id/tlp/status/severity filters become a case SELECTOR here (picking
