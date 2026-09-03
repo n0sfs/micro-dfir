@@ -1,0 +1,20 @@
+[Unit]
+Description=Micro DFIR opt-in DNS query logger (dnsmasq)
+# Deliberately NOT ordered after/wanted-by any micro-dfir app unit, and deliberately
+# never touched by update.sh's restart list -- an app deploy must never interrupt DNS
+# resolution for whatever devices have opted in to using this as their resolver. See
+# config/dnsmasq.conf for the full reasoning.
+After=network.target
+
+[Service]
+ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/opt/micro-dfir/config/dnsmasq.conf
+Restart=on-failure
+RestartSec=5
+User=root
+Group=root
+# Auto-creates /var/log/microsoc-dnsmasq (owned by User/Group above) matching
+# dnsmasq.conf's log-facility path -- no manual mkdir step needed.
+LogsDirectory=microsoc-dnsmasq
+
+[Install]
+WantedBy=multi-user.target

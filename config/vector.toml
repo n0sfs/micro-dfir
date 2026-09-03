@@ -1,3 +1,9 @@
+# One-time install seed only -- install.sh copies this file to /etc/vector/vector.toml
+# once, but src/app.py's generate_vector_config() fully regenerates that live file from
+# current settings/drop_rules (including the opt-in DNS query logging source/transform)
+# on every app startup, so this file's exact content stops mattering after first boot.
+# Not hand-maintained to mirror generate_vector_config() line-for-line -- see that
+# function for the actual current pipeline shape.
 [sources.windows_agent_https]
 type = "http_server"
 address = "0.0.0.0:5000"

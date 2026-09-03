@@ -255,6 +255,37 @@ mode = "tcp"
 address = "{ingest_ip}:514"
 """
 
+    # Opt-in DNS query logging (dnsmasq, config/microsoc-dnsmasq.service) -- a completely
+    # separate, independently-managed systemd service that only ever answers/logs devices
+    # an admin has manually pointed at this appliance's IP (see that unit's own comment
+    # for why it's never touched by update.sh). Unconditionally present here, not gated
+    # behind a settings flag -- there's no UI to set such a flag (this feature is
+    # deliberately read-only/status-only, see DNSMASQ_QUERY_REGEX below), and Vector's
+    # file source simply waits if the log file doesn't exist yet, so this block is inert
+    # until dnsmasq is actually installed and running.
+    syslog_inputs.append('"dnsmasq_parse"')
+    dnsmasq_block = r"""
+[sources.dnsmasq_log]
+type = "file"
+include = ["/var/log/microsoc-dnsmasq/query.log"]
+read_from = "end"
+
+[transforms.dnsmasq_parse]
+type = "remap"
+inputs = ["dnsmasq_log"]
+source = '''
+  parsed, err = parse_regex(.message, r'query\[(?P<qtype>[A-Za-z0-9]+)\]\s+(?P<domain>\S+)\s+from\s+(?P<src_ip>\S+)')
+  if err != null {
+    abort
+  }
+  .hostname = parsed.src_ip
+  .appname = "dnsmasq"
+  .source_ip = parsed.src_ip
+  .timestamp = now()
+  .message = "DNS query from " + parsed.src_ip + ": " + parsed.domain + " (" + parsed.qtype + ")\nQueryName: " + parsed.domain
+'''
+"""
+
     toml = f"""[api]
 enabled = true
 address = "127.0.0.1:8686"
@@ -271,6 +302,7 @@ type = "syslog"
 mode = "udp"
 address = "{ingest_ip}:514"
 {tcp_source_block}
+{dnsmasq_block}
 [transforms.shape_logs]
 type = "remap"
 inputs = [{", ".join(syslog_inputs)}]
@@ -294,6 +326,12 @@ auth.token = "{soc_token}"
 """
     with open("/etc/vector/vector.toml", "w") as f: f.write(toml)
     subprocess.run(["systemctl", "reload", "vector"], check=False)
+
+# Displayed read-only on SIEM > Log Pipeline (see api_dns_logging_status) so an admin can
+# see exactly what's matching/dropping without SSHing in to read vector.toml -- kept as a
+# literal constant (not derived from generate_vector_config()'s own f-string) so the two
+# can't silently drift without a diff showing both sides changing.
+DNSMASQ_QUERY_REGEX = r'query\[(?P<qtype>[A-Za-z0-9]+)\]\s+(?P<domain>\S+)\s+from\s+(?P<src_ip>\S+)'
 
 def _resolve_ingest_port(ui_port):
     # settings.ingest_port only reflects reality while the systemd unit still has the
@@ -1972,6 +2010,26 @@ def del_drop(rid):
     get_db().execute("DELETE FROM drop_rules WHERE id=?", (rid,)); get_db().commit(); generate_vector_config()
     log_audit('drop_rule_delete', 'drop_rule', rid)
     return jsonify({"ok":1})
+
+# Read-only status for the opt-in DNS query logging feature (dnsmasq, see
+# generate_vector_config()) -- no create/edit/delete here by design, this is visibility
+# only. "active" reflects RECENT (24h) volume, not "has ever appeared at all", so a
+# source that logged once months ago and never again doesn't read as currently working.
+@app.route('/api/dns-logging/status', methods=['GET'])
+@login_required
+def api_dns_logging_status():
+    db = get_db()
+    row = db.execute(
+        "SELECT COUNT(*) as cnt FROM live_logs WHERE app = 'dnsmasq' AND timestamp >= datetime('now', '-24 hours')"
+    ).fetchone()
+    last_row = db.execute("SELECT MAX(timestamp) as last_seen FROM live_logs WHERE app = 'dnsmasq'").fetchone()
+    return jsonify({
+        'active': row['cnt'] > 0,
+        'last_seen': last_row['last_seen'],
+        'query_count_24h': row['cnt'],
+        'parser_pattern': DNSMASQ_QUERY_REGEX,
+        'parser_source': 'config/vector.toml (dnsmasq_parse transform, see generate_vector_config())',
+    })
 
 DROP_RULE_PREVIEW_WINDOW_DAYS = 7
 DROP_RULE_PREVIEW_SAMPLE_LIMIT = 20

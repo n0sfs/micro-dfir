@@ -379,6 +379,25 @@
 
 </div>
 
+<!-- DNS Query Logging (opt-in dnsmasq) -->
+<div class="row g-4 mb-4">
+    <div class="col-lg-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-body">
+                <h5 class="card-title text-light mb-3"><i class="fa-solid fa-globe me-2"></i>DNS Query Logging</h5>
+                <p class="text-muted small mb-3">Opt-in DNS query capture via a separate dnsmasq process (config/microsoc-dnsmasq.service) -- never this network's DHCP or default resolver. Point a specific device's own DNS setting at this appliance's IP to opt it in; nothing here changes automatically for the rest of the network. Read-only: this panel shows status and the exact parser in use, but editing the parser or dnsmasq's own config is not done from the UI.</p>
+                <div class="row g-3 mb-3" id="dnsLoggingHero">
+                    <div class="col-6 col-md-3 text-center"><div class="fs-4 fw-bold" id="dnsLoggingActive">—</div><div class="text-muted small">Status</div></div>
+                    <div class="col-6 col-md-3 text-center"><div class="fs-4 fw-bold" id="dnsLoggingCount">—</div><div class="text-muted small">Queries (24h)</div></div>
+                    <div class="col-12 col-md-6 text-center"><div class="fs-6" id="dnsLoggingLastSeen">—</div><div class="text-muted small">Last Query</div></div>
+                </div>
+                <label class="form-label text-muted small mb-1">Parser in use (read-only)</label>
+                <pre class="bg-black border border-secondary rounded p-2 small text-info mb-0" id="dnsLoggingParser" style="white-space:pre-wrap;">Loading…</pre>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Agent Windows Log Channels -->
 <div class="row g-4 mb-4">
     <div class="col-lg-12">
@@ -2427,6 +2446,23 @@ function saveChannels() {
 function initPipelineTab() {
     loadDropRules();
     loadChannelSettings();
+    loadDnsLoggingStatus();
+}
+
+// Read-only status/parser view for the opt-in DNS query logging feature (dnsmasq) --
+// no create/edit/save here by design, see /api/dns-logging/status's own comment.
+function loadDnsLoggingStatus() {
+    fetch('/api/dns-logging/status').then(r => r.json()).then(d => {
+        const activeEl = document.getElementById('dnsLoggingActive');
+        activeEl.innerText = d.active ? 'Active' : 'Inactive';
+        activeEl.className = 'fs-4 fw-bold ' + (d.active ? 'text-success' : 'text-muted');
+        document.getElementById('dnsLoggingCount').innerText = d.query_count_24h.toLocaleString();
+        document.getElementById('dnsLoggingLastSeen').innerText = d.last_seen || 'Never';
+        document.getElementById('dnsLoggingParser').innerText = `${d.parser_pattern}\n\nSource: ${d.parser_source}`;
+    }).catch(err => {
+        console.error('Error loading DNS logging status:', err);
+        document.getElementById('dnsLoggingParser').innerText = 'Error loading parser info.';
+    });
 }
 
 // =====================================================================
