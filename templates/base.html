@@ -90,12 +90,28 @@ body.sidebar-collapsed .btn-logout span{display:none;}
   background-color:var(--bg-card-alt);
   border:1px solid var(--border);
   transition:background-color .12s ease, color .12s ease, border-color .12s ease;
+  position:relative;
 }
 .nav-block i{width:18px;text-align:center;font-size:1rem;color:var(--text-muted);transition:color .12s ease;}
 .nav-block:hover{border-color:var(--border-light);color:var(--text-primary);}
 .nav-block:hover i{color:var(--text-secondary);}
 .nav-block.active{background-color:var(--accent-dim);color:var(--text-primary);border-color:var(--accent);}
 .nav-block.active i{color:var(--accent);}
+/* Pending-count badge (e.g. SOAR approvals) -- a numbered pill next to the label when
+   the sidebar is expanded, collapsing to a plain dot (no number) pinned on the icon
+   when collapsed, since `.nav-block span` itself is hidden in that state (see the
+   collapsed-sidebar rule above) and there's no room for a number anyway. */
+.nav-badge{
+  margin-left:auto;background-color:var(--danger);color:#fff;
+  font-size:.68rem;font-weight:700;line-height:1;
+  min-width:18px;height:18px;padding:0 5px;
+  border-radius:999px;display:flex;align-items:center;justify-content:center;
+  font-variant-numeric:tabular-nums;
+}
+body.sidebar-collapsed .nav-block .nav-badge{
+  display:block;position:absolute;top:6px;right:6px;
+  min-width:9px;width:9px;height:9px;padding:0;font-size:0;
+}
 
 .sidebar-bottom{margin-top:auto;padding:8px 12px 4px;}
 .sidebar-divider{height:1px;background:var(--border);margin:6px 8px 10px;}
@@ -356,7 +372,7 @@ body.sidebar-collapsed .btn-logout span{display:none;}
             <a href="/agents" class="nav-block {{ 'active' if request.endpoint == 'agents' else '' }}" title="EDR"><i class="fa-solid fa-laptop-medical"></i><span>EDR</span></a>
             <a href="/ueba" class="nav-block {{ 'active' if request.endpoint in ['ueba', 'ueba_tuning'] else '' }}" title="UEBA"><i class="fa-solid fa-user-secret"></i><span>UEBA</span></a>
             <a href="/threat-intel" class="nav-block {{ 'active' if request.endpoint in ['threat_intel', 'hunt'] else '' }}" title="Threat Intel &amp; Hunting"><i class="fa-solid fa-globe"></i><span>Threat Intel &amp; Hunting</span></a>
-            <a href="{{ url_for('soar_page') }}" class="nav-block {{ 'active' if request.endpoint == 'soar_page' else '' }}" title="SOAR"><i class="fa-solid fa-robot"></i><span>SOAR</span></a>
+            <a href="{{ url_for('soar_page') }}" class="nav-block {{ 'active' if request.endpoint == 'soar_page' else '' }}" title="SOAR"><i class="fa-solid fa-robot"></i><span>SOAR</span><span class="nav-badge" id="soarApprovalsBadge" style="display:none;"></span></a>
             <a href="{{ url_for('cases_page') }}" class="nav-block {{ 'active' if request.endpoint == 'cases_page' else '' }}" title="Cases"><i class="fa-solid fa-folder-open"></i><span>Cases</span></a>
         </nav>
 
@@ -404,6 +420,35 @@ body.sidebar-collapsed .btn-logout span{display:none;}
                 }
             };
         })();
+
+        // ---------- SOAR pending-approvals nav badge ----------
+        // One fetch on page load plus a periodic refresh, so an approval that appears
+        // while someone is deep in another tab still surfaces without a full page
+        // reload -- cheap since the route itself is a small, indexed, status-filtered
+        // query (see api_playbook_approvals). Client-side hasPermission() here just
+        // skips the request for a user who'd get a 403 anyway (mirrors the Pending
+        // Approvals panel's own has_permission('soar.playbooks.manage') gate in
+        // templates/soar.html); the actual enforcement is server-side on the route.
+        function refreshSoarApprovalsBadge() {
+            if (!hasPermission('soar.playbooks.manage')) return;
+            fetch('/api/playbook-approvals?status=pending')
+                .then(r => r.ok ? r.json() : [])
+                .then(rows => {
+                    const badge = document.getElementById('soarApprovalsBadge');
+                    if (!badge) return;
+                    const count = Array.isArray(rows) ? rows.length : 0;
+                    if (count > 0) {
+                        badge.textContent = count > 99 ? '99+' : String(count);
+                        badge.title = `${count} playbook action${count === 1 ? '' : 's'} awaiting approval`;
+                        badge.style.display = '';
+                    } else {
+                        badge.style.display = 'none';
+                    }
+                })
+                .catch(() => {});
+        }
+        refreshSoarApprovalsBadge();
+        setInterval(refreshSoarApprovalsBadge, 60000);
 
         function toggleSidebar() {
             const collapsed = document.body.classList.toggle('sidebar-collapsed');
