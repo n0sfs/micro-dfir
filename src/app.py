@@ -5834,6 +5834,7 @@ def api_run_scheduled_playbooks():
     _run_due_offline_agent_alerts(db)
     _run_due_case_created_playbooks(db)
     _run_due_case_stale_playbooks(db)
+    _run_due_log_source_silent_alerts(db)
     return jsonify({'status': 'success'})
 
 # Due isolation auto-reverts -- for each playbook_pending_reverts row past its revert_at,
@@ -5967,6 +5968,105 @@ def _run_due_offline_agent_alerts(db):
         db.execute("INSERT INTO agent_offline_alerts (hostname, alerted_at) VALUES (?, datetime('now'))", (r['hostname'],))
         soar_alerts.run_playbooks_for_alert(db, {
             'id': new_alert_id, 'rule_title': 'Agent Offline', 'severity': 'MEDIUM', 'host': r['hostname'],
+            'username': None, 'source_ip': None, 'message': msg, 'timestamp': None,
+        }, run_case_playbooks_fn=lambda cid, qid, tlp, st, sev: _run_playbooks_for_case(db, cid, 'case_created', qid, tlp, st, sev))
+    db.commit()
+
+# Distinct from _log_source_gap_summary (which only flags an app category that has NEVER
+# ingested anything -- a permanent, structural gap) -- this flags a source that WAS
+# recently active and then stopped, the "pipeline broke" case that gap summary can't see.
+# Threshold is adaptive PER APP rather than one fixed number: a naturally continuous
+# source (sysmon, every few seconds) and a naturally bursty one (cron, once a day) need
+# wildly different "this is now overdue" cutoffs, and a single global threshold would
+# either spam constantly on bursty sources or miss real outages on continuous ones. The
+# 7-day baseline window is itself the mechanism that keeps this scoped to "recently
+# active" -- a source silent for the whole window simply won't appear in the query at all.
+DEFAULT_LOG_SOURCE_SILENT_MULTIPLIER = 10  # how many multiples of an app's own average
+# inter-event gap it must be overdue by before alarming
+DEFAULT_LOG_SOURCE_SILENT_MIN_HOURS = 2  # absolute floor regardless of multiplier, so a
+# very high-frequency app doesn't fire after a few seconds of normal jitter
+DEFAULT_LOG_SOURCE_SILENT_COOLDOWN_HOURS = 24
+LOG_SOURCE_SILENT_BASELINE_DAYS = 7  # not exposed as a setting -- changing the
+# observation window changes what "this app's own history" even means, closer to a code
+# constant than an operational knob an admin would tune day to day
+LOG_SOURCE_SILENT_MIN_BASELINE_EVENTS = 20  # too few historical events in the baseline
+# window to establish a meaningful cadence at all -- skip rather than guess
+
+def _log_source_silent_config(db):
+    mult_row = db.execute("SELECT value FROM settings WHERE key = 'log_source_silent_multiplier'").fetchone()
+    min_row = db.execute("SELECT value FROM settings WHERE key = 'log_source_silent_min_hours'").fetchone()
+    cooldown_row = db.execute("SELECT value FROM settings WHERE key = 'log_source_silent_cooldown_hours'").fetchone()
+    try:
+        multiplier = float(mult_row['value']) if mult_row and mult_row['value'] else DEFAULT_LOG_SOURCE_SILENT_MULTIPLIER
+    except (ValueError, TypeError):
+        multiplier = DEFAULT_LOG_SOURCE_SILENT_MULTIPLIER
+    try:
+        min_hours = float(min_row['value']) if min_row and min_row['value'] else DEFAULT_LOG_SOURCE_SILENT_MIN_HOURS
+    except (ValueError, TypeError):
+        min_hours = DEFAULT_LOG_SOURCE_SILENT_MIN_HOURS
+    try:
+        cooldown_hours = float(cooldown_row['value']) if cooldown_row and cooldown_row['value'] else DEFAULT_LOG_SOURCE_SILENT_COOLDOWN_HOURS
+    except (ValueError, TypeError):
+        cooldown_hours = DEFAULT_LOG_SOURCE_SILENT_COOLDOWN_HOURS
+    return {'multiplier': multiplier, 'min_hours': min_hours, 'cooldown_hours': cooldown_hours}
+
+@app.route('/api/settings/log-source-silent-alert', methods=['GET', 'POST'])
+@login_required
+def api_settings_log_source_silent_alert():
+    db = get_db()
+    if request.method == 'GET':
+        return jsonify(_log_source_silent_config(db))
+    err = require_permission('settings.system.manage')
+    if err: return err
+    d = request.json or {}
+    try:
+        multiplier = float(d.get('multiplier'))
+        min_hours = float(d.get('min_hours'))
+        cooldown_hours = float(d.get('cooldown_hours'))
+        if multiplier < 1 or min_hours < 0 or cooldown_hours < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({'error': 'multiplier must be >= 1, min_hours must be >= 0, and cooldown_hours must be >= 1'}), 400
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('log_source_silent_multiplier', ?)", (str(multiplier),))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('log_source_silent_min_hours', ?)", (str(min_hours),))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('log_source_silent_cooldown_hours', ?)", (str(cooldown_hours),))
+    db.commit()
+    log_audit('log_source_silent_alert_config_change', 'settings', None, f'multiplier={multiplier}, min_hours={min_hours}, cooldown={cooldown_hours}h')
+    return jsonify({'status': 'success', 'multiplier': multiplier, 'min_hours': min_hours, 'cooldown_hours': cooldown_hours})
+
+def _run_due_log_source_silent_alerts(db):
+    cfg = _log_source_silent_config(db)
+    rows = db.execute(
+        "SELECT app, COUNT(*) as baseline_count, "
+        "(julianday(MAX(timestamp)) - julianday(MIN(timestamp))) * 24 as observed_span_hours, "
+        "(julianday('now') - julianday(MAX(timestamp))) * 24 as silence_hours, "
+        "MAX(timestamp) as last_seen "
+        "FROM live_logs WHERE app IS NOT NULL AND app != '' AND timestamp >= datetime('now', ?) "
+        "GROUP BY app HAVING baseline_count >= ?",
+        (f'-{LOG_SOURCE_SILENT_BASELINE_DAYS} days', LOG_SOURCE_SILENT_MIN_BASELINE_EVENTS)
+    ).fetchall()
+    for r in rows:
+        avg_gap_hours = r['observed_span_hours'] / max(r['baseline_count'] - 1, 1)
+        threshold_hours = max(avg_gap_hours * cfg['multiplier'], cfg['min_hours'])
+        if r['silence_hours'] <= threshold_hours:
+            continue
+        already = db.execute(
+            "SELECT 1 FROM log_source_silent_alerts WHERE app = ? AND alerted_at >= datetime('now', ?)",
+            (r['app'], f"-{cfg['cooldown_hours']} hours")
+        ).fetchone()
+        if already:
+            continue
+        msg = (f"Log source '{r['app']}' has not ingested any new events for {round(r['silence_hours'], 1)}h "
+               f"(expected roughly every {round(avg_gap_hours, 1)}h based on its own recent history; last event at {r['last_seen']}).")
+        ins_cur = db.execute(
+            "INSERT INTO alerts (timestamp, rule_name, severity, message, occurrence_count, last_seen) "
+            "VALUES (datetime('now'), 'Log Source Silent', 'MEDIUM', ?, 1, datetime('now'))",
+            (msg,)
+        )
+        new_alert_id = ins_cur.lastrowid
+        db.execute("INSERT INTO log_source_silent_alerts (app, alerted_at) VALUES (?, datetime('now'))", (r['app'],))
+        soar_alerts.run_playbooks_for_alert(db, {
+            'id': new_alert_id, 'rule_title': 'Log Source Silent', 'severity': 'MEDIUM', 'host': None,
             'username': None, 'source_ip': None, 'message': msg, 'timestamp': None,
         }, run_case_playbooks_fn=lambda cid, qid, tlp, st, sev: _run_playbooks_for_case(db, cid, 'case_created', qid, tlp, st, sev))
     db.commit()
@@ -8028,6 +8128,20 @@ def migrate_agent_offline_alerts():
             alerted_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )''')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_offline_alerts_host ON agent_offline_alerts(hostname, alerted_at)')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_log_source_silent_alerts():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS log_source_silent_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            app TEXT NOT NULL,
+            alerted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_log_source_silent_alerts_app ON log_source_silent_alerts(app, alerted_at)')
         conn.commit()
         conn.close()
     except Exception:
@@ -12874,6 +12988,7 @@ migrate_alerts_effective_seen()
 migrate_alert_escalations()
 migrate_case_playbook_outbox()
 migrate_agent_offline_alerts()
+migrate_log_source_silent_alerts()
 migrate_sigma_aggregation()
 migrate_sigma_rules_columns()
 migrate_rule_tuning()
