@@ -263,6 +263,22 @@
 
             <hr class="border-secondary my-4">
 
+            <!-- Case Stale Nudge -->
+            <h6 class="text-info mb-3">Case Stale Nudge</h6>
+            <p class="text-muted small mb-3">When an open case has had no activity (no status/assignee/queue/severity/workflow change logged to its timeline) for this long, a "Case gone stale" playbook trigger fires — a proactive nudge distinct from SLA breach, which only tracks the case's age, not whether anyone has actually touched it since. Fires again after a fresh period of silence following any new activity.</p>
+            <div class="row g-2 align-items-end mb-3">
+                <div class="col-auto">
+                    <label class="form-label small text-muted mb-1">Stale after (hours)</label>
+                    <input type="number" min="1" id="caseStaleHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:130px;">
+                </div>
+                <div class="col-auto">
+                    <button class="btn btn-outline-primary btn-sm" onclick="saveCaseStaleConfig()"><i class="fa-solid fa-save me-1"></i> Save</button>
+                </div>
+            </div>
+            <div class="small text-muted" id="caseStaleStatus"></div>
+
+            <hr class="border-secondary my-4">
+
             <!-- Hot/Cold Log Archiving -->
             <h6 class="text-info mb-3">Log Archiving</h6>
             <p class="text-muted small mb-3">Move logs older than the archive window out of the live search index into cold storage in the same database, so Log Search stays fast without losing older data outright. Independent of Log Retention above -- if both are enabled, keep the retention period longer than the archive window, or retention will purge logs before they get a chance to be archived.</p>
@@ -545,6 +561,7 @@ document.addEventListener("DOMContentLoaded", function() {
     loadRetentionSettings();
     loadEscalationConfig();
     loadAgentOfflineAlertConfig();
+    loadCaseStaleConfig();
     loadArchiveSettings();
     loadReportBranding();
     loadReportSchedule();
@@ -1159,6 +1176,38 @@ function saveAgentOfflineAlertConfig() {
             toast(res.error || 'Failed to save agent offline alert settings.', 'danger');
         }
     }).catch(err => toast('Error saving agent offline alert settings: ' + err, 'danger'));
+}
+
+// ---- Case Stale Nudge ----
+function loadCaseStaleConfig() {
+    fetch('/api/settings/case-stale-nudge')
+        .then(r => r.json())
+        .then(data => {
+            document.getElementById('caseStaleHours').value = data.stale_hours;
+            document.getElementById('caseStaleStatus').innerText =
+                `Currently: an open case with no activity for ${data.stale_hours} hour(s) triggers a "Case gone stale" nudge.`;
+        })
+        .catch(e => console.error('Case stale nudge settings load issue:', e));
+}
+
+function saveCaseStaleConfig() {
+    const hours = parseInt(document.getElementById('caseStaleHours').value, 10);
+    if (!(hours >= 1)) {
+        toast('Stale threshold must be a positive number of hours.', 'warning');
+        return;
+    }
+    fetch('/api/settings/case-stale-nudge', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({stale_hours: hours})
+    }).then(r => r.json()).then(res => {
+        if (res.status === 'success') {
+            loadCaseStaleConfig();
+            toast('Case stale nudge settings saved.', 'success');
+        } else {
+            toast(res.error || 'Failed to save case stale nudge settings.', 'danger');
+        }
+    }).catch(err => toast('Error saving case stale nudge settings: ' + err, 'danger'));
 }
 
 // ---- Log Archiving ----
