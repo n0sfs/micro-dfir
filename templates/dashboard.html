@@ -1299,11 +1299,15 @@ function showLogDetail(idx) {
         : '';
     const hasProcessFields = log.process_image || log.command_line || log.parent_image || log.parent_command_line || log.original_file_name;
     const isRecurring = log.type === 'alert' && log.occurrence_count > 1;
-    const canAddToCase = (log.type === 'alert' || log.type === 'anomaly') && log.id;
+    const canAddToCase = (log.type === 'alert' || log.type === 'anomaly' || log.type === 'log') && log.id;
+    // Link-to-Entity stays alert/anomaly-only -- ti_relationships has no target_type
+    // concept for a raw log row, unlike Add-to-Case (which maps a 'log' row onto the
+    // already-generic 'fim_event' item type server-side).
+    const canLinkToEntity = (log.type === 'alert' || log.type === 'anomaly') && log.id;
 
     document.getElementById('logDetailBody').innerHTML = `
         ${canAddToCase ? `<div id="addToCaseWrap" class="mb-2"></div>` : ''}
-        ${canAddToCase ? `<div id="linkToEntityWrap" class="mb-2"></div>` : ''}
+        ${canLinkToEntity ? `<div id="linkToEntityWrap" class="mb-2"></div>` : ''}
         <dl class="row mb-2 small">
             <dt class="col-3">Time</dt><dd class="col-9">${escHtml(log.time)}${isRecurring ? ` <span class="text-muted">(first seen)</span>` : ''}</dd>
             ${isRecurring ? `<dt class="col-3">Last Seen</dt><dd class="col-9">${escHtml(log.last_seen)} <span class="badge bg-secondary">&times;${log.occurrence_count} occurrences</span></dd>` : ''}
@@ -1362,7 +1366,8 @@ function showLogDetail(idx) {
             <pre class="bg-black border border-secondary rounded p-2 small mb-0 mt-1" style="white-space:pre-wrap; word-break:break-word; max-height:400px; overflow-y:auto;">${highlightText(log.raw_xml, termsFor('raw_xml'))}</pre>
         </details>` : ''}
     `;
-    if (canAddToCase) { renderAddToCaseControl(log); renderLinkToEntityControl(log); }
+    if (canAddToCase) { renderAddToCaseControl(log); }
+    if (canLinkToEntity) { renderLinkToEntityControl(log); }
     new bootstrap.Modal(document.getElementById('logDetailModal')).show();
 }
 
@@ -1471,7 +1476,10 @@ function renderAddToCaseControl(log) {
     wrap.innerHTML = `<span class="text-muted small">Loading cases…</span>`;
     fetch('/api/cases').then(r => r.json()).then(cases => {
         const openCases = (cases || []).filter(c => c.status === 'open');
-        const itemType = log.type === 'alert' ? 'alert' : 'ueba_event';
+        // 'fim_event' is really just "a raw live_logs row" server-side (see
+        // _case_item_summary) -- not restricted to FIM-sourced rows despite the name,
+        // so it's the right item type for any plain log-search row, not only FIM ones.
+        const itemType = log.type === 'alert' ? 'alert' : (log.type === 'log' ? 'fim_event' : 'ueba_event');
         const options = openCases.map(c => `<option value="${c.id}">${escHtml(c.title)}</option>`).join('');
         wrap.innerHTML = `
             <div class="d-flex align-items-center gap-2">
