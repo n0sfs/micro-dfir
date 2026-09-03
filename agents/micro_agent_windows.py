@@ -4,7 +4,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, tem
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.09.02.1"
+AGENT_VERSION = "2026.09.03.1"
 
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
@@ -206,7 +206,6 @@ def _ensure_sysmon_installed(context):
 def install_agent():
     try:
         _kill_other_agent_instances()
-        _configure_windows_audit_logging()
         if not os.path.exists(INSTALL_DIR): os.makedirs(INSTALL_DIR)
         target_path = os.path.join(INSTALL_DIR, "micro_agent_windows.py")
         with open(os.path.abspath(__file__), 'r', encoding='utf-8') as src, open(target_path, 'w', encoding='utf-8') as dst:
@@ -491,6 +490,14 @@ def run_agent():
             f.write(str(os.getpid()))
     except Exception:
         pass
+    # Applied on every process start (fresh install, reboot, watchdog relaunch, AND a
+    # remote "Upgrade Agent" -- upgrade_agent() just swaps the script file and relaunches
+    # via the same scheduled task, it never calls install_agent() again). Each individual
+    # setting is idempotent (re-applying an already-set auditpol/registry value is a
+    # harmless no-op), so calling this on every startup rather than only once at install
+    # time is what makes it actually reach an agent that was installed before this
+    # existed, not just brand new ones.
+    _configure_windows_audit_logging()
     context = build_ssl_context()
     active_channel_configs = [
         {'name': 'Security', 'capture_xml': False, 'where_clause': ''},
