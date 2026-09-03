@@ -594,10 +594,6 @@ def api_ingest():
     import datetime
     try:
         db = get_db()
-        expected_token = get_soc_secret(db)
-        if expected_token and request.headers.get('Authorization') != f'Bearer {expected_token}':
-            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
-
         data = request.get_json()
         # The Windows/Linux agents send {"logs": [...]}, but Vector's http sink (used for
         # syslog ingestion) posts a bare JSON array of events with no wrapper key — accept
@@ -608,6 +604,22 @@ def api_ingest():
             logs = data['logs']
         else:
             return jsonify({'status': 'error', 'message': 'Missing logs payload'}), 400
+
+        # This used to check ONLY the shared soc_secret (Vector/legacy agents) — a
+        # per-agent token (minted for any installer-based deployment, see
+        # _mint_agent_token) authenticates fine against /api/agent/config but was never
+        # accepted here, so every such agent could check in and run response actions but
+        # silently could never ship a single log: found live via a real endpoint with
+        # active check-ins and zero live_logs rows ever, no error visible anywhere until
+        # agent-side diagnostic logging (see _redirect_output_to_log) surfaced a raw SSL
+        # EOF instead of a clean 401 (this route's old bare Authorization-header check
+        # returning 401 before the body was consumed is what produced that on the
+        # agent's client-side connection, not a real TLS problem).
+        auth_header = request.headers.get('Authorization', '')
+        token = auth_header[7:] if auth_header.startswith('Bearer ') else None
+        ingest_host = (logs[0].get('host') if logs and isinstance(logs[0], dict) else None) or 'Unknown'
+        if not _validate_agent_auth(db, token, ingest_host):
+            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
 
         count = 0
         for log in logs:
