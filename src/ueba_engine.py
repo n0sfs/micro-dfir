@@ -1105,6 +1105,15 @@ def run_autocase_check():
                 "ON CONFLICT(entity_type, entity_id) DO UPDATE SET last_triggered_at = excluded.last_triggered_at, case_id = excluded.case_id",
                 (entity_type, entity_id, cid)
             )
+            try:
+                # Same case_playbook_outbox bridge sigma_engine.py's auto-case paths use --
+                # see migrate_case_playbook_outbox's comment in app.py. Wrapped separately
+                # (not just relying on this function's own outer except) so a table that
+                # doesn't exist yet on a brand-new install can't abort the whole autocase
+                # sweep -- this entity's case still gets created either way.
+                conn.execute("INSERT INTO case_playbook_outbox (case_id, trigger_event) VALUES (?, 'case_created')", (cid,))
+            except Exception:
+                pass
         conn.commit()
     except Exception as e:
         print(f"[-] UEBA auto-case check failed: {e}")
