@@ -2190,6 +2190,11 @@ def api_compliance_coverage():
         coverage[key]['tier'] = t['tier']
         coverage[key]['validated'] = t['validated']
         coverage[key]['log_source_gap'] = t['log_source_gap']
+    # Fourth addition, same additive-only shape as the three above -- see
+    # _framework_evidence's own docstring for why this is a deliberately separate signal
+    # from rule/SCA/tier coverage, not blended into any of them.
+    for key in coverage:
+        coverage[key]['evidence'] = _framework_evidence(db, key, 30)
     frameworks = sorted(coverage.values(), key=lambda f: f['label'])
     return jsonify({
         'frameworks': frameworks,
@@ -2878,6 +2883,72 @@ def _get_validated_compliance_counts(db, days):
             if tag:
                 counts[tag] = counts.get(tag, 0) + 1
     return counts
+
+# "Relevant" here means: this framework's own tagged rules (enabled AND disabled -- a
+# disabled rule still represents detection intent for the framework, so its log-source
+# dependency still counts as evidence of what monitoring the framework's story rests on)
+# have a Sigma logsource that resolves to one or more real live_logs.app values. Answers
+# "is the underlying data even being collected", independent of whether any rule has
+# fired on it. Ported from generate_report.py's own Part D _framework_relevant_apps
+# (PDF-only) so the same resolution now also drives a live score -- kept as a second,
+# independent copy rather than imported, matching that file's own established reasoning
+# for why it duplicates SIGMA_LOGSOURCE_INGESTED_APPS/_extract_yaml_field locally (no
+# Flask context there, and this repo's per-file duplication convention for small,
+# rarely-changing catalogs generally).
+def _framework_relevant_apps(db, framework_key):
+    like_pattern = f'%{framework_key}%'
+    apps = set()
+    for row in db.execute(
+        "SELECT rule_yaml FROM sigma_rules WHERE compliance_tags LIKE ?", (like_pattern,)
+    ).fetchall():
+        product = _extract_yaml_field('product', row['rule_yaml'])
+        service = _extract_yaml_field('service', row['rule_yaml'])
+        if not product:
+            continue
+        product = product.strip().lower()
+        service = service.strip().lower() if service else None
+        expected = SIGMA_LOGSOURCE_INGESTED_APPS.get((product, service))
+        if expected is None:
+            expected = SIGMA_LOGSOURCE_INGESTED_APPS.get((product, None))
+        if expected:
+            apps |= expected
+    return apps
+
+# Picked as "clearly more than noise, still reachable on a quiet single-appliance
+# deployment over a 30-day window" -- not tuned per framework/control the way a
+# multi-tenant evidence-auditing tool might (see the design note on _framework_evidence
+# below for why this stays a framework-wide constant, not a per-control threshold).
+COMPLIANCE_EVIDENCE_MIN_EVENTS = 50
+
+# A fourth, independently-sourced signal alongside rule tag total/enabled, SCA hardening
+# pass rate, and the tiered gap/inactive/active/validated score api_compliance_coverage()
+# already returns -- "is the raw log data this framework's tagged rules depend on
+# actually flowing in real volume", distinct from all three: a rule can be tagged,
+# enabled, and even validated (fired once, 30+ days ago is irrelevant to "validated")
+# while its log source is otherwise thin or has gone quiet, and conversely a framework
+# can have plenty of relevant log volume flowing with zero rules tagged yet (a
+# procedural/manual control an auditor still cares about). Deliberately scored at
+# FRAMEWORK granularity, not per-control -- this appliance has no per-control model to
+# hang finer precision on, and a real-world reference (a competing tool's per-control
+# evidence-query catalog) collapses to a handful of underlying evidence groups per
+# framework in practice anyway (e.g. 153 PCI DSS controls -> 7 distinct query groups),
+# so framework-level is an honest match for the granularity that data actually supports,
+# not a simplification that loses real signal.
+def _framework_evidence(db, framework_key, days=30):
+    tagged_count = db.execute(
+        "SELECT COUNT(*) FROM sigma_rules WHERE compliance_tags LIKE ?", (f'%{framework_key}%',)
+    ).fetchone()[0]
+    apps = _framework_relevant_apps(db, framework_key)
+    if not apps:
+        status = 'not_tagged' if tagged_count == 0 else 'not_ingestible'
+        return {'status': status, 'total_events': 0, 'apps': []}
+    placeholders = ','.join('?' for _ in apps)
+    total = db.execute(
+        f"SELECT COUNT(*) FROM live_logs WHERE app IN ({placeholders}) AND timestamp >= datetime('now', ?)",
+        (*apps, f'-{days} days')
+    ).fetchone()[0]
+    status = 'none' if total == 0 else ('sparse' if total < COMPLIANCE_EVIDENCE_MIN_EVENTS else 'sufficient')
+    return {'status': status, 'total_events': total, 'apps': sorted(apps)}
 
 def _build_compliance_coverage(rules, validated):
     """Same 4-tier model as _build_mitre_coverage, keyed by flat compliance framework
