@@ -1404,6 +1404,31 @@ function onPlaybookTriggerChange() {
     const isAlert = trigger === 'alert_created';
     document.querySelectorAll('.pb-case-only-cond').forEach(el => { el.style.display = isAlert ? 'none' : ''; });
     document.getElementById('pbCondSeverityLabel').textContent = isAlert ? 'Only if Severity is at least…' : 'Only if Severity is…';
+    refreshActionRowsForTrigger(trigger);
+}
+
+// Every already-present action row's type dropdown was built from whichever trigger was
+// selected AT THE TIME that row was added (addPlaybookActionRow reads pbTrigger.value
+// once, up front) -- switching the trigger afterward otherwise leaves those rows stuck
+// showing the old catalog, making e.g. create_case unreachable on a row that was added
+// before switching to "Alert created". Re-render every row's option list against the
+// CURRENT trigger here instead: keep the row's existing selection when it's still valid
+// in the new catalog, or fall back to the catalog's first entry (matching
+// addPlaybookActionRow's own fallback) and re-render that row's param fields too, since a
+// changed action type needs different ones.
+function refreshActionRowsForTrigger(trigger) {
+    const labelsForRow = actionLabelsForTrigger(trigger);
+    document.querySelectorAll('#pbActionsList [id^="pbActType_"]').forEach(select => {
+        const seq = select.id.split('_')[1];
+        const current = select.value;
+        const stillValid = current in labelsForRow;
+        select.innerHTML = Object.entries(labelsForRow).map(([k, label]) =>
+            `<option value="${k}" ${k === current ? 'selected' : ''}>${label}</option>`).join('');
+        if (!stillValid) {
+            select.value = Object.keys(labelsForRow)[0];
+            onPlaybookActionTypeChange(seq);
+        }
+    });
 }
 
 async function showPlaybookModal() {
