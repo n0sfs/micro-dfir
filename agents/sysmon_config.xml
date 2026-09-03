@@ -1,0 +1,45 @@
+<Sysmon schemaversion="4.90">
+  <!-- Micro DFIR starter Sysmon config: served to agents via GET /api/agent/sysmon-config
+       (src/app.py) and installed automatically when an admin enables the "Sysmon" channel
+       on the Log Pipeline tab (see _ensure_sysmon_installed() in micro_agent_windows.py).
+       Editable here and redeployed via the normal git+update.sh flow: no need to
+       redistribute a new agent installer to every endpoint to change it.
+
+       Deliberately broad rather than finely noise-tuned: covers exactly the event types
+       this appliance's own detection/IOC-correlation pipeline already depends on
+       (Process Creation with hashing, Network Connections, DNS queries; see
+       sigma_engine.py's Sysmon EID 1/3/22 mappings and app.py's query_name/file_hash IOC
+       correlation), plus a couple of common persistence-technique event types scoped down
+       to keep volume reasonable. A real starting point, not a mature production config;
+       expect to add exclusions for your own environment's known-noisy software over time. -->
+  <EventFiltering>
+    <!-- Broad, unfiltered (an onmatch="exclude" block with no rules excludes nothing,
+         i.e. logs everything of that type) -->
+    <ProcessCreate onmatch="exclude" />
+    <NetworkConnect onmatch="exclude" />
+    <DnsQuery onmatch="exclude" />
+    <ProcessTerminate onmatch="exclude" />
+
+    <!-- Scoped: genuinely high volume without filtering, still real signal -->
+    <FileCreate onmatch="include">
+      <TargetFilename condition="end with">.exe</TargetFilename>
+      <TargetFilename condition="end with">.dll</TargetFilename>
+      <TargetFilename condition="end with">.ps1</TargetFilename>
+      <TargetFilename condition="end with">.bat</TargetFilename>
+      <TargetFilename condition="end with">.vbs</TargetFilename>
+      <TargetFilename condition="end with">.js</TargetFilename>
+    </FileCreate>
+    <RegistryEvent onmatch="include">
+      <TargetObject condition="contains">\CurrentVersion\Run</TargetObject>
+      <TargetObject condition="contains">\CurrentVersion\RunOnce</TargetObject>
+      <TargetObject condition="contains">Winlogon</TargetObject>
+      <TargetObject condition="contains">\Services\</TargetObject>
+    </RegistryEvent>
+
+    <!-- Everything else (ImageLoad, ProcessAccess, DriverLoad, PipeEvent, WmiEvent,
+         ClipboardChange, FileDelete, RawAccessRead, CreateRemoteThread, etc.) is
+         deliberately left out of this starter config entirely: lower signal to volume
+         for a first pass. Add an explicit block for any of these if you need that
+         visibility later. -->
+  </EventFiltering>
+</Sysmon>
