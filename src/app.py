@@ -12559,6 +12559,7 @@ def _build_agent_source(agent_filename, server_ip, ui_port, ingest_port, soc_tok
     script_data = script_data.replace('https://__HOST_URL__/api/agent/config', f'https://{server_ip}:{ui_port}/api/agent/config')
     script_data = script_data.replace('https://__HOST_URL__/api/agent/result', f'https://{server_ip}:{ui_port}/api/agent/result')
     script_data = script_data.replace('https://__HOST_URL__/api/ingest', f'https://{server_ip}:{ingest_port}/api/ingest')
+    script_data = script_data.replace('https://__HOST_URL__/api/agent/sysmon-config', f'https://{server_ip}:{ui_port}/api/agent/sysmon-config')
     script_data = script_data.replace('__SOC_TOKEN__', soc_token)
     # The server's cert is self-signed with no CA to chain to and no SAN for the IP
     # agents actually connect over — pinning this exact cert (see the agent's own
