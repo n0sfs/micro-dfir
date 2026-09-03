@@ -13,6 +13,10 @@
 #iocTable .th-icon-btn{background:none; border:none; color:var(--text-muted); padding:0 2px; font-size:.72rem; cursor:pointer; line-height:1;}
 #iocTable .th-icon-btn:hover{color:var(--text-secondary);}
 #iocTable .th-icon-btn.active-filter{color:var(--accent);}
+#entitiesTable .entity-th{white-space:nowrap;}
+#entitiesTable .th-icon-btn{background:none; border:none; color:var(--text-muted); padding:0 2px; font-size:.72rem; cursor:pointer; line-height:1;}
+#entitiesTable .th-icon-btn:hover{color:var(--text-secondary);}
+#entitiesTable .th-icon-btn.active-filter{color:var(--accent);}
 .yara-mode-btn.active-filter, .sweep-target-btn.active-filter{background-color:var(--accent); border-color:var(--accent); color:#fff;}
 /* Detection-coverage tier badges -- same 4-tier model/colors as the Coverage page's
    MITRE tab (coverage.html's COVERAGE_TIER_CELL_CLASS), duplicated per this repo's
@@ -251,32 +255,90 @@
                 <div class="card-body">
                     <div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
                         <input type="text" id="entitySearch" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:280px;" placeholder="Search name or alias..." oninput="filterEntities()">
-                        <select id="entityTypeFilter" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:180px;" onchange="filterEntities()">
-                            <option value="">All Types</option>
-                            <option value="actor">Threat Actor</option>
-                            <option value="malware">Malware</option>
-                            <option value="ransomware">Ransomware</option>
-                            <option value="tool">Tool</option>
-                        </select>
                         <select id="entitySort" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:200px;" onchange="filterEntities()" title="Gap exposure = how many of this entity's known techniques have no enabled detection rule">
                             <option value="">Sort: default</option>
                             <option value="gap">Sort: most gap exposure first</option>
                         </select>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="clearEntityFilters()"><i class="fa-solid fa-xmark me-1"></i>Clear Filters</button>
                     </div>
                 </div>
                 <div class="card-body p-0">
                     <div class="table-responsive">
-                        <table class="table table-dark table-hover mb-0 align-middle">
+                        <table class="table table-dark table-hover mb-0 align-middle" id="entitiesTable">
                             <thead>
                                 <tr>
-                                    <th class="ps-3">Name</th>
-                                    <th>Type</th>
-                                    <th>Aliases</th>
-                                    <th>Techniques</th>
-                                    <th>Source</th>
-                                    <th>Confidence</th>
-                                    <th title="Most recent time an IOC matching this entity was actually observed in this environment (ioc_sightings) -- not just present in the synced feed catalog">Last Seen</th>
-                                    <th title="How many indicators/cases/alerts are manually linked to this entity in this environment">Linked</th>
+                                    <th class="ps-3 entity-th">
+                                        <div class="d-flex align-items-center justify-content-between">
+                                            <span>Name</span>
+                                            <div class="dropdown">
+                                                <button type="button" class="th-icon-btn" id="filterBtnEntityName" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                                <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuEntityName" style="min-width:220px;"></div>
+                                            </div>
+                                        </div>
+                                    </th>
+                                    <th class="entity-th">
+                                        <div class="d-flex align-items-center justify-content-between">
+                                            <span>Type</span>
+                                            <div class="dropdown">
+                                                <button type="button" class="th-icon-btn" id="filterBtnEntityType" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                                <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuEntityType" style="min-width:190px;"></div>
+                                            </div>
+                                        </div>
+                                    </th>
+                                    <th class="entity-th">
+                                        <div class="d-flex align-items-center justify-content-between">
+                                            <span>Aliases</span>
+                                            <div class="dropdown">
+                                                <button type="button" class="th-icon-btn" id="filterBtnEntityAliases" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                                <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuEntityAliases" style="min-width:220px;"></div>
+                                            </div>
+                                        </div>
+                                    </th>
+                                    <th class="entity-th">
+                                        <div class="d-flex align-items-center justify-content-between">
+                                            <span>Techniques</span>
+                                            <div class="dropdown">
+                                                <button type="button" class="th-icon-btn" id="filterBtnEntityTechniques" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                                <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuEntityTechniques" style="min-width:210px;"></div>
+                                            </div>
+                                        </div>
+                                    </th>
+                                    <th class="entity-th">
+                                        <div class="d-flex align-items-center justify-content-between">
+                                            <span>Source</span>
+                                            <div class="dropdown">
+                                                <button type="button" class="th-icon-btn" id="filterBtnEntitySource" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                                <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuEntitySource" style="min-width:170px;"></div>
+                                            </div>
+                                        </div>
+                                    </th>
+                                    <th class="entity-th">
+                                        <div class="d-flex align-items-center justify-content-between">
+                                            <span>Confidence</span>
+                                            <div class="dropdown">
+                                                <button type="button" class="th-icon-btn" id="filterBtnEntityConfidence" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                                <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuEntityConfidence" style="min-width:190px;"></div>
+                                            </div>
+                                        </div>
+                                    </th>
+                                    <th class="entity-th" title="Most recent time an IOC matching this entity was actually observed in this environment (ioc_sightings) -- not just present in the synced feed catalog">
+                                        <div class="d-flex align-items-center justify-content-between">
+                                            <span>Last Seen</span>
+                                            <div class="dropdown">
+                                                <button type="button" class="th-icon-btn" id="filterBtnEntityLastSeen" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                                <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuEntityLastSeen" style="min-width:170px;"></div>
+                                            </div>
+                                        </div>
+                                    </th>
+                                    <th class="entity-th" title="How many indicators/cases/alerts are manually linked to this entity in this environment">
+                                        <div class="d-flex align-items-center justify-content-between">
+                                            <span>Linked</span>
+                                            <div class="dropdown">
+                                                <button type="button" class="th-icon-btn" id="filterBtnEntityLinked" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                                <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuEntityLinked" style="min-width:150px;"></div>
+                                            </div>
+                                        </div>
+                                    </th>
                                     <th style="width:110px;">Actions</th>
                                 </tr>
                             </thead>
@@ -1672,8 +1734,146 @@ function loadEntities() {
         const coverageById = {};
         (coverage || []).forEach(c => { coverageById[c.id] = c; });
         allEntities = entities.map(e => ({ ...e, coverage: coverageById[e.id] || null }));
-        renderEntitiesTable(allEntities);
+        populateEntityFilterMenus();
+        initEntityFilterDropdowns();
+        filterEntities();
     }).catch(err => console.error('Error loading entities:', err));
+}
+
+// ---- Per-column filters on the Entities table (Name/Type/Aliases/Techniques/Source/
+// Confidence/Last Seen/Linked -- every column but Actions) -- same th-icon-btn/dropdown
+// pattern as the Indicator Browser table above (duplicated locally per this repo's
+// per-file convention rather than shared). Unlike the Indicator Browser, entities are a
+// small, fully-client-loaded catalog (allEntities), so filtering runs client-side against
+// it, same as filterEntities()'s existing search/type/sort handling.
+let entityColFilters = { name: [], type: [], aliases: [], techniques: [], source: [], confidence: [], lastSeen: [], linked: [] };
+
+function buildEntityFilterMenu(menuId, colKey, options) {
+    const menu = document.getElementById(menuId);
+    if (!menu) return;
+    let html = `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-2" placeholder="Search..." oninput="filterEntityMenuOptions('${menuId}', this.value)">`;
+    html += `<div class="d-flex justify-content-between align-items-center mb-1 px-1">
+        <button type="button" class="btn btn-link btn-sm p-0 small" onclick="selectAllVisibleEntityMenuOptions('${menuId}','${colKey}')">Select all visible</button>
+        <button type="button" class="btn btn-link btn-sm p-0 small text-secondary" onclick="clearEntityMenuOptions('${menuId}','${colKey}')">Clear</button>
+    </div>`;
+    html += `<div class="menu-option-list" style="max-height:220px; overflow-y:auto;">`;
+    if (!options.length) {
+        html += `<div class="text-muted small px-1">No options</div>`;
+    }
+    options.forEach((o, i) => {
+        const checked = entityColFilters[colKey].includes(String(o.value)) ? 'checked' : '';
+        const cbId = `${menuId}_chk${i}`;
+        const safeVal = escHtml(String(o.value));
+        html += `<div class="form-check menu-option-item" data-search="${escHtml(String(o.label).toLowerCase())}">
+            <input class="form-check-input" type="checkbox" data-value="${safeVal}" id="${cbId}" ${checked} onchange="toggleEntityFilter('${colKey}', this.dataset.value, this.checked)">
+            <label class="form-check-label small" for="${cbId}">${escHtml(o.label)}</label>
+        </div>`;
+    });
+    html += `</div>`;
+    menu.innerHTML = html;
+}
+
+function filterEntityMenuOptions(menuId, q) {
+    q = q.toLowerCase();
+    document.querySelectorAll(`#${menuId} .menu-option-item`).forEach(el => {
+        el.style.display = el.dataset.search.includes(q) ? '' : 'none';
+    });
+}
+
+function updateEntityFilterButtonState(colKey) {
+    const btn = document.getElementById('filterBtnEntity' + colKey.charAt(0).toUpperCase() + colKey.slice(1));
+    if (btn) btn.classList.toggle('active-filter', entityColFilters[colKey].length > 0);
+}
+
+function toggleEntityFilter(colKey, value, checked) {
+    const set = new Set(entityColFilters[colKey]);
+    if (checked) set.add(value); else set.delete(value);
+    entityColFilters[colKey] = Array.from(set);
+    updateEntityFilterButtonState(colKey);
+    filterEntities();
+}
+
+function selectAllVisibleEntityMenuOptions(menuId, colKey) {
+    const set = new Set(entityColFilters[colKey]);
+    document.querySelectorAll(`#${menuId} .menu-option-item`).forEach(el => {
+        if (el.style.display !== 'none') {
+            const cb = el.querySelector('input[type=checkbox]');
+            cb.checked = true;
+            set.add(cb.dataset.value);
+        }
+    });
+    entityColFilters[colKey] = Array.from(set);
+    updateEntityFilterButtonState(colKey);
+    filterEntities();
+}
+
+function clearEntityMenuOptions(menuId, colKey) {
+    document.querySelectorAll(`#${menuId} input[type=checkbox]`).forEach(cb => { cb.checked = false; });
+    entityColFilters[colKey] = [];
+    updateEntityFilterButtonState(colKey);
+    filterEntities();
+}
+
+function clearEntityFilters() {
+    entityColFilters = { name: [], type: [], aliases: [], techniques: [], source: [], confidence: [], lastSeen: [], linked: [] };
+    document.getElementById('entitySearch').value = '';
+    Object.keys(entityColFilters).forEach(updateEntityFilterButtonState);
+    populateEntityFilterMenus();
+    filterEntities();
+}
+
+// Which technique-tier chips (see entityCoverageChips) this entity actually shows --
+// the filter's options match exactly what the Techniques column visually displays,
+// same principle as Detection Rules' Level filter matching its own Level column.
+function entityTechniqueTierBuckets(e) {
+    const c = e.coverage;
+    if (!c || !c.technique_count) return ['none'];
+    const buckets = [];
+    if (c.gap) buckets.push('gap');
+    if (c.inactive) buckets.push('inactive');
+    if (c.active) buckets.push('active');
+    if (c.validated) buckets.push('validated');
+    return buckets.length ? buckets : ['none'];
+}
+
+function populateEntityFilterMenus() {
+    const names = new Set(), aliasesSet = new Set(), linkedCounts = new Set();
+    allEntities.forEach(e => {
+        names.add(e.name);
+        (e.aliases || []).forEach(a => aliasesSet.add(a));
+        linkedCounts.add(e.linked_count || 0);
+    });
+    buildEntityFilterMenu('filterMenuEntityName', 'name', Array.from(names).sort().map(n => ({ value: n, label: n })));
+    buildEntityFilterMenu('filterMenuEntityType', 'type', [
+        { value: 'actor', label: 'Threat Actor' }, { value: 'malware', label: 'Malware' },
+        { value: 'ransomware', label: 'Ransomware' }, { value: 'tool', label: 'Tool' },
+    ]);
+    buildEntityFilterMenu('filterMenuEntityAliases', 'aliases', Array.from(aliasesSet).sort().map(a => ({ value: a, label: a })));
+    buildEntityFilterMenu('filterMenuEntityTechniques', 'techniques', [
+        { value: 'gap', label: 'Has gap' }, { value: 'inactive', label: 'Has inactive' },
+        { value: 'active', label: 'Has active' }, { value: 'validated', label: 'Has validated' },
+        { value: 'none', label: 'No techniques' },
+    ]);
+    buildEntityFilterMenu('filterMenuEntitySource', 'source', [
+        { value: 'curated', label: 'Curated' }, { value: 'admin', label: 'Admin' },
+    ]);
+    buildEntityFilterMenu('filterMenuEntityConfidence', 'confidence', [
+        { value: 'confirmed', label: 'Confirmed' }, { value: 'probable', label: 'Probable' },
+        { value: 'possible', label: 'Possible' }, { value: 'not_assessed', label: 'Not assessed' },
+    ]);
+    buildEntityFilterMenu('filterMenuEntityLastSeen', 'lastSeen', [
+        { value: 'seen', label: 'Seen' }, { value: 'never', label: 'Never' },
+    ]);
+    buildEntityFilterMenu('filterMenuEntityLinked', 'linked', Array.from(linkedCounts).sort((a, b) => a - b).map(n => ({ value: String(n), label: String(n) })));
+}
+
+// Same clipping fix as the Indicator Browser table above -- these menus live inside a
+// scrollable table container, so absolute-positioned dropdowns get cut off without
+// forcing fixed-strategy Popper placement.
+function initEntityFilterDropdowns() {
+    document.querySelectorAll('#entitiesTable thead [data-bs-toggle="dropdown"]').forEach(el => {
+        bootstrap.Dropdown.getOrCreateInstance(el, { popperConfig: { strategy: 'fixed' } });
+    });
 }
 
 // Compact "N gap / N inactive / N active / N validated" pills -- how many of this
@@ -1722,13 +1922,22 @@ function renderEntitiesTable(entities) {
 
 function filterEntities() {
     const q = (document.getElementById('entitySearch').value || '').toLowerCase().trim();
-    const type = document.getElementById('entityTypeFilter').value;
     const sort = document.getElementById('entitySort').value;
+    const cf = entityColFilters;
     let filtered = allEntities.filter(e => {
-        if (type && e.entity_type !== type) return false;
-        if (!q) return true;
-        const haystack = [e.name, ...(e.aliases || [])].join(' ').toLowerCase();
-        return haystack.includes(q);
+        if (q) {
+            const haystack = [e.name, ...(e.aliases || [])].join(' ').toLowerCase();
+            if (!haystack.includes(q)) return false;
+        }
+        if (cf.name.length && !cf.name.includes(e.name)) return false;
+        if (cf.type.length && !cf.type.includes(e.entity_type)) return false;
+        if (cf.aliases.length && !(e.aliases || []).some(a => cf.aliases.includes(a))) return false;
+        if (cf.techniques.length && !entityTechniqueTierBuckets(e).some(b => cf.techniques.includes(b))) return false;
+        if (cf.source.length && !cf.source.includes(e.source)) return false;
+        if (cf.confidence.length && !cf.confidence.includes(e.confidence || 'not_assessed')) return false;
+        if (cf.lastSeen.length && !cf.lastSeen.includes(entityLastSeenById[e.id] ? 'seen' : 'never')) return false;
+        if (cf.linked.length && !cf.linked.includes(String(e.linked_count || 0))) return false;
+        return true;
     });
     if (sort === 'gap') {
         // Highest gap-exposure first (ties broken by technique count, then name) --
