@@ -8,15 +8,46 @@ AGENT_VERSION = "2026.09.02.1"
 
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
-SERVER_URL = 'https://__HOST_URL__/api/agent/config'
-INGEST_URL = 'https://__HOST_URL__/api/ingest'
-RESULT_URL = 'https://__HOST_URL__/api/agent/result'
-SOC_TOKEN = '__SOC_TOKEN__'
+
+# Optional INSTALL_DIR\agent_config.json, dropped there by the NSIS installer (see
+# installer/agent_installer.nsi) BEFORE it runs `install` -- that installer bundles a
+# generic, un-substituted copy of this script (built once, not per download), so the
+# per-deployment host/token/cert can't be baked into the .py source the way the plain-
+# script .zip download does. When present, its values win; the __HOST_URL__/__SOC_TOKEN__/
+# __SERVER_CERT_PEM__ placeholders below stay as the fallback for that existing plain-
+# script path, unchanged. Deliberately keyed on the fixed INSTALL_DIR constant, not
+# os.path.dirname(__file__) -- install_agent() below copies this same script's own
+# source into INSTALL_DIR\micro_agent_windows.py by opening that exact path for both
+# read and write, so having the installer stage the source script anywhere OTHER than
+# INSTALL_DIR itself (e.g. NSIS's own $PLUGINSDIR) avoids a same-file read/write hazard,
+# while the config file goes straight into its permanent INSTALL_DIR home either way.
+def _load_external_config():
+    path = os.path.join(INSTALL_DIR, "agent_config.json")
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+_EXTERNAL_CONFIG = _load_external_config()
+# Two distinct host:port values, not one -- _build_agent_source's own substitution (see
+# src/app.py) already uses ui_port for /api/agent/config and /api/agent/result but
+# ingest_port for /api/ingest (they can genuinely differ, see _resolve_ingest_port), so
+# collapsing both into a single __HOST_URL__-equivalent here would silently break
+# ingestion on any deployment where those two ports aren't the same.
+_HOST_URL = _EXTERNAL_CONFIG.get('host_url')
+_INGEST_HOST_URL = _EXTERNAL_CONFIG.get('ingest_host_url') or _HOST_URL
+SERVER_URL = f'https://{_HOST_URL}/api/agent/config' if _HOST_URL else 'https://__HOST_URL__/api/agent/config'
+RESULT_URL = f'https://{_HOST_URL}/api/agent/result' if _HOST_URL else 'https://__HOST_URL__/api/agent/result'
+INGEST_URL = f'https://{_INGEST_HOST_URL}/api/ingest' if _INGEST_HOST_URL else 'https://__HOST_URL__/api/ingest'
+SOC_TOKEN = _EXTERNAL_CONFIG.get('soc_token') or '__SOC_TOKEN__'
 # The server's own cert, pinned so the agent can verify it without a real CA (it's
 # self-signed) — see build_ssl_context() below. Left as the literal placeholder if the
 # script is run without ever going through the server's build step (e.g. tampered with
 # by hand), in which case the agent falls back to unverified rather than refusing to run.
-SERVER_CERT_PEM = """__SERVER_CERT_PEM__"""
+SERVER_CERT_PEM = _EXTERNAL_CONFIG.get('server_cert_pem') or """__SERVER_CERT_PEM__"""
 # Was 90s -- too tight for string_sweep (content search across many files is inherently
 # heavier than ioc_sweep's single-pass hashing, and 90s wasn't enough margin even after
 # fixing string_sweep's own O(pattern_count) blowup, see agent_scripts.py).

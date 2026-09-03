@@ -12509,6 +12509,22 @@ def _get_live_yara_rule_conditions(max_rules=60, max_strings_per_rule=25):
 
 AGENT_TLS_CERT_PATH = '/opt/micro-dfir/config/cert.pem'
 
+# A fresh per-agent token for one specific download, not the shared soc_secret — it's
+# unbound to any hostname until the endpoint it actually gets installed on first checks
+# in (see _validate_agent_auth), so a leaked token from one download can't be replayed
+# to impersonate a different already-enrolled host the way the single shared secret
+# could. Shared by every download route that mints a real enrollment credential (the
+# plain-script .zip route and the Windows installer route below).
+def _mint_agent_token(db):
+    import datetime as _dt
+    soc_token = secrets.token_hex(32)
+    db.execute(
+        "INSERT INTO agent_tokens (token, hostname, created_at) VALUES (?, NULL, ?)",
+        (soc_token, _dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    )
+    db.commit()
+    return soc_token
+
 def _build_agent_source(agent_filename, server_ip, ui_port, ingest_port, soc_token):
     # Shared by the manual download route and the remote self-upgrade path (agent_config())
     # so both ever inject the placeholders the exact same way.
@@ -12556,18 +12572,7 @@ def api_download_agent(os_type):
     s = {r[0]: r[1] for r in cursor.fetchall()}
     ui_port = s.get("ui_port", "5001")
     ingest_port = _resolve_ingest_port(ui_port)
-    # A fresh per-agent token for this specific download, not the shared soc_secret —
-    # it's unbound to any hostname until the endpoint it actually gets installed on
-    # first checks in (see _validate_agent_auth), so a leaked token from one download
-    # can't be replayed to impersonate a different already-enrolled host the way the
-    # single shared secret could.
-    import datetime as _dt
-    soc_token = secrets.token_hex(32)
-    db.execute(
-        "INSERT INTO agent_tokens (token, hostname, created_at) VALUES (?, NULL, ?)",
-        (soc_token, _dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-    )
-    db.commit()
+    soc_token = _mint_agent_token(db)
 
     memory_file = io.BytesIO()
 
@@ -12609,6 +12614,59 @@ def api_download_agent(os_type):
         return send_file(memory_file, download_name='MicroDFIR_macOS_Agent.tar.gz', as_attachment=True)
 
     return "Invalid OS type requested.", 400
+
+# Path installer/build.ps1 (run manually, on a Windows machine -- the Linux appliance
+# can't compile a Windows installer itself) writes MicroDFIRAgentSetup.exe to; checked
+# into the repo since that's the only way it reaches this box at all (update.sh's rsync
+# carries it over like any other file, but nothing on THIS host can regenerate it).
+AGENT_WINDOWS_INSTALLER_PATH = '/opt/micro-dfir/installer/dist/MicroDFIRAgentSetup.exe'
+
+# Same admin-only gating and fresh-token minting as api_download_agent above, but ships
+# the pre-built NSIS installer (bundles its own Python runtime -- no system Python
+# prerequisite) plus a small agent_config.json instead of the raw .py source. The
+# installer .exe itself never changes per download; only this JSON does, matching the
+# "build once, configure per deployment" split -- see micro_agent_windows.py's own
+# _load_external_config() for the read side, and installer/agent_installer.nsi's own
+# comment for why the config lives beside the installer, not baked into it.
+@app.route('/api/agent/download/windows-installer', methods=['GET'])
+@login_required
+def api_download_agent_windows_installer():
+    from flask import send_file, request
+    import io, zipfile
+
+    err = require_permission('settings.system.manage')
+    if err: return err
+
+    if not os.path.exists(AGENT_WINDOWS_INSTALLER_PATH):
+        return "Windows installer has not been built on this appliance yet (see installer/build.ps1).", 404
+
+    server_ip = request.host.split(':')[0]
+    db = get_db()
+    cursor = db.execute("SELECT key, value FROM settings")
+    s = {r[0]: r[1] for r in cursor.fetchall()}
+    ui_port = s.get("ui_port", "5001")
+    ingest_port = _resolve_ingest_port(ui_port)
+    soc_token = _mint_agent_token(db)
+
+    try:
+        with open(AGENT_TLS_CERT_PATH, 'r', encoding='utf-8') as f:
+            cert_pem = f.read()
+    except OSError:
+        cert_pem = ''
+
+    agent_config = json.dumps({
+        'host_url': f'{server_ip}:{ui_port}',
+        'ingest_host_url': f'{server_ip}:{ingest_port}',
+        'soc_token': soc_token,
+        'server_cert_pem': cert_pem,
+    })
+
+    memory_file = io.BytesIO()
+    with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
+        zf.write(AGENT_WINDOWS_INSTALLER_PATH, 'MicroDFIRAgentSetup.exe')
+        zf.writestr('agent_config.json', agent_config)
+    memory_file.seek(0)
+    return send_file(memory_file, download_name='MicroDFIR_Windows_Agent_Installer.zip', as_attachment=True)
 
 
 @app.route('/api/agent/checkins', methods=['GET'])
