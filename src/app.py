@@ -4511,7 +4511,7 @@ def api_case_detail(cid):
         summary = _case_item_summary(db, it['item_type'], it['item_id'])
         items_out.append({**dict(it), 'summary': summary})
     tasks = [dict(t) for t in db.execute(
-        "SELECT id, title, status, assignee, position, created_by, created_at FROM case_tasks WHERE case_id = ? ORDER BY position, id", (cid,)
+        "SELECT id, title, status, assignee, due_date, position, created_by, created_at FROM case_tasks WHERE case_id = ? ORDER BY position, id", (cid,)
     ).fetchall()]
     events = [dict(e) for e in db.execute(
         "SELECT id, ts, actor, event_type, detail FROM case_events WHERE case_id = ? ORDER BY ts DESC, id DESC", (cid,)
@@ -4884,11 +4884,17 @@ def api_case_task_detail(cid, tid):
     title = data['title'].strip() if 'title' in data and data['title'] else task['title']
     status = data['status'].strip() if 'status' in data and data['status'] else task['status']
     assignee = data['assignee'].strip() if 'assignee' in data else (task['assignee'] or '')
+    # Key-presence check (not truthiness) so an explicit "" clears a previously-set due
+    # date -- same convention this repo already uses for TLP/PAP (see CLAUDE.md).
+    due_date = (data.get('due_date') or '').strip() if 'due_date' in data else (task['due_date'] or '')
     if status not in ('open', 'done'):
         return jsonify({"error": "status must be 'open' or 'done'"}), 400
     if status != task['status']:
         _log_case_event(db, cid, 'task_done' if status == 'done' else 'task_reopened', title)
-    db.execute("UPDATE case_tasks SET title = ?, status = ?, assignee = ? WHERE id = ?", (title, status, assignee, tid))
+    db.execute(
+        "UPDATE case_tasks SET title = ?, status = ?, assignee = ?, due_date = ? WHERE id = ?",
+        (title, status, assignee, due_date or None, tid)
+    )
     db.commit()
     return jsonify({"status": "success"})
 
@@ -8261,6 +8267,9 @@ def migrate_case_upgrade():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )''')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_case_tasks_case ON case_tasks(case_id)')
+        task_cols = {row[1] for row in conn.execute("PRAGMA table_info(case_tasks)").fetchall()}
+        if 'due_date' not in task_cols:
+            conn.execute("ALTER TABLE case_tasks ADD COLUMN due_date DATE")
         conn.execute('''CREATE TABLE IF NOT EXISTS case_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             case_id INTEGER NOT NULL,
