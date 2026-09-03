@@ -4,7 +4,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, tem
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.09.03.2"
+AGENT_VERSION = "2026.09.03.3"
 
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
@@ -409,7 +409,12 @@ def fetch_windows_logs(channel_configs, last_seconds):
                     if capture_xml and e.get('Xml'):
                         log_entry["xml"] = str(e.get('Xml'))
                     logs.append(log_entry)
-        except: pass
+        except Exception as e:
+            # Was a bare `except: pass` -- a channel that Get-WinEvent can't read (most
+            # commonly Security, which needs an elevated/SYSTEM token or Event Log
+            # Readers membership) failed completely silently, every cycle, on every
+            # deployed agent, with nothing printed anywhere -- see _redirect_output_to_log.
+            print(f"[-] Failed to read '{channel}' log channel: {e}", flush=True)
     return logs
 
 # ---- File Integrity Monitoring ----
@@ -487,8 +492,36 @@ def run_fim_check(paths):
     _save_fim_state(state)
     return logs
 
+AGENT_LOG_PATH = os.path.join(INSTALL_DIR, "agent.log")
+AGENT_LOG_MAX_BYTES = 2 * 1024 * 1024
+
+def _redirect_output_to_log():
+    # run_hidden.vbs launches this with no console and no output redirection, so every
+    # print() in this file (startup, check-in status, and -- critically -- exception
+    # messages in except blocks that do print before swallowing) has always gone
+    # nowhere, on every deployed agent. That made a real bug (fetch_windows_logs's
+    # Get-WinEvent failing silently for a channel like Security, which needs elevated
+    # read access) completely undiagnosable short of manually running the script in a
+    # foreground console. Simple truncate-on-oversize instead of real rotation --
+    # this is a low-volume diagnostic trail, not an audit log.
+    try:
+        if os.path.exists(AGENT_LOG_PATH) and os.path.getsize(AGENT_LOG_PATH) > AGENT_LOG_MAX_BYTES:
+            # Text-mode files can't do a nonzero end-relative seek in Python -- read the
+            # tail in binary, then decode.
+            with open(AGENT_LOG_PATH, 'rb') as f:
+                f.seek(-(AGENT_LOG_MAX_BYTES // 2), os.SEEK_END)
+                tail = f.read().decode('utf-8', errors='ignore')
+            with open(AGENT_LOG_PATH, 'w', encoding='utf-8') as f:
+                f.write(tail)
+        log_f = open(AGENT_LOG_PATH, 'a', encoding='utf-8', errors='ignore')
+        sys.stdout = log_f
+        sys.stderr = log_f
+    except Exception:
+        pass  # no console either way -- worst case, back to today's total silence
+
 def run_agent():
     global INGEST_URL
+    _redirect_output_to_log()
     print("[*] Agent starting up! Initializing...", flush=True)
     # Read by the MicroDFIRAgentWatchdog task's watchdog_check() to detect a crashed/
     # killed agent process and relaunch it -- see install_agent().
