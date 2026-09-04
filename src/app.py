@@ -1210,7 +1210,7 @@ def threat_intel():
         active_tab=active_tab, current_user=current_user
     )
 
-TI_FEED_TYPES = ('taxii', 'threatfox', 'otx', 'urlhaus', 'feodotracker', 'yaraify', 'yara_forge', 'yara_rules_project', 'signature_base', 'misp', 'sslbl', 'spamhaus_drop', 'tor_exit', 'malwarebazaar', 'csv')
+TI_FEED_TYPES = ('taxii', 'threatfox', 'otx', 'urlhaus', 'feodotracker', 'yaraify', 'yara_forge', 'yara_rules_project', 'signature_base', 'misp', 'sslbl', 'spamhaus_drop', 'tor_exit', 'malwarebazaar', 'openphish', 'blocklist_de', 'csv')
 
 _CSV_VALUE_COLS = ('value', 'indicator', 'ioc', 'pattern', 'ip', 'url', 'domain', 'hash', 'ioc_value')
 _CSV_TYPE_COLS = ('type', 'ioc_type')
