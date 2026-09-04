@@ -873,7 +873,7 @@ def api_alerts():
         rows = db.execute("""
             SELECT a.id, a.timestamp, a.severity, a.acknowledged, a.status, a.assignee,
                    a.rule_id, a.username, a.source_ip, a.destination_ip,
-                   a.occurrence_count, a.last_seen,
+                   a.occurrence_count, a.last_seen, a.is_atomic_test,
                    COALESCE(s.title, a.rule_name, 'YARA / Custom Rule Match') as rule_title,
                    COALESCE(l.message, a.message) as event_message,
                    COALESCE(l.host, a.host) as hostname
@@ -8636,6 +8636,22 @@ def migrate_yara_forge_synced_rules():
     except Exception:
         pass
 
+def migrate_alerts_atomic_test_flag():
+    # Set the moment an atomic test run's detection check finds its match (see
+    # api_atomic_runs_list) -- lets every other alert-listing surface (main Alerts
+    # table, case items, etc.) show that an alert came from a deliberate validation
+    # test, not real activity, since nothing else about the alert row itself would
+    # otherwise distinguish the two.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(alerts)").fetchall()]
+        if 'is_atomic_test' not in cols:
+            conn.execute("ALTER TABLE alerts ADD COLUMN is_atomic_test INTEGER DEFAULT 0")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_atomic_tests():
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
@@ -11530,8 +11546,20 @@ def api_atomic_runs_list():
         "LEFT JOIN sigma_rules s ON s.id = a.rule_id "
         "ORDER BY r.id DESC LIMIT 200"
     ).fetchall()
+    # technique_id -> [{id, title, enabled}] -- built once, reused per not_detected row
+    # below, so an analyst can immediately tell "no rule exists for this technique" (a
+    # real coverage gap) from "a rule exists but didn't fire" (a tuning/logic problem)
+    # instead of having to go check Detection Rules/Coverage separately.
+    rules_by_technique = {}
+    for rule in _get_rules_cache(db):
+        for tech in rule['mitre_techniques']:
+            rules_by_technique.setdefault(tech['id'], []).append(
+                {'id': rule['id'], 'title': rule['title'], 'enabled': bool(rule['enabled'])}
+            )
+
     out = []
     updates = []
+    newly_detected_alert_ids = []
     for r in rows:
         d = dict(r)
         if d['validation_status'] == 'pending':
@@ -11556,12 +11584,18 @@ def api_atomic_runs_list():
                     d['alert_severity'] = alert_row['severity']
                     d['alert_message'] = alert_row['message']
                     d['alert_rule_title'] = alert_row['rule_title']
+                newly_detected_alert_ids.append(alert_id)
+        if d['validation_status'] == 'not_detected':
+            technique_id = _strip_technique_t_prefix(d['technique_id'])
+            d['matching_rules'] = rules_by_technique.get(technique_id, [])
         out.append(d)
     for status, alert_id, run_id in updates:
         db.execute(
             "UPDATE atomic_test_runs SET validation_status = ?, validated_alert_id = ?, validated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (status, alert_id, run_id)
         )
+    for alert_id in newly_detected_alert_ids:
+        db.execute("UPDATE alerts SET is_atomic_test = 1 WHERE id = ?", (alert_id,))
     if updates:
         db.commit()
     return jsonify(out)
@@ -12213,7 +12247,7 @@ _LOG_BRANCH_SQL = """SELECT timestamp, severity, host, app, event_id, username, 
        NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
        process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
        NULL as occurrence_count, NULL as last_seen, id as item_id, NULL as entity_type,
-       NULL as status, NULL as assignee, file_hash, query_name
+       NULL as status, NULL as assignee, file_hash, query_name, 0 as is_atomic_test
 FROM live_logs"""
 
 _LOG_ARCHIVE_BRANCH_SQL = _LOG_BRANCH_SQL.replace("FROM live_logs", "FROM live_logs_archive")
@@ -12234,7 +12268,8 @@ _ALERT_BRANCH_SQL = """SELECT a.timestamp, a.severity,
        NULL as raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
        a.occurrence_count as occurrence_count, a.last_seen as last_seen, a.id as item_id, NULL as entity_type,
-       a.status as status, a.assignee as assignee, NULL as file_hash, NULL as query_name
+       a.status as status, a.assignee as assignee, NULL as file_hash, NULL as query_name,
+       COALESCE(a.is_atomic_test, 0) as is_atomic_test
 FROM alerts a
 LEFT JOIN sigma_rules s ON a.rule_id = s.id"""
 
@@ -12243,7 +12278,7 @@ _ANOMALY_BRANCH_SQL = """SELECT timestamp, severity, hostname as host, 'UEBA Ano
        NULL as rule_id, 'ueba' as rule_source, NULL as log_event_id, NULL as log_app, raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
        NULL as occurrence_count, NULL as last_seen, id as item_id, entity_type,
-       NULL as status, NULL as assignee, NULL as file_hash, NULL as query_name
+       NULL as status, NULL as assignee, NULL as file_hash, NULL as query_name, 0 as is_atomic_test
 FROM events
 WHERE app_name = 'duckdb_ueba'"""
 
@@ -12766,7 +12801,8 @@ def _build_log_response_rows(rows):
             'status': r['status'],
             'assignee': r['assignee'],
             'file_hash': r['file_hash'],
-            'query_name': r['query_name']
+            'query_name': r['query_name'],
+            'is_atomic_test': bool(r['is_atomic_test'])
         })
     return logs
 
@@ -14298,6 +14334,7 @@ migrate_case_playbook_outbox()
 migrate_agent_offline_alerts()
 migrate_agent_polls_os_detail()
 migrate_atomic_tests()
+migrate_alerts_atomic_test_flag()
 migrate_yara_forge_synced_rules()
 migrate_log_source_silent_alerts()
 migrate_sigma_aggregation()
