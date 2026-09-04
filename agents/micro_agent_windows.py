@@ -4,7 +4,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, tem
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.09.03.3"
+AGENT_VERSION = "2026.09.03.4"
 
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
@@ -390,7 +390,19 @@ def fetch_windows_logs(channel_configs, last_seconds):
             " | ConvertTo-Json -Compress\""
         )
         try:
-            out = subprocess.check_output(cmd, shell=True, encoding='utf-8', errors='ignore', stderr=subprocess.DEVNULL).strip()
+            # subprocess.run, not check_output -- Get-WinEvent's PowerShell host exits 1
+            # whenever a FilterHashtable query matches zero events, even with
+            # -ErrorAction SilentlyContinue on the cmdlet itself (that only suppresses
+            # PowerShell's own error record, not the host process's exit code). A
+            # low-frequency channel like Windows Defender legitimately has zero events
+            # in most 8-second polling windows, so treating any nonzero exit as a real
+            # failure made it "fail" every single cycle even though nothing was wrong.
+            # A genuine problem (e.g. access denied reading Security) DOES write to
+            # stderr, so that's the actual signal to check, not the exit code.
+            result = subprocess.run(cmd, shell=True, encoding='utf-8', errors='ignore', capture_output=True)
+            if result.returncode != 0 and result.stderr and result.stderr.strip():
+                raise RuntimeError(result.stderr.strip())
+            out = (result.stdout or '').strip()
             if out:
                 events = json.loads(out)
                 if isinstance(events, dict): events = [events]
