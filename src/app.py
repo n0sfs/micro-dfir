@@ -12811,6 +12811,76 @@ def agent_checkins():
         print("Checkins error:", e)
         return jsonify([])
 
+@app.route('/api/agents/<hostname>/detail', methods=['GET'])
+@login_required
+def api_agent_detail(hostname):
+    # Everything the Agents page's hostname-click popup shows beyond what
+    # agent_checkins() already sent client-side (IP/OS/version/status/group/
+    # legacy_auth) -- first-enrolled date, total check-in volume, recent alert
+    # activity, and its last few queued response actions. One route instead of
+    # several round trips since the popup renders all of it together.
+    db = get_db()
+    row = db.execute(
+        "SELECT MIN(timestamp) as first_seen, COUNT(*) as total_checkins FROM agent_polls WHERE user_agent = ?",
+        (hostname,)
+    ).fetchone()
+    if not row or not row['first_seen']:
+        return jsonify({'error': 'No check-in history for this host.'}), 404
+    # alerts.timestamp is a SQL datetime('now')-stamped column (UTC), unlike
+    # agent_polls' Python datetime.now() (local server time) -- compared against
+    # its own convention, not agent_polls'.
+    alerts_24h = db.execute(
+        "SELECT COUNT(*) as c FROM alerts WHERE host = ? AND COALESCE(last_seen, timestamp) >= datetime('now', '-1 day')",
+        (hostname,)
+    ).fetchone()['c']
+    recent_actions = [dict(r) for r in db.execute(
+        "SELECT label, status, queued, completed_at, queued_by FROM agent_commands WHERE hostname = ? ORDER BY id DESC LIMIT 5",
+        (hostname,)
+    ).fetchall()]
+    return jsonify({
+        'hostname': hostname,
+        'first_seen': row['first_seen'],
+        'total_checkins': row['total_checkins'],
+        'alerts_24h': alerts_24h,
+        'recent_actions': recent_actions,
+    })
+
+@app.route('/api/agents/<hostname>/heartbeat-history', methods=['GET'])
+@login_required
+def api_agent_heartbeat_history(hostname):
+    # Hourly check-in counts over the last 24h -- the sparkline on the row itself
+    # only ever covers a 5-minute window (see heartbeatSpark() in agents.html);
+    # this is what its click-through popup charts to show the longer trend (a
+    # host that's been flapping, or one whose agent died hours ago and never
+    # came back, reads very differently on a 24h view than on a 5-minute one).
+    from datetime import timedelta
+    db = get_db()
+    rows = db.execute(
+        "SELECT timestamp FROM agent_polls WHERE user_agent = ? AND timestamp >= datetime('now', 'localtime', '-1 day') ORDER BY timestamp ASC",
+        (hostname,)
+    ).fetchall()
+    now = datetime.now()
+    buckets = [0] * 24
+    labels = []
+    for i in range(24):
+        bucket_start = now - timedelta(hours=23 - i)
+        labels.append(bucket_start.strftime('%H:00'))
+    for r in rows:
+        try:
+            ts = datetime.strptime(r['timestamp'], '%Y-%m-%d %H:%M:%S')
+        except (ValueError, TypeError):
+            continue
+        age_hours = (now - ts).total_seconds() / 3600
+        idx = 23 - int(age_hours)
+        if 0 <= idx < 24:
+            buckets[idx] += 1
+    hours_with_activity = sum(1 for b in buckets if b > 0)
+    return jsonify({
+        'hostname': hostname, 'labels': labels, 'counts': buckets,
+        'uptime_pct_24h': round(hours_with_activity / 24 * 100, 1),
+        'total_checkins_24h': sum(buckets),
+    })
+
 # Was hardcoded as FIM_INTERVAL = 300 directly in both agent scripts -- moved here so
 # it's viewable/settable from the Agents page instead of requiring a code change +
 # redeploy + re-upgrade of every endpoint just to retune how often FIM runs.

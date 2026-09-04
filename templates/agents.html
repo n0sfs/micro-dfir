@@ -370,6 +370,34 @@
     {% endif %}
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<!-- Host Detail Modal (hostname click) -->
+<div class="modal fade" id="hostDetailModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title" id="hostDetailTitle"><i class="fa-solid fa-laptop-medical me-2"></i>Host Details</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="hostDetailBody">Loading...</div>
+    </div>
+  </div>
+</div>
+
+<!-- Heartbeat History Modal (sparkline click) -->
+<div class="modal fade" id="heartbeatHistoryModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title" id="heartbeatHistoryTitle"><i class="fa-solid fa-heart-pulse me-2"></i>Check-in History (24h)</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="heartbeatHistoryBody">Loading...</div>
+    </div>
+  </div>
+</div>
+
 <!-- Command Result Modal (for history rows) -->
 <div class="modal fade" id="cmdResultModal" tabindex="-1">
   <div class="modal-dialog modal-lg modal-dialog-scrollable">
@@ -762,6 +790,93 @@ function hideHostInfoMenu() {
     document.removeEventListener('keydown', hostInfoMenuEscHandler);
 }
 
+// ---- Host Detail popup (hostname click) ----
+// Combines what's already loaded client-side (allEndpoints) with a fresh fetch for
+// everything that isn't -- first-enrolled date, total check-in volume, recent alert
+// count, and its last few response actions.
+let heartbeatHistoryChart = null;
+
+function openHostDetailModal(hostname) {
+    const dev = allEndpoints.find(e => e.hostname === hostname);
+    if (!dev) return;
+    document.getElementById('hostDetailTitle').innerHTML = `<i class="fa-solid fa-laptop-medical me-2"></i>${escHtml(hostname)}`;
+    const body = document.getElementById('hostDetailBody');
+    body.innerHTML = `
+        <table class="table table-sm table-dark table-borderless mb-3">
+            <tr><td class="text-muted" style="width:160px;">Status</td><td>${endpointStatusBadge(dev.status)}</td></tr>
+            <tr><td class="text-muted">OS</td><td>${osIcon(dev.os)}</td></tr>
+            <tr><td class="text-muted">Endpoint IP</td><td class="text-info">${escHtml(dev.endpoint_ip)}</td></tr>
+            <tr><td class="text-muted">Agent Version</td><td>${versionBadge(dev)}</td></tr>
+            <tr><td class="text-muted">Group</td><td>${escHtml(dev.group || '—')}</td></tr>
+            <tr><td class="text-muted">Auth</td><td>${dev.legacy_auth ? '<span class="text-warning"><i class="fa-solid fa-triangle-exclamation me-1"></i>Legacy shared secret</span>' : '<span class="text-success"><i class="fa-solid fa-shield-halved me-1"></i>Per-agent token</span>'}</td></tr>
+        </table>
+        <div id="hostDetailExtra" class="small text-muted">Loading more details...</div>
+    `;
+    const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('hostDetailModal'));
+    modal.show();
+
+    fetch(`/api/agents/${encodeURIComponent(hostname)}/detail`)
+        .then(r => r.json())
+        .then(data => {
+            const extra = document.getElementById('hostDetailExtra');
+            if (!extra) return; // modal closed before this resolved
+            if (data.error) { extra.innerHTML = `<span class="text-muted">${escHtml(data.error)}</span>`; return; }
+            const actionsRows = (data.recent_actions || []).map(a => `
+                <tr>
+                    <td class="text-nowrap">${escHtml(a.queued || '')}</td>
+                    <td>${escHtml(a.label || '')}</td>
+                    <td>${a.status === 'done' ? '<span class="badge bg-success">Done</span>' : a.status === 'error' ? '<span class="badge bg-danger">Error</span>' : `<span class="badge bg-secondary">${escHtml(a.status || '')}</span>`}</td>
+                    <td class="text-muted">${escHtml(a.queued_by || '')}</td>
+                </tr>`).join('');
+            extra.className = '';
+            extra.innerHTML = `
+                <table class="table table-sm table-dark table-borderless mb-3">
+                    <tr><td class="text-muted" style="width:160px;">First Enrolled</td><td>${escHtml(data.first_seen)}</td></tr>
+                    <tr><td class="text-muted">Total Check-ins</td><td>${escHtml(String(data.total_checkins))}</td></tr>
+                    <tr><td class="text-muted">Alerts (24h)</td><td>${data.alerts_24h > 0 ? `<span class="text-danger fw-bold">${data.alerts_24h}</span>` : '0'}</td></tr>
+                </table>
+                <h6 class="text-light">Recent Response Actions</h6>
+                ${actionsRows ? `<table class="table table-sm table-dark border-secondary"><thead><tr><th>Queued</th><th>Action</th><th>Status</th><th>By</th></tr></thead><tbody>${actionsRows}</tbody></table>` : '<div class="text-muted small">No response actions run on this host yet.</div>'}
+            `;
+        })
+        .catch(() => {
+            const extra = document.getElementById('hostDetailExtra');
+            if (extra) extra.innerHTML = '<span class="text-danger">Failed to load additional details.</span>';
+        });
+}
+
+// ---- Heartbeat History popup (sparkline click) ----
+function openHeartbeatHistoryModal(hostname) {
+    document.getElementById('heartbeatHistoryTitle').innerHTML = `<i class="fa-solid fa-heart-pulse me-2"></i>${escHtml(hostname)} — Check-in History (24h)`;
+    const body = document.getElementById('heartbeatHistoryBody');
+    body.innerHTML = '<div class="text-muted small">Loading...</div>';
+    const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('heartbeatHistoryModal'));
+    modal.show();
+
+    fetch(`/api/agents/${encodeURIComponent(hostname)}/heartbeat-history`)
+        .then(r => r.json())
+        .then(data => {
+            body.innerHTML = `
+                <div class="d-flex gap-4 mb-3 small">
+                    <div><span class="text-muted">Uptime (24h):</span> <strong class="${data.uptime_pct_24h >= 90 ? 'text-success' : data.uptime_pct_24h >= 50 ? 'text-warning' : 'text-danger'}">${data.uptime_pct_24h}%</strong></div>
+                    <div><span class="text-muted">Check-ins (24h):</span> <strong>${data.total_checkins_24h}</strong></div>
+                </div>
+                <canvas id="heartbeatHistoryCanvas" height="90"></canvas>
+            `;
+            if (heartbeatHistoryChart) { heartbeatHistoryChart.destroy(); heartbeatHistoryChart = null; }
+            const ctx = document.getElementById('heartbeatHistoryCanvas').getContext('2d');
+            heartbeatHistoryChart = new Chart(ctx, {
+                type: 'bar',
+                data: { labels: data.labels, datasets: [{ label: 'Check-ins', data: data.counts, backgroundColor: data.counts.map(c => c > 0 ? '#3fb950' : '#5b6270') }] },
+                options: {
+                    plugins: { legend: { display: false } },
+                    scales: { y: { beginAtZero: true, ticks: { precision: 0, color: '#adb5bd' }, grid: { color: '#333' } }, x: { ticks: { color: '#adb5bd', maxRotation: 0, autoSkip: true, maxTicksLimit: 12 }, grid: { display: false } } }
+                }
+            });
+        })
+        .catch(() => { body.innerHTML = '<span class="text-danger small">Failed to load check-in history.</span>'; });
+}
+
 let allEndpoints = [];
 let endpointStatusFilter = 'all';
 let endpointFilters = { os: [], version: [] };
@@ -842,7 +957,7 @@ function renderEndpoints() {
                 <tr data-hostname="${escHtml(dev.hostname)}">
                     <td><input class="form-check-input endpoint-select-cb" type="checkbox" ${selectedEndpoints.has(dev.hostname) ? 'checked' : ''} onchange="toggleEndpointSelection(rowHost(this), this.checked)"></td>
                     <td>
-                        <strong class="hostname-cell" title="${escHtml(hostInfoText(dev))}" oncontextmenu="showHostInfoMenu(event, rowHost(this)); return false;">${escHtml(dev.hostname)}</strong>${dev.legacy_auth ? ` <i class="fa-solid fa-triangle-exclamation text-warning" title="Authenticating via the legacy shared secret, not a per-agent token. Re-download and redeploy the installer (Deployment tab) to upgrade this agent -- a remote 'Upgrade Agent' alone does not migrate it."></i>` : ''}
+                        <strong class="hostname-cell" style="cursor:pointer; text-decoration:underline dotted;" title="${escHtml(hostInfoText(dev))}\n\nClick for full host details" onclick="openHostDetailModal(rowHost(this));" oncontextmenu="showHostInfoMenu(event, rowHost(this)); return false;">${escHtml(dev.hostname)}</strong>${dev.legacy_auth ? ` <i class="fa-solid fa-triangle-exclamation text-warning" title="Authenticating via the legacy shared secret, not a per-agent token. Re-download and redeploy the installer (Deployment tab) to upgrade this agent -- a remote 'Upgrade Agent' alone does not migrate it."></i>` : ''}
                     </td>
                     <td>${osIcon(dev.os)}</td>
                     <td><span class="text-info">${escHtml(dev.endpoint_ip)}</span></td>
@@ -850,7 +965,7 @@ function renderEndpoints() {
                     <td class="text-nowrap"><span title="${escHtml(dev.last_check_in)}">${escHtml(relativeTime(dev.last_check_in)) || escHtml(dev.last_check_in)}</span></td>
                     <td class="text-nowrap">${versionBadge(dev)}</td>
                     <td class="text-nowrap"><input type="text" class="form-control form-control-sm bg-dark text-light border-secondary py-0" style="width:110px; font-size:.8rem;" value="${escHtml(dev.group || '')}" placeholder="—" title="Organizational grouping for bulk response actions -- not a config policy" onblur="saveEndpointGroup(rowHost(this), this.value)" onkeydown="if(event.key==='Enter') this.blur()"></td>
-                    <td>${heartbeatSpark(dev.status, dev.recent_polls)}</td>
+                    <td><div style="cursor:pointer; display:inline-block;" onclick="openHeartbeatHistoryModal(rowHost(this));" title="Click for 24h check-in history">${heartbeatSpark(dev.status, dev.recent_polls)}</div></td>
                     <td class="text-nowrap">
                         <div class="dropdown d-inline-block">
                             <button class="btn btn-sm btn-outline-primary py-0 px-2 dropdown-toggle" type="button" data-bs-toggle="dropdown">Respond</button>
