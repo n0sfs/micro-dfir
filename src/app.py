@@ -1097,6 +1097,34 @@ def _yara_file_description(full_path, content=None):
     author = a.group(1).replace('\\"', '"').strip() if a else None
     return f"{desc} (by {author})" if author else desc
 
+def _yara_resolve_path(relpath):
+    """Resolves a user-supplied relative path against YARA_RULES_DIR, rejecting
+    traversal outside it -- same trust boundary as threat_intel()'s POST-time
+    yara_files_set allowlist check, but via a normpath containment check instead of
+    a fresh full-tree walk (this can be called once per rule-viewer click)."""
+    if not relpath or not relpath.endswith(('.yar', '.yara')):
+        return None
+    base = os.path.normpath(YARA_RULES_DIR)
+    full_path = os.path.normpath(os.path.join(base, relpath))
+    if full_path != base and not full_path.startswith(base + os.sep):
+        return None
+    if not os.path.isfile(full_path):
+        return None
+    return full_path
+
+@app.route('/api/yara/rule-content')
+@login_required
+def api_yara_rule_content():
+    full_path = _yara_resolve_path(request.args.get('path', ''))
+    if not full_path:
+        return jsonify({'error': 'Rule file not found'}), 404
+    try:
+        with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+    except OSError:
+        return jsonify({'error': 'Could not read rule file'}), 500
+    return jsonify({'path': request.args.get('path', ''), 'filename': os.path.basename(full_path), 'content': content})
+
 @app.route('/threat-intel', methods=['GET', 'POST'])
 @login_required
 def threat_intel():
