@@ -2520,8 +2520,34 @@ function initIocFilterDropdowns() {
     });
 }
 
+// Grouped by what the type actually IS, not alphabetically -- network location
+// (domain/ip/ip:port) reads as one family, file-identity (the 3 hash types) as
+// another, so the color itself carries a little meaning instead of just being
+// "different for variety." Fixed hex (not Bootstrap's bg-* set) since 9 real types
+// need more distinguishable hues than the ~6 Bootstrap contextual colors give.
+const IOC_TYPE_COLORS = {
+    domain: '#0ea5e9', 'ip': '#14b8a6', 'ip-dst': '#14b8a6', 'ip:port': '#14b8a6',
+    url: '#8b5cf6', filename: '#f59e0b',
+    md5_hash: '#f43f5e', sha1_hash: '#e11d48', sha256_hash: '#be123c',
+};
 function ioTypeBadge(type) {
-    return type ? `<span class="badge bg-secondary">${escHtml(type)}</span>` : '<span class="text-muted">—</span>';
+    if (!type) return '<span class="text-muted">—</span>';
+    const color = IOC_TYPE_COLORS[type] || '#6b7280';
+    return `<span class="badge" style="background-color:${color};">${escHtml(type)}</span>`;
+}
+
+// Sources are open-ended (any feed a user adds), not a fixed catalog like ioc_type --
+// a stable hash-to-hue mapping gives every distinct source its own consistent color
+// without hardcoding feed names.
+const SOURCE_COLOR_PALETTE = ['#0ea5e9', '#8b5cf6', '#f59e0b', '#14b8a6', '#ec4899', '#84cc16', '#6366f1', '#f97316'];
+function sourceColor(name) {
+    let hash = 0;
+    for (let i = 0; i < (name || '').length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+    return SOURCE_COLOR_PALETTE[hash % SOURCE_COLOR_PALETTE.length];
+}
+function sourceBadge(name) {
+    if (!name) return '<span class="text-muted small">Unknown</span>';
+    return `<span class="badge" style="background-color:${sourceColor(name)};">${escHtml(name)}</span>`;
 }
 
 function loadIocs() {
@@ -2553,13 +2579,13 @@ function loadIocs() {
                     <td>${escHtml(i.name || '')}</td>
                     <td class="text-muted small text-truncate" style="max-width:220px;" title="${escHtml(i.description || '')}">${escHtml(i.description || '—')}</td>
                     <td>${ioTypeBadge(i.ioc_type)}</td>
-                    <td class="text-muted small">${escHtml(i.source_name || 'Unknown')}${i.corroboration_count > 1
+                    <td class="text-muted small">${sourceBadge(i.source_name)}${i.corroboration_count > 1
                         ? ` <span class="badge bg-info text-dark" title="Independently reported by ${i.corroboration_count} different feeds -- a real confidence signal">+${i.corroboration_count - 1} more</span>`
                         : ''}</td>
                     <td class="text-nowrap small text-muted">${escHtml(i.valid_from || '')}</td>
-                    <td>${i.revoked ? '<span class="badge bg-secondary">Revoked</span>' : '<span class="badge bg-danger">Active</span>'}</td>
+                    <td>${i.revoked ? '<span class="badge bg-secondary">Revoked</span>' : '<span class="badge bg-success">Active</span>'}</td>
                     <td>${i.sighting_count > 0
-                        ? `<span class="badge bg-warning text-dark" title="Last observed here: ${escHtml(i.last_sighted || '')}">${i.sighting_count}</span>`
+                        ? `<span class="badge bg-danger" title="Last observed here: ${escHtml(i.last_sighted || '')}">${i.sighting_count}</span>`
                         : '<span class="text-muted small">—</span>'}</td>
                     <td class="text-end"><button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1" title="Link to entity" onclick="openLinkIocModal(${idx})"><i class="fa-solid fa-link"></i></button></td>
                 </tr>
