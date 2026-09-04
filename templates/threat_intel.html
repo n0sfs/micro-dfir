@@ -139,7 +139,7 @@
                 <div class="card-header d-flex justify-content-between align-items-center">
                     <span><i class="fa-solid fa-satellite-dish me-2"></i>Feed Sources</span>
                     {% if has_permission('threatintel.manage') %}
-                    <button class="btn btn-primary btn-sm" onclick="openFeedModal()"><i class="fa-solid fa-plus me-1"></i> Add Feed</button>
+                    <button class="btn btn-primary btn-sm" onclick="openFeedModal(null, null, 'ioc')"><i class="fa-solid fa-plus me-1"></i> Add Feed</button>
                     {% endif %}
                 </div>
                 <div class="card-body p-0">
@@ -357,7 +357,7 @@
                 <div class="card-header d-flex justify-content-between align-items-center">
                     <span><i class="fa-solid fa-satellite-dish me-2"></i>Rule Sources <span class="text-muted small fw-normal">— external YARA rule feeds synced into rules/yara_imported</span></span>
                     {% if has_permission('threatintel.manage') %}
-                    <button class="btn btn-primary btn-sm" onclick="openFeedModal(null, 'yaraify')"><i class="fa-solid fa-plus me-1"></i> Add Rule Source</button>
+                    <button class="btn btn-primary btn-sm" onclick="openFeedModal(null, 'yaraify', 'rule')"><i class="fa-solid fa-plus me-1"></i> Add Rule Source</button>
                     {% endif %}
                 </div>
                 <div class="card-body p-0">
@@ -911,19 +911,21 @@
         <div class="mb-3">
             <label class="form-label">Feed Type</label>
             <select id="feedType" class="form-select bg-dark text-light border-secondary" onchange="toggleFeedTypeFields()">
-                <option value="threatfox">ThreatFox Recent IOCs (public — API key optional)</option>
-                <option value="urlhaus">URLhaus Malicious URLs (public — API key optional)</option>
-                <option value="feodotracker">Feodo Tracker Botnet C2 IPs (public — API key optional)</option>
-                <option value="otx">AlienVault OTX Subscribed Pulses (API key required)</option>
-                <option value="yaraify">YARAify Bulk YARA Rule Pack (public — API key optional)</option>
-                <option value="yara_forge">YARA Forge / YARAHQ Curated Rule Packs (public)</option>
-                <option value="misp">MISP-format Feed (public — e.g. CIRCL OSINT)</option>
-                <option value="sslbl">SSLBL Malicious TLS Certificates (public)</option>
-                <option value="spamhaus_drop">Spamhaus DROP (hijacked netblocks, public)</option>
-                <option value="tor_exit">Tor Exit Node List (public)</option>
-                <option value="malwarebazaar">MalwareBazaar Recent Samples (free API key required)</option>
-                <option value="taxii">STIX / TAXII 2.1 Server</option>
-                <option value="csv">CSV File Upload</option>
+                <option value="threatfox" data-kind="ioc">ThreatFox Recent IOCs (public — API key optional)</option>
+                <option value="urlhaus" data-kind="ioc">URLhaus Malicious URLs (public — API key optional)</option>
+                <option value="feodotracker" data-kind="ioc">Feodo Tracker Botnet C2 IPs (public — API key optional)</option>
+                <option value="otx" data-kind="ioc">AlienVault OTX Subscribed Pulses (API key required)</option>
+                <option value="yaraify" data-kind="rule">YARAify Bulk YARA Rule Pack (public — API key optional)</option>
+                <option value="yara_forge" data-kind="rule">YARA Forge / YARAHQ Curated Rule Packs (public)</option>
+                <option value="yara_rules_project" data-kind="rule">Yara-Rules/rules community project (public, GPL-2.0)</option>
+                <option value="signature_base" data-kind="rule">Neo23x0/signature-base (public)</option>
+                <option value="misp" data-kind="ioc">MISP-format Feed (public — e.g. CIRCL OSINT)</option>
+                <option value="sslbl" data-kind="ioc">SSLBL Malicious TLS Certificates (public)</option>
+                <option value="spamhaus_drop" data-kind="ioc">Spamhaus DROP (hijacked netblocks, public)</option>
+                <option value="tor_exit" data-kind="ioc">Tor Exit Node List (public)</option>
+                <option value="malwarebazaar" data-kind="ioc">MalwareBazaar Recent Samples (free API key required)</option>
+                <option value="taxii" data-kind="ioc">STIX / TAXII 2.1 Server</option>
+                <option value="csv" data-kind="ioc">CSV File Upload</option>
             </select>
         </div>
         <div id="csvFields" style="display:none;">
@@ -1437,12 +1439,19 @@ function toggleFeedTypeFields() {
     document.getElementById('syncIntervalField').style.display = isCsv ? 'none' : 'block';
 }
 
-function openFeedModal(feed, defaultType) {
+function openFeedModal(feed, defaultType, context) {
     initFeedModal();
     document.getElementById('feedModalError').style.display = 'none';
     editingFeedId = feed ? feed.id : null;
     document.getElementById('feedName').value = feed ? feed.name : '';
-    document.getElementById('feedType').value = feed ? feed.feed_type : (defaultType || 'threatfox');
+    // Editing an existing feed always shows every type (changing type mid-edit is
+    // unusual, not worth the edge cases of filtering it) -- only a fresh Add, opened
+    // from a specific tab, narrows the list to that tab's kind of feed. Without a
+    // context (e.g. called from somewhere that doesn't know), every option stays.
+    document.querySelectorAll('#feedType option').forEach(opt => {
+        opt.hidden = !feed && context ? opt.dataset.kind !== context : false;
+    });
+    document.getElementById('feedType').value = feed ? feed.feed_type : (defaultType || (context === 'rule' ? 'yaraify' : 'threatfox'));
     document.getElementById('feedUrl').value = feed ? (feed.discovery_url || '') : '';
     document.getElementById('feedCollection').value = feed ? (feed.collection_id || '') : '';
     document.getElementById('feedYaraForgePackage').value = feed ? (feed.collection_id || 'core') : 'core';
@@ -1580,16 +1589,23 @@ function statusBadge(status) {
 
 const FEED_TYPE_LABELS = {
     threatfox: 'ThreatFox', taxii: 'STIX/TAXII 2.1', otx: 'AlienVault OTX',
-    urlhaus: 'URLhaus', feodotracker: 'Feodo Tracker', yaraify: 'YARAify', yara_forge: 'YARA Forge', csv: 'CSV Upload',
+    urlhaus: 'URLhaus', feodotracker: 'Feodo Tracker', yaraify: 'YARAify', yara_forge: 'YARA Forge',
+    yara_rules_project: 'Yara-Rules/rules', signature_base: 'signature-base', csv: 'CSV Upload',
     misp: 'MISP-format Feed', sslbl: 'SSLBL Cert Blacklist', spamhaus_drop: 'Spamhaus DROP', tor_exit: 'Tor Exit List',
     malwarebazaar: 'MalwareBazaar'
 };
 const YARA_FORGE_PACKAGE_LABELS = {core: 'Core', extended: 'Extended', full: 'Full'};
+// These three feed types all support the same new/updated/all sync-mode tracking
+// (individually-diffed rule files, not just a full-pack replace every time) -- see
+// _sync_github_yara_repo/sync_yara_forge in taxii_client.py.
+const RULE_FEED_TYPES_WITH_SYNC_MODES = ['yara_forge', 'yara_rules_project', 'signature_base'];
 const FEED_TYPE_SOURCES = {
     threatfox: 'threatfox.abuse.ch (public)', urlhaus: 'urlhaus.abuse.ch (public)',
     feodotracker: 'feodotracker.abuse.ch (public)', otx: 'otx.alienvault.com (API key)',
     yaraify: 'yaraify.abuse.ch (public) — syncs YARA rule files, not IOCs',
     yara_forge: 'yarahq.github.io (public) — syncs YARA rule files, not IOCs',
+    yara_rules_project: 'github.com/Yara-Rules/rules (public, GPL-2.0) — syncs YARA rule files, not IOCs',
+    signature_base: 'github.com/Neo23x0/signature-base (public) — syncs YARA rule files, not IOCs',
     csv: 'Uploaded file (one-time snapshot)',
     sslbl: 'sslbl.abuse.ch (public)', spamhaus_drop: 'spamhaus.org/drop (public)',
     tor_exit: 'check.torproject.org (public)', malwarebazaar: 'bazaar.abuse.ch (public) — recent malware samples'
@@ -1604,6 +1620,7 @@ function syncIntervalLabel(mins) {
 
 function feedRowHtml(f, isAdmin) {
     const isYaraForge = f.feed_type === 'yara_forge';
+    const hasSyncModes = RULE_FEED_TYPES_WITH_SYNC_MODES.includes(f.feed_type);
     const sourceText = ['taxii', 'misp'].includes(f.feed_type) ? (f.discovery_url || '')
         : isYaraForge ? `${FEED_TYPE_SOURCES.yara_forge} (${YARA_FORGE_PACKAGE_LABELS[f.collection_id] || 'Core'} package)`
         : (FEED_TYPE_SOURCES[f.feed_type] || '');
@@ -1620,10 +1637,10 @@ function feedRowHtml(f, isAdmin) {
                     <td>${statusBadge(f.last_status)}</td>
                     <td class="text-nowrap small">${escHtml(f.last_sync) || '—'}</td>
                     <td class="text-nowrap small">${syncIntervalLabel(f.sync_interval_minutes)}</td>
-                    <td>${(f.feed_type === 'yaraify' || isYaraForge) ? `${f.last_count ?? 0} rule(s)` : (f.last_count ?? 0)}</td>
+                    <td>${(f.feed_type === 'yaraify' || hasSyncModes) ? `${f.last_count ?? 0} rule(s)` : (f.last_count ?? 0)}</td>
                     <td class="text-nowrap">
                         ${isAdmin ? `
-                        ${isYaraForge ? `
+                        ${hasSyncModes ? `
                         <select class="form-select form-select-sm bg-dark text-light border-secondary d-inline-block py-0 me-1" style="width:auto;" id="syncMode_${f.id}" title="What to sync">
                             <option value="all">All (full resync)</option>
                             <option value="new">New rules only</option>
@@ -1647,7 +1664,7 @@ function feedRowHtml(f, isAdmin) {
 // YARAify/YARA Forge sync YARA rules, not IOCs -- they get their own table on the YARA
 // Scanning tab (renderRuleSourcesTable) instead of appearing in the IOC-centric Feed
 // Sources table here, even though both tables are driven by the same /api/ti/feeds data.
-const RULE_SOURCE_FEED_TYPES = ['yaraify', 'yara_forge'];
+const RULE_SOURCE_FEED_TYPES = ['yaraify', 'yara_forge', 'yara_rules_project', 'signature_base'];
 function loadFeeds() {
     fetch('/api/ti/feeds')
         .then(r => {
