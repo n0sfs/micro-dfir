@@ -39,3 +39,7 @@ checked against each role's row in `role_permissions`) on every
 mutating/sensitive route; the UI's `hasPermission(key)` helper
 (`templates/base.html`) mirrors those checks only to hide controls a user's
 role couldn't use anyway.
+
+## License
+
+[MIT](LICENSE)
