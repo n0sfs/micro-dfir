@@ -21,7 +21,23 @@ import urllib.request, json, time, sys, os, subprocess, socket, ssl, threading, 
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.08.31.1"
+AGENT_VERSION = "2026.08.31.2"
+
+_OS_DETAIL_CACHE = None
+
+def _get_os_detail():
+    # platform.mac_ver() is stdlib, no subprocess needed -- computed once and cached.
+    global _OS_DETAIL_CACHE
+    if _OS_DETAIL_CACHE is not None:
+        return _OS_DETAIL_CACHE
+    try:
+        import platform
+        ver = platform.mac_ver()[0]
+        _OS_DETAIL_CACHE = f"macOS {ver}" if ver else "macOS (unknown version)"
+    except Exception:
+        _OS_DETAIL_CACHE = "macOS (unknown version)"
+    _OS_DETAIL_CACHE = _OS_DETAIL_CACHE.replace('\r', '').replace('\n', '')[:200]
+    return _OS_DETAIL_CACHE
 
 INSTALL_DIR = "/usr/local/microdfir-agent"
 SERVICE_LABEL = "com.microdfir.agent"
@@ -315,7 +331,7 @@ def run_agent():
             for attempt in range(3):
                 try:
                     print(f"[*] Checking in with {SERVER_URL} (Attempt {attempt + 1})...", flush=True)
-                    headers = {'X-Agent-Hostname': socket.gethostname(), 'X-Agent-Token': SOC_TOKEN, 'X-Agent-Version': AGENT_VERSION, 'X-Agent-OS': 'macos'}
+                    headers = {'X-Agent-Hostname': socket.gethostname(), 'X-Agent-Token': SOC_TOKEN, 'X-Agent-Version': AGENT_VERSION, 'X-Agent-OS': 'macos', 'X-Agent-OS-Detail': _get_os_detail()}
                     req = urllib.request.Request(SERVER_URL, headers=headers)
                     with urllib.request.urlopen(req, context=context, timeout=5) as response:
                         data = json.loads(response.read().decode())
