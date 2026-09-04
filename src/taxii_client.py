@@ -5,6 +5,14 @@ DB_PATH = "/opt/micro-dfir/siem.db"
 # is deliberately standalone (app.py imports FROM here), same reasoning as DB_PATH
 # above being its own local constant instead of importing app.py's DB path.
 YARA_RULES_DIR = "/opt/micro-dfir/rules/yara_imported"
+# Some upstream packages ship pure "include every file in this category" wrapper files
+# (e.g. Yara-Rules/rules' own *_index.yar files, confirmed on disk: a few lines of
+# nothing but `include "./x/y.yar"` statements) with no rule{} block of their own --
+# real detections live in the files they include. Skip these at sync time so they
+# never land on disk in the first place (matches app.py's own _YARA_HAS_RULE_RE, kept
+# as a separate bytes-mode duplicate here since this module works on raw zip bytes,
+# not decoded text, same reasoning YARA_RULES_DIR above is its own local duplicate).
+_YARA_HAS_RULE_RE_BYTES = re.compile(rb'^\s*(?:private\s+|global\s+)*rule\s+\S+', re.MULTILINE)
 # Confirmed live: this specific bulk-download endpoint needs no Auth-Key at all (the
 # YARAify API docs' own "download all rules" section shows a plain unauthenticated
 # curl example, and its "Download all YARA rules" link resolves here) -- unlike every
@@ -788,7 +796,11 @@ def _sync_github_yara_repo(feed, mode, zip_url, subdir, table, source_dirname):
     subfolders of its own, so its files land flat, exactly like today's static drop)."""
     t, files = _fetch_github_yara_files(zip_url, subdir)
     try:
-        parsed = {relpath: (hashlib.sha256(content).hexdigest(), content) for relpath, content in files}
+        parsed = {
+            relpath: (hashlib.sha256(content).hexdigest(), content)
+            for relpath, content in files
+            if _YARA_HAS_RULE_RE_BYTES.search(content)
+        }
     finally:
         shutil.rmtree(t, ignore_errors=True)
 

@@ -1079,6 +1079,31 @@ YARA_RULES_DIR = '/opt/micro-dfir/rules/yara_imported'
 # consistently populate this field (spot-checked: ~80% of files under rules-master/).
 _YARA_DESCRIPTION_RE = re.compile(r'description\s*=\s*"((?:[^"\\]|\\.)*)"')
 _YARA_AUTHOR_RE = re.compile(r'author\s*=\s*"((?:[^"\\]|\\.)*)"')
+# Some upstream packages ship pure "include every file in this category" wrapper files
+# (e.g. Yara-Rules/rules' own rules-master/*_index.yar -- confirmed on disk: each is a
+# few lines of nothing but `include "./x/y.yar"` statements) with no rule{} block of
+# their own. Real detections live in the files they include; presented as selectable
+# scan rules they're pure noise, and compiling one standalone via
+# yara.compile(filepath=...) can't resolve its relative include path anyway. This
+# matches any real rule declaration line so index-only files can be filtered out
+# wherever YARA files are discovered.
+_YARA_HAS_RULE_RE = re.compile(r'^\s*(?:private\s+|global\s+)*rule\s+\S+', re.MULTILINE)
+
+def _yara_source_label(top_dir):
+    """Maps a YARA rule's top-level directory under YARA_RULES_DIR back to the real
+    upstream project it came from, for the File Scan tab's Source filter. rules-master
+    and yara_rules_project_synced are the same upstream project (Yara-Rules/rules) --
+    the former is the original static one-time import that predates the tracked-sync
+    feature, the latter is what sync_yara_rules_project() writes today."""
+    if top_dir in ('rules-master', 'yara_rules_project_synced'):
+        return 'Yara-Rules/rules'
+    if top_dir == 'signature_base_synced':
+        return 'signature-base'
+    if top_dir == 'yara_forge_synced':
+        return 'YARA Forge'
+    if top_dir == 'yaraify_synced':
+        return 'YARAify'
+    return 'Other'
 
 def _yara_file_description(full_path, content=None):
     if content is None:
@@ -1147,28 +1172,41 @@ def threat_intel():
     # Fetch loaded YARA files for the UI checklist first — this is also the
     # allowlist for which rule paths a scan request may reference.
     yara_dir = YARA_RULES_DIR
+    candidate_files = []
     if os.path.exists(yara_dir):
         for root, dirs, files in os.walk(yara_dir):
             for file_name in files:
                 if file_name.endswith(('.yar', '.yara')):
-                    yara_files.append(os.path.relpath(os.path.join(root, file_name), yara_dir))
-    yara_files.sort()
-    yara_files_set = set(yara_files)
+                    candidate_files.append(os.path.relpath(os.path.join(root, file_name), yara_dir))
+    candidate_files.sort()
     # Grouped purely for display (identify where the rules came from) -- the flat
-    # yara_files list above stays the actual POST-time validation allowlist. Category
+    # yara_files list below stays the actual POST-time validation allowlist. Category
     # is each file's IMMEDIATE parent directory, not the first path segment -- the
     # real category dirs (malware/, webshells/, crypto/, etc, each a checkout of the
     # community Yara-Rules/rules project) sit one level deeper than yara_dir, under a
     # rules-master/ wrapper (confirmed on disk: yara_dir also has a sibling
     # yaraify_synced/ for feed-synced rules, so segment[0] alone would lump everything
     # from either source into one bucket). Files with no parent dir at all fall back
-    # to 'Other'.
+    # to 'Other'. Source (for the Source filter) is derived from the TOP-level
+    # directory instead, via _yara_source_label() -- a distinct axis from category
+    # (e.g. rules-master/ and yara_rules_project_synced/ are different top-level dirs
+    # but the same real upstream project).
+    yara_files = []
     yara_files_by_category = {}
     yara_file_descriptions = {}
-    for rf in yara_files:
+    yara_category_sources = {}
+    for rf in candidate_files:
+        full_path = os.path.join(yara_dir, rf)
+        try:
+            with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+        except OSError:
+            continue
+        if not _YARA_HAS_RULE_RE.search(content):
+            continue  # index-only wrapper file (e.g. rules-master/*_index.yar) -- see _YARA_HAS_RULE_RE
         parts = rf.split(os.sep)
         category = parts[-2] if len(parts) > 1 else 'Other'
-        full_path = os.path.join(yara_dir, rf)
+        source = _yara_source_label(parts[0])
         # YARAify's bulk export is a flat file drop with no folder taxonomy at all (see
         # sync_yaraify in taxii_client.py) -- every one of its ~600 rules would
         # otherwise land in one giant "yaraify_synced" bucket. Checked directly against
@@ -1178,22 +1216,18 @@ def threat_intel():
         # clusters into meaningful groups (the same researcher/team's submissions tend
         # to cover related malware). Re-bucket by parsed author instead of the flat
         # source-folder name, purely for this display -- the underlying files/allowlist
-        # are untouched. Reads the file once and reuses it for the description lookup
-        # right below rather than letting _yara_file_description() re-read it.
-        content = None
+        # are untouched.
         if category == 'yaraify_synced':
-            try:
-                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-            except OSError:
-                content = ''
             a = _YARA_AUTHOR_RE.search(content)
             author = a.group(1).replace('\\"', '"').strip() if a else None
             category = f"YARAify — {author}" if author else "YARAify — Unattributed"
+        yara_files.append(rf)
         yara_files_by_category.setdefault(category, []).append(rf)
+        yara_category_sources.setdefault(category, source)
         desc = _yara_file_description(full_path, content)
         if desc:
             yara_file_descriptions[rf] = desc
+    yara_files_set = set(yara_files)
 
     if request.method == 'POST' and yara_available:
         active_tab = 'hunt'
@@ -1235,6 +1269,7 @@ def threat_intel():
     return render_template(
         'threat_intel.html', matches=matches, yara_files=yara_files,
         yara_files_by_category=yara_files_by_category, yara_file_descriptions=yara_file_descriptions,
+        yara_category_sources=yara_category_sources,
         active_tab=active_tab, current_user=current_user
     )
 
