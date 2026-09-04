@@ -499,32 +499,34 @@
     <!-- Vulnerabilities pane -->
     <div id="paneVulns" style="display:{{ 'block' if active_tab == 'vulns' else 'none' }};">
         <div class="card-body">
-            <div class="card bg-dark border-secondary">
-                <div class="card-header d-flex justify-content-between align-items-start flex-wrap gap-2">
-                    <span><i class="fa-solid fa-bug me-2"></i>CVE Database</span>
-                    <div class="d-flex flex-column align-items-end gap-1">
-                        <div class="d-flex align-items-center gap-2">
-                            <span id="cveSyncStatus" class="text-muted small"></span>
-                            {% if has_permission('threatintel.manage') %}
-                            <button type="button" class="btn btn-sm btn-outline-primary" id="cveSyncBtn" onclick="syncCveFeed()" title="Pulls CVEs published in roughly the last week from the National Vulnerability Database"><i class="fa-solid fa-rotate me-1"></i>Sync NVD</button>
-                            {% endif %}
-                        </div>
-                        <div class="d-flex align-items-center gap-2">
-                            <span id="kevSyncStatus" class="text-muted small"></span>
-                            {% if has_permission('threatintel.manage') %}
-                            <button type="button" class="btn btn-sm btn-outline-danger" id="kevSyncBtn" onclick="syncKevFeed()" title="Pulls CISA's full catalog of vulnerabilities with confirmed real-world exploitation"><i class="fa-solid fa-rotate me-1"></i>Sync CISA KEV</button>
-                            {% endif %}
-                        </div>
-                        <div class="d-flex align-items-center gap-2">
-                            <span id="epssSyncStatus" class="text-muted small"></span>
-                            {% if has_permission('threatintel.manage') %}
-                            <button type="button" class="btn btn-sm btn-outline-info" id="epssSyncBtn" onclick="syncEpssFeed()" title="Scores every CVE already stored here for likelihood of exploitation in the next 30 days (FIRST.org EPSS)"><i class="fa-solid fa-rotate me-1"></i>Sync EPSS</button>
-                            {% endif %}
-                        </div>
+            <div class="card bg-dark border-secondary mb-4">
+                <div class="card-header"><i class="fa-solid fa-satellite-dish me-2"></i>Vulnerability Feeds</div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-dark table-hover mb-0 align-middle">
+                            <thead>
+                                <tr>
+                                    <th class="ps-3">Feed</th>
+                                    <th>Source</th>
+                                    <th>Status</th>
+                                    <th>Last Sync</th>
+                                    <th>Records</th>
+                                    <th style="width:150px;">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="vulnFeedsTableBody">
+                                <tr><td colspan="6" class="text-center text-muted py-4">Loading...</td></tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
+            </div>
+            <div class="card bg-dark border-secondary">
+                <div class="card-header">
+                    <span><i class="fa-solid fa-bug me-2"></i>CVE Database</span>
+                </div>
                 <div class="card-body">
-                    <p class="text-muted small"><i class="fa-solid fa-circle-info me-1"></i>CVEs from the <a href="https://nvd.nist.gov/" target="_blank" rel="noopener" class="text-muted">National Vulnerability Database</a>'s public API, enriched with <a href="https://www.cisa.gov/known-exploited-vulnerabilities-catalog" target="_blank" rel="noopener" class="text-muted">CISA's Known Exploited Vulnerabilities</a> catalog (confirmed real-world exploitation) and <a href="https://www.first.org/epss/" target="_blank" rel="noopener" class="text-muted">FIRST.org's EPSS</a> score (predicted exploitation likelihood). EPSS only scores CVEs already stored here -- sync NVD (or add some another way) first. Browsable reference today; not yet correlated against installed software on any endpoint.</p>
+                    <p class="text-muted small"><i class="fa-solid fa-circle-info me-1"></i>CVEs from the <a href="https://nvd.nist.gov/" target="_blank" rel="noopener" class="text-muted">National Vulnerability Database</a>'s public API, enriched with <a href="https://www.cisa.gov/known-exploited-vulnerabilities-catalog" target="_blank" rel="noopener" class="text-muted">CISA's Known Exploited Vulnerabilities</a> catalog (confirmed real-world exploitation) and <a href="https://www.first.org/epss/" target="_blank" rel="noopener" class="text-muted">FIRST.org's EPSS</a> score (predicted exploitation likelihood). A KEV-listed CVE outside NVD's ~7-day sync window still gets a browsable entry here. Not yet correlated against installed software on any endpoint.</p>
                     <div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
                         <input type="text" id="cveSearch" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:320px;" placeholder="Search CVE ID or description..." onkeyup="if(event.key === 'Enter') loadCveRecords()">
                         <select id="cveSeverityFilter" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:160px;" onchange="loadCveRecords()">
@@ -2773,79 +2775,61 @@ function loadCveRecords() {
     }).catch(err => console.error('Error loading CVE records:', err));
 }
 
-function loadCveSyncStatus() {
-    fetch('/api/cve/sync-status').then(r => r.json()).then(d => {
-        const el = document.getElementById('cveSyncStatus');
-        if (!d.last_sync) { el.innerText = `${d.total_stored || 0} stored, never synced`; return; }
-        const statusTxt = d.last_status === 'error' ? `error: ${d.last_error}` : `${d.last_count} fetched`;
-        el.innerText = `${d.total_stored} stored — last sync ${d.last_sync} (${statusTxt})`;
-        el.className = d.last_status === 'error' ? 'small text-danger' : 'small text-muted';
-    }).catch(err => console.error('Error loading CVE sync status:', err));
+// Same table/badge idiom as the IOC tab's Feed Sources table (feedRowHtml/statusBadge)
+// -- three independent feeds (NVD, CISA KEV, EPSS), one row each, instead of the
+// original cramped stack of status-text-plus-button pairs in the card header.
+const VULN_FEEDS_META = [
+    {key: 'nvd', name: 'NVD (CVE Database)', source: 'nvd.nist.gov (public)', statusUrl: '/api/cve/sync-status', syncUrl: '/api/cve/sync', unit: 'stored', syncLabel: 'Sync NVD'},
+    {key: 'kev', name: 'CISA KEV', source: 'cisa.gov (public)', statusUrl: '/api/cve/kev/sync-status', syncUrl: '/api/cve/kev/sync', unit: 'listed', syncLabel: 'Sync CISA KEV'},
+    {key: 'epss', name: 'FIRST.org EPSS', source: 'api.first.org (public)', statusUrl: '/api/cve/epss/sync-status', syncUrl: '/api/cve/epss/sync', unit: 'scored', syncLabel: 'Sync EPSS'},
+];
+let vulnFeedsState = {};
+
+function renderVulnFeedsTable() {
+    const tbody = document.getElementById('vulnFeedsTableBody');
+    if (!tbody) return;
+    const isAdmin = hasPermission('threatintel.manage');
+    tbody.innerHTML = VULN_FEEDS_META.map(f => {
+        const d = vulnFeedsState[f.key] || {};
+        return `<tr>
+            <td class="ps-3"><strong>${escHtml(f.name)}</strong></td>
+            <td class="text-muted small">${escHtml(f.source)}</td>
+            <td>${statusBadge(d.last_status)}</td>
+            <td class="text-nowrap small">${d.last_sync ? escHtml(d.last_sync) : '—'}</td>
+            <td>${d.total_stored ?? 0} ${escHtml(f.unit)}</td>
+            <td class="text-nowrap">
+                ${isAdmin ? `<button class="btn btn-sm btn-outline-secondary py-0 px-2" title="${escAttr(f.syncLabel)}" id="vulnSyncBtn_${f.key}" onclick="syncVulnFeed('${f.key}')"><i class="fa-solid fa-rotate"></i></button>` : ''}
+            </td>
+        </tr>`;
+    }).join('');
 }
 
-function syncCveFeed() {
-    const btn = document.getElementById('cveSyncBtn');
-    btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i>Syncing...';
-    fetch('/api/cve/sync', {method: 'POST'}).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
-        if (ok) toast(`Synced ${data.last_count} CVE(s) from NVD.`, 'success');
-        else toast(data.error || 'Sync failed.', 'danger');
-        loadCveSyncStatus();
+function loadVulnFeedStatus(key) {
+    const meta = VULN_FEEDS_META.find(f => f.key === key);
+    return fetch(meta.statusUrl).then(r => r.json()).then(d => {
+        vulnFeedsState[key] = d;
+        renderVulnFeedsTable();
+    }).catch(err => console.error(`Error loading ${key} sync status:`, err));
+}
+
+function loadAllVulnFeedStatuses() {
+    VULN_FEEDS_META.forEach(f => loadVulnFeedStatus(f.key));
+}
+
+function syncVulnFeed(key) {
+    const meta = VULN_FEEDS_META.find(f => f.key === key);
+    const btn = document.getElementById(`vulnSyncBtn_${key}`);
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>'; }
+    fetch(meta.syncUrl, {method: 'POST'}).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (ok) {
+            if (key === 'epss' && !data.last_count) toast('Nothing to score yet -- sync NVD (or add CVEs another way) first.', 'info');
+            else toast(`Synced ${data.last_count} record(s) from ${meta.name}.`, 'success');
+        } else {
+            toast(data.error || 'Sync failed.', 'danger');
+        }
+        loadVulnFeedStatus(key);
         loadCveRecords();
-    }).catch(err => toast('Error: ' + err, 'danger')).finally(() => {
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-rotate me-1"></i>Sync NVD';
-    });
-}
-
-function loadKevSyncStatus() {
-    fetch('/api/cve/kev/sync-status').then(r => r.json()).then(d => {
-        const el = document.getElementById('kevSyncStatus');
-        if (!d.last_sync) { el.innerText = `${d.total_stored || 0} stored, never synced`; return; }
-        const statusTxt = d.last_status === 'error' ? `error: ${d.last_error}` : `${d.last_count} fetched`;
-        el.innerText = `${d.total_stored} in KEV — last sync ${d.last_sync} (${statusTxt})`;
-        el.className = d.last_status === 'error' ? 'small text-danger' : 'small text-muted';
-    }).catch(err => console.error('Error loading KEV sync status:', err));
-}
-
-function syncKevFeed() {
-    const btn = document.getElementById('kevSyncBtn');
-    btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i>Syncing...';
-    fetch('/api/cve/kev/sync', {method: 'POST'}).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
-        if (ok) toast(`Synced ${data.last_count} CVE(s) from CISA KEV.`, 'success');
-        else toast(data.error || 'Sync failed.', 'danger');
-        loadKevSyncStatus();
-        loadCveRecords();
-    }).catch(err => toast('Error: ' + err, 'danger')).finally(() => {
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-rotate me-1"></i>Sync CISA KEV';
-    });
-}
-
-function loadEpssSyncStatus() {
-    fetch('/api/cve/epss/sync-status').then(r => r.json()).then(d => {
-        const el = document.getElementById('epssSyncStatus');
-        if (!d.last_sync) { el.innerText = `${d.total_stored || 0} scored, never synced`; return; }
-        const statusTxt = d.last_status === 'error' ? `error: ${d.last_error}` : `${d.last_count} scored`;
-        el.innerText = `${d.total_stored} scored — last sync ${d.last_sync} (${statusTxt})`;
-        el.className = d.last_status === 'error' ? 'small text-danger' : 'small text-muted';
-    }).catch(err => console.error('Error loading EPSS sync status:', err));
-}
-
-function syncEpssFeed() {
-    const btn = document.getElementById('epssSyncBtn');
-    btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i>Syncing...';
-    fetch('/api/cve/epss/sync', {method: 'POST'}).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
-        if (ok) toast(data.last_count ? `Scored ${data.last_count} CVE(s) via EPSS.` : 'Nothing to score yet -- sync NVD (or add CVEs another way) first.', data.last_count ? 'success' : 'info');
-        else toast(data.error || 'Sync failed.', 'danger');
-        loadEpssSyncStatus();
-        loadCveRecords();
-    }).catch(err => toast('Error: ' + err, 'danger')).finally(() => {
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-rotate me-1"></i>Sync EPSS';
-    });
+    }).catch(err => toast('Error: ' + err, 'danger'));
 }
 
 // ---- Atomic Testing ----
@@ -3165,9 +3149,7 @@ loadIocs();
 loadIocFacets();
 initIocFilterDropdowns();
 checkEntityDeepLink();
-loadCveSyncStatus();
-loadKevSyncStatus();
-loadEpssSyncStatus();
+loadAllVulnFeedStatuses();
 loadCveRecords();
 loadAtomicTests();
 loadAtomicRuns();
