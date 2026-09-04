@@ -927,6 +927,8 @@
                 <option value="spamhaus_drop" data-kind="ioc">Spamhaus DROP (hijacked netblocks, public)</option>
                 <option value="tor_exit" data-kind="ioc">Tor Exit Node List (public)</option>
                 <option value="malwarebazaar" data-kind="ioc">MalwareBazaar Recent Samples (free API key required)</option>
+                <option value="openphish" data-kind="ioc">OpenPhish Community Feed (public — phishing URLs)</option>
+                <option value="blocklist_de" data-kind="ioc">blocklist.de Reported Attackers (public)</option>
                 <option value="taxii" data-kind="ioc">STIX / TAXII 2.1 Server</option>
                 <option value="csv" data-kind="ioc">CSV File Upload</option>
             </select>
@@ -1604,7 +1606,7 @@ const FEED_TYPE_LABELS = {
     urlhaus: 'URLhaus', feodotracker: 'Feodo Tracker', yaraify: 'YARAify', yara_forge: 'YARA Forge',
     yara_rules_project: 'Yara-Rules/rules', signature_base: 'signature-base', csv: 'CSV Upload',
     misp: 'MISP-format Feed', sslbl: 'SSLBL Cert Blacklist', spamhaus_drop: 'Spamhaus DROP', tor_exit: 'Tor Exit List',
-    malwarebazaar: 'MalwareBazaar'
+    malwarebazaar: 'MalwareBazaar', openphish: 'OpenPhish', blocklist_de: 'blocklist.de'
 };
 const YARA_FORGE_PACKAGE_LABELS = {core: 'Core', extended: 'Extended', full: 'Full'};
 // These three feed types all support the same new/updated/all sync-mode tracking
@@ -1620,7 +1622,9 @@ const FEED_TYPE_SOURCES = {
     signature_base: 'github.com/Neo23x0/signature-base (public) — syncs YARA rule files, not IOCs',
     csv: 'Uploaded file (one-time snapshot)',
     sslbl: 'sslbl.abuse.ch (public)', spamhaus_drop: 'spamhaus.org/drop (public)',
-    tor_exit: 'check.torproject.org (public)', malwarebazaar: 'bazaar.abuse.ch (public) — recent malware samples'
+    tor_exit: 'check.torproject.org (public)', malwarebazaar: 'bazaar.abuse.ch (public) — recent malware samples',
+    openphish: 'openphish.com community feed (public) — phishing URLs',
+    blocklist_de: 'blocklist.de (public) — aggregated fail2ban-style abuse reports'
 };
 
 function syncIntervalLabel(mins) {

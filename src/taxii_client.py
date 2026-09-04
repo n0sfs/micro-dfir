@@ -430,6 +430,50 @@ def sync_tor_exit(feed):
     conn.commit(); conn.close()
     return c
 
+# OpenPhish's free community feed -- the openphish.com/feed.txt URL now just 302s to
+# its real current home (confirmed live), a plain GitHub-hosted text file of the 300
+# most recent verified phishing URLs, no auth, updated regularly. A genuinely distinct
+# category from every existing feed here -- ThreatFox/URLhaus/MalwareBazaar are all
+# malware-centric, none of them track phishing specifically.
+def sync_openphish(feed):
+    res = requests.get("https://raw.githubusercontent.com/openphish/public_feed/refs/heads/main/feed.txt", timeout=20)
+    res.raise_for_status()
+    conn = _connect(); c = 0
+    for line in res.text.splitlines():
+        url = line.strip()
+        if not url:
+            continue
+        stix_id = f"openphish--{url}"
+        conn.execute(
+            "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) VALUES (?, 'indicator', 'url', 'Phishing URL', 'source=OpenPhish community feed', ?, '', 0, ?)",
+            (stix_id, url, feed["id"])
+        )
+        c += 1
+    conn.commit(); conn.close()
+    return c
+
+# blocklist.de aggregates real fail2ban-style abuse reports from many independent
+# server admins -- this is their combined "all attack types" list (ssh/mail/web/etc
+# folded into one), plain text, one IP per line, no auth. Lower per-entry context than
+# the abuse.ch feeds (no malware family/threat type, just "reported as an attacker"),
+# but a real, large, independently-sourced signal distinct from anything else here.
+def sync_blocklist_de(feed):
+    res = requests.get("https://lists.blocklist.de/lists/all.txt", timeout=20)
+    res.raise_for_status()
+    conn = _connect(); c = 0
+    for line in res.text.splitlines():
+        ip = line.strip()
+        if not ip or ip.startswith('#'):
+            continue
+        stix_id = f"blocklist-de--{ip}"
+        conn.execute(
+            "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) VALUES (?, 'indicator', 'ip', 'Reported Attack Source', 'source=blocklist.de (aggregated fail2ban-style abuse reports)', ?, '', 0, ?)",
+            (stix_id, ip, feed["id"])
+        )
+        c += 1
+    conn.commit(); conn.close()
+    return c
+
 def _extract_zip_safely(zip_path, dest_dir, max_total_bytes=_YARAIFY_MAX_EXTRACTED_BYTES):
     # dest_dir must already exist and be empty. Returns the number of files written.
     # Two defenses zipfile.extractall() alone doesn't give you, even for a zip from a
@@ -823,6 +867,10 @@ def sync_feed(feed, mode='all'):
         return sync_spamhaus_drop(feed)
     elif feed["feed_type"] == "tor_exit":
         return sync_tor_exit(feed)
+    elif feed["feed_type"] == "openphish":
+        return sync_openphish(feed)
+    elif feed["feed_type"] == "blocklist_de":
+        return sync_blocklist_de(feed)
     elif feed["feed_type"] == "malwarebazaar":
         return sync_malwarebazaar(feed)
     elif feed["feed_type"] == "csv":
