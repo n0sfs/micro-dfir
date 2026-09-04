@@ -282,7 +282,14 @@ source = '''
   .appname = "dnsmasq"
   .source_ip = parsed.src_ip
   .timestamp = now()
-  .message = "DNS query from " + parsed.src_ip + ": " + parsed.domain + " (" + parsed.qtype + ")\nQueryName: " + parsed.domain
+  # parse_regex's named capture groups type as VRL's "any" (not a guaranteed string),
+  # so concatenating them with + is flagged fallible by VRL's static type checker even
+  # though it can never actually fail here (parse_regex already succeeded above) --
+  # same "?? <fallback>" idiom shape_logs' own .time assignment already uses below,
+  # not a new pattern. Found live: this made EVERY vector.toml reload fail validation
+  # (E103) since this transform was first added, so Vector silently kept running
+  # whatever config it last loaded successfully instead of ever picking up a new one.
+  .message = ("DNS query from " + parsed.src_ip + ": " + parsed.domain + " (" + parsed.qtype + ")\nQueryName: " + parsed.domain) ?? ""
 '''
 """
 
