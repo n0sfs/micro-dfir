@@ -607,8 +607,8 @@
                 <div class="card-body">
                     <div class="table-responsive">
                         <table class="table table-dark table-hover mb-0">
-                            <thead><tr><th>Run At</th><th>Host</th><th>Technique</th><th>Test</th><th>Command</th><th>Detection</th></tr></thead>
-                            <tbody id="atomicRunsTableBody"><tr><td colspan="6" class="text-center text-muted py-3">No tests run yet.</td></tr></tbody>
+                            <thead><tr><th>Run At</th><th>Host</th><th>Technique</th><th>Test</th><th>Command</th><th>Detection</th><th></th></tr></thead>
+                            <tbody id="atomicRunsTableBody"><tr><td colspan="7" class="text-center text-muted py-3">No tests run yet.</td></tr></tbody>
                         </table>
                     </div>
                 </div>
@@ -636,6 +636,20 @@
         <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
         <button type="button" class="btn btn-warning btn-sm" id="atomicRunConfirmBtn" onclick="confirmAtomicRun()"><i class="fa-solid fa-play me-1"></i>Run Test</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Atomic Test Run Detail Modal -->
+<div class="modal fade" id="atomicRunDetailModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title" id="atomicRunDetailTitle"><i class="fa-solid fa-clipboard-check me-2"></i>Run Detail</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="atomicRunDetailBody"></div>
+      <div class="modal-footer border-secondary" id="atomicRunDetailFooter"></div>
     </div>
   </div>
 </div>
@@ -2950,23 +2964,87 @@ function atomicValidationBadge(status) {
     return '<span class="badge bg-secondary"><i class="fa-solid fa-clock me-1"></i>Pending</span>';
 }
 
+let atomicRunsData = [];
+
 function loadAtomicRuns() {
     fetch('/api/atomic/runs').then(r => r.json()).then(runs => {
+        atomicRunsData = Array.isArray(runs) ? runs : [];
         const tbody = document.getElementById('atomicRunsTableBody');
-        if (!Array.isArray(runs) || !runs.length) {
-            tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">No tests run yet.</td></tr>';
+        if (!atomicRunsData.length) {
+            tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No tests run yet.</td></tr>';
             return;
         }
-        tbody.innerHTML = runs.map(r => `
+        tbody.innerHTML = atomicRunsData.map(r => `
             <tr>
                 <td class="text-nowrap small">${escHtml(r.queued_at)}</td>
                 <td class="text-nowrap">${escHtml(r.hostname)}</td>
                 <td class="text-nowrap"><span class="badge bg-secondary">${escHtml(r.technique_id || '?')}</span></td>
                 <td>${escHtml(r.test_name || '')}</td>
                 <td>${r.command_status === 'done' ? '<span class="badge bg-success">Done</span>' : r.command_status === 'error' ? '<span class="badge bg-danger">Error</span>' : `<span class="badge bg-secondary">${escHtml(r.command_status || 'pending')}</span>`}</td>
-                <td>${atomicValidationBadge(r.validation_status)}${r.validated_alert_id ? ` <a href="#" class="small" onclick="return false;" title="Alert #${r.validated_alert_id}"><i class="fa-solid fa-arrow-up-right-from-square"></i></a>` : ''}</td>
+                <td>${atomicValidationBadge(r.validation_status)}</td>
+                <td class="text-nowrap"><button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" title="View details" onclick="openAtomicRunDetailModal(${r.id})"><i class="fa-solid fa-magnifying-glass"></i></button></td>
             </tr>`).join('');
     }).catch(() => {});
+}
+
+function openAtomicRunDetailModal(runId) {
+    const r = atomicRunsData.find(x => x.id === runId);
+    if (!r) return;
+    document.getElementById('atomicRunDetailTitle').innerHTML =
+        `<i class="fa-solid fa-clipboard-check me-2"></i>${escHtml(r.test_name || 'Run Detail')} <span class="badge bg-secondary ms-1">${escHtml(r.technique_id || '?')}</span>`;
+
+    const parts = [];
+    if (r.test_description) {
+        parts.push(`<p class="text-muted small">${escHtml(r.test_description)}</p>`);
+    }
+    parts.push(`<div class="d-flex flex-wrap gap-3 small text-muted mb-3">
+        <span><i class="fa-solid fa-desktop me-1"></i>${escHtml(r.hostname)}</span>
+        <span><i class="fa-solid fa-clock me-1"></i>Queued ${escHtml(r.queued_at)}</span>
+        <span><i class="fa-solid fa-terminal me-1"></i>${escHtml(r.executor_name || '?')}</span>
+        ${r.elevation_required ? '<span class="text-warning"><i class="fa-solid fa-shield-halved me-1"></i>Requires elevation</span>' : ''}
+    </div>`);
+
+    if (r.command_script) {
+        parts.push(`<h6 class="small text-uppercase text-muted">Command Executed</h6>
+            <pre class="bg-black p-2 rounded border border-secondary small font-monospace mb-3" style="white-space:pre-wrap; max-height:150px; overflow-y:auto;">${escHtml(r.command_script)}</pre>`);
+    }
+    if (r.command_stdout) {
+        parts.push(`<h6 class="small text-uppercase text-muted">Output <span class="text-muted fw-normal">(exit code ${r.exit_code ?? '?'})</span></h6>
+            <pre class="bg-black p-2 rounded border border-secondary small font-monospace mb-3" style="white-space:pre-wrap; max-height:200px; overflow-y:auto;">${escHtml(r.command_stdout)}</pre>`);
+    }
+    if (r.command_stderr) {
+        parts.push(`<h6 class="small text-uppercase text-danger">Error Output</h6>
+            <pre class="bg-black p-2 rounded border border-danger small font-monospace mb-3 text-danger" style="white-space:pre-wrap; max-height:150px; overflow-y:auto;">${escHtml(r.command_stderr)}</pre>`);
+    }
+
+    parts.push(`<h6 class="small text-uppercase text-muted">Detection</h6>`);
+    parts.push(`<div class="mb-2">${atomicValidationBadge(r.validation_status)}</div>`);
+    if (r.validated_alert_id) {
+        parts.push(`<div class="card bg-black border-secondary p-2 small">
+            <div><strong>${escHtml(r.alert_rule_title || 'Custom/YARA Rule')}</strong> <span class="badge bg-secondary ms-1">${escHtml(r.alert_severity || '')}</span></div>
+            <div class="text-muted">${escHtml(r.alert_timestamp || '')}</div>
+            <div class="mt-1">${escHtml(r.alert_message || '')}</div>
+        </div>`);
+    } else if (r.validation_status === 'not_detected') {
+        parts.push(`<div class="text-muted small">No alert tagged with ${escHtml(r.technique_id || 'this technique')} fired on ${escHtml(r.hostname)} within the validation window.</div>`);
+    }
+
+    document.getElementById('atomicRunDetailBody').innerHTML = parts.join('');
+    document.getElementById('atomicRunDetailFooter').innerHTML = r.has_cleanup
+        ? `<button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+           <button type="button" class="btn btn-outline-warning btn-sm" onclick="runAtomicCleanupFromDetail(${r.atomic_test_id}, '${escAttr(r.hostname)}')"><i class="fa-solid fa-broom me-1"></i>Run Cleanup</button>`
+        : `<button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>`;
+
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('atomicRunDetailModal')).show();
+}
+
+function runAtomicCleanupFromDetail(testId, hostname) {
+    fetch(`/api/atomic/tests/${testId}/cleanup`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({hostname})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (ok) toast(`Cleanup queued on ${hostname} -- check Response Actions (EDR) for output.`, 'success');
+        else toast(data.error || 'Failed to queue cleanup.', 'danger');
+    }).catch(err => toast('Error: ' + err, 'danger'));
 }
 
 // ---- Atomic Test import picker ----
