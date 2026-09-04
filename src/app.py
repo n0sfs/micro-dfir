@@ -2593,25 +2593,30 @@ def api_cve_records():
     conditions, params = [], []
     q = (request.args.get('q') or '').strip()
     if q:
-        conditions.append("(cve_id LIKE ? OR description LIKE ?)")
+        conditions.append("(cr.cve_id LIKE ? OR cr.description LIKE ?)")
         params.extend([f'%{q}%', f'%{q}%'])
     severity = (request.args.get('severity') or '').strip().upper()
     if severity:
-        conditions.append("UPPER(severity) = ?")
+        conditions.append("UPPER(cr.severity) = ?")
         params.append(severity)
     min_score = request.args.get('min_score', type=float)
     if min_score is not None:
-        conditions.append("cvss_score >= ?")
+        conditions.append("cr.cvss_score >= ?")
         params.append(min_score)
+    if request.args.get('kev_only') in ('1', 'true'):
+        conditions.append("kev.cve_id IS NOT NULL")
     where_sql = ('WHERE ' + ' AND '.join(conditions)) if conditions else ''
     try:
         limit = min(int(request.args.get('limit', 100)), 500)
     except (TypeError, ValueError):
         limit = 100
-    total = db.execute(f"SELECT COUNT(*) AS c FROM cve_records {where_sql}", params).fetchone()['c']
+    join_sql = "LEFT JOIN cve_kev kev ON kev.cve_id = cr.cve_id LEFT JOIN cve_epss epss ON epss.cve_id = cr.cve_id"
+    total = db.execute(f"SELECT COUNT(*) AS c FROM cve_records cr {join_sql} {where_sql}", params).fetchone()['c']
     rows = db.execute(
-        f"SELECT cve_id, description, cvss_score, severity, published_date, last_modified FROM cve_records "
-        f"{where_sql} ORDER BY published_date DESC LIMIT ?",
+        f"SELECT cr.cve_id, cr.description, cr.cvss_score, cr.severity, cr.published_date, cr.last_modified, "
+        f"kev.date_added AS kev_date_added, kev.due_date AS kev_due_date, kev.known_ransomware_use AS kev_ransomware_use, "
+        f"epss.epss_score, epss.percentile AS epss_percentile "
+        f"FROM cve_records cr {join_sql} {where_sql} ORDER BY (kev.cve_id IS NULL), cr.published_date DESC LIMIT ?",
         params + [limit]
     ).fetchall()
     return jsonify({'rows': [dict(r) for r in rows], 'total': total})
@@ -2642,6 +2647,140 @@ def api_cve_sync():
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('cve_feed_status', ?)", (json.dumps(status),))
     db.commit()
     log_audit('cve_feed_sync', 'cve_feed', None, f"status={status['last_status']}, count={status['last_count']}")
+    if status['last_status'] == 'error':
+        return jsonify({'error': status['last_error']}), 502
+    return jsonify(status)
+
+def _fetch_cisa_kev_data():
+    import urllib.request, json as _json
+    req = urllib.request.Request(
+        "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
+        headers={'User-Agent': 'micro-dfir/1.0'}
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return _json.loads(resp.read().decode('utf-8'))
+
+def _sync_cisa_kev(db):
+    # CISA's feed is the FULL current catalog every time (not an incremental delta) --
+    # a real vulnerability does eventually get REMOVED from KEV if CISA's own review
+    # decides it no longer belongs (rare, but real), so a plain delete-all-then-insert-
+    # all keeps this table an honest mirror of the current catalog rather than
+    # accumulating rows CISA itself no longer lists. ~1,700 rows -- cheap either way.
+    data = _fetch_cisa_kev_data()
+    vulns = data.get('vulnerabilities') or []
+    if not vulns:
+        raise ValueError("CISA KEV feed returned no vulnerabilities -- the download may be incomplete or the format has changed.")
+    db.execute("DELETE FROM cve_kev")
+    for v in vulns:
+        cve_id = v.get('cveID')
+        if not cve_id:
+            continue
+        db.execute(
+            "INSERT INTO cve_kev (cve_id, vendor_project, product, vulnerability_name, date_added, "
+            "short_description, required_action, due_date, known_ransomware_use, fetched_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+            (cve_id, v.get('vendorProject'), v.get('product'), v.get('vulnerabilityName'), v.get('dateAdded'),
+             v.get('shortDescription'), v.get('requiredAction'), v.get('dueDate'), v.get('knownRansomwareCampaignUse'))
+        )
+    db.commit()
+    return len(vulns)
+
+def _fetch_epss_batch(batch):
+    import urllib.request, json as _json
+    url = f"https://api.first.org/data/v1/epss?cve={','.join(batch)}"
+    req = urllib.request.Request(url, headers={'User-Agent': 'micro-dfir/1.0'})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = _json.loads(resp.read().decode('utf-8'))
+    return data.get('data') or []
+
+def _sync_epss(db):
+    # EPSS (FIRST.org) scores nearly every known CVE (200k+) -- pulling the whole
+    # universe would bloat this appliance's DB for no benefit. Instead this enriches
+    # only the CVEs already tracked in cve_records (NVD sync, or anything else that's
+    # ever written a row there), batched at 100 per request (the API's own default/max
+    # page size) since a single comma-joined query string covering thousands of CVE
+    # IDs would be an unreasonably large URL. Returns 0, honestly, if cve_records is
+    # empty -- there's nothing to enrich, not a feed failure.
+    cve_ids = [r['cve_id'] for r in db.execute("SELECT cve_id FROM cve_records").fetchall()]
+    if not cve_ids:
+        return 0
+    count = 0
+    for i in range(0, len(cve_ids), 100):
+        batch = cve_ids[i:i + 100]
+        for row in _fetch_epss_batch(batch):
+            cve_id = row.get('cve')
+            if not cve_id:
+                continue
+            try:
+                score = float(row.get('epss'))
+                percentile = float(row.get('percentile'))
+            except (TypeError, ValueError):
+                continue
+            db.execute(
+                "INSERT INTO cve_epss (cve_id, epss_score, percentile, fetched_at) VALUES (?, ?, ?, datetime('now')) "
+                "ON CONFLICT(cve_id) DO UPDATE SET epss_score=excluded.epss_score, percentile=excluded.percentile, fetched_at=excluded.fetched_at",
+                (cve_id, score, percentile)
+            )
+            count += 1
+    db.commit()
+    return count
+
+@app.route('/api/cve/kev/sync-status', methods=['GET'])
+@login_required
+def api_cve_kev_sync_status():
+    import json
+    db = get_db()
+    row = db.execute("SELECT value FROM settings WHERE key = 'cisa_kev_feed_status'").fetchone()
+    status = json.loads(row['value']) if row and row['value'] else {}
+    total = db.execute("SELECT COUNT(*) AS c FROM cve_kev").fetchone()['c']
+    return jsonify({**status, 'total_stored': total})
+
+@app.route('/api/cve/kev/sync', methods=['POST'])
+@login_required
+def api_cve_kev_sync():
+    import json
+    err = require_permission('threatintel.manage')
+    if err: return err
+    db = get_db()
+    now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        count = _sync_cisa_kev(db)
+        status = {'last_sync': now, 'last_count': count, 'last_status': 'success', 'last_error': None}
+    except Exception as e:
+        status = {'last_sync': now, 'last_count': 0, 'last_status': 'error', 'last_error': str(e)}
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('cisa_kev_feed_status', ?)", (json.dumps(status),))
+    db.commit()
+    log_audit('cisa_kev_sync', 'cve_feed', None, f"status={status['last_status']}, count={status['last_count']}")
+    if status['last_status'] == 'error':
+        return jsonify({'error': status['last_error']}), 502
+    return jsonify(status)
+
+@app.route('/api/cve/epss/sync-status', methods=['GET'])
+@login_required
+def api_cve_epss_sync_status():
+    import json
+    db = get_db()
+    row = db.execute("SELECT value FROM settings WHERE key = 'epss_feed_status'").fetchone()
+    status = json.loads(row['value']) if row and row['value'] else {}
+    total = db.execute("SELECT COUNT(*) AS c FROM cve_epss").fetchone()['c']
+    return jsonify({**status, 'total_stored': total})
+
+@app.route('/api/cve/epss/sync', methods=['POST'])
+@login_required
+def api_cve_epss_sync():
+    import json
+    err = require_permission('threatintel.manage')
+    if err: return err
+    db = get_db()
+    now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        count = _sync_epss(db)
+        status = {'last_sync': now, 'last_count': count, 'last_status': 'success', 'last_error': None}
+    except Exception as e:
+        status = {'last_sync': now, 'last_count': 0, 'last_status': 'error', 'last_error': str(e)}
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('epss_feed_status', ?)", (json.dumps(status),))
+    db.commit()
+    log_audit('epss_sync', 'cve_feed', None, f"status={status['last_status']}, count={status['last_count']}")
     if status['last_status'] == 'error':
         return jsonify({'error': status['last_error']}), 502
     return jsonify(status)
@@ -10215,6 +10354,37 @@ def migrate_cve_records():
     except Exception:
         pass
 
+def migrate_cve_kev_epss():
+    # Two small, separate tables (not columns bolted onto cve_records) -- KEV and EPSS
+    # are independently-sourced, independently-synced feeds that can carry a CVE
+    # cve_records has never heard of (KEV in particular routinely lists older CVEs well
+    # outside NVD's rolling 7-day sync window here) -- a foreign-key-shaped column would
+    # force a sync ordering dependency that doesn't actually exist.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS cve_kev (
+            cve_id TEXT PRIMARY KEY,
+            vendor_project TEXT,
+            product TEXT,
+            vulnerability_name TEXT,
+            date_added TEXT,
+            short_description TEXT,
+            required_action TEXT,
+            due_date TEXT,
+            known_ransomware_use TEXT,
+            fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS cve_epss (
+            cve_id TEXT PRIMARY KEY,
+            epss_score REAL,
+            percentile REAL,
+            fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_cve_affected_products():
     # Extracted from each CVE's CPE match criteria (cpe:2.3:a:vendor:product:version:...)
     # at sync time -- a separate table, not extra columns on cve_records, since one CVE
@@ -14074,6 +14244,7 @@ migrate_agent_versions()
 migrate_agent_tokens()
 migrate_agent_groups()
 migrate_cve_records()
+migrate_cve_kev_epss()
 migrate_cve_affected_products()
 migrate_cve_affected_products_ranges()
 migrate_audit_log()
