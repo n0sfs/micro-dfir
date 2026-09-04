@@ -497,7 +497,182 @@ def sync_yaraify(feed):
         except OSError:
             pass
 
-def sync_feed(feed):
+# YARA Forge (https://yarahq.github.io/, github.com/YARAHQ/yara-forge) publishes 3
+# curated packages (core/extended/full, increasing coverage/false-positive tradeoff) as
+# GitHub release assets -- one big pre-compiled .yar file per package, NOT one file per
+# rule like YARAify's zip. Confirmed live against a real release: each rule block
+# carries its own stable meta "id" (a UUID) and "modified" date, which is what makes
+# real new-vs-updated-vs-all sync tracking possible here.
+YARA_FORGE_RELEASES_API = "https://api.github.com/repos/YARAHQ/yara-forge/releases/latest"
+YARA_FORGE_TIERS = ('core', 'extended', 'full')
+_YARA_FORGE_RULE_NAME_RE = re.compile(r'^rule\s+(\S+)', re.MULTILINE)
+_YARA_FORGE_META_ID_RE = re.compile(r'^\s*id\s*=\s*"([^"]*)"', re.MULTILINE)
+_YARA_FORGE_META_MODIFIED_RE = re.compile(r'^\s*modified\s*=\s*"([^"]*)"', re.MULTILINE)
+_YARA_FORGE_SAFE_NAME_RE = re.compile(r'[^A-Za-z0-9_.-]')
+
+def _split_yara_rules(text):
+    """Splits one YARA source blob into individual top-level `rule NAME ... { ... }`
+    block strings. A plain brace-depth counter would still work correctly through
+    hex-pattern braces ({ AA BB ?? }, themselves always balanced) but NOT through a
+    stray unbalanced brace inside a quoted string or a comment -- so string/comment
+    content is tracked and skipped while counting depth. A block whose depth never
+    returns to 0 by EOF (a genuine parse failure, not expected in a real upstream
+    file) is silently dropped rather than swallowing the rest of the file."""
+    blocks = []
+    n = len(text)
+    for m in _YARA_FORGE_RULE_NAME_RE.finditer(text):
+        start = m.start()
+        brace_start = text.find('{', m.end())
+        if brace_start == -1:
+            continue
+        i = brace_start
+        depth = 0
+        in_string = in_line_comment = in_block_comment = False
+        while i < n:
+            c = text[i]
+            if in_line_comment:
+                if c == '\n':
+                    in_line_comment = False
+            elif in_block_comment:
+                if c == '*' and i + 1 < n and text[i + 1] == '/':
+                    in_block_comment = False
+                    i += 1
+            elif in_string:
+                if c == '\\':
+                    i += 1
+                elif c == '"':
+                    in_string = False
+            else:
+                if c == '"':
+                    in_string = True
+                elif c == '/' and i + 1 < n and text[i + 1] == '/':
+                    in_line_comment = True
+                    i += 1
+                elif c == '/' and i + 1 < n and text[i + 1] == '*':
+                    in_block_comment = True
+                    i += 1
+                elif c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        blocks.append(text[start:i + 1])
+                        break
+            i += 1
+    return blocks
+
+def _parse_yara_forge_rule_block(block):
+    name_m = _YARA_FORGE_RULE_NAME_RE.match(block)
+    if not name_m:
+        return None
+    id_m = _YARA_FORGE_META_ID_RE.search(block)
+    modified_m = _YARA_FORGE_META_MODIFIED_RE.search(block)
+    return {
+        'name': name_m.group(1),
+        'uid': id_m.group(1) if id_m else None,
+        'modified': modified_m.group(1) if modified_m else None,
+        'text': block,
+    }
+
+def _fetch_yara_forge_package(tier):
+    tier = tier if tier in YARA_FORGE_TIERS else 'core'
+    res = requests.get(YARA_FORGE_RELEASES_API, headers={'Accept': 'application/vnd.github+json'}, timeout=20)
+    res.raise_for_status()
+    release = res.json()
+    asset = next((a for a in release.get('assets', []) if a.get('name') == f'yara-forge-rules-{tier}.zip'), None)
+    if not asset:
+        raise ValueError(f"YARA Forge release '{release.get('tag_name', '?')}' has no '{tier}' package asset")
+    zres = requests.get(asset['browser_download_url'], timeout=120)
+    zres.raise_for_status()
+    fd, tmp_zip_path = tempfile.mkstemp(suffix=".zip")
+    os.close(fd)
+    try:
+        with open(tmp_zip_path, 'wb') as f:
+            f.write(zres.content)
+        with zipfile.ZipFile(tmp_zip_path) as zf:
+            yar_name = next((n for n in zf.namelist() if n.endswith('.yar')), None)
+            if not yar_name:
+                raise ValueError("YARA Forge package zip had no .yar file")
+            text = zf.read(yar_name).decode('utf-8', errors='replace')
+    finally:
+        try:
+            os.remove(tmp_zip_path)
+        except OSError:
+            pass
+    return text
+
+def sync_yara_forge(feed, mode='all'):
+    """Like sync_yaraify, writes rule files to disk rather than IOC rows -- but unlike
+    YARAify's already-one-file-per-rule zip, YARA Forge ships one combined .yar file per
+    package tier, so this splits it into individual rule files first. That per-rule
+    granularity is what makes real new/updated/all sync modes possible (tracked in
+    yara_forge_synced_rules, keyed by each rule's own stable meta "id"):
+      - 'all': full replace -- every current-release rule is (re)written, and any
+        previously-synced rule no longer present upstream is removed (mirrors
+        YARAify's atomic-swap-whole-directory behavior).
+      - 'new': only rules not already tracked for this feed are written; existing
+        rule files and tracking rows are left untouched.
+      - 'updated': only rules already tracked whose "modified" date changed are
+        rewritten; untracked and unchanged rules are left alone.
+    """
+    tier = feed['collection_id'] if feed['collection_id'] in YARA_FORGE_TIERS else 'core'
+    text = _fetch_yara_forge_package(tier)
+    parsed = {}
+    for block in _split_yara_rules(text):
+        r = _parse_yara_forge_rule_block(block)
+        if not r:
+            continue
+        key = r['uid'] or r['name']
+        parsed[key] = r  # last occurrence wins on a genuine duplicate key
+
+    conn = _connect()
+    existing = {row['rule_uid']: row['modified'] for row in conn.execute(
+        "SELECT rule_uid, modified FROM yara_forge_synced_rules WHERE feed_id = ? AND tier = ?", (feed['id'], tier)
+    ).fetchall()}
+
+    if mode == 'new':
+        to_write = {k: r for k, r in parsed.items() if k not in existing}
+    elif mode == 'updated':
+        to_write = {k: r for k, r in parsed.items() if k in existing and r['modified'] != existing[k]}
+    else:
+        to_write = parsed  # 'all' (and any unrecognized value, defaulting safely to a full sync)
+
+    tier_dir = os.path.join(YARA_RULES_DIR, "yara_forge_synced", tier)
+    os.makedirs(tier_dir, exist_ok=True)
+    written = 0
+    for r in to_write.values():
+        safe_name = _YARA_FORGE_SAFE_NAME_RE.sub('_', r['name'])[:200] or 'rule'
+        with open(os.path.join(tier_dir, f"{safe_name}.yar"), 'w', encoding='utf-8') as f:
+            f.write(r['text'])
+        conn.execute(
+            "INSERT OR REPLACE INTO yara_forge_synced_rules (feed_id, tier, rule_uid, rule_name, modified, filename, synced_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
+            (feed['id'], tier, r['uid'] or r['name'], r['name'], r['modified'], f"{safe_name}.yar")
+        )
+        written += 1
+
+    if mode not in ('new', 'updated'):
+        # 'all' mode: anything tracked from a prior sync that's no longer in this
+        # release has genuinely dropped out upstream -- remove its file and tracking row.
+        stale_keys = set(existing) - set(parsed)
+        if stale_keys:
+            placeholders = ','.join('?' for _ in stale_keys)
+            for row in conn.execute(
+                f"SELECT filename FROM yara_forge_synced_rules WHERE feed_id = ? AND tier = ? AND rule_uid IN ({placeholders})",
+                (feed['id'], tier, *stale_keys)
+            ).fetchall():
+                try:
+                    os.remove(os.path.join(tier_dir, row['filename']))
+                except OSError:
+                    pass
+            conn.execute(
+                f"DELETE FROM yara_forge_synced_rules WHERE feed_id = ? AND tier = ? AND rule_uid IN ({placeholders})",
+                (feed['id'], tier, *stale_keys)
+            )
+    conn.commit(); conn.close()
+    return written
+
+def sync_feed(feed, mode='all'):
     if feed["feed_type"] == "taxii":
         return sync_taxii(feed)
     elif feed["feed_type"] == "threatfox":
@@ -510,6 +685,8 @@ def sync_feed(feed):
         return sync_otx(feed)
     elif feed["feed_type"] == "yaraify":
         return sync_yaraify(feed)
+    elif feed["feed_type"] == "yara_forge":
+        return sync_yara_forge(feed, mode=mode)
     elif feed["feed_type"] == "misp":
         return sync_misp_feed(feed)
     elif feed["feed_type"] == "sslbl":
@@ -527,7 +704,7 @@ def sync_feed(feed):
         raise ValueError("CSV feeds can't be re-synced — upload a new CSV to refresh the list")
     raise ValueError(f"Unknown feed_type: {feed['feed_type']}")
 
-def sync_one(feed_id):
+def sync_one(feed_id, mode='all'):
     conn = _connect()
     feed = conn.execute("SELECT * FROM ti_feeds WHERE id = ?", (feed_id,)).fetchone()
     if not feed:
@@ -535,7 +712,7 @@ def sync_one(feed_id):
         return {"status": "error", "message": "Feed not found"}
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     try:
-        count = sync_feed(feed)
+        count = sync_feed(feed, mode=mode)
         conn.execute("UPDATE ti_feeds SET last_sync = ?, last_status = 'success', last_count = ? WHERE id = ?", (now, count, feed_id))
         conn.commit(); conn.close()
         print(f"[+] Synced feed '{feed['name']}': {count} indicators.")

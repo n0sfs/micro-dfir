@@ -244,7 +244,10 @@
                 <div class="card-header d-flex justify-content-between align-items-center">
                     <span><i class="fa-solid fa-user-ninja me-2"></i>Threat Actor / Malware Entities</span>
                     {% if has_permission('threatintel.manage') %}
-                    <button class="btn btn-primary btn-sm" onclick="openEntityModal()"><i class="fa-solid fa-plus me-1"></i> Add Entity</button>
+                    <div>
+                        <button class="btn btn-outline-secondary btn-sm me-1" onclick="openMitreEntityPickerModal()"><i class="fa-solid fa-cloud-arrow-down me-1"></i> Sync from MITRE ATT&CK...</button>
+                        <button class="btn btn-primary btn-sm" onclick="openEntityModal()"><i class="fa-solid fa-plus me-1"></i> Add Entity</button>
+                    </div>
                     {% endif %}
                 </div>
                 <div class="card-body">
@@ -653,6 +656,44 @@
   </div>
 </div>
 
+<!-- MITRE ATT&CK Groups/Software Import Picker Modal -->
+<div class="modal fade" id="mitreEntityPickerModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title"><i class="fa-solid fa-cloud-arrow-down me-2"></i>Sync Groups &amp; Software from MITRE ATT&CK</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="small text-muted mb-2">Pulls real intrusion-set (Group) and malware/tool (Software) profiles, with their known techniques, from MITRE's own <a href="https://github.com/mitre/cti" target="_blank" rel="noopener" class="text-muted">CTI repository</a> (~46MB) -- first load takes a little while, cached for an hour after that, shared across the appliance.</div>
+        <div class="d-flex flex-wrap gap-2 mb-2 align-items-center">
+            <input type="text" id="mitreEntityPickerSearch" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:260px;" placeholder="Search name or alias..." oninput="filterMitreEntityPicker()">
+            <select id="mitreEntityPickerTypeFilter" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:150px;" onchange="filterMitreEntityPicker()">
+                <option value="">All Types</option>
+                <option value="actor">Groups (actor)</option>
+                <option value="malware">Malware</option>
+                <option value="tool">Tools</option>
+            </select>
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleAllMitreEntityPicker(true)">Select Visible</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleAllMitreEntityPicker(false)">Clear</button>
+        </div>
+        <div id="mitreEntityPickerStatus" class="text-muted small mb-2">Loading...</div>
+        <div class="table-responsive" style="max-height:420px; overflow-y:auto;">
+            <table class="table table-dark table-sm mb-0">
+                <thead><tr><th style="width:30px;"></th><th>ATT&CK ID</th><th>Name</th><th>Type</th><th>Techniques</th><th></th></tr></thead>
+                <tbody id="mitreEntityPickerTableBody"></tbody>
+            </table>
+        </div>
+      </div>
+      <div class="modal-footer border-secondary">
+        <span id="mitreEntityPickerSelectedCount" class="text-muted small me-auto"></span>
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+        <button type="button" class="btn btn-primary btn-sm" onclick="importSelectedMitreEntities()"><i class="fa-solid fa-download me-1"></i>Import Selected</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- IOC Sweep Hit Detail Modal -->
 <!-- Warninglist Entries Modal -->
 <div class="modal fade" id="warninglistEntriesModal" tabindex="-1">
@@ -829,6 +870,7 @@
                 <option value="feodotracker">Feodo Tracker Botnet C2 IPs (public — API key optional)</option>
                 <option value="otx">AlienVault OTX Subscribed Pulses (API key required)</option>
                 <option value="yaraify">YARAify Bulk YARA Rule Pack (public — API key optional)</option>
+                <option value="yara_forge">YARA Forge / YARAHQ Curated Rule Packs (public)</option>
                 <option value="misp">MISP-format Feed (public — e.g. CIRCL OSINT)</option>
                 <option value="sslbl">SSLBL Malicious TLS Certificates (public)</option>
                 <option value="spamhaus_drop">Spamhaus DROP (hijacked netblocks, public)</option>
@@ -875,6 +917,17 @@
                 <label class="form-label" id="feedApiKeyLabel">API Key</label>
                 <input type="password" id="feedApiKey" class="form-control bg-dark text-light border-secondary" placeholder="Leave blank to keep existing">
                 <div id="apiKeyStatus" class="form-text text-muted"></div>
+            </div>
+        </div>
+        <div id="yaraForgeFields" style="display:none;">
+            <div class="mb-3">
+                <label class="form-label">Rule Package</label>
+                <select id="feedYaraForgePackage" class="form-select bg-dark text-light border-secondary">
+                    <option value="core">Core — highest-accuracy rules, minimal false positives</option>
+                    <option value="extended">Extended — adds threat-hunting coverage, more false positives</option>
+                    <option value="full">Full — broadest coverage, includes experimental rules</option>
+                </select>
+                <div class="form-text text-muted">Curated by <a href="https://yarahq.github.io/" target="_blank" rel="noopener" class="text-muted">YARAHQ / YARA Forge</a> from many public YARA repos. Sync mode (new / updated / all) is chosen per sync, from the Rule Sources table.</div>
             </div>
         </div>
         <div id="syncIntervalField" class="mb-3">
@@ -1329,6 +1382,7 @@ function toggleFeedTypeFields() {
     document.getElementById('feedUrl').placeholder = type === 'misp'
         ? 'https://www.circl.lu/doc/misp/feed-osint/' : 'https://taxii.example.com/api/v1/taxii2/feeds';
     document.getElementById('taxiiFields').style.display = (!isCsv && type === 'taxii') ? 'block' : 'none';
+    document.getElementById('yaraForgeFields').style.display = (!isCsv && type === 'yara_forge') ? 'block' : 'none';
     document.getElementById('apiKeyField').style.display = (!isCsv && FEED_TYPES_WITH_API_KEY.includes(type)) ? 'block' : 'none';
     document.getElementById('feedApiKeyLabel').innerText = FEED_TYPES_WITH_OPTIONAL_API_KEY.includes(type)
         ? 'API Key (optional — raises the rate limit)' : 'API Key';
@@ -1345,6 +1399,7 @@ function openFeedModal(feed, defaultType) {
     document.getElementById('feedType').value = feed ? feed.feed_type : (defaultType || 'threatfox');
     document.getElementById('feedUrl').value = feed ? (feed.discovery_url || '') : '';
     document.getElementById('feedCollection').value = feed ? (feed.collection_id || '') : '';
+    document.getElementById('feedYaraForgePackage').value = feed ? (feed.collection_id || 'core') : 'core';
     document.getElementById('feedUsername').value = feed ? (feed.username || '') : '';
     document.getElementById('feedPassword').value = '';
     document.getElementById('feedApiKey').value = '';
@@ -1386,7 +1441,7 @@ async function saveFeed() {
         name: document.getElementById('feedName').value.trim(),
         feed_type: feedType,
         discovery_url: document.getElementById('feedUrl').value.trim(),
-        collection_id: document.getElementById('feedCollection').value.trim(),
+        collection_id: feedType === 'yara_forge' ? document.getElementById('feedYaraForgePackage').value : document.getElementById('feedCollection').value.trim(),
         username: document.getElementById('feedUsername').value.trim(),
         password: document.getElementById('feedPassword').value,
         api_key: document.getElementById('feedApiKey').value.trim(),
@@ -1429,11 +1484,12 @@ async function toggleFeedEnabled(id, checked) {
     }
 }
 
-async function syncFeedNow(id, btn) {
+async function syncFeedNow(id, btn, mode) {
     const original = btn.innerHTML;
     btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
     try {
-        const res = await fetch(`/api/ti/feeds/${id}/sync`, {method: 'POST'});
+        const url = mode ? `/api/ti/feeds/${id}/sync?mode=${encodeURIComponent(mode)}` : `/api/ti/feeds/${id}/sync`;
+        const res = await fetch(url, {method: 'POST'});
         const data = await res.json();
         if (!res.ok) toast(data.message || 'Sync failed.', 'danger');
     } catch (e) {
@@ -1478,14 +1534,16 @@ function statusBadge(status) {
 
 const FEED_TYPE_LABELS = {
     threatfox: 'ThreatFox', taxii: 'STIX/TAXII 2.1', otx: 'AlienVault OTX',
-    urlhaus: 'URLhaus', feodotracker: 'Feodo Tracker', yaraify: 'YARAify', csv: 'CSV Upload',
+    urlhaus: 'URLhaus', feodotracker: 'Feodo Tracker', yaraify: 'YARAify', yara_forge: 'YARA Forge', csv: 'CSV Upload',
     misp: 'MISP-format Feed', sslbl: 'SSLBL Cert Blacklist', spamhaus_drop: 'Spamhaus DROP', tor_exit: 'Tor Exit List',
     malwarebazaar: 'MalwareBazaar'
 };
+const YARA_FORGE_PACKAGE_LABELS = {core: 'Core', extended: 'Extended', full: 'Full'};
 const FEED_TYPE_SOURCES = {
     threatfox: 'threatfox.abuse.ch (public)', urlhaus: 'urlhaus.abuse.ch (public)',
     feodotracker: 'feodotracker.abuse.ch (public)', otx: 'otx.alienvault.com (API key)',
     yaraify: 'yaraify.abuse.ch (public) — syncs YARA rule files, not IOCs',
+    yara_forge: 'yarahq.github.io (public) — syncs YARA rule files, not IOCs',
     csv: 'Uploaded file (one-time snapshot)',
     sslbl: 'sslbl.abuse.ch (public)', spamhaus_drop: 'spamhaus.org/drop (public)',
     tor_exit: 'check.torproject.org (public)', malwarebazaar: 'bazaar.abuse.ch (public) — recent malware samples'
@@ -1499,11 +1557,15 @@ function syncIntervalLabel(mins) {
 }
 
 function feedRowHtml(f, isAdmin) {
+    const isYaraForge = f.feed_type === 'yara_forge';
+    const sourceText = ['taxii', 'misp'].includes(f.feed_type) ? (f.discovery_url || '')
+        : isYaraForge ? `${FEED_TYPE_SOURCES.yara_forge} (${YARA_FORGE_PACKAGE_LABELS[f.collection_id] || 'Core'} package)`
+        : (FEED_TYPE_SOURCES[f.feed_type] || '');
     return `
                 <tr>
                     <td class="ps-3"><strong>${escHtml(f.name)}</strong></td>
                     <td><span class="badge bg-secondary">${escHtml(FEED_TYPE_LABELS[f.feed_type] || f.feed_type)}</span></td>
-                    <td class="text-muted small text-truncate" style="max-width:200px;">${escHtml(['taxii', 'misp'].includes(f.feed_type) ? (f.discovery_url || '') : (FEED_TYPE_SOURCES[f.feed_type] || ''))}</td>
+                    <td class="text-muted small text-truncate" style="max-width:200px;">${escHtml(sourceText)}</td>
                     <td>
                         <div class="form-check form-switch mb-0">
                             <input class="form-check-input" type="checkbox" ${f.enabled ? 'checked' : ''} ${isAdmin ? '' : 'disabled'} onchange="toggleFeedEnabled(${f.id}, this.checked)">
@@ -1512,10 +1574,18 @@ function feedRowHtml(f, isAdmin) {
                     <td>${statusBadge(f.last_status)}</td>
                     <td class="text-nowrap small">${escHtml(f.last_sync) || '—'}</td>
                     <td class="text-nowrap small">${syncIntervalLabel(f.sync_interval_minutes)}</td>
-                    <td>${f.feed_type === 'yaraify' ? `${f.last_count ?? 0} rule(s)` : (f.last_count ?? 0)}</td>
+                    <td>${(f.feed_type === 'yaraify' || isYaraForge) ? `${f.last_count ?? 0} rule(s)` : (f.last_count ?? 0)}</td>
                     <td class="text-nowrap">
                         ${isAdmin ? `
-                        ${f.feed_type !== 'csv' ? `
+                        ${isYaraForge ? `
+                        <select class="form-select form-select-sm bg-dark text-light border-secondary d-inline-block py-0 me-1" style="width:auto;" id="syncMode_${f.id}" title="What to sync">
+                            <option value="all">All (full resync)</option>
+                            <option value="new">New rules only</option>
+                            <option value="updated">Updated rules only</option>
+                        </select>
+                        <button class="btn btn-sm btn-outline-secondary py-0 px-2 me-1" title="Sync Now" onclick="syncFeedNow(${f.id}, this, document.getElementById('syncMode_${f.id}').value)"><i class="fa-solid fa-rotate"></i></button>
+                        <button class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="Edit" onclick='openFeedModal(${JSON.stringify(f).replace(/'/g, "&#39;")})'><i class="fa-solid fa-pen"></i></button>
+                        ` : f.feed_type !== 'csv' ? `
                         <button class="btn btn-sm btn-outline-secondary py-0 px-2 me-1" title="Sync Now" onclick="syncFeedNow(${f.id}, this)"><i class="fa-solid fa-rotate"></i></button>
                         <button class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="Edit" onclick='openFeedModal(${JSON.stringify(f).replace(/'/g, "&#39;")})'><i class="fa-solid fa-pen"></i></button>
                         ` : `
@@ -1528,9 +1598,10 @@ function feedRowHtml(f, isAdmin) {
     `;
 }
 
-// YARAify is a YARA rule sync, not an IOC feed -- it gets its own table on the YARA
+// YARAify/YARA Forge sync YARA rules, not IOCs -- they get their own table on the YARA
 // Scanning tab (renderRuleSourcesTable) instead of appearing in the IOC-centric Feed
 // Sources table here, even though both tables are driven by the same /api/ti/feeds data.
+const RULE_SOURCE_FEED_TYPES = ['yaraify', 'yara_forge'];
 function loadFeeds() {
     fetch('/api/ti/feeds')
         .then(r => {
@@ -1544,14 +1615,14 @@ function loadFeeds() {
             populateIocSourceSelect();
 
             const isAdmin = hasPermission('threatintel.manage');
-            const iocFeeds = feeds.filter(f => f.feed_type !== 'yaraify');
+            const iocFeeds = feeds.filter(f => !RULE_SOURCE_FEED_TYPES.includes(f.feed_type));
             const tbody = document.getElementById('feedsTableBody');
             if (iocFeeds.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-4">No threat feeds configured yet. Click "Add Feed" above to sync one.</td></tr>';
             } else {
                 tbody.innerHTML = iocFeeds.map(f => feedRowHtml(f, isAdmin)).join('');
             }
-            renderRuleSourcesTable(feeds.filter(f => f.feed_type === 'yaraify'), isAdmin);
+            renderRuleSourcesTable(feeds.filter(f => RULE_SOURCE_FEED_TYPES.includes(f.feed_type)), isAdmin);
         })
         .catch(err => {
             console.error('Error loading feeds:', err);
@@ -2910,6 +2981,93 @@ function importSelectedAtomicTests() {
             atomicPickerSelected.clear();
             loadAtomicTests();
             loadAtomicPickerData();
+        } else {
+            toast(data.error || 'Import failed.', 'danger');
+        }
+    }).catch(err => toast('Error: ' + err, 'danger'));
+}
+
+// ---- MITRE ATT&CK Groups/Software import picker ----
+let mitreEntityPickerCandidates = [];
+let mitreEntityPickerSelected = new Set(); // stix_id
+
+function openMitreEntityPickerModal() {
+    const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('mitreEntityPickerModal'));
+    modal.show();
+    if (mitreEntityPickerCandidates.length) { renderMitreEntityPicker(); return; }
+    loadMitreEntityPickerData();
+}
+
+function loadMitreEntityPickerData() {
+    document.getElementById('mitreEntityPickerStatus').innerText = 'Downloading and parsing the MITRE ATT&CK CTI bundle (~46MB) -- this can take a little while on a cold cache, faster once cached.';
+    document.getElementById('mitreEntityPickerTableBody').innerHTML = '';
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6 * 60 * 1000);
+    fetch('/api/ti/entities/import/mitre-attack/preview', {signal: controller.signal}).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        clearTimeout(timeoutId);
+        if (!ok) { document.getElementById('mitreEntityPickerStatus').innerText = data.error || 'Failed to load.'; return; }
+        mitreEntityPickerCandidates = data.entities || [];
+        document.getElementById('mitreEntityPickerStatus').innerText = `${mitreEntityPickerCandidates.length} entit${mitreEntityPickerCandidates.length === 1 ? 'y' : 'ies'} available.`;
+        renderMitreEntityPicker();
+    }).catch(err => {
+        clearTimeout(timeoutId);
+        const msg = err.name === 'AbortError' ? 'Timed out after 6 minutes -- check your connection to the appliance and try again.' : ('Error: ' + err);
+        document.getElementById('mitreEntityPickerStatus').innerText = msg;
+    });
+}
+
+function filterMitreEntityPicker() { renderMitreEntityPicker(); }
+
+function _mitreEntityPickerFiltered() {
+    const q = (document.getElementById('mitreEntityPickerSearch').value || '').toLowerCase();
+    const type = document.getElementById('mitreEntityPickerTypeFilter').value;
+    return mitreEntityPickerCandidates.filter(e => {
+        if (type && e.entity_type !== type) return false;
+        if (q && !e.name.toLowerCase().includes(q) && !(e.aliases || []).some(a => a.toLowerCase().includes(q))) return false;
+        return true;
+    });
+}
+
+function renderMitreEntityPicker() {
+    const filtered = _mitreEntityPickerFiltered();
+    const tbody = document.getElementById('mitreEntityPickerTableBody');
+    tbody.innerHTML = filtered.map(e => {
+        const checked = mitreEntityPickerSelected.has(e.stix_id);
+        return `<tr>
+            <td><input type="checkbox" class="form-check-input" ${e.already_imported ? 'disabled' : ''} ${checked ? 'checked' : ''} onchange="toggleMitreEntityPick('${escAttr(e.stix_id)}', this.checked)"></td>
+            <td class="text-nowrap"><span class="badge bg-secondary">${escHtml(e.attack_id)}</span></td>
+            <td>${escHtml(e.name)}${e.already_imported ? ' <span class="text-muted small">(already imported)</span>' : ''}${(e.aliases || []).length ? ` <span class="text-muted small">(${escHtml(e.aliases.slice(0, 3).join(', '))}${e.aliases.length > 3 ? ', ...' : ''})</span>` : ''}</td>
+            <td class="small text-muted text-capitalize">${escHtml(e.entity_type)}</td>
+            <td class="small text-muted">${(e.techniques || []).length}</td>
+            <td>${e.url ? `<a href="${escHtml(e.url)}" target="_blank" rel="noopener" class="small"><i class="fa-solid fa-arrow-up-right-from-square"></i></a>` : ''}</td>
+        </tr>`;
+    }).join('');
+    document.getElementById('mitreEntityPickerSelectedCount').innerText = `${mitreEntityPickerSelected.size} selected`;
+}
+
+function toggleMitreEntityPick(stixId, checked) {
+    if (checked) mitreEntityPickerSelected.add(stixId); else mitreEntityPickerSelected.delete(stixId);
+    document.getElementById('mitreEntityPickerSelectedCount').innerText = `${mitreEntityPickerSelected.size} selected`;
+}
+
+function toggleAllMitreEntityPicker(state) {
+    _mitreEntityPickerFiltered().filter(e => !e.already_imported).forEach(e => {
+        if (state) mitreEntityPickerSelected.add(e.stix_id); else mitreEntityPickerSelected.delete(e.stix_id);
+    });
+    renderMitreEntityPicker();
+}
+
+function importSelectedMitreEntities() {
+    if (!mitreEntityPickerSelected.size) { toast('Select at least one entity first.', 'danger'); return; }
+    const stix_ids = Array.from(mitreEntityPickerSelected);
+    fetch('/api/ti/entities/import/mitre-attack/selected', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({stix_ids})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (ok) {
+            toast(`Imported ${data.inserted} entit${data.inserted === 1 ? 'y' : 'ies'}${data.skipped ? `, ${data.skipped} skipped (already imported)` : ''}.`, 'success');
+            mitreEntityPickerSelected.clear();
+            loadEntities();
+            loadMitreEntityPickerData();
         } else {
             toast(data.error || 'Import failed.', 'danger');
         }
