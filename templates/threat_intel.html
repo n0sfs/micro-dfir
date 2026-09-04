@@ -406,15 +406,16 @@
                             <div class="mb-3">
                                 <input class="form-control bg-dark text-light border-secondary" type="file" name="scan_file" required>
                             </div>
-                            <div class="mb-3">
+                            <div class="row g-3 mb-3">
+                                <div class="col-lg-7">
                                 <label class="form-label text-info fw-bold">Active Rules ({{ yara_files|length }} loaded)</label>
-                                <div class="text-muted small mb-2"><i class="fa-solid fa-circle-info me-1"></i>Community rules from the <a href="https://github.com/Yara-Rules/rules" target="_blank" rel="noopener" class="text-muted">Yara-Rules/rules</a>, <a href="https://github.com/Neo23x0/signature-base" target="_blank" rel="noopener" class="text-muted">signature-base</a>, and <a href="https://yarahq.github.io/" target="_blank" rel="noopener" class="text-muted">YARA Forge</a> projects are organized by their own real category/package below. YARAify's bulk export has no folder taxonomy of its own, so those are grouped by each rule's submitting author instead (its most consistent per-rule metadata) — use the search box if a specific rule doesn't turn up where expected.</div>
+                                <div class="text-muted small mb-2"><i class="fa-solid fa-circle-info me-1"></i>Community rules from the <a href="https://github.com/Yara-Rules/rules" target="_blank" rel="noopener" class="text-muted">Yara-Rules/rules</a>, <a href="https://github.com/Neo23x0/signature-base" target="_blank" rel="noopener" class="text-muted">signature-base</a>, and <a href="https://yarahq.github.io/" target="_blank" rel="noopener" class="text-muted">YARA Forge</a> projects are organized by their own real category/package below. YARAify's bulk export has no folder taxonomy of its own, so those are grouped by each rule's submitting author instead (its most consistent per-rule metadata) — use the search box if a specific rule doesn't turn up where expected. Click a rule's name to preview its contents on the right; use the checkbox to include/exclude it from the scan.</div>
                                 <input type="text" id="yaraRuleSearch" class="form-control form-control-sm bg-dark text-light border-secondary mb-2" placeholder="Search rule names or descriptions..." oninput="filterYaraRules()">
                                 <div class="d-flex justify-content-between mb-2">
                                     <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAll(true)">Select All</button>
                                     <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAll(false)">Clear</button>
                                 </div>
-                                <div class="border border-secondary rounded p-2 bg-black" id="yaraRuleList" style="max-height: 300px; overflow-y: auto;">
+                                <div class="border border-secondary rounded p-2 bg-black" id="yaraRuleList" style="max-height: 400px; overflow-y: auto;">
                                     {% for category, files in yara_files_by_category.items()|sort %}
                                     <details class="mb-1 yara-cat-group">
                                         <summary class="text-uppercase text-muted small fw-bold mt-2 mb-1" style="cursor:pointer;">{{ category }} ({{ files|length }})</summary>
@@ -422,7 +423,7 @@
                                         {% for rf in files %}
                                         <div class="form-check yara-rule-row" data-search="{{ (rf.split('/')[-1] ~ ' ' ~ (yara_file_descriptions.get(rf) or ''))|lower }}">
                                             <input class="form-check-input rule-checkbox" type="checkbox" name="selected_rules" value="{{ rf }}" id="rule-{{ loop.index0 }}-{{ category }}" checked onchange="updateHuntStats()">
-                                            <label class="form-check-label text-light small" for="rule-{{ loop.index0 }}-{{ category }}"{% if yara_file_descriptions.get(rf) %} title="{{ yara_file_descriptions[rf] }}"{% endif %}>
+                                            <label class="form-check-label text-light small yara-rule-viewlabel" data-relpath="{{ rf }}" style="cursor:pointer;" onclick="viewYaraRule(this.dataset.relpath)"{% if yara_file_descriptions.get(rf) %} title="{{ yara_file_descriptions[rf] }}"{% endif %}>
                                                 {{ rf.split('/')[-1] }}{% if yara_file_descriptions.get(rf) %}<span class="text-muted"> — {{ yara_file_descriptions[rf] | truncate(70) }}</span>{% endif %}
                                             </label>
                                         </div>
@@ -432,6 +433,19 @@
                                     {% else %}
                                     <span class="text-muted small">No YARA rules found under rules/yara_imported.</span>
                                     {% endfor %}
+                                </div>
+                                </div>
+                                <div class="col-lg-5">
+                                <label class="form-label text-info fw-bold d-block">Rule Viewer</label>
+                                <div class="card bg-black border-secondary">
+                                    <div class="card-header bg-secondary text-white py-1 px-2 d-flex justify-content-between align-items-center">
+                                        <span class="small text-truncate" id="yaraViewerTitle"><i class="fa-solid fa-file-lines me-1"></i>No rule selected</span>
+                                        <button type="button" class="btn btn-sm btn-outline-light py-0 px-1" id="yaraViewerCopyBtn" style="display:none;" onclick="copyYaraViewerContent()" title="Copy raw rule text"><i class="fa-solid fa-copy"></i></button>
+                                    </div>
+                                    <div class="card-body p-2" style="max-height: 400px; overflow-y: auto;">
+                                        <div id="yaraViewerBody" class="text-muted small">Click a rule name on the left to preview its raw YARA source here.</div>
+                                    </div>
+                                </div>
                                 </div>
                             </div>
                             <button type="submit" class="btn btn-outline-info w-100"><i class="fa-solid fa-play"></i> Run Scan</button>
@@ -1080,6 +1094,38 @@ function filterYaraRules() {
         group.style.display = anyVisible ? '' : 'none';
         if (q) { if (anyVisible) group.open = true; } else { group.open = false; }
     });
+}
+
+let yaraViewerContent = '';
+function viewYaraRule(relpath) {
+    if (!relpath) return;
+    document.querySelectorAll('.yara-rule-viewlabel').forEach(el => {
+        el.classList.toggle('text-info', el.dataset.relpath === relpath);
+        el.classList.toggle('fw-bold', el.dataset.relpath === relpath);
+    });
+    const titleEl = document.getElementById('yaraViewerTitle');
+    const bodyEl = document.getElementById('yaraViewerBody');
+    const copyBtn = document.getElementById('yaraViewerCopyBtn');
+    titleEl.innerHTML = `<i class="fa-solid fa-file-lines me-1"></i>${escHtml(relpath.split('/').pop())}`;
+    bodyEl.innerHTML = '<div class="text-muted small">Loading...</div>';
+    copyBtn.style.display = 'none';
+    fetch('/api/yara/rule-content?path=' + encodeURIComponent(relpath))
+        .then(res => res.json().then(d => ({ ok: res.ok, d })))
+        .then(({ ok, d }) => {
+            if (!ok) {
+                bodyEl.innerHTML = `<div class="text-danger small">${escHtml(d.error || 'Failed to load rule.')}</div>`;
+                return;
+            }
+            yaraViewerContent = d.content || '';
+            bodyEl.innerHTML = `<pre class="text-light small mb-0" style="white-space:pre-wrap; word-break:break-word;">${escHtml(yaraViewerContent)}</pre>`;
+            copyBtn.style.display = '';
+        })
+        .catch(() => { bodyEl.innerHTML = '<div class="text-danger small">Network error loading rule.</div>'; });
+}
+
+function copyYaraViewerContent() {
+    if (!yaraViewerContent) return;
+    navigator.clipboard.writeText(yaraViewerContent).then(() => toast('Rule copied to clipboard.', 'success')).catch(() => toast('Could not copy to clipboard.', 'danger'));
 }
 
 // ---- YARA Scanning: File Scan vs IOC Hash Sweep mode ----
