@@ -10713,7 +10713,10 @@ def _fetch_atomic_test_files():
     t = tempfile.mkdtemp()
     zp = os.path.join(t, "atomics.zip")
     old_timeout = socket.getdefaulttimeout()
-    socket.setdefaulttimeout(120)  # a full-repo zip is much larger than a SigmaHQ pack
+    # Confirmed live: the real repo zip is ~126MB (includes payload binaries alongside
+    # the atomics/*.yaml files this app actually reads), dramatically larger than a
+    # SigmaHQ release pack -- 120s wasn't always enough headroom.
+    socket.setdefaulttimeout(300)
     try:
         req = urllib.request.Request(ATOMIC_RED_TEAM_ZIP_URL, headers={'User-Agent': 'micro-dfir'})
         with urllib.request.urlopen(req) as resp, open(zp, 'wb') as f:
@@ -10733,6 +10736,14 @@ def _fetch_atomic_test_files():
         for f in files:
             if f.lower().endswith(('.yaml', '.yml')):
                 relpaths.append(os.path.relpath(os.path.join(root, f), atomics_dir))
+    if not relpaths:
+        # The real repo always has hundreds of technique files -- zero found here means
+        # something is genuinely wrong (a truncated/corrupted download that still opened
+        # as a valid zip, or the extracted folder structure not matching what's expected),
+        # not a legitimate empty result. Surfacing this as a real error instead of quietly
+        # returning nothing is what stops a transient failure from looking like "the
+        # import worked and there's just nothing to show."
+        raise ValueError(f"Downloaded archive extracted, but no atomics/*.yaml files were found under {entries[0]}/atomics -- the download may be incomplete or the repo structure has changed.")
     return t, relpaths
 
 def _parse_atomic_test_file(relpath, raw_yaml):
@@ -10790,8 +10801,14 @@ def _list_atomic_tests_available():
                 continue
     finally:
         shutil.rmtree(t, ignore_errors=True)
-    _ATOMIC_LIST_CACHE['data'] = out
-    _ATOMIC_LIST_CACHE['time'] = now
+    # Only cache a genuinely non-empty result -- a fetch that succeeded structurally
+    # (no exception) but whose parse loop caught every single file's individual error
+    # would otherwise cache an empty result for the full TTL, making a transient/partial
+    # failure look identical to "the import worked, there's nothing here" for up to an
+    # hour instead of self-healing on the next request.
+    if out:
+        _ATOMIC_LIST_CACHE['data'] = out
+        _ATOMIC_LIST_CACHE['time'] = now
     return out
 
 def _fill_atomic_command_template(command, input_arguments):
