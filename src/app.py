@@ -11067,6 +11067,11 @@ def migrate_log_search_indexes():
             "CREATE INDEX IF NOT EXISTS idx_events_hostname ON events(hostname)",
             "CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity)",
             "CREATE INDEX IF NOT EXISTS idx_events_app_name ON events(app_name)",
+            # Supports the 'command' branch (agent_commands, see _COMMAND_BRANCH_SQL) --
+            # same per-branch timestamp-sort need every other branch already has an index
+            # for; idx_agent_commands_host_status (hostname, status) doesn't cover a plain
+            # queued_at sort/filter.
+            "CREATE INDEX IF NOT EXISTS idx_agent_commands_queued_at ON agent_commands(queued_at)",
         ):
             conn.execute(stmt)
         conn.commit()
@@ -12515,10 +12520,40 @@ _ANOMALY_BRANCH_SQL = """SELECT timestamp, severity, hostname as host, 'UEBA Ano
 FROM events
 WHERE app_name = 'duckdb_ueba'"""
 
+# The "Collect Evidence" stage of the UEBA Timeline's Signal -> Collect -> Reconstruct
+# -> Understand design (see project memory) -- EDR response/collection actions
+# (isolate_host, sweeps, collect_software_inventory, etc.) queued against a host,
+# stitched into the same per-entity investigation view as alerts/anomalies/logs.
+# queued_by (an admin username, or 'playbook'/'auto_revert'/'scheduled_sweep') maps to
+# username -- the closest analog to "the account associated with this event", same
+# overload the alert branch already does with a.username. assignee has no equivalent
+# concept for a command (no ongoing triage-ownership the way an alert has) and stays
+# NULL. severity is synthesized (not a real column on agent_commands) -- HIGH only
+# for a failed action, otherwise NULL (renders as an INFO badge), so a failed EDR
+# action stands out the same way a real high-severity event would.
+_COMMAND_BRANCH_SQL = """SELECT queued_at as timestamp,
+       CASE WHEN status = 'failed' THEN 'HIGH' ELSE NULL END as severity,
+       hostname as host, label as app, '-' as event_id, COALESCE(queued_by, '-') as username,
+       NULL as source_ip, NULL as destination_ip,
+       (CASE WHEN status = 'done' THEN 'Completed' WHEN status = 'failed' THEN 'Failed'
+             WHEN status = 'sent' THEN 'Sent to agent' ELSE 'Pending' END
+        || COALESCE(' (exit ' || exit_code || ')', '')
+        || COALESCE(' -- ' || substr(stdout, 1, 300), '')
+        || COALESCE(' -- ' || substr(stderr, 1, 300), '')) as message,
+       'command' as log_type,
+       NULL as rule_id, 'edr_command' as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
+       NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
+       NULL as occurrence_count, completed_at as last_seen, id as item_id, NULL as entity_type,
+       status as status, NULL as assignee, NULL as file_hash, NULL as query_name, 0 as is_atomic_test
+FROM agent_commands"""
+
 # (log_type, branch_sql) pairs, in the same branch order as the historical flat unions.
-LOG_TYPE_BRANCHES = [('log', _LOG_BRANCH_SQL), ('alert', _ALERT_BRANCH_SQL), ('anomaly', _ANOMALY_BRANCH_SQL)]
+LOG_TYPE_BRANCHES = [
+    ('log', _LOG_BRANCH_SQL), ('alert', _ALERT_BRANCH_SQL), ('anomaly', _ANOMALY_BRANCH_SQL), ('command', _COMMAND_BRANCH_SQL)
+]
 LOG_TYPE_BRANCHES_WITH_ARCHIVE = [
-    ('log', _LOG_BRANCH_SQL), ('log', _LOG_ARCHIVE_BRANCH_SQL), ('alert', _ALERT_BRANCH_SQL), ('anomaly', _ANOMALY_BRANCH_SQL)
+    ('log', _LOG_BRANCH_SQL), ('log', _LOG_ARCHIVE_BRANCH_SQL), ('alert', _ALERT_BRANCH_SQL),
+    ('anomaly', _ANOMALY_BRANCH_SQL), ('command', _COMMAND_BRANCH_SQL)
 ]
 
 UNIFIED_LOGS_SQL = "(\n" + "\nUNION ALL\n".join(sql for _, sql in LOG_TYPE_BRANCHES) + "\n) AS unified_logs"
@@ -12751,7 +12786,7 @@ def _build_log_filters(args):
             params.extend(apps)
 
     if active_types:
-        # log_type is one of 'log' / 'alert' / 'anomaly' -- both the UEBA Timeline tab's
+        # log_type is one of 'log' / 'alert' / 'anomaly' / 'command' -- both the UEBA Timeline tab's
         # event-type checkboxes and Log Search's own Type filter drive this, same IN-list
         # shape as the app/severity filters above. Kept even though api_logs_search/
         # export_logs_csv also skip excluded branches entirely (see LOG_TYPE_BRANCHES) --

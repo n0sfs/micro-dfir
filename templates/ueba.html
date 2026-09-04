@@ -50,6 +50,10 @@
                         <label class="form-check-label small" for="tlTypeAlert"><span class="badge bg-danger" style="font-size:.6rem;">Alert</span> Sigma &amp; Custom Alerts</label>
                     </div>
                     <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="tlTypeCommand" checked onchange="timelineLimit=300; loadTimeline();">
+                        <label class="form-check-label small" for="tlTypeCommand"><span class="badge bg-warning text-dark" style="font-size:.6rem;">EDR</span> EDR Actions</label>
+                    </div>
+                    <div class="form-check">
                         <input class="form-check-input" type="checkbox" id="tlTypeLog" onchange="timelineLimit=300; loadTimeline();">
                         <label class="form-check-label small" for="tlTypeLog"><span class="badge bg-secondary" style="font-size:.6rem;">Log</span> All Logs</label>
                     </div>
@@ -725,6 +729,7 @@ function getTimelineTypes() {
     const types = [];
     if (document.getElementById('tlTypeAnomaly').checked) types.push('anomaly');
     if (document.getElementById('tlTypeAlert').checked) types.push('alert');
+    if (document.getElementById('tlTypeCommand').checked) types.push('command');
     if (document.getElementById('tlTypeLog').checked) types.push('log');
     return types;
 }
@@ -732,6 +737,7 @@ function getTimelineTypes() {
 function timelineTypeBadge(t) {
     if (t === 'alert') return '<span class="badge bg-danger" style="font-size:.65rem;"><i class="fa-solid fa-triangle-exclamation me-1"></i>Alert</span>';
     if (t === 'anomaly') return '<span class="badge bg-info text-dark" style="font-size:.65rem;"><i class="fa-solid fa-user-secret me-1"></i>UEBA</span>';
+    if (t === 'command') return '<span class="badge bg-warning text-dark" style="font-size:.65rem;"><i class="fa-solid fa-terminal me-1"></i>EDR</span>';
     return '<span class="badge bg-secondary" style="font-size:.65rem;"><i class="fa-solid fa-file-lines me-1"></i>Log</span>';
 }
 
