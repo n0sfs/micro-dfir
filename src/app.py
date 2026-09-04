@@ -11499,7 +11499,13 @@ def _check_atomic_run_validation(db, run, window_minutes):
     ).fetchone()
     if match:
         return 'detected', match['id']
-    age_minutes = (datetime.now() - datetime.strptime(run['queued_at'], '%Y-%m-%d %H:%M:%S')).total_seconds() / 60
+    # queued_at came from SQLite's own CURRENT_TIMESTAMP (always UTC, same convention
+    # sigma_engine.py's datetime('now') alert inserts use -- confirmed no 'localtime'
+    # modifier anywhere in that path) -- must compare against utcnow(), not now(). Found
+    # live: on this EDT (UTC-4) host, now() trails the UTC-stored queued_at by ~4 hours
+    # immediately after a run is queued, making age_minutes negative and the run stuck
+    # reporting "pending" for hours even once the real validation window had elapsed.
+    age_minutes = (datetime.utcnow() - datetime.strptime(run['queued_at'], '%Y-%m-%d %H:%M:%S')).total_seconds() / 60
     if age_minutes >= window_minutes:
         return 'not_detected', None
     return 'pending', None
@@ -11510,11 +11516,18 @@ def api_atomic_runs_list():
     db = get_db()
     window = _validation_window_minutes(db)
     rows = db.execute(
-        "SELECT r.*, t.technique_id, t.technique_name, t.test_name, c.status as command_status, "
-        "c.exit_code, c.completed_at as command_completed_at "
+        "SELECT r.*, t.technique_id, t.technique_name, t.test_name, t.description as test_description, "
+        "t.elevation_required, t.executor_name, "
+        "(t.cleanup_command IS NOT NULL AND t.cleanup_command != '') as has_cleanup, "
+        "c.status as command_status, c.exit_code, c.completed_at as command_completed_at, "
+        "c.script as command_script, c.stdout as command_stdout, c.stderr as command_stderr, "
+        "a.timestamp as alert_timestamp, a.severity as alert_severity, a.message as alert_message, "
+        "COALESCE(s.title, a.rule_name, 'Custom/YARA Rule') as alert_rule_title "
         "FROM atomic_test_runs r "
         "JOIN atomic_tests t ON t.id = r.atomic_test_id "
         "LEFT JOIN agent_commands c ON c.id = r.agent_command_id "
+        "LEFT JOIN alerts a ON a.id = r.validated_alert_id "
+        "LEFT JOIN sigma_rules s ON s.id = a.rule_id "
         "ORDER BY r.id DESC LIMIT 200"
     ).fetchall()
     out = []
@@ -11527,6 +11540,22 @@ def api_atomic_runs_list():
                 updates.append((status, alert_id, r['id']))
             d['validation_status'] = status
             d['validated_alert_id'] = alert_id
+            if alert_id:
+                # The row's own alert_* columns above were joined against whatever
+                # validated_alert_id was already stored BEFORE this recomputation just
+                # found one -- a run that goes pending -> detected within this exact
+                # request would otherwise report the new alert's ID but still show
+                # NULL rule/severity/message alongside it. Re-fetch for just this case.
+                alert_row = db.execute(
+                    "SELECT a.timestamp, a.severity, a.message, COALESCE(s.title, a.rule_name, 'Custom/YARA Rule') as rule_title "
+                    "FROM alerts a LEFT JOIN sigma_rules s ON s.id = a.rule_id WHERE a.id = ?",
+                    (alert_id,)
+                ).fetchone()
+                if alert_row:
+                    d['alert_timestamp'] = alert_row['timestamp']
+                    d['alert_severity'] = alert_row['severity']
+                    d['alert_message'] = alert_row['message']
+                    d['alert_rule_title'] = alert_row['rule_title']
         out.append(d)
     for status, alert_id, run_id in updates:
         db.execute(
