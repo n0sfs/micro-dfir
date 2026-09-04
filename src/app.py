@@ -531,6 +531,28 @@ def _extract_auditd_exec_fields(message):
         out['command_line'] = cmd_line
     return out
 
+# Same access-mask set SigmaHQ's own "Suspicious LSASS Access" rules check --
+# real-world tooling (Mimikatz, ProcDump, comsvcs.dll MiniDump, etc.) opens a handle
+# to lsass.exe with one of these specific rights to read its memory. Used by
+# _is_suspicious_lsass_process_access() below, the inline heuristic engine's
+# replacement for a bare "lsass" substring match (see api_ingest()) -- that match
+# fired on literally any log mentioning lsass.exe, including its own completely
+# routine registry/service writes, which happen constantly and aren't dumping.
+_SUSPICIOUS_LSASS_ACCESS_MASKS = {
+    '0x1010', '0x1038', '0x1400', '0x1410', '0x1418', '0x1438', '0x143a',
+    '0x1fffff', '0x1f0fff', '0x1f1fff', '0x1f2fff', '0x1f3fff',
+}
+_GRANTED_ACCESS_RE = re.compile(r'grantedaccess:\s*(0x[0-9a-f]+)')
+
+def _is_suspicious_lsass_process_access(msg_lower):
+    # Real signature (Sysmon EventID 10, ProcessAccess): a process opened a handle to
+    # lsass.exe (TargetImage) with a known-suspicious GrantedAccess mask -- not just
+    # any message that happens to contain the word "lsass".
+    if 'targetimage' not in msg_lower or 'lsass.exe' not in msg_lower:
+        return False
+    m = _GRANTED_ACCESS_RE.search(msg_lower)
+    return bool(m and m.group(1) in _SUSPICIOUS_LSASS_ACCESS_MASKS)
+
 # Maps the same 5 target columns as _PROCESS_FIELD_PATTERNS above, but reads them from
 # a channel's raw event XML (captured when a channel has "Capture XML" enabled) instead
 # of guessing at the rendered Message text -- every <Data Name="..."> is explicit, so
@@ -686,7 +708,7 @@ def api_ingest():
             if fim_sha256 and fim_sha256 in _get_live_ioc_sha256_hashes(db):
                 triggered_rule = "Known-Bad Hash Matched via FIM"
                 alert_sev = "CRITICAL"
-            elif "mimikatz" in msg_lower or "lsass" in msg_lower:
+            elif "mimikatz" in msg_lower or (eid == '10' and _is_suspicious_lsass_process_access(msg_lower)):
                 triggered_rule = "Credential Dumping Activity"
                 alert_sev = "CRITICAL"
             elif "powershell" in msg_lower and ("-enc" in msg_lower or "-w hidden" in msg_lower):
