@@ -632,6 +632,31 @@ $apps = @($apps | Sort-Object name, version -Unique)
 [PSCustomObject]@{ count = $apps.Count; apps = $apps } | ConvertTo-Json -Compress -Depth 3
 """
 
+# Windows-only -- Get-ItemProperty over the Uninstall keys above never lists installed
+# KB hotfixes (they aren't registered as regular "programs" the way applications are),
+# so nothing in collect_software_inventory() covers OS-level patch state at all today.
+# Linux doesn't need an equivalent: collect_software_inventory_linux() already reads
+# every dpkg/rpm package's exact version, and a distro security patch IS a package
+# version bump -- that data already feeds the existing vuln-matching pipeline.
+#
+# Deliberately NOT claiming per-CVE-to-KB precision here (e.g. "CVE-2024-1234 is
+# unpatched because KB5028166 is missing") -- that mapping isn't derivable from a
+# general CVE/NVD feed at all; it lives only in Microsoft's own separate Security
+# Update Guide (MSRC) data, which isn't ingested anywhere in this app. What IS honest
+# and useful from this data alone: the full hotfix list, and how long it's been since
+# the most recent one landed (a stale "last patched" date is a real, meaningful signal
+# on its own, same "approximate, not the full licensed thing" posture sca_check()
+# already takes).
+def collect_installed_patches():
+    return r"""$hotfixes = Get-CimInstance Win32_QuickFixEngineering -ErrorAction SilentlyContinue |
+    Select-Object @{N='hotfix_id';E={$_.HotFixID}}, @{N='description';E={$_.Description}},
+        @{N='installed_on';E={ if ($_.InstalledOn) { $_.InstalledOn.ToString('yyyy-MM-dd') } else { '' } }}
+$hotfixes = @($hotfixes | Sort-Object installed_on -Descending)
+$os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue |
+    Select-Object Caption, Version, BuildNumber, OSArchitecture, @{N='LastBootUpTime';E={$_.LastBootUpTime.ToString('yyyy-MM-dd HH:mm:ss')}}
+[PSCustomObject]@{ count = $hotfixes.Count; hotfixes = $hotfixes; os = $os } | ConvertTo-Json -Compress -Depth 3
+"""
+
 # A small, hand-authored set of CIS-Benchmark-flavored hardening checks, not the real
 # CIS content itself (that's a licensed, hundreds-of-checks-per-OS policy library --
 # see the comment on migrate_cve_affected_products for the same "approximate, not the
@@ -850,6 +875,7 @@ WINDOWS_TEMPLATES = {
     'collect_recent_file_changes': (lambda params: _PROGRESS_SILENT + collect_recent_file_changes(), []),
     'collect_live_forensics': (lambda params: _PROGRESS_SILENT + collect_live_forensics(), []),
     'collect_software_inventory': (lambda params: _PROGRESS_SILENT + collect_software_inventory(), []),
+    'collect_installed_patches': (lambda params: _PROGRESS_SILENT + collect_installed_patches(), []),
     'sca_check': (lambda params: _PROGRESS_SILENT + sca_check(), []),
     'collect_network_connections': (lambda params: _PROGRESS_SILENT + collect_network_connections(), []),
     'collect_dns_arp': (lambda params: _PROGRESS_SILENT + collect_dns_arp(), []),

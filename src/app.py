@@ -2526,6 +2526,47 @@ def api_sca_results_for_host(hostname):
         'errored': result.get('errored', 0) if isinstance(result, dict) else 0,
     })
 
+@app.route('/api/agent/<hostname>/patches', methods=['GET'])
+@login_required
+def api_patches_for_host(hostname):
+    # Same shape as api_sca_results_for_host/api_vulnerabilities_for_host above -- latest
+    # agent_commands.stdout for collect_installed_patches (Windows-only, see
+    # agent_scripts.py). No per-CVE-to-KB matching here -- that mapping lives only in
+    # Microsoft's own MSRC Security Update Guide data, which isn't ingested anywhere in
+    # this app (a general CVE/NVD feed doesn't carry it). What this DOES give honestly:
+    # the full hotfix list, and a staleness signal from the most recent one's date.
+    err = require_permission('edr.command.basic')
+    if err: return err
+    db = get_db()
+    row = db.execute(
+        "SELECT stdout, completed_at FROM agent_commands "
+        "WHERE hostname = ? AND label = 'collect_installed_patches' AND status = 'done' AND stdout IS NOT NULL "
+        "ORDER BY id DESC LIMIT 1",
+        (hostname,)
+    ).fetchone()
+    if not row:
+        return jsonify({'error': 'No patch inventory has been collected for this host yet (Windows only). Run "Collect Installed Patches" first.'}), 404
+    try:
+        result = json.loads(row['stdout'])
+    except (ValueError, TypeError):
+        return jsonify({'error': 'The stored patch inventory is not valid JSON.'}), 500
+    hotfixes = result.get('hotfixes', []) if isinstance(result, dict) else []
+    if isinstance(hotfixes, dict):
+        hotfixes = [hotfixes]
+    days_since_last_patch = None
+    latest_date = next((h.get('installed_on') for h in hotfixes if h.get('installed_on')), None)
+    if latest_date:
+        try:
+            days_since_last_patch = (datetime.now() - datetime.strptime(latest_date, '%Y-%m-%d')).days
+        except (ValueError, TypeError):
+            pass
+    return jsonify({
+        'hostname': hostname, 'completed_at': row['completed_at'],
+        'hotfixes': hotfixes, 'count': result.get('count', len(hotfixes)) if isinstance(result, dict) else len(hotfixes),
+        'os': result.get('os') if isinstance(result, dict) else None,
+        'latest_patch_date': latest_date, 'days_since_last_patch': days_since_last_patch,
+    })
+
 def invalidate_rules_cache():
     global RULES_CACHE, TUNING_CACHE
     RULES_CACHE = None
@@ -5843,12 +5884,16 @@ def _run_scheduled_agent_sweeps(db):
         # fleet-assessed denominator (previously this was never auto-collected, only
         # queued by hand -- see /api/vulnerabilities/coverage).
         'collect_software_inventory': {},
+        # Windows-only (no entry in LINUX_TEMPLATES/MACOS_TEMPLATES) -- the per-host
+        # templates.get(label) lookup below already skips a host whose OS template dict
+        # doesn't have this label, same as every other OS-specific sweep label.
+        'collect_installed_patches': {},
     }
     # ioc_sweep/string_sweep/yara_condition_sweep are only worth queuing once something's
     # actually loaded to check against (empty params -> a guaranteed no-op command) --
-    # sca_check and collect_software_inventory have no such live-data dependency, so they
-    # must never be caught by that same "nothing loaded" skip.
-    ALWAYS_RUN_SWEEP_LABELS = {'sca_check', 'collect_software_inventory'}
+    # sca_check, collect_software_inventory, and collect_installed_patches have no such
+    # live-data dependency, so they must never be caught by that same "nothing loaded" skip.
+    ALWAYS_RUN_SWEEP_LABELS = {'sca_check', 'collect_software_inventory', 'collect_installed_patches'}
     for h in hosts:
         os_name = h['os'] if h['os'] in ('windows', 'linux', 'macos') else 'windows'
         templates = agent_scripts.TEMPLATES_BY_OS[os_name]
