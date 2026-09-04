@@ -3026,7 +3026,8 @@ function openAtomicRunDetailModal(runId) {
             <div class="mt-1">${escHtml(r.alert_message || '')}</div>
         </div>`);
     } else if (r.validation_status === 'not_detected') {
-        parts.push(`<div class="text-muted small">No alert tagged with ${escHtml(r.technique_id || 'this technique')} fired on ${escHtml(r.hostname)} within the validation window.</div>`);
+        parts.push(`<div class="text-muted small mb-2">No alert tagged with ${escHtml(r.technique_id || 'this technique')} fired on ${escHtml(r.hostname)} within the validation window.</div>`);
+        parts.push(atomicGapWorkflowHtml(r));
     }
 
     document.getElementById('atomicRunDetailBody').innerHTML = parts.join('');
@@ -3036,6 +3037,32 @@ function openAtomicRunDetailModal(runId) {
         : `<button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>`;
 
     bootstrap.Modal.getOrCreateInstance(document.getElementById('atomicRunDetailModal')).show();
+}
+
+// Distinguishes a real coverage gap (no rule tagged for this technique at all) from a
+// tuning problem (a rule exists but didn't fire) -- an analyst shouldn't have to go
+// check Detection Rules/Coverage separately to tell which situation they're in.
+function atomicGapWorkflowHtml(r) {
+    const rules = r.matching_rules || [];
+    const mitreTag = 'attack.' + (r.technique_id || '').toLowerCase();
+    const ruleTitle = `Detect: ${r.test_name || r.technique_id || 'Atomic Test'}`;
+    const ruleDescription = `Written after Atomic Testing ran "${r.test_name || ''}" (${r.technique_id || '?'}) on ${r.hostname} and no existing rule detected it.${r.command_script ? ' Command used: ' + r.command_script : ''}`;
+    const createUrl = '/siem?tab=rules&new_rule=1'
+        + '&title=' + encodeURIComponent(ruleTitle)
+        + '&mitre=' + encodeURIComponent(mitreTag)
+        + '&description=' + encodeURIComponent(ruleDescription);
+
+    let rulesHtml;
+    if (!rules.length) {
+        rulesHtml = `<div class="alert alert-warning small py-2 mb-2"><i class="fa-solid fa-triangle-exclamation me-1"></i>No detection rule is tagged for ${escHtml(r.technique_id || 'this technique')} at all -- a real coverage gap, not a tuning issue.</div>`;
+    } else {
+        rulesHtml = `<div class="small text-muted mb-1">${rules.length} rule(s) already tagged for ${escHtml(r.technique_id || 'this technique')}, but none fired -- worth checking their logic/log-source against what this test actually did:</div>
+            <ul class="small mb-2">${rules.map(rule => `<li><a href="/siem?tab=rules&rule_id=${rule.id}" target="_blank">${escHtml(rule.title)}</a>${rule.enabled ? '' : ' <span class="badge bg-secondary">Disabled</span>'}</li>`).join('')}</ul>`;
+    }
+    return `<div class="card bg-black border-secondary p-2">
+        ${rulesHtml}
+        <a href="${createUrl}" target="_blank" class="btn btn-sm btn-outline-primary"><i class="fa-solid fa-plus me-1"></i>Create Detection Rule</a>
+    </div>`;
 }
 
 function runAtomicCleanupFromDetail(testId, hostname) {

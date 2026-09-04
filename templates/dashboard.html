@@ -1261,6 +1261,15 @@ function typeBadge(t) {
     return '<span class="badge bg-secondary" title="Raw ingested log">Log</span>';
 }
 
+// Nothing else about an alert row distinguishes "fired from a deliberate Atomic Red
+// Team validation test" from "fired on real activity" -- see threat_intel.html's
+// Atomic Testing tab, which stamps alerts.is_atomic_test the moment a run's detection
+// check finds its match.
+function atomicTestBadge(log) {
+    if (log.type !== 'alert' || !log.is_atomic_test) return '';
+    return ' <span class="badge bg-warning text-dark" title="This alert fired from a deliberate Atomic Red Team test run, not observed real-world activity"><i class="fa-solid fa-flask-vial me-1"></i>Atomic Test</span>';
+}
+
 // Distinguishes *what kind* of alert/anomaly this is — a Sigma rule, a hand-written
 // custom rule, the legacy built-in keyword heuristics (rule_id is null for those, there's
 // no rule row to point to), or a UEBA anomaly, optionally sub-typed from its raw detail.
@@ -1330,7 +1339,7 @@ function showLogDetail(idx) {
         <dl class="row mb-2 small">
             <dt class="col-3">Time</dt><dd class="col-9">${escHtml(log.time)}${isRecurring ? ` <span class="text-muted">(first seen)</span>` : ''}</dd>
             ${isRecurring ? `<dt class="col-3">Last Seen</dt><dd class="col-9">${escHtml(log.last_seen)} <span class="badge bg-secondary">&times;${log.occurrence_count} occurrences</span></dd>` : ''}
-            <dt class="col-3">Type</dt><dd class="col-9">${typeBadge(log.type)}</dd>
+            <dt class="col-3">Type</dt><dd class="col-9">${typeBadge(log.type)}${atomicTestBadge(log)}</dd>
             ${srcLabel ? `<dt class="col-3">Detection Source</dt><dd class="col-9"><span class="badge bg-secondary">${escHtml(srcLabel)}</span></dd>` : ''}
             <dt class="col-3">Severity</dt><dd class="col-9"><span class="badge ${severityBadgeClass(log.severity)}">${escHtml((log.severity || '').toUpperCase())}</span></dd>
             <dt class="col-3">Host</dt><dd class="col-9">${highlightText(log.host, termsFor('host'))}</dd>
@@ -1813,7 +1822,7 @@ function renderCell(col, log, idx) {
     let rendered;
     switch (col) {
         case 'time': rendered = escHtml(log.time); break;
-        case 'type': rendered = typeBadge(log.type) + (log.occurrence_count > 1 ? ` <span class="badge bg-secondary" title="Same alert recurred ${log.occurrence_count} times since ${escHtml(log.time)}">&times;${log.occurrence_count}</span>` : '') + (log.type === 'alert' ? alertStatusBadge(log.status) : ''); break;
+        case 'type': rendered = typeBadge(log.type) + atomicTestBadge(log) + (log.occurrence_count > 1 ? ` <span class="badge bg-secondary" title="Same alert recurred ${log.occurrence_count} times since ${escHtml(log.time)}">&times;${log.occurrence_count}</span>` : '') + (log.type === 'alert' ? alertStatusBadge(log.status) : ''); break;
         case 'severity': rendered = `<span class="badge ${severityBadgeClass(log.severity)}">${escHtml((log.severity || '').toUpperCase())}</span>`; break;
         case 'source_ip': rendered = highlightText(log[col], termsFor(col)) + (log.country_name ? ` <span class="badge bg-secondary" title="${escHtml(log.country_code || '')}">${escHtml(log.country_name)}</span>` : ''); break;
         default: rendered = highlightText(log[col], termsFor(col));
@@ -3063,7 +3072,7 @@ function fmtDT(s) {
     return s ? s : '—';
 }
 
-async function openRuleModal(id) {
+async function openRuleModal(id, prefill) {
     initRuleModal();
     editingRuleId = id || null;
     editingRuleSource = null;
@@ -3129,6 +3138,11 @@ async function openRuleModal(id) {
     } else {
         document.getElementById('ruleModalTitle').innerText = 'New Custom Rule';
         resetBuilderState();
+        if (prefill) {
+            if (prefill.title) document.getElementById('bTitle').value = prefill.title;
+            if (prefill.mitre) document.getElementById('bMitre').value = prefill.mitre;
+            if (prefill.description) document.getElementById('bDescription').value = prefill.description;
+        }
         switchRuleTab('builder');
     }
     ruleModal.show();
@@ -3555,8 +3569,20 @@ function initRulesTab() {
     ld().then(() => {
         // Deep link from Log Search's alert detail modal ("View Rule" button) — opens
         // straight to the rule that fired instead of leaving the user to search for it.
-        const _deepLinkRuleId = new URLSearchParams(window.location.search).get('rule_id');
-        if (_deepLinkRuleId) openRuleModal(parseInt(_deepLinkRuleId, 10));
+        const _params = new URLSearchParams(window.location.search);
+        const _deepLinkRuleId = _params.get('rule_id');
+        if (_deepLinkRuleId) { openRuleModal(parseInt(_deepLinkRuleId, 10)); return; }
+        // Deep link from Atomic Testing's "Create Detection Rule" button (a Not
+        // Detected run) -- opens a fresh rule pre-filled with the technique/a
+        // suggested title+description, instead of leaving the analyst to re-type
+        // context they already had on the previous page.
+        if (_params.get('new_rule') === '1') {
+            openRuleModal(null, {
+                title: _params.get('title') || '',
+                mitre: _params.get('mitre') || '',
+                description: _params.get('description') || '',
+            });
+        }
     });
 }
 
