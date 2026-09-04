@@ -2671,6 +2671,7 @@ def _sync_cisa_kev(db):
     if not vulns:
         raise ValueError("CISA KEV feed returned no vulnerabilities -- the download may be incomplete or the format has changed.")
     db.execute("DELETE FROM cve_kev")
+    existing = {r['cve_id'] for r in db.execute("SELECT cve_id FROM cve_records").fetchall()}
     for v in vulns:
         cve_id = v.get('cveID')
         if not cve_id:
@@ -2682,6 +2683,20 @@ def _sync_cisa_kev(db):
             (cve_id, v.get('vendorProject'), v.get('product'), v.get('vulnerabilityName'), v.get('dateAdded'),
              v.get('shortDescription'), v.get('requiredAction'), v.get('dueDate'), v.get('knownRansomwareCampaignUse'))
         )
+        # NVD sync here is bounded to CVEs published in roughly the last week (see
+        # _sync_cve_feed) -- KEV lists confirmed-exploited CVEs from any time period, so
+        # most of them would otherwise never appear in cve_records at all and this whole
+        # feed would look nearly empty (confirmed live: 0 overlap against a real 400-CVE
+        # NVD window on first deploy). A stub row (no CVSS/severity -- KEV doesn't carry
+        # those, left NULL/honestly "unrated" rather than fabricated) makes every
+        # actively-exploited CVE browsable here even when NVD's own sync never touched it.
+        if cve_id not in existing:
+            db.execute(
+                "INSERT INTO cve_records (cve_id, description, cvss_score, severity, published_date, last_modified, fetched_at) "
+                "VALUES (?, ?, NULL, NULL, ?, NULL, datetime('now'))",
+                (cve_id, v.get('shortDescription') or v.get('vulnerabilityName') or '', v.get('dateAdded'))
+            )
+            existing.add(cve_id)
     db.commit()
     return len(vulns)
 
