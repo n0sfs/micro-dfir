@@ -8270,6 +8270,47 @@ def migrate_agent_offline_alerts():
     except Exception:
         pass
 
+def migrate_atomic_tests():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS atomic_tests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            technique_id TEXT NOT NULL,
+            technique_name TEXT,
+            test_name TEXT NOT NULL,
+            test_guid TEXT,
+            description TEXT,
+            supported_platforms TEXT,
+            executor_name TEXT,
+            command TEXT,
+            cleanup_command TEXT,
+            elevation_required INTEGER DEFAULT 0,
+            input_arguments TEXT,
+            source_path TEXT NOT NULL,
+            test_index INTEGER NOT NULL,
+            imported_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_atomic_tests_source ON atomic_tests(source_path, test_index)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_atomic_tests_technique ON atomic_tests(technique_id)')
+        conn.execute('''CREATE TABLE IF NOT EXISTS atomic_test_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            atomic_test_id INTEGER NOT NULL,
+            hostname TEXT NOT NULL,
+            agent_command_id INTEGER,
+            queued_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            queued_by TEXT,
+            validation_status TEXT NOT NULL DEFAULT 'pending',
+            validated_alert_id INTEGER,
+            validated_at DATETIME,
+            FOREIGN KEY(atomic_test_id) REFERENCES atomic_tests(id),
+            FOREIGN KEY(agent_command_id) REFERENCES agent_commands(id)
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_atomic_test_runs_test ON atomic_test_runs(atomic_test_id)')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_agent_polls_os_detail():
     # agent_config() is hit every ~8s per agent -- a one-time startup migration here
     # instead of an ALTER TABLE attempt inside that hot route on every request.
@@ -10621,6 +10662,380 @@ def _list_sigmahq_pack_rules(pack):
         shutil.rmtree(t, ignore_errors=True)
     _SIGMAHQ_PACK_LIST_CACHE[pack] = {'data': out, 'time': now}
     return out
+
+# ===== Atomic Red Team import + run + Sigma-detection validation loop =====
+#
+# Atomic Red Team (redcanaryco/atomic-red-team on GitHub) is a public library of small,
+# MITRE-technique-mapped attack-simulation scripts -- one YAML file per technique under
+# atomics/T####[.###]/T####[.###].yaml, each holding one or more discrete "atomic
+# tests" (a name/description, supported_platforms, an executor with a real command +
+# optional cleanup_command, and optional #{arg}-templated input_arguments).
+#
+# Import mirrors the SigmaHQ selective picker exactly (_fetch_sigmahq_pack_files/
+# _list_sigmahq_pack_rules/_ingest_sigma_candidate above) -- same "download a repo zip,
+# parse each file, let the user browse & select individual items" shape, just walking
+# atomics/ instead of rules/ and a flat GitHub branch zip instead of a tagged release
+# asset (Atomic Red Team doesn't publish curated release packages the way SigmaHQ does).
+#
+# Execution deliberately does NOT introduce any new agent-side capability. An atomic
+# test's command is just a script; _queue_agent_command(db, hostname, 'custom', {},
+# script, queued_by) (used today by the interactive console's arbitrary-command box) is
+# the exact same dispatch path -- the agent has no idea it's running an "atomic test"
+# versus any other ad-hoc script. This is what makes running one safe to build on: it
+# reuses the whole existing agent_commands queue/poll/result pipeline unchanged.
+#
+# The actual point of this feature is the validation loop: after a test runs on a host,
+# check whether alerts.mitre_techniques (already stamped on every fired alert -- see
+# _get_validated_technique_counts above) shows a same-technique, same-host detection
+# after the test's queued_at timestamp. That's real evidence a Sigma rule fired against
+# genuinely-simulated attacker behavior, not just "a rule tagged for this technique
+# exists" (which the MITRE Coverage tab already shows) or "some rule fired on real
+# traffic recently" (the existing 'validated' coverage tier, a related but distinct
+# signal -- this one is intentionally kept separate, not blended into that tier).
+
+ATOMIC_RED_TEAM_ZIP_URL = "https://github.com/redcanaryco/atomic-red-team/archive/refs/heads/master.zip"
+# alerts.mitre_techniques stores bare digit IDs with no "T" prefix (see
+# mitre_attack.py's _TECH_TAG_RE / techniques_for_tags -- "1003.001", not "T1003.001"),
+# while Atomic Red Team's attack_technique field always carries the "T" prefix. Every
+# comparison between the two must normalize one side to the other's convention.
+def _strip_technique_t_prefix(tid):
+    tid = (tid or '').strip().upper()
+    return tid[1:] if tid.startswith('T') else tid
+
+_ATOMIC_LIST_CACHE = {'data': None, 'time': 0}
+_ATOMIC_LIST_CACHE_TTL = 3600  # the repo changes far less often than SigmaHQ releases
+
+def _fetch_atomic_test_files():
+    """Downloads+extracts the atomic-red-team repo's default-branch zip to a fresh temp
+    dir; returns (tempdir, [relpath, ...]) for every atomics/T*/T*.yaml file. Caller owns
+    cleanup (shutil.rmtree(tempdir)) -- same contract as _fetch_sigmahq_pack_files."""
+    import urllib.request, zipfile, tempfile, socket
+    t = tempfile.mkdtemp()
+    zp = os.path.join(t, "atomics.zip")
+    old_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(120)  # a full-repo zip is much larger than a SigmaHQ pack
+    try:
+        req = urllib.request.Request(ATOMIC_RED_TEAM_ZIP_URL, headers={'User-Agent': 'micro-dfir'})
+        with urllib.request.urlopen(req) as resp, open(zp, 'wb') as f:
+            f.write(resp.read())
+    finally:
+        socket.setdefaulttimeout(old_timeout)
+    with zipfile.ZipFile(zp, 'r') as z:
+        z.extractall(t)
+    # GitHub's branch-zip wraps everything in "<repo>-<branch>/" -- find it rather than
+    # hardcoding the exact folder name, which shifts if the default branch is ever renamed.
+    entries = [e for e in os.listdir(t) if os.path.isdir(os.path.join(t, e)) and e != '__MACOSX']
+    if not entries:
+        raise ValueError("Downloaded archive had no top-level folder")
+    atomics_dir = os.path.join(t, entries[0], "atomics")
+    relpaths = []
+    for root, _, files in os.walk(atomics_dir):
+        for f in files:
+            if f.lower().endswith(('.yaml', '.yml')):
+                relpaths.append(os.path.relpath(os.path.join(root, f), atomics_dir))
+    return t, relpaths
+
+def _parse_atomic_test_file(relpath, raw_yaml):
+    """One technique YAML -> a list of individual atomic-test candidate dicts (a file can
+    define several atomic_tests entries for the same technique). Genuinely malformed YAML
+    is rare in the real upstream repo but not impossible -- handled here directly (not
+    just by the caller's own try/except) so this function is safe to call standalone."""
+    import yaml as _yaml
+    try:
+        parsed = _yaml.safe_load(raw_yaml)
+    except _yaml.YAMLError:
+        return []
+    if not isinstance(parsed, dict):
+        return []
+    technique_id = (parsed.get('attack_technique') or '').strip()
+    technique_name = (parsed.get('display_name') or '').strip()
+    out = []
+    for idx, test in enumerate(parsed.get('atomic_tests') or []):
+        if not isinstance(test, dict):
+            continue
+        executor = test.get('executor') or {}
+        out.append({
+            'source_path': relpath,
+            'test_index': idx,
+            'technique_id': technique_id,
+            'technique_name': technique_name,
+            'test_name': (test.get('name') or '').strip(),
+            'test_guid': test.get('auto_generated_guid'),
+            'description': (test.get('description') or '').strip(),
+            'supported_platforms': test.get('supported_platforms') or [],
+            'executor_name': executor.get('name'),
+            'command': executor.get('command'),
+            'cleanup_command': executor.get('cleanup_command'),
+            'elevation_required': bool(executor.get('elevation_required')),
+            'input_arguments': test.get('input_arguments') or {},
+        })
+    return out
+
+def _list_atomic_tests_available():
+    """Downloads+parses every technique file into candidate dicts, TTL-cached the same
+    way _list_sigmahq_pack_rules is -- browse-only, no DB writes."""
+    import shutil, time as _time
+    now = _time.time()
+    if _ATOMIC_LIST_CACHE['data'] is not None and (now - _ATOMIC_LIST_CACHE['time']) < _ATOMIC_LIST_CACHE_TTL:
+        return _ATOMIC_LIST_CACHE['data']
+    t, relpaths = _fetch_atomic_test_files()
+    out = []
+    try:
+        for rp in relpaths:
+            try:
+                with open(os.path.join(t, 'atomics', rp), 'r', encoding='utf-8') as fh:
+                    raw = fh.read()
+                out.extend(_parse_atomic_test_file(rp, raw))
+            except Exception:
+                continue
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+    _ATOMIC_LIST_CACHE['data'] = out
+    _ATOMIC_LIST_CACHE['time'] = now
+    return out
+
+def _fill_atomic_command_template(command, input_arguments):
+    # Atomic Red Team's own templating syntax: #{arg_name}, resolved to each argument's
+    # documented default -- there's no per-run override UI in this pass (see the module
+    # docstring above), so every run uses the same sane defaults the tests ship with.
+    if not command:
+        return command
+    def _sub(m):
+        arg = input_arguments.get(m.group(1)) or {}
+        return str(arg.get('default', ''))
+    return re.sub(r'#\{(\w+)\}', _sub, command)
+
+def _build_atomic_run_script(test_row, phase='command'):
+    """test_row: a sqlite3.Row from atomic_tests. phase 'command' or 'cleanup'. Returns
+    the real script text to dispatch, or None if this test has no script for that phase
+    (a 'manual' executor, or a test with no cleanup_command)."""
+    executor = (test_row['executor_name'] or '').lower()
+    raw = test_row['command'] if phase == 'command' else test_row['cleanup_command']
+    if not raw or executor == 'manual':
+        return None
+    input_args = json.loads(test_row['input_arguments'] or '{}')
+    filled = _fill_atomic_command_template(raw, input_args)
+    if executor == 'command_prompt':
+        # Dispatch always runs through powershell -File (see run_remote_script in both
+        # Windows/Linux agents) -- piping the batch commands into cmd.exe's stdin lets
+        # cmd.exe interpret them natively (%VAR% expansion, batch control flow) instead
+        # of PowerShell mis-parsing genuine CMD syntax.
+        return "$cmdScript = @'\n" + filled + "\n'@\n$cmdScript | cmd.exe\n"
+    # powershell (Windows) and sh/bash (Linux) all match their agent's raw script
+    # execution as-is -- no wrapping needed.
+    return filled
+
+@app.route('/api/atomic/import/preview', methods=['GET'])
+@login_required
+def api_atomic_import_preview():
+    err = require_permission('rules.manage')
+    if err: return err
+    try:
+        candidates = _list_atomic_tests_available()
+    except Exception as e:
+        return jsonify({"error": f"Failed to list Atomic Red Team tests: {e}"}), 500
+    db = get_db()
+    imported = {(r['source_path'], r['test_index']) for r in db.execute(
+        "SELECT source_path, test_index FROM atomic_tests"
+    ).fetchall()}
+    technique_filter = (request.args.get('technique') or '').strip().upper()
+    platform_filter = (request.args.get('platform') or '').strip().lower()
+    q = (request.args.get('q') or '').strip().lower()
+    out = []
+    for c in candidates:
+        if technique_filter and technique_filter not in (c['technique_id'] or '').upper():
+            continue
+        if platform_filter and platform_filter not in [p.lower() for p in c['supported_platforms']]:
+            continue
+        if q and q not in c['test_name'].lower() and q not in (c['technique_id'] or '').lower():
+            continue
+        row = dict(c)
+        row['test_index'] = c['test_index']
+        row['already_imported'] = (c['source_path'], c['test_index']) in imported
+        row['runnable'] = (c['executor_name'] or '').lower() != 'manual'
+        out.append(row)
+    return jsonify({"count": len(out), "tests": out})
+
+@app.route('/api/atomic/import/selected', methods=['POST'])
+@login_required
+def api_atomic_import_selected():
+    err = require_permission('rules.manage')
+    if err: return err
+    data = request.json or {}
+    selections = data.get('tests')
+    if not isinstance(selections, list) or not selections:
+        return jsonify({"error": "No tests selected."}), 400
+    try:
+        candidates = _list_atomic_tests_available()
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch Atomic Red Team tests: {e}"}), 500
+    by_key = {(c['source_path'], c['test_index']): c for c in candidates}
+    db = get_db()
+    inserted, skipped = 0, 0
+    for sel in selections:
+        key = (sel.get('source_path'), sel.get('test_index'))
+        c = by_key.get(key)
+        if not c:
+            skipped += 1
+            continue
+        existing = db.execute(
+            "SELECT id FROM atomic_tests WHERE source_path = ? AND test_index = ?", key
+        ).fetchone()
+        if existing:
+            skipped += 1
+            continue
+        db.execute(
+            "INSERT INTO atomic_tests (technique_id, technique_name, test_name, test_guid, description, "
+            "supported_platforms, executor_name, command, cleanup_command, elevation_required, "
+            "input_arguments, source_path, test_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (c['technique_id'], c['technique_name'], c['test_name'], c['test_guid'], c['description'],
+             json.dumps(c['supported_platforms']), c['executor_name'], c['command'], c['cleanup_command'],
+             1 if c['elevation_required'] else 0, json.dumps(c['input_arguments']), c['source_path'], c['test_index'])
+        )
+        inserted += 1
+    db.commit()
+    log_audit('atomic_test_import', 'atomic_test', None, f"inserted={inserted}, skipped={skipped}")
+    return jsonify({"status": "success", "inserted": inserted, "skipped": skipped})
+
+@app.route('/api/atomic/tests', methods=['GET'])
+@login_required
+def api_atomic_tests_list():
+    db = get_db()
+    rows = db.execute("SELECT * FROM atomic_tests ORDER BY technique_id, test_index").fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d['supported_platforms'] = json.loads(d['supported_platforms'] or '[]')
+        d['input_arguments'] = json.loads(d['input_arguments'] or '{}')
+        out.append(d)
+    return jsonify(out)
+
+@app.route('/api/atomic/tests/<int:test_id>', methods=['DELETE'])
+@login_required
+def api_atomic_test_delete(test_id):
+    err = require_permission('rules.manage')
+    if err: return err
+    db = get_db()
+    row = db.execute("SELECT test_name FROM atomic_tests WHERE id = ?", (test_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+    db.execute("DELETE FROM atomic_tests WHERE id = ?", (test_id,))
+    db.commit()
+    log_audit('atomic_test_delete', 'atomic_test', row['test_name'])
+    return jsonify({"ok": 1})
+
+def _validation_window_minutes(db):
+    row = db.execute("SELECT value FROM settings WHERE key = 'atomic_validation_window_minutes'").fetchone()
+    try:
+        return int(row['value']) if row and row['value'] else 15
+    except (TypeError, ValueError):
+        return 15
+
+@app.route('/api/atomic/tests/<int:test_id>/run', methods=['POST'])
+@login_required
+def api_atomic_test_run(test_id):
+    err = require_permission('edr.command.advanced')
+    if err: return err
+    data = request.json or {}
+    hostname = (data.get('hostname') or '').strip()
+    if not hostname:
+        return jsonify({"error": "hostname is required"}), 400
+    db = get_db()
+    test_row = db.execute("SELECT * FROM atomic_tests WHERE id = ?", (test_id,)).fetchone()
+    if not test_row:
+        return jsonify({"error": "Atomic test not found"}), 404
+    host_os = _get_host_os(db, hostname)
+    supported = json.loads(test_row['supported_platforms'] or '[]')
+    if supported and host_os not in [p.lower() for p in supported]:
+        return jsonify({"error": f"This test targets {', '.join(supported)}, not {host_os}."}), 400
+    script = _build_atomic_run_script(test_row, phase='command')
+    if not script:
+        return jsonify({"error": "This test has no automatable command (manual executor)."}), 400
+    cmd_id, cmd_err = _queue_agent_command(db, hostname, 'custom', {}, script, current_user.username)
+    if cmd_err:
+        return jsonify({"error": cmd_err}), 400
+    cur = db.execute(
+        "INSERT INTO atomic_test_runs (atomic_test_id, hostname, agent_command_id, queued_by) VALUES (?, ?, ?, ?)",
+        (test_id, hostname, cmd_id, current_user.username)
+    )
+    db.commit()
+    log_audit('atomic_test_run', 'atomic_test', test_row['test_name'], f"host={hostname}")
+    return jsonify({"status": "success", "run_id": cur.lastrowid, "agent_command_id": cmd_id})
+
+@app.route('/api/atomic/tests/<int:test_id>/cleanup', methods=['POST'])
+@login_required
+def api_atomic_test_cleanup(test_id):
+    err = require_permission('edr.command.advanced')
+    if err: return err
+    data = request.json or {}
+    hostname = (data.get('hostname') or '').strip()
+    if not hostname:
+        return jsonify({"error": "hostname is required"}), 400
+    db = get_db()
+    test_row = db.execute("SELECT * FROM atomic_tests WHERE id = ?", (test_id,)).fetchone()
+    if not test_row:
+        return jsonify({"error": "Atomic test not found"}), 404
+    script = _build_atomic_run_script(test_row, phase='cleanup')
+    if not script:
+        return jsonify({"error": "This test has no cleanup_command."}), 400
+    cmd_id, cmd_err = _queue_agent_command(db, hostname, 'custom', {}, script, current_user.username)
+    if cmd_err:
+        return jsonify({"error": cmd_err}), 400
+    db.commit()
+    log_audit('atomic_test_cleanup', 'atomic_test', test_row['test_name'], f"host={hostname}")
+    return jsonify({"status": "success", "agent_command_id": cmd_id})
+
+def _check_atomic_run_validation(db, run, window_minutes):
+    """Returns (status, alert_id_or_None) for one atomic_test_runs row: 'detected' if a
+    same-host alert tagged with the run's technique fired after queued_at, 'not_detected'
+    if the validation window has elapsed with no match, 'pending' otherwise."""
+    technique_id = _strip_technique_t_prefix(run['technique_id'])
+    if not technique_id:
+        return 'not_detected', None  # nothing to match against -- can't validate this test at all
+    match = db.execute(
+        "SELECT id FROM alerts WHERE host = ? AND COALESCE(last_seen, timestamp) >= ? "
+        "AND (',' || mitre_techniques || ',') LIKE ? ORDER BY id ASC LIMIT 1",
+        (run['hostname'], run['queued_at'], f"%,{technique_id},%")
+    ).fetchone()
+    if match:
+        return 'detected', match['id']
+    age_minutes = (datetime.now() - datetime.strptime(run['queued_at'], '%Y-%m-%d %H:%M:%S')).total_seconds() / 60
+    if age_minutes >= window_minutes:
+        return 'not_detected', None
+    return 'pending', None
+
+@app.route('/api/atomic/runs', methods=['GET'])
+@login_required
+def api_atomic_runs_list():
+    db = get_db()
+    window = _validation_window_minutes(db)
+    rows = db.execute(
+        "SELECT r.*, t.technique_id, t.technique_name, t.test_name, c.status as command_status, "
+        "c.exit_code, c.completed_at as command_completed_at "
+        "FROM atomic_test_runs r "
+        "JOIN atomic_tests t ON t.id = r.atomic_test_id "
+        "LEFT JOIN agent_commands c ON c.id = r.agent_command_id "
+        "ORDER BY r.id DESC LIMIT 200"
+    ).fetchall()
+    out = []
+    updates = []
+    for r in rows:
+        d = dict(r)
+        if d['validation_status'] == 'pending':
+            status, alert_id = _check_atomic_run_validation(db, r, window)
+            if status != 'pending':
+                updates.append((status, alert_id, r['id']))
+            d['validation_status'] = status
+            d['validated_alert_id'] = alert_id
+        out.append(d)
+    for status, alert_id, run_id in updates:
+        db.execute(
+            "UPDATE atomic_test_runs SET validation_status = ?, validated_alert_id = ?, validated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (status, alert_id, run_id)
+        )
+    if updates:
+        db.commit()
+    return jsonify(out)
 
 @app.route('/api/audit-log', methods=['GET'])
 @login_required
@@ -13353,6 +13768,7 @@ migrate_alert_escalations()
 migrate_case_playbook_outbox()
 migrate_agent_offline_alerts()
 migrate_agent_polls_os_detail()
+migrate_atomic_tests()
 migrate_log_source_silent_alerts()
 migrate_sigma_aggregation()
 migrate_sigma_rules_columns()

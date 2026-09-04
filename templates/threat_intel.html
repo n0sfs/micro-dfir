@@ -46,6 +46,7 @@
             <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'entities' else '' }}" id="tabBtnEntities" onclick="switchTiTab('entities')"><i class="fa-solid fa-user-ninja me-2"></i>Threat Entities</button></li>
             <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'hunt' else '' }}" id="tabBtnHunt" onclick="switchTiTab('hunt')"><i class="fa-solid fa-magnifying-glass me-2"></i>YARA Scanning</button></li>
             <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'vulns' else '' }}" id="tabBtnVulns" onclick="switchTiTab('vulns')"><i class="fa-solid fa-bug me-2"></i>Vulnerabilities</button></li>
+            <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'atomic' else '' }}" id="tabBtnAtomic" onclick="switchTiTab('atomic')"><i class="fa-solid fa-vial-circle-check me-2"></i>Atomic Testing</button></li>
         </ul>
     </div>
 
@@ -515,6 +516,116 @@
             </div>
         </div>
     </div>
+
+    <!-- Atomic Testing pane -->
+    <div id="paneAtomic" style="display:{{ 'block' if active_tab == 'atomic' else 'none' }};">
+        <div class="card-body">
+            <p class="text-muted small">Run real <a href="https://github.com/redcanaryco/atomic-red-team" target="_blank" rel="noopener" class="text-muted">Atomic Red Team</a> attack-simulation tests against a real endpoint, then automatically check whether a Sigma detection actually fired for that technique on that host afterward -- proof a rule works against genuinely-simulated behavior, not just that a rule tagged for the technique exists (see Coverage &gt; MITRE ATT&amp;CK) or fired on real traffic recently (the existing "Validated" coverage tier). These are real commands that can create real files/registry keys/processes -- review what a test does before running it, and use its cleanup command afterward.</p>
+
+            <div class="card bg-dark border-secondary mb-3">
+                <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                    <span><i class="fa-solid fa-flask-vial me-2"></i>Test Catalog</span>
+                    {% if has_permission('rules.manage') %}
+                    <button type="button" class="btn btn-sm btn-outline-info" onclick="openAtomicPickerModal()"><i class="fa-solid fa-list-check me-1"></i>Browse &amp; Import Tests...</button>
+                    {% endif %}
+                </div>
+                <div class="card-body">
+                    <div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
+                        <input type="text" id="atomicCatalogSearch" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:280px;" placeholder="Search technique or test name..." onkeyup="renderAtomicCatalogTable()">
+                        <select id="atomicCatalogPlatformFilter" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:150px;" onchange="renderAtomicCatalogTable()">
+                            <option value="">All Platforms</option>
+                            <option value="windows">Windows</option>
+                            <option value="linux">Linux</option>
+                            <option value="macos">macOS</option>
+                        </select>
+                        <span id="atomicCatalogCount" class="text-muted small ms-auto"></span>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-dark table-hover mb-0">
+                            <thead><tr><th>Technique</th><th>Test</th><th>Platforms</th><th>Executor</th><th></th></tr></thead>
+                            <tbody id="atomicCatalogTableBody"><tr><td colspan="5" class="text-center text-muted py-3">No tests imported yet -- click "Browse &amp; Import Tests..." above.</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card bg-dark border-secondary">
+                <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                    <span><i class="fa-solid fa-clipboard-check me-2"></i>Validation Results</span>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadAtomicRuns()"><i class="fa-solid fa-rotate me-1"></i>Refresh</button>
+                </div>
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-dark table-hover mb-0">
+                            <thead><tr><th>Run At</th><th>Host</th><th>Technique</th><th>Test</th><th>Command</th><th>Detection</th></tr></thead>
+                            <tbody id="atomicRunsTableBody"><tr><td colspan="6" class="text-center text-muted py-3">No tests run yet.</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Atomic Test Run Modal (pick a host) -->
+<div class="modal fade" id="atomicRunModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title" id="atomicRunModalTitle"><i class="fa-solid fa-play me-2"></i>Run Atomic Test</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div id="atomicRunModalDesc" class="small text-muted mb-3"></div>
+        <div class="alert alert-warning small py-2" id="atomicRunModalWarning"><i class="fa-solid fa-triangle-exclamation me-1"></i>This runs a real command on the target host. Review the command below before confirming.</div>
+        <pre id="atomicRunModalCommand" class="bg-black p-2 rounded border border-secondary small font-monospace" style="white-space:pre-wrap; max-height:180px; overflow-y:auto;"></pre>
+        <label class="form-label small text-muted mb-1 mt-2">Target Host</label>
+        <select id="atomicRunHostSelect" class="form-select form-select-sm bg-dark text-light border-secondary"></select>
+      </div>
+      <div class="modal-footer border-secondary">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-warning btn-sm" id="atomicRunConfirmBtn" onclick="confirmAtomicRun()"><i class="fa-solid fa-play me-1"></i>Run Test</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Atomic Test Import Picker Modal -->
+<div class="modal fade" id="atomicPickerModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title"><i class="fa-solid fa-list-check me-2"></i>Browse &amp; Import Atomic Red Team Tests</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="small text-muted mb-2">First load downloads and parses the full test repository -- this can take a little while. Cached for an hour after that.</div>
+        <div class="d-flex flex-wrap gap-2 mb-2 align-items-center">
+            <input type="text" id="atomicPickerSearch" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:260px;" placeholder="Search technique or test name..." oninput="filterAtomicPicker()">
+            <select id="atomicPickerPlatformFilter" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:150px;" onchange="filterAtomicPicker()">
+                <option value="">All Platforms</option>
+                <option value="windows">Windows</option>
+                <option value="linux">Linux</option>
+                <option value="macos">macOS</option>
+            </select>
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleAllAtomicPicker(true)">Select Visible</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleAllAtomicPicker(false)">Clear</button>
+        </div>
+        <div id="atomicPickerStatus" class="text-muted small mb-2">Loading...</div>
+        <div class="table-responsive" style="max-height:420px; overflow-y:auto;">
+            <table class="table table-dark table-sm mb-0">
+                <thead><tr><th style="width:30px;"></th><th>Technique</th><th>Test</th><th>Platforms</th><th>Executor</th></tr></thead>
+                <tbody id="atomicPickerTableBody"></tbody>
+            </table>
+        </div>
+      </div>
+      <div class="modal-footer border-secondary">
+        <span id="atomicPickerSelectedCount" class="text-muted small me-auto"></span>
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+        <button type="button" class="btn btn-primary btn-sm" onclick="importSelectedAtomicTests()"><i class="fa-solid fa-download me-1"></i>Import Selected</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- IOC Sweep Hit Detail Modal -->
@@ -773,7 +884,7 @@ const LAST_MATCHES_COUNT = {{ matches|length }};
 // ---- Tabs + shared stat row (repurposed per active tab, not two separate rows) ----
 let activeTiTab = '{{ "hunt" if active_tab == "hunt" else "iocs" }}';
 
-const TI_TAB_IDS = ['iocs', 'feeds', 'entities', 'hunt', 'vulns'];
+const TI_TAB_IDS = ['iocs', 'feeds', 'entities', 'hunt', 'vulns', 'atomic'];
 function switchTiTab(tab) {
     activeTiTab = tab;
     TI_TAB_IDS.forEach(t => {
@@ -1319,6 +1430,10 @@ function escHtml(str) {
     const d = document.createElement('div');
     d.innerText = str == null ? '' : String(str);
     return d.innerHTML;
+}
+
+function escAttr(s) {
+    return (s === null || s === undefined) ? '' : String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 // A loader's initial "Loading..." table state has no failure counterpart today -- a
@@ -2510,6 +2625,214 @@ function syncCveFeed() {
     });
 }
 
+// ---- Atomic Testing ----
+let atomicCatalog = [];
+let atomicPickerCandidates = [];
+let atomicPickerSelected = new Set(); // "source_path::test_index"
+let atomicRunPendingTest = null;
+
+function loadAtomicTests() {
+    return fetch('/api/atomic/tests').then(r => r.json()).then(data => {
+        atomicCatalog = Array.isArray(data) ? data : [];
+        renderAtomicCatalogTable();
+    }).catch(() => {});
+}
+
+function atomicPlatformBadges(platforms) {
+    return (platforms || []).map(p => {
+        const icon = p === 'linux' ? 'fa-linux' : p === 'macos' ? 'fa-apple' : 'fa-windows';
+        return `<i class="fa-brands ${icon} me-1" title="${escHtml(p)}"></i>`;
+    }).join('');
+}
+
+function renderAtomicCatalogTable() {
+    const q = (document.getElementById('atomicCatalogSearch').value || '').toLowerCase();
+    const platform = document.getElementById('atomicCatalogPlatformFilter').value;
+    const filtered = atomicCatalog.filter(t => {
+        if (platform && !(t.supported_platforms || []).map(p => p.toLowerCase()).includes(platform)) return false;
+        if (q && !t.test_name.toLowerCase().includes(q) && !(t.technique_id || '').toLowerCase().includes(q)) return false;
+        return true;
+    });
+    document.getElementById('atomicCatalogCount').innerText = `${filtered.length} of ${atomicCatalog.length} imported test(s)`;
+    const tbody = document.getElementById('atomicCatalogTableBody');
+    if (!filtered.length) {
+        tbody.innerHTML = `<tr><td colspan="5" class="text-center text-muted py-3">${atomicCatalog.length ? 'No tests match this filter.' : 'No tests imported yet -- click "Browse &amp; Import Tests..." above.'}</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = filtered.map(t => `
+        <tr>
+            <td class="text-nowrap"><span class="badge bg-secondary">${escHtml(t.technique_id || '?')}</span> <span class="text-muted small">${escHtml(t.technique_name || '')}</span></td>
+            <td>${escHtml(t.test_name)}</td>
+            <td class="text-nowrap">${atomicPlatformBadges(t.supported_platforms)}</td>
+            <td class="small text-muted">${escHtml(t.executor_name || '')}</td>
+            <td class="text-nowrap">
+                ${t.executor_name !== 'manual' ? `<button class="btn btn-sm btn-outline-warning py-0" onclick="openAtomicRunModal(${t.id})" title="Run this test"><i class="fa-solid fa-play"></i></button>` : '<span class="text-muted small">Manual only</span>'}
+                {% if has_permission('rules.manage') %}
+                <button class="btn btn-sm btn-outline-danger py-0" onclick="deleteAtomicTest(${t.id}, '${escAttr(t.test_name).replace(/'/g, "\\'")}')" title="Remove from catalog"><i class="fa-solid fa-trash"></i></button>
+                {% endif %}
+            </td>
+        </tr>`).join('');
+}
+
+function deleteAtomicTest(id, name) {
+    confirmDialog(`Remove "${name}" from the imported catalog? This does not affect any past runs.`, {title: 'Remove test', danger: true, confirmLabel: 'Remove'}).then(ok => {
+        if (!ok) return;
+        fetch(`/api/atomic/tests/${id}`, {method: 'DELETE'}).then(r => {
+            if (r.ok) { toast('Removed.', 'success'); loadAtomicTests(); }
+            else toast('Failed to remove.', 'danger');
+        }).catch(err => toast('Error: ' + err, 'danger'));
+    });
+}
+
+function openAtomicRunModal(testId) {
+    const t = atomicCatalog.find(x => x.id === testId);
+    if (!t) return;
+    atomicRunPendingTest = t;
+    document.getElementById('atomicRunModalTitle').innerHTML = `<i class="fa-solid fa-play me-2"></i>Run: ${escHtml(t.test_name)}`;
+    document.getElementById('atomicRunModalDesc').innerText = t.description || '';
+    document.getElementById('atomicRunModalCommand').innerText = t.command || '(no command)';
+    if (t.elevation_required) {
+        document.getElementById('atomicRunModalWarning').innerHTML = '<i class="fa-solid fa-triangle-exclamation me-1"></i>This runs a real command on the target host AND requires elevated privileges. Review the command below before confirming.';
+    }
+    const sel = document.getElementById('atomicRunHostSelect');
+    sel.innerHTML = '<option>Loading hosts...</option>';
+    const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('atomicRunModal'));
+    modal.show();
+    fetch('/api/agent/checkins').then(r => r.json()).then(hosts => {
+        const supported = (t.supported_platforms || []).map(p => p.toLowerCase());
+        const eligible = (hosts || []).filter(h => !supported.length || supported.includes(h.os));
+        if (!eligible.length) {
+            sel.innerHTML = `<option value="">No online hosts support ${escHtml((t.supported_platforms || []).join('/'))}</option>`;
+            return;
+        }
+        sel.innerHTML = eligible.map(h => `<option value="${escAttr(h.hostname)}">${escHtml(h.hostname)} (${escHtml(h.status)})</option>`).join('');
+    }).catch(() => { sel.innerHTML = '<option value="">Failed to load hosts</option>'; });
+}
+
+function confirmAtomicRun() {
+    const hostname = document.getElementById('atomicRunHostSelect').value;
+    if (!hostname || !atomicRunPendingTest) return;
+    const btn = document.getElementById('atomicRunConfirmBtn');
+    btn.disabled = true;
+    fetch(`/api/atomic/tests/${atomicRunPendingTest.id}/run`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({hostname})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (ok) {
+            toast(`Queued on ${hostname} -- check Response Actions (EDR) for output, and Validation Results below for the detection check.`, 'success');
+            bootstrap.Modal.getInstance(document.getElementById('atomicRunModal')).hide();
+            loadAtomicRuns();
+        } else {
+            toast(data.error || 'Failed to queue test.', 'danger');
+        }
+    }).catch(err => toast('Error: ' + err, 'danger')).finally(() => { btn.disabled = false; });
+}
+
+function atomicValidationBadge(status) {
+    if (status === 'detected') return '<span class="badge bg-success"><i class="fa-solid fa-check me-1"></i>Detected</span>';
+    if (status === 'not_detected') return '<span class="badge bg-danger"><i class="fa-solid fa-xmark me-1"></i>Not Detected</span>';
+    return '<span class="badge bg-secondary"><i class="fa-solid fa-clock me-1"></i>Pending</span>';
+}
+
+function loadAtomicRuns() {
+    fetch('/api/atomic/runs').then(r => r.json()).then(runs => {
+        const tbody = document.getElementById('atomicRunsTableBody');
+        if (!Array.isArray(runs) || !runs.length) {
+            tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">No tests run yet.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = runs.map(r => `
+            <tr>
+                <td class="text-nowrap small">${escHtml(r.queued_at)}</td>
+                <td class="text-nowrap">${escHtml(r.hostname)}</td>
+                <td class="text-nowrap"><span class="badge bg-secondary">${escHtml(r.technique_id || '?')}</span></td>
+                <td>${escHtml(r.test_name || '')}</td>
+                <td>${r.command_status === 'done' ? '<span class="badge bg-success">Done</span>' : r.command_status === 'error' ? '<span class="badge bg-danger">Error</span>' : `<span class="badge bg-secondary">${escHtml(r.command_status || 'pending')}</span>`}</td>
+                <td>${atomicValidationBadge(r.validation_status)}${r.validated_alert_id ? ` <a href="#" class="small" onclick="return false;" title="Alert #${r.validated_alert_id}"><i class="fa-solid fa-arrow-up-right-from-square"></i></a>` : ''}</td>
+            </tr>`).join('');
+    }).catch(() => {});
+}
+
+// ---- Atomic Test import picker ----
+function openAtomicPickerModal() {
+    const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('atomicPickerModal'));
+    modal.show();
+    if (atomicPickerCandidates.length) { renderAtomicPicker(); return; }
+    loadAtomicPickerData();
+}
+
+function loadAtomicPickerData() {
+    document.getElementById('atomicPickerStatus').innerText = 'Downloading and parsing the Atomic Red Team repository -- this can take up to a minute on first load...';
+    document.getElementById('atomicPickerTableBody').innerHTML = '';
+    fetch('/api/atomic/import/preview').then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (!ok) { document.getElementById('atomicPickerStatus').innerText = data.error || 'Failed to load.'; return; }
+        atomicPickerCandidates = data.tests || [];
+        document.getElementById('atomicPickerStatus').innerText = `${atomicPickerCandidates.length} test(s) available.`;
+        renderAtomicPicker();
+    }).catch(err => { document.getElementById('atomicPickerStatus').innerText = 'Error: ' + err; });
+}
+
+function atomicPickerKey(c) { return `${c.source_path}::${c.test_index}`; }
+
+function filterAtomicPicker() { renderAtomicPicker(); }
+
+function renderAtomicPicker() {
+    const q = (document.getElementById('atomicPickerSearch').value || '').toLowerCase();
+    const platform = document.getElementById('atomicPickerPlatformFilter').value;
+    const filtered = atomicPickerCandidates.filter(c => {
+        if (platform && !(c.supported_platforms || []).map(p => p.toLowerCase()).includes(platform)) return false;
+        if (q && !c.test_name.toLowerCase().includes(q) && !(c.technique_id || '').toLowerCase().includes(q)) return false;
+        return true;
+    });
+    const tbody = document.getElementById('atomicPickerTableBody');
+    tbody.innerHTML = filtered.map(c => {
+        const key = atomicPickerKey(c);
+        const checked = atomicPickerSelected.has(key);
+        return `<tr>
+            <td><input type="checkbox" class="form-check-input" ${c.already_imported ? 'disabled' : ''} ${checked ? 'checked' : ''} onchange="toggleAtomicPick('${escAttr(key)}', this.checked)"></td>
+            <td class="text-nowrap"><span class="badge bg-secondary">${escHtml(c.technique_id || '?')}</span></td>
+            <td>${escHtml(c.test_name)}${c.already_imported ? ' <span class="text-muted small">(already imported)</span>' : ''}</td>
+            <td class="text-nowrap">${atomicPlatformBadges(c.supported_platforms)}</td>
+            <td class="small text-muted">${escHtml(c.executor_name || '')}</td>
+        </tr>`;
+    }).join('');
+    document.getElementById('atomicPickerSelectedCount').innerText = `${atomicPickerSelected.size} selected`;
+}
+
+function toggleAtomicPick(key, checked) {
+    if (checked) atomicPickerSelected.add(key); else atomicPickerSelected.delete(key);
+    document.getElementById('atomicPickerSelectedCount').innerText = `${atomicPickerSelected.size} selected`;
+}
+
+function toggleAllAtomicPicker(state) {
+    const q = (document.getElementById('atomicPickerSearch').value || '').toLowerCase();
+    const platform = document.getElementById('atomicPickerPlatformFilter').value;
+    atomicPickerCandidates.filter(c => {
+        if (platform && !(c.supported_platforms || []).map(p => p.toLowerCase()).includes(platform)) return false;
+        if (q && !c.test_name.toLowerCase().includes(q) && !(c.technique_id || '').toLowerCase().includes(q)) return false;
+        return !c.already_imported;
+    }).forEach(c => { const key = atomicPickerKey(c); if (state) atomicPickerSelected.add(key); else atomicPickerSelected.delete(key); });
+    renderAtomicPicker();
+}
+
+function importSelectedAtomicTests() {
+    if (!atomicPickerSelected.size) { toast('Select at least one test first.', 'danger'); return; }
+    const byKey = {};
+    atomicPickerCandidates.forEach(c => { byKey[atomicPickerKey(c)] = c; });
+    const tests = Array.from(atomicPickerSelected).map(k => byKey[k]).filter(Boolean).map(c => ({source_path: c.source_path, test_index: c.test_index}));
+    fetch('/api/atomic/import/selected', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({tests})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (ok) {
+            toast(`Imported ${data.inserted} test(s)${data.skipped ? `, ${data.skipped} skipped (already imported)` : ''}.`, 'success');
+            atomicPickerSelected.clear();
+            loadAtomicTests();
+            loadAtomicPickerData();
+        } else {
+            toast(data.error || 'Import failed.', 'danger');
+        }
+    }).catch(err => toast('Error: ' + err, 'danger'));
+}
+
 updateHuntStats();
 loadFeeds();
 loadEntities();
@@ -2522,5 +2845,7 @@ initIocFilterDropdowns();
 checkEntityDeepLink();
 loadCveSyncStatus();
 loadCveRecords();
+loadAtomicTests();
+loadAtomicRuns();
 </script>
 {% endblock %}
