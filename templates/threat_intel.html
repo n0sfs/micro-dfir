@@ -407,8 +407,13 @@
                                 <input class="form-control bg-dark text-light border-secondary" type="file" name="scan_file" required>
                             </div>
                             <div class="row g-3 mb-3">
-                                <div class="col-lg-7">
-                                <label class="form-label text-info fw-bold">Active Rules ({{ yara_files|length }} loaded)</label>
+                                <div class="col-lg-7 d-flex flex-column">
+                                <div class="d-flex justify-content-between align-items-start">
+                                    <label class="form-label text-info fw-bold">Active Rules ({{ yara_files|length }} loaded)</label>
+                                    {% if has_permission('rules.manage') %}
+                                    <button type="button" class="btn btn-sm btn-outline-info" onclick="openYaraCustomRuleModal()"><i class="fa-solid fa-plus me-1"></i>Create Rule</button>
+                                    {% endif %}
+                                </div>
                                 <div class="text-muted small mb-2"><i class="fa-solid fa-circle-info me-1"></i>Community rules from the <a href="https://github.com/Yara-Rules/rules" target="_blank" rel="noopener" class="text-muted">Yara-Rules/rules</a>, <a href="https://github.com/Neo23x0/signature-base" target="_blank" rel="noopener" class="text-muted">signature-base</a>, and <a href="https://yarahq.github.io/" target="_blank" rel="noopener" class="text-muted">YARA Forge</a> projects are organized by their own real category/package below. YARAify's bulk export has no folder taxonomy of its own, so those are grouped by each rule's submitting author instead (its most consistent per-rule metadata) — use the search box if a specific rule doesn't turn up where expected. Click a rule's name to preview its contents on the right; use the checkbox to include/exclude it from the scan.</div>
                                 <div class="d-flex gap-2 mb-2">
                                     <input type="text" id="yaraRuleSearch" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Search rule names or descriptions..." oninput="filterYaraRules()">
@@ -419,21 +424,29 @@
                                         {% endfor %}
                                     </select>
                                 </div>
-                                <div class="d-flex justify-content-between mb-2">
-                                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAll(true)">Select All</button>
-                                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAll(false)">Clear</button>
+                                <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+                                    <div>
+                                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAll(true)">Select All</button>
+                                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAll(false)">Clear</button>
+                                    </div>
+                                    {% if has_permission('rules.manage') %}
+                                    <button type="button" class="btn btn-sm btn-outline-danger" id="yaraBulkDeleteBtn" onclick="bulkDeleteYaraRules()" disabled><i class="fa-solid fa-trash me-1"></i>Delete Selected (<span id="yaraBulkDeleteCount">0</span>)</button>
+                                    {% endif %}
                                 </div>
-                                <div class="border border-secondary rounded p-2 bg-black" id="yaraRuleList" style="max-height: 400px; overflow-y: auto;">
+                                <div class="border border-secondary rounded p-2 bg-black flex-grow-1" id="yaraRuleList" style="overflow-y: auto; min-height: 400px;">
                                     {% for category, files in yara_files_by_category.items()|sort %}
                                     <details class="mb-1 yara-cat-group" data-source="{{ yara_category_sources.get(category, 'Other') }}">
                                         <summary class="text-uppercase text-muted small fw-bold mt-2 mb-1" style="cursor:pointer;">{{ category }} ({{ files|length }})</summary>
                                         <div class="ms-3">
                                         {% for rf in files %}
-                                        <div class="form-check yara-rule-row" data-search="{{ (rf.split('/')[-1] ~ ' ' ~ (yara_file_descriptions.get(rf) or ''))|lower }}">
+                                        <div class="form-check yara-rule-row d-flex align-items-start" data-search="{{ (rf.split('/')[-1] ~ ' ' ~ (yara_file_descriptions.get(rf) or ''))|lower }}">
                                             <input class="form-check-input rule-checkbox" type="checkbox" name="selected_rules" value="{{ rf }}" id="rule-{{ loop.index0 }}-{{ category }}" checked onchange="updateHuntStats()">
-                                            <label class="form-check-label text-light small yara-rule-viewlabel" data-relpath="{{ rf }}" style="cursor:pointer;" onclick="viewYaraRule(this.dataset.relpath)"{% if yara_file_descriptions.get(rf) %} title="{{ yara_file_descriptions[rf] }}"{% endif %}>
+                                            <label class="form-check-label text-light small yara-rule-viewlabel flex-grow-1" data-relpath="{{ rf }}" style="cursor:pointer;" onclick="viewYaraRule(this.dataset.relpath)"{% if yara_file_descriptions.get(rf) %} title="{{ yara_file_descriptions[rf] }}"{% endif %}>
                                                 {{ rf.split('/')[-1] }}{% if yara_file_descriptions.get(rf) %}<span class="text-muted"> — {{ yara_file_descriptions[rf] | truncate(70) }}</span>{% endif %}
                                             </label>
+                                            {% if has_permission('rules.manage') %}
+                                            <input type="checkbox" class="ms-2 mt-1 yara-delete-select" data-relpath="{{ rf }}" title="Select for bulk delete" onchange="updateYaraBulkDeleteButton()">
+                                            {% endif %}
                                         </div>
                                         {% endfor %}
                                         </div>
@@ -443,9 +456,9 @@
                                     {% endfor %}
                                 </div>
                                 </div>
-                                <div class="col-lg-5">
+                                <div class="col-lg-5 d-flex flex-column">
                                 <label class="form-label text-info fw-bold d-block">Rule Viewer</label>
-                                <div class="card bg-black border-secondary">
+                                <div class="card bg-black border-secondary flex-grow-1 d-flex flex-column">
                                     <div class="card-header bg-secondary text-white py-1 px-2 d-flex justify-content-between align-items-center">
                                         <span class="small text-truncate" id="yaraViewerTitle"><i class="fa-solid fa-file-lines me-1"></i>No rule selected</span>
                                         <div>
@@ -455,7 +468,7 @@
                                             {% endif %}
                                         </div>
                                     </div>
-                                    <div class="card-body p-2" style="max-height: 400px; overflow-y: auto;">
+                                    <div class="card-body p-2 flex-grow-1" style="overflow-y: auto; min-height: 400px;">
                                         <div id="yaraViewerBody" class="text-muted small">Click a rule name on the left to preview its raw YARA source here.</div>
                                     </div>
                                 </div>
@@ -925,6 +938,60 @@
   </div>
 </div>
 
+<!-- Custom YARA Rule Builder Modal -->
+<div class="modal fade" id="yaraCustomRuleModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title"><i class="fa-solid fa-plus me-1"></i>Create Custom YARA Rule</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="row g-2 mb-2">
+            <div class="col-md-6">
+                <label class="form-label small text-muted mb-1">Rule Name</label>
+                <input type="text" id="customRuleName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. suspicious_dropper" oninput="updateCustomRulePreview()">
+            </div>
+            <div class="col-md-6">
+                <label class="form-label small text-muted mb-1">Author</label>
+                <input type="text" id="customRuleAuthor" class="form-control form-control-sm bg-dark text-light border-secondary" oninput="updateCustomRulePreview()">
+            </div>
+        </div>
+        <div class="mb-2">
+            <label class="form-label small text-muted mb-1">Description</label>
+            <input type="text" id="customRuleDescription" class="form-control form-control-sm bg-dark text-light border-secondary" oninput="updateCustomRulePreview()">
+        </div>
+        <div class="mb-3">
+            <label class="form-label small text-muted mb-1">Reference (optional)</label>
+            <input type="text" id="customRuleReference" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. a case ID, ticket, or CTI report link" oninput="updateCustomRulePreview()">
+        </div>
+        <div class="d-flex justify-content-between align-items-center mb-1">
+            <label class="form-label small text-muted mb-0">Strings</label>
+            <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="addCustomRuleString()"><i class="fa-solid fa-plus"></i> Add String</button>
+        </div>
+        <div id="customRuleStringsList" class="mb-3"></div>
+        <div class="mb-3">
+            <label class="form-label small text-muted mb-1">Condition</label>
+            <select id="customRuleConditionMode" class="form-select form-select-sm bg-dark text-light border-secondary mb-2" onchange="toggleCustomRuleConditionMode()">
+                <option value="any">Any of the strings above</option>
+                <option value="all">All of the strings above</option>
+                <option value="custom">Custom expression</option>
+            </select>
+            <div id="customRuleConditionCustomWrap" style="display:none;">
+                <input type="text" id="customRuleConditionCustom" class="form-control form-control-sm bg-dark text-light border-secondary font-monospace" placeholder="e.g. $s1 and $s2 or filesize &lt; 100KB" oninput="updateCustomRulePreview()">
+            </div>
+        </div>
+        <div class="mb-2">
+            <label class="form-label small text-muted mb-1">Preview</label>
+            <pre id="customRulePreview" class="border border-secondary rounded p-2 bg-black text-light small mb-0" style="max-height: 200px; overflow-y: auto;"></pre>
+        </div>
+        <button type="button" class="btn btn-sm btn-outline-info" onclick="saveCustomYaraRule()"><i class="fa-solid fa-floppy-disk me-1"></i>Validate &amp; Save</button>
+        <div id="customRuleSaveMsg" class="small mt-2" style="display:none;"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Add/Edit Feed Modal -->
 <div class="modal fade" id="feedModal" tabindex="-1">
   <div class="modal-dialog">
@@ -1164,6 +1231,168 @@ async function deleteYaraRule(relpath) {
         location.reload();
     } catch (e) {
         toast('Network error deleting rule file.', 'danger');
+    }
+}
+
+// A separate, dedicated checkbox per row (default unchecked) rather than reusing the
+// scan-selection checkboxes (default CHECKED for every rule) -- reusing those would
+// make it dangerously easy to bulk-delete every loaded rule by accident.
+function updateYaraBulkDeleteButton() {
+    const count = document.querySelectorAll('.yara-delete-select:checked').length;
+    const btn = document.getElementById('yaraBulkDeleteBtn');
+    const countEl = document.getElementById('yaraBulkDeleteCount');
+    if (countEl) countEl.textContent = count;
+    if (btn) btn.disabled = count === 0;
+}
+
+async function bulkDeleteYaraRules() {
+    const paths = Array.from(document.querySelectorAll('.yara-delete-select:checked')).map(cb => cb.dataset.relpath);
+    if (paths.length === 0) return;
+    if (!(await confirmDialog(`Delete ${paths.length} selected rule file(s)? This removes the actual .yar files from disk. Any that came from a synced feed may reappear on that feed's next full sync.`, {title: 'Delete selected rules', danger: true, confirmLabel: `Delete ${paths.length}`}))) return;
+    const results = await Promise.all(paths.map(p =>
+        fetch('/api/yara/rule-content?path=' + encodeURIComponent(p), { method: 'DELETE' }).then(res => res.ok).catch(() => false)
+    ));
+    const succeeded = results.filter(ok => ok).length;
+    const failed = results.length - succeeded;
+    if (failed === 0) {
+        toast(`Deleted ${succeeded} rule file(s).`, 'success');
+    } else {
+        toast(`Deleted ${succeeded} rule file(s); ${failed} failed.`, 'warning');
+    }
+    location.reload();
+}
+
+// ---- Custom YARA rule builder ----
+let customRuleStrings = [];
+let yaraCustomRuleModalInstance = null;
+
+function openYaraCustomRuleModal() {
+    customRuleStrings = [{ id: '$s1', type: 'text', value: '', nocase: false, wide: false, ascii: false, fullword: false }];
+    document.getElementById('customRuleName').value = '';
+    document.getElementById('customRuleDescription').value = '';
+    document.getElementById('customRuleAuthor').value = '';
+    document.getElementById('customRuleReference').value = '';
+    document.getElementById('customRuleConditionMode').value = 'any';
+    document.getElementById('customRuleConditionCustom').value = '';
+    document.getElementById('customRuleConditionCustomWrap').style.display = 'none';
+    document.getElementById('customRuleSaveMsg').style.display = 'none';
+    renderCustomRuleStrings();
+    if (!yaraCustomRuleModalInstance) yaraCustomRuleModalInstance = new bootstrap.Modal(document.getElementById('yaraCustomRuleModal'));
+    yaraCustomRuleModalInstance.show();
+}
+
+function addCustomRuleString() {
+    customRuleStrings.push({ id: `$s${customRuleStrings.length + 1}`, type: 'text', value: '', nocase: false, wide: false, ascii: false, fullword: false });
+    renderCustomRuleStrings();
+}
+
+function removeCustomRuleString(idx) {
+    customRuleStrings.splice(idx, 1);
+    renderCustomRuleStrings();
+}
+
+function renderCustomRuleStrings() {
+    const container = document.getElementById('customRuleStringsList');
+    container.innerHTML = customRuleStrings.map((s, i) => `
+        <div class="border border-secondary rounded p-2 mb-2">
+            <div class="d-flex gap-2 mb-1">
+                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:90px;" value="${escAttr(s.id)}" oninput="customRuleStrings[${i}].id = this.value; updateCustomRulePreview()">
+                <select class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:110px;" onchange="customRuleStrings[${i}].type = this.value; renderCustomRuleStrings()">
+                    <option value="text" ${s.type === 'text' ? 'selected' : ''}>Text</option>
+                    <option value="hex" ${s.type === 'hex' ? 'selected' : ''}>Hex bytes</option>
+                    <option value="regex" ${s.type === 'regex' ? 'selected' : ''}>Regex</option>
+                </select>
+                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="${s.type === 'hex' ? 'e.g. 4D 5A 90 00' : s.type === 'regex' ? 'e.g. [a-f0-9]{32}' : 'value'}" value="${escAttr(s.value)}" oninput="customRuleStrings[${i}].value = this.value; updateCustomRulePreview()">
+                ${customRuleStrings.length > 1 ? `<button type="button" class="btn btn-sm btn-outline-danger" onclick="removeCustomRuleString(${i})" title="Remove this string"><i class="fa-solid fa-xmark"></i></button>` : ''}
+            </div>
+            ${s.type !== 'hex' ? `<div class="d-flex gap-3 small text-muted">
+                <label class="mb-0"><input type="checkbox" ${s.nocase ? 'checked' : ''} onchange="customRuleStrings[${i}].nocase = this.checked; updateCustomRulePreview()"> nocase</label>
+                ${s.type === 'text' ? `<label class="mb-0"><input type="checkbox" ${s.wide ? 'checked' : ''} onchange="customRuleStrings[${i}].wide = this.checked; updateCustomRulePreview()"> wide</label>
+                <label class="mb-0"><input type="checkbox" ${s.ascii ? 'checked' : ''} onchange="customRuleStrings[${i}].ascii = this.checked; updateCustomRulePreview()"> ascii</label>
+                <label class="mb-0"><input type="checkbox" ${s.fullword ? 'checked' : ''} onchange="customRuleStrings[${i}].fullword = this.checked; updateCustomRulePreview()"> fullword</label>` : ''}
+            </div>` : ''}
+        </div>
+    `).join('');
+    updateCustomRulePreview();
+}
+
+function toggleCustomRuleConditionMode() {
+    const mode = document.getElementById('customRuleConditionMode').value;
+    document.getElementById('customRuleConditionCustomWrap').style.display = mode === 'custom' ? '' : 'none';
+    updateCustomRulePreview();
+}
+
+function buildCustomRuleText() {
+    const rawName = (document.getElementById('customRuleName').value || '').trim();
+    const safeName = (rawName.replace(/[^A-Za-z0-9_\-]/g, '_').replace(/^_+|_+$/g, '')) || 'unnamed_rule';
+    const desc = (document.getElementById('customRuleDescription').value || '').trim();
+    const author = (document.getElementById('customRuleAuthor').value || '').trim();
+    const ref = (document.getElementById('customRuleReference').value || '').trim();
+    const condMode = document.getElementById('customRuleConditionMode').value;
+    const condCustom = (document.getElementById('customRuleConditionCustom').value || '').trim();
+
+    const escStr = (s) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const meta = [];
+    if (desc) meta.push(`        description = "${escStr(desc)}"`);
+    if (author) meta.push(`        author = "${escStr(author)}"`);
+    if (ref) meta.push(`        reference = "${escStr(ref)}"`);
+
+    const strings = customRuleStrings.filter(s => s.value.trim()).map(s => {
+        const id = s.id.startsWith('$') ? s.id : '$' + s.id;
+        if (s.type === 'hex') return `        ${id} = { ${s.value.trim()} }`;
+        const mods = [];
+        if (s.nocase) mods.push('nocase');
+        if (s.type === 'text') { if (s.wide) mods.push('wide'); if (s.ascii) mods.push('ascii'); if (s.fullword) mods.push('fullword'); }
+        const modStr = mods.length ? ' ' + mods.join(' ') : '';
+        if (s.type === 'regex') return `        ${id} = /${s.value.trim()}/${modStr}`;
+        return `        ${id} = "${escStr(s.value)}"${modStr}`;
+    });
+
+    let condition = 'any of them';
+    if (condMode === 'all') condition = 'all of them';
+    else if (condMode === 'custom') condition = condCustom || 'any of them';
+
+    const lines = [`rule ${safeName}`, '{'];
+    if (meta.length) { lines.push('    meta:', ...meta); }
+    if (strings.length) { lines.push('    strings:', ...strings); }
+    lines.push('    condition:', `        ${condition}`, '}');
+    return { name: safeName, text: lines.join('\n') };
+}
+
+function updateCustomRulePreview() {
+    document.getElementById('customRulePreview').textContent = buildCustomRuleText().text;
+}
+
+async function saveCustomYaraRule() {
+    const rawName = (document.getElementById('customRuleName').value || '').trim();
+    const msgEl = document.getElementById('customRuleSaveMsg');
+    if (!rawName) {
+        msgEl.className = 'small mt-2 text-danger';
+        msgEl.textContent = 'Rule name is required.';
+        msgEl.style.display = '';
+        return;
+    }
+    const { name, text } = buildCustomRuleText();
+    try {
+        const res = await fetch('/api/yara/custom-rules', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name, rule_text: text }),
+        });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            msgEl.className = 'small mt-2 text-danger';
+            msgEl.textContent = d.error || 'Failed to save custom rule.';
+            msgEl.style.display = '';
+            return;
+        }
+        toast('Custom rule saved.', 'success');
+        if (yaraCustomRuleModalInstance) yaraCustomRuleModalInstance.hide();
+        location.reload();
+    } catch (e) {
+        msgEl.className = 'small mt-2 text-danger';
+        msgEl.textContent = 'Network error saving custom rule.';
+        msgEl.style.display = '';
     }
 }
 
