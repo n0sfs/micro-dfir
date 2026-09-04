@@ -4,10 +4,53 @@ import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, tem
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.09.03.4"
+AGENT_VERSION = "2026.09.03.5"
 
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
+
+_OS_DETAIL_CACHE = None
+
+def _get_os_detail():
+    # Registry read (winreg, stdlib, no subprocess) instead of Get-ComputerInfo --
+    # that cmdlet takes several seconds, far too slow to run on every check-in.
+    # Computed once and cached; the OS version doesn't change mid-session.
+    global _OS_DETAIL_CACHE
+    if _OS_DETAIL_CACHE is not None:
+        return _OS_DETAIL_CACHE
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
+        product_name = winreg.QueryValueEx(key, "ProductName")[0]
+        try:
+            display_version = winreg.QueryValueEx(key, "DisplayVersion")[0]
+        except FileNotFoundError:
+            try:
+                display_version = winreg.QueryValueEx(key, "ReleaseId")[0]
+            except FileNotFoundError:
+                display_version = ""
+        try:
+            build = winreg.QueryValueEx(key, "CurrentBuildNumber")[0]
+        except FileNotFoundError:
+            build = ""
+        winreg.CloseKey(key)
+        # Microsoft never updated ProductName for Windows 11 on many builds -- it can
+        # genuinely still read "Windows 10 Pro" on a real Windows 11 install. Build
+        # number >= 22000 is the actual, documented way to tell them apart.
+        try:
+            if build and int(build) >= 22000 and product_name.startswith("Windows 10"):
+                product_name = product_name.replace("Windows 10", "Windows 11", 1)
+        except ValueError:
+            pass
+        parts = [p for p in [product_name, display_version, f"(Build {build})" if build else ""] if p]
+        _OS_DETAIL_CACHE = " ".join(parts) or "Windows (unknown version)"
+    except Exception:
+        _OS_DETAIL_CACHE = "Windows (unknown version)"
+    # Sent as a raw HTTP header value -- a stray CR/LF from a tampered registry value
+    # would otherwise be a header-injection vector, and no legitimate value is ever
+    # this long.
+    _OS_DETAIL_CACHE = _OS_DETAIL_CACHE.replace('\r', '').replace('\n', '')[:200]
+    return _OS_DETAIL_CACHE
 
 # Optional INSTALL_DIR\agent_config.json, dropped there by the NSIS installer (see
 # installer/agent_installer.nsi) BEFORE it runs `install` -- that installer bundles a
@@ -575,7 +618,7 @@ def run_agent():
             for attempt in range(3):
                 try:
                     print(f"[*] Checking in with {SERVER_URL} (Attempt {attempt + 1})...", flush=True)
-                    headers = {'X-Agent-Hostname': socket.gethostname(), 'X-Agent-Token': SOC_TOKEN, 'X-Agent-Version': AGENT_VERSION, 'X-Agent-OS': 'windows'}
+                    headers = {'X-Agent-Hostname': socket.gethostname(), 'X-Agent-Token': SOC_TOKEN, 'X-Agent-Version': AGENT_VERSION, 'X-Agent-OS': 'windows', 'X-Agent-OS-Detail': _get_os_detail()}
                     req = urllib.request.Request(SERVER_URL, headers=headers)
                     with urllib.request.urlopen(req, context=context, timeout=5) as response:
                         data = json.loads(response.read().decode())

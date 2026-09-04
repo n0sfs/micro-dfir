@@ -8203,6 +8203,19 @@ def migrate_agent_offline_alerts():
     except Exception:
         pass
 
+def migrate_agent_polls_os_detail():
+    # agent_config() is hit every ~8s per agent -- a one-time startup migration here
+    # instead of an ALTER TABLE attempt inside that hot route on every request.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(agent_polls)").fetchall()]
+        if 'os_detail' not in cols:
+            conn.execute('ALTER TABLE agent_polls ADD COLUMN os_detail TEXT')
+            conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_log_source_silent_alerts():
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
@@ -11029,9 +11042,12 @@ def agent_config():
     agent_os = request.headers.get('X-Agent-OS', 'windows')
     if agent_os not in ('windows', 'linux', 'macos'):
         agent_os = 'windows'
+    # Agents that predate OS-detail reporting send no header -- 'unknown' rather than
+    # blank so the UI can tell "hasn't upgraded yet" apart from "reported empty".
+    os_detail = (request.headers.get('X-Agent-OS-Detail') or 'unknown')[:200]
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    db.execute('CREATE TABLE IF NOT EXISTS agent_polls (id INTEGER PRIMARY KEY, timestamp TEXT, ip_address TEXT, user_agent TEXT, version TEXT, os TEXT)')
-    db.execute('INSERT INTO agent_polls (timestamp, ip_address, user_agent, version, os) VALUES (?, ?, ?, ?, ?)', (now, ip, ua, agent_version, agent_os))
+    db.execute('CREATE TABLE IF NOT EXISTS agent_polls (id INTEGER PRIMARY KEY, timestamp TEXT, ip_address TEXT, user_agent TEXT, version TEXT, os TEXT, os_detail TEXT)')
+    db.execute('INSERT INTO agent_polls (timestamp, ip_address, user_agent, version, os, os_detail) VALUES (?, ?, ?, ?, ?, ?)', (now, ip, ua, agent_version, agent_os, os_detail))
     db.execute(
         "INSERT OR IGNORE INTO agent_version_history (hostname, version, first_seen) VALUES (?, ?, ?)",
         (ua, agent_version, now)
@@ -12736,6 +12752,7 @@ def agent_checkins():
             hostnames.append(hostname)
             version = r["version"] if "version" in r.keys() and r["version"] else "unknown"
             os_name = r["os"] if "os" in r.keys() and r["os"] in ("windows", "linux") else "windows"
+            os_detail = r["os_detail"] if "os_detail" in r.keys() and r["os_detail"] else "unknown"
             mapped.append({
                 "hostname": hostname,
                 "endpoint_ip": r["ip_address"] if "ip_address" in r.keys() else "Unknown",
@@ -12744,6 +12761,7 @@ def agent_checkins():
                 "version": version,
                 "version_since": None,
                 "os": os_name,
+                "os_detail": os_detail,
                 "group": "",
                 "recent_polls": []
             })
@@ -13209,6 +13227,7 @@ migrate_alerts_effective_seen()
 migrate_alert_escalations()
 migrate_case_playbook_outbox()
 migrate_agent_offline_alerts()
+migrate_agent_polls_os_detail()
 migrate_log_source_silent_alerts()
 migrate_sigma_aggregation()
 migrate_sigma_rules_columns()

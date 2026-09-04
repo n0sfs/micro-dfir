@@ -713,10 +713,17 @@ function relativeTime(ts) {
     return `${Math.round(s / 86400)}d ago`;
 }
 
-function osIcon(os) {
-    if (os === 'linux') return '<i class="fa-brands fa-linux text-warning" title="Linux"></i> <span class="text-muted small">Linux</span>';
-    if (os === 'macos') return '<i class="fa-brands fa-apple text-light" title="macOS"></i> <span class="text-muted small">macOS</span>';
-    return '<i class="fa-brands fa-windows text-info" title="Windows"></i> <span class="text-muted small">Windows</span>';
+function osIcon(os, osDetail) {
+    const icon = os === 'linux' ? '<i class="fa-brands fa-linux text-warning" title="Linux"></i>'
+        : os === 'macos' ? '<i class="fa-brands fa-apple text-light" title="macOS"></i>'
+        : '<i class="fa-brands fa-windows text-info" title="Windows"></i>';
+    const label = osLabel(os);
+    // Agents that predate OS-detail reporting (or haven't checked in since upgrading)
+    // send 'unknown' -- fall back to just the OS family label rather than showing a
+    // literal "unknown" string next to it.
+    const detail = (osDetail && osDetail !== 'unknown') ? osDetail : null;
+    return `${icon} <span class="text-muted small">${escHtml(label)}</span>` +
+        (detail ? `<div class="small text-muted" style="font-size:.72rem;">${escHtml(detail)}</div>` : '');
 }
 
 function osLabel(os) {
@@ -728,7 +735,7 @@ function osLabel(os) {
 function hostInfoText(dev) {
     return [
         `Hostname: ${dev.hostname}`,
-        `OS: ${osLabel(dev.os)}`,
+        `OS: ${dev.os_detail && dev.os_detail !== 'unknown' ? dev.os_detail : osLabel(dev.os)}`,
         `IP: ${dev.endpoint_ip}`,
         `Status: ${dev.status}`,
         `Version: ${dev.version && dev.version !== 'unknown' ? dev.version : 'Unknown'}`,
@@ -753,7 +760,7 @@ function showHostInfoMenu(evt, hostname) {
     menu.innerHTML = `
         <div class="px-2 py-1">
             <div class="fw-bold text-light mb-1"><i class="fa-solid fa-laptop-medical me-1"></i>${escHtml(dev.hostname)}</div>
-            <div class="small text-muted mb-2">${osIcon(dev.os)}</div>
+            <div class="small text-muted mb-2">${osIcon(dev.os, dev.os_detail)}</div>
             <table class="small mb-2">
                 <tr><td class="text-muted pe-2">Endpoint IP</td><td class="text-info">${escHtml(dev.endpoint_ip)}</td></tr>
                 <tr><td class="text-muted pe-2">Status</td><td>${endpointStatusBadge(dev.status)}</td></tr>
@@ -804,7 +811,7 @@ function openHostDetailModal(hostname) {
     body.innerHTML = `
         <table class="table table-sm table-dark table-borderless mb-3">
             <tr><td class="text-muted" style="width:160px;">Status</td><td>${endpointStatusBadge(dev.status)}</td></tr>
-            <tr><td class="text-muted">OS</td><td>${osIcon(dev.os)}</td></tr>
+            <tr><td class="text-muted">OS</td><td>${osIcon(dev.os, dev.os_detail)}</td></tr>
             <tr><td class="text-muted">Endpoint IP</td><td class="text-info">${escHtml(dev.endpoint_ip)}</td></tr>
             <tr><td class="text-muted">Agent Version</td><td>${versionBadge(dev)}</td></tr>
             <tr><td class="text-muted">Group</td><td>${escHtml(dev.group || '—')}</td></tr>
@@ -959,7 +966,7 @@ function renderEndpoints() {
                     <td>
                         <strong class="hostname-cell" style="cursor:pointer; text-decoration:underline dotted;" title="${escHtml(hostInfoText(dev))}\n\nClick for full host details" onclick="openHostDetailModal(rowHost(this));" oncontextmenu="showHostInfoMenu(event, rowHost(this)); return false;">${escHtml(dev.hostname)}</strong>${dev.legacy_auth ? ` <i class="fa-solid fa-triangle-exclamation text-warning" title="Authenticating via the legacy shared secret, not a per-agent token. Re-download and redeploy the installer (Deployment tab) to upgrade this agent -- a remote 'Upgrade Agent' alone does not migrate it."></i>` : ''}
                     </td>
-                    <td>${osIcon(dev.os)}</td>
+                    <td>${osIcon(dev.os, dev.os_detail)}</td>
                     <td><span class="text-info">${escHtml(dev.endpoint_ip)}</span></td>
                     <td>${endpointStatusBadge(dev.status)}</td>
                     <td class="text-nowrap"><span title="${escHtml(dev.last_check_in)}">${escHtml(relativeTime(dev.last_check_in)) || escHtml(dev.last_check_in)}</span></td>
