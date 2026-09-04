@@ -11,6 +11,24 @@ A Complete Edge Security Appliance integrating:
 ## Deployment
 `sudo bash install.sh`
 
+### Network
+
+By default the UI, agent check-ins, and log ingestion all share one network
+interface — this works fine out of the box and is all a single-NIC host (a
+laptop, a WiFi-only mini PC) can do anyway.
+
+If the host has two interfaces (e.g. WiFi + a wired port), a wired
+connection is **recommended, not required**, for log ingestion once log
+volume gets heavy — splitting bulk log traffic off the same link as
+interactive UI/check-in traffic removes contention between the two. Under
+light load a single shared interface is unlikely to need this at all.
+
+To split them: **Settings → System → Network Configuration**, set *UI Bind
+IP* to the interface you browse the UI from and *Ingestion Bind IP* to the
+wired interface's IP, then save. Every already-enrolled agent picks up the
+new ingest address automatically on its next check-in (~8s) — no
+reinstall needed.
+
 ## Access control
 
 Access is governed by named permissions, not a fixed rank ladder — a role is
