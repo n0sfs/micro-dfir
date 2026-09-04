@@ -823,7 +823,7 @@ function openHostDetailModal(hostname) {
             if (data.error) { extra.innerHTML = `<span class="text-muted">${escHtml(data.error)}</span>`; return; }
             const actionsRows = (data.recent_actions || []).map(a => `
                 <tr>
-                    <td class="text-nowrap">${escHtml(a.queued || '')}</td>
+                    <td class="text-nowrap">${escHtml(a.queued_at || '')}</td>
                     <td>${escHtml(a.label || '')}</td>
                     <td>${a.status === 'done' ? '<span class="badge bg-success">Done</span>' : a.status === 'error' ? '<span class="badge bg-danger">Error</span>' : `<span class="badge bg-secondary">${escHtml(a.status || '')}</span>`}</td>
                     <td class="text-muted">${escHtml(a.queued_by || '')}</td>

@@ -12834,7 +12834,7 @@ def api_agent_detail(hostname):
         (hostname,)
     ).fetchone()['c']
     recent_actions = [dict(r) for r in db.execute(
-        "SELECT label, status, queued, completed_at, queued_by FROM agent_commands WHERE hostname = ? ORDER BY id DESC LIMIT 5",
+        "SELECT label, status, queued_at, completed_at, queued_by FROM agent_commands WHERE hostname = ? ORDER BY id DESC LIMIT 5",
         (hostname,)
     ).fetchall()]
     return jsonify({
