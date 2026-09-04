@@ -11093,7 +11093,17 @@ def _strip_technique_t_prefix(tid):
     return tid[1:] if tid.startswith('T') else tid
 
 _ATOMIC_LIST_CACHE = {'data': None, 'time': 0}
-_ATOMIC_LIST_CACHE_TTL = 3600  # the repo changes far less often than SigmaHQ releases
+# The repo changes far less often than SigmaHQ releases -- default weekly, admin-
+# configurable (daily/weekly/monthly) via /api/settings/atomic-catalog-sync, so a full
+# ~170MB/2-3-minute re-download+parse only happens on the chosen cadence instead of
+# forcing every picker open past the old fixed 1-hour TTL to pay that cost again.
+ATOMIC_CATALOG_SYNC_HOURS_OPTIONS = {'daily': 24, 'weekly': 24 * 7, 'monthly': 24 * 30}
+DEFAULT_ATOMIC_CATALOG_SYNC_INTERVAL = 'weekly'
+
+def _atomic_catalog_ttl_seconds(db):
+    row = db.execute("SELECT value FROM settings WHERE key = 'atomic_catalog_sync_interval'").fetchone()
+    interval = row['value'] if row and row['value'] in ATOMIC_CATALOG_SYNC_HOURS_OPTIONS else DEFAULT_ATOMIC_CATALOG_SYNC_INTERVAL
+    return ATOMIC_CATALOG_SYNC_HOURS_OPTIONS[interval] * 3600
 
 def _fetch_atomic_test_files():
     """Downloads+extracts the atomic-red-team repo's default-branch zip to a fresh temp
@@ -11180,7 +11190,7 @@ def _parse_atomic_test_file(relpath, raw_yaml):
         })
     return out
 
-def _list_atomic_tests_available(db):
+def _list_atomic_tests_available(db, force=False):
     """Downloads+parses every technique file into candidate dicts. Two-layer cache:
     an in-memory per-process copy (instant, avoids even a DB round trip within the
     same worker) backed by a DB-persisted copy in settings (shared across gunicorn's
@@ -11190,24 +11200,29 @@ def _list_atomic_tests_available(db):
     worker that hadn't already populated its own copy, even seconds after a different
     worker had just done the exact same fetch -- from a user's perspective, "it just
     worked a minute ago" and "it's stuck for minutes again" were both true at once,
-    depending entirely on which of the 3 workers gunicorn routed the request to."""
+    depending entirely on which of the 3 workers gunicorn routed the request to.
+    force=True (admin "Refresh Now") skips both cache layers outright, for the case
+    where the admin knows upstream has something new and doesn't want to wait for the
+    configured cadence."""
     import shutil, time as _time
     now = _time.time()
-    if _ATOMIC_LIST_CACHE['data'] is not None and (now - _ATOMIC_LIST_CACHE['time']) < _ATOMIC_LIST_CACHE_TTL:
+    ttl = _atomic_catalog_ttl_seconds(db)
+    if not force and _ATOMIC_LIST_CACHE['data'] is not None and (now - _ATOMIC_LIST_CACHE['time']) < ttl:
         return _ATOMIC_LIST_CACHE['data']
-    row = db.execute("SELECT value FROM settings WHERE key = 'atomic_test_catalog_cache'").fetchone()
-    ts_row = db.execute("SELECT value FROM settings WHERE key = 'atomic_test_catalog_cache_time'").fetchone()
-    if row and row['value'] and ts_row and ts_row['value']:
-        try:
-            cache_time = float(ts_row['value'])
-            if (now - cache_time) < _ATOMIC_LIST_CACHE_TTL:
-                out = json.loads(row['value'])
-                if out:
-                    _ATOMIC_LIST_CACHE['data'] = out
-                    _ATOMIC_LIST_CACHE['time'] = now
-                    return out
-        except (ValueError, TypeError, json.JSONDecodeError):
-            pass
+    if not force:
+        row = db.execute("SELECT value FROM settings WHERE key = 'atomic_test_catalog_cache'").fetchone()
+        ts_row = db.execute("SELECT value FROM settings WHERE key = 'atomic_test_catalog_cache_time'").fetchone()
+        if row and row['value'] and ts_row and ts_row['value']:
+            try:
+                cache_time = float(ts_row['value'])
+                if (now - cache_time) < ttl:
+                    out = json.loads(row['value'])
+                    if out:
+                        _ATOMIC_LIST_CACHE['data'] = out
+                        _ATOMIC_LIST_CACHE['time'] = now
+                        return out
+            except (ValueError, TypeError, json.JSONDecodeError):
+                pass
     t, atomics_dir, relpaths = _fetch_atomic_test_files()
     out = []
     try:
@@ -11338,6 +11353,42 @@ def api_atomic_import_selected():
     db.commit()
     log_audit('atomic_test_import', 'atomic_test', None, f"inserted={inserted}, skipped={skipped}")
     return jsonify({"status": "success", "inserted": inserted, "skipped": skipped})
+
+@app.route('/api/settings/atomic-catalog-sync', methods=['GET', 'POST'])
+@login_required
+def api_settings_atomic_catalog_sync():
+    db = get_db()
+    if request.method == 'GET':
+        row = db.execute("SELECT value FROM settings WHERE key = 'atomic_catalog_sync_interval'").fetchone()
+        interval = row['value'] if row and row['value'] in ATOMIC_CATALOG_SYNC_HOURS_OPTIONS else DEFAULT_ATOMIC_CATALOG_SYNC_INTERVAL
+        ts_row = db.execute("SELECT value FROM settings WHERE key = 'atomic_test_catalog_cache_time'").fetchone()
+        return jsonify({
+            'interval': interval,
+            'last_synced': datetime.fromtimestamp(float(ts_row['value'])).strftime('%Y-%m-%d %H:%M:%S') if ts_row and ts_row['value'] else None,
+            'cached_test_count': len(_ATOMIC_LIST_CACHE['data']) if _ATOMIC_LIST_CACHE['data'] is not None else None,
+        })
+    err = require_permission('rules.manage')
+    if err: return err
+    interval = (request.json or {}).get('interval')
+    if interval not in ATOMIC_CATALOG_SYNC_HOURS_OPTIONS:
+        return jsonify({'error': f"interval must be one of {', '.join(ATOMIC_CATALOG_SYNC_HOURS_OPTIONS)}"}), 400
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('atomic_catalog_sync_interval', ?)", (interval,))
+    db.commit()
+    log_audit('atomic_catalog_sync_interval_change', 'settings', None, interval)
+    return jsonify({'status': 'success', 'interval': interval})
+
+@app.route('/api/atomic/catalog/refresh', methods=['POST'])
+@login_required
+def api_atomic_catalog_refresh():
+    err = require_permission('rules.manage')
+    if err: return err
+    db = get_db()
+    try:
+        candidates = _list_atomic_tests_available(db, force=True)
+    except Exception as e:
+        return jsonify({"error": f"Failed to refresh Atomic Red Team catalog: {e}"}), 500
+    log_audit('atomic_catalog_refresh', 'atomic_test', None, f"count={len(candidates)}")
+    return jsonify({"status": "success", "count": len(candidates)})
 
 @app.route('/api/atomic/tests', methods=['GET'])
 @login_required

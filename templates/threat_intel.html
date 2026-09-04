@@ -649,7 +649,17 @@
         <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
-        <div class="small text-muted mb-2">First load downloads and parses the full test repository (~170MB) -- this genuinely takes a few minutes, not seconds. Cached for an hour after that, shared across the appliance so it's not repeated per-request.</div>
+        <div class="small text-muted mb-2">First load downloads and parses the full test repository (~170MB) -- this genuinely takes a few minutes, not seconds. After that, tests stay cached on this appliance and only re-sync on the schedule below (or immediately with "Refresh Now").</div>
+        <div class="d-flex flex-wrap gap-2 mb-2 align-items-center">
+            <label class="small text-muted mb-0" for="atomicCatalogSyncInterval">Auto-refresh:</label>
+            <select id="atomicCatalogSyncInterval" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:140px;" onchange="saveAtomicCatalogSyncInterval()">
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+            </select>
+            <button type="button" class="btn btn-sm btn-outline-warning" id="atomicCatalogRefreshBtn" onclick="refreshAtomicCatalogNow()"><i class="fa-solid fa-rotate me-1"></i>Refresh Now</button>
+            <span id="atomicCatalogSyncStatus" class="text-muted small"></span>
+        </div>
         <div class="d-flex flex-wrap gap-2 mb-2 align-items-center">
             <input type="text" id="atomicPickerSearch" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:260px;" placeholder="Search technique or test name..." oninput="filterAtomicPicker()">
             <select id="atomicPickerPlatformFilter" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:150px;" onchange="filterAtomicPicker()">
@@ -2963,8 +2973,51 @@ function loadAtomicRuns() {
 function openAtomicPickerModal() {
     const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('atomicPickerModal'));
     modal.show();
+    loadAtomicCatalogSyncStatus();
     if (atomicPickerCandidates.length) { renderAtomicPicker(); return; }
     loadAtomicPickerData();
+}
+
+function loadAtomicCatalogSyncStatus() {
+    fetch('/api/settings/atomic-catalog-sync').then(r => r.json()).then(d => {
+        document.getElementById('atomicCatalogSyncInterval').value = d.interval || 'weekly';
+        const statusEl = document.getElementById('atomicCatalogSyncStatus');
+        statusEl.innerText = d.last_synced
+            ? `${d.cached_test_count ?? '?'} test(s) cached — last synced ${d.last_synced}`
+            : 'Not synced yet on this appliance.';
+    }).catch(err => console.error('Error loading Atomic catalog sync status:', err));
+}
+
+function saveAtomicCatalogSyncInterval() {
+    const interval = document.getElementById('atomicCatalogSyncInterval').value;
+    fetch('/api/settings/atomic-catalog-sync', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({interval})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (ok) toast(`Atomic Red Team catalog will now re-sync ${interval}.`, 'success');
+        else toast(data.error || 'Failed to save.', 'danger');
+    }).catch(err => toast('Error: ' + err, 'danger'));
+}
+
+function refreshAtomicCatalogNow() {
+    const btn = document.getElementById('atomicCatalogRefreshBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i>Refreshing...';
+    // A forced refresh re-downloads+re-parses the full repo (~170MB, a few minutes) --
+    // same real cost as a genuine cold-cache first load, just requested on demand
+    // instead of waiting for the configured cadence.
+    fetch('/api/atomic/catalog/refresh', {method: 'POST'}).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (ok) {
+            toast(`Refreshed -- ${data.count} test(s) now cached.`, 'success');
+            atomicPickerCandidates = [];
+            loadAtomicCatalogSyncStatus();
+            loadAtomicPickerData();
+        } else {
+            toast(data.error || 'Refresh failed.', 'danger');
+        }
+    }).catch(err => toast('Error: ' + err, 'danger')).finally(() => {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-rotate me-1"></i>Refresh Now';
+    });
 }
 
 function loadAtomicPickerData() {
