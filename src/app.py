@@ -10790,13 +10790,34 @@ def _parse_atomic_test_file(relpath, raw_yaml):
         })
     return out
 
-def _list_atomic_tests_available():
-    """Downloads+parses every technique file into candidate dicts, TTL-cached the same
-    way _list_sigmahq_pack_rules is -- browse-only, no DB writes."""
+def _list_atomic_tests_available(db):
+    """Downloads+parses every technique file into candidate dicts. Two-layer cache:
+    an in-memory per-process copy (instant, avoids even a DB round trip within the
+    same worker) backed by a DB-persisted copy in settings (shared across gunicorn's
+    multiple worker PROCESSES -- unlike a plain in-memory dict, which each worker
+    holds independently). Found live: without the DB layer, a real ~170MB/2-3-minute
+    download+parse cycle repeated in full every time a request happened to land on a
+    worker that hadn't already populated its own copy, even seconds after a different
+    worker had just done the exact same fetch -- from a user's perspective, "it just
+    worked a minute ago" and "it's stuck for minutes again" were both true at once,
+    depending entirely on which of the 3 workers gunicorn routed the request to."""
     import shutil, time as _time
     now = _time.time()
     if _ATOMIC_LIST_CACHE['data'] is not None and (now - _ATOMIC_LIST_CACHE['time']) < _ATOMIC_LIST_CACHE_TTL:
         return _ATOMIC_LIST_CACHE['data']
+    row = db.execute("SELECT value FROM settings WHERE key = 'atomic_test_catalog_cache'").fetchone()
+    ts_row = db.execute("SELECT value FROM settings WHERE key = 'atomic_test_catalog_cache_time'").fetchone()
+    if row and row['value'] and ts_row and ts_row['value']:
+        try:
+            cache_time = float(ts_row['value'])
+            if (now - cache_time) < _ATOMIC_LIST_CACHE_TTL:
+                out = json.loads(row['value'])
+                if out:
+                    _ATOMIC_LIST_CACHE['data'] = out
+                    _ATOMIC_LIST_CACHE['time'] = now
+                    return out
+        except (ValueError, TypeError, json.JSONDecodeError):
+            pass
     t, atomics_dir, relpaths = _fetch_atomic_test_files()
     out = []
     try:
@@ -10817,6 +10838,12 @@ def _list_atomic_tests_available():
     if out:
         _ATOMIC_LIST_CACHE['data'] = out
         _ATOMIC_LIST_CACHE['time'] = now
+        try:
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('atomic_test_catalog_cache', ?)", (json.dumps(out),))
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('atomic_test_catalog_cache_time', ?)", (str(now),))
+            db.commit()
+        except Exception:
+            pass  # the in-memory cache above still works even if the DB write fails
     return out
 
 def _fill_atomic_command_template(command, input_arguments):
@@ -10855,11 +10882,11 @@ def _build_atomic_run_script(test_row, phase='command'):
 def api_atomic_import_preview():
     err = require_permission('rules.manage')
     if err: return err
+    db = get_db()
     try:
-        candidates = _list_atomic_tests_available()
+        candidates = _list_atomic_tests_available(db)
     except Exception as e:
         return jsonify({"error": f"Failed to list Atomic Red Team tests: {e}"}), 500
-    db = get_db()
     imported = {(r['source_path'], r['test_index']) for r in db.execute(
         "SELECT source_path, test_index FROM atomic_tests"
     ).fetchall()}
@@ -10890,12 +10917,12 @@ def api_atomic_import_selected():
     selections = data.get('tests')
     if not isinstance(selections, list) or not selections:
         return jsonify({"error": "No tests selected."}), 400
+    db = get_db()
     try:
-        candidates = _list_atomic_tests_available()
+        candidates = _list_atomic_tests_available(db)
     except Exception as e:
         return jsonify({"error": f"Failed to fetch Atomic Red Team tests: {e}"}), 500
     by_key = {(c['source_path'], c['test_index']): c for c in candidates}
-    db = get_db()
     inserted, skipped = 0, 0
     for sel in selections:
         key = (sel.get('source_path'), sel.get('test_index'))
