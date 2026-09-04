@@ -109,13 +109,22 @@ def sync_taxii(feed):
             desc = obj.get("description", "")
             valid_from = obj.get("valid_from", "")
             revoked = 1 if obj.get("revoked", False) else 0
+            # Real STIX 2.1 Indicator SDO properties -- confidence is a 0-100 integer
+            # per spec, indicator_types/labels are the object's own free-text
+            # classification tags. TLP is deliberately left NULL here: a real STIX TLP
+            # marking lives on a separate marking-definition object referenced by
+            # object_marking_refs, not inline on the indicator itself, and resolving
+            # that would mean cross-referencing every other object in the same
+            # objects[] page -- out of scope for this pass.
+            confidence = obj.get("confidence")
+            tags = ", ".join(obj.get("indicator_types") or obj.get("labels") or []) or None
             comparisons = _parse_stix_pattern_comparisons(pattern)
             if comparisons:
                 for cmp in comparisons:
                     conn.execute(
-                        "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id, confidence, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (f"{obj_id}--{cmp['id_suffix']}", "indicator", cmp['ioc_type'], name, desc,
-                         cmp['value'], valid_from, revoked, feed["id"])
+                         cmp['value'], valid_from, revoked, feed["id"], confidence, tags)
                     )
                     c += 1
             else:
@@ -123,8 +132,8 @@ def sync_taxii(feed):
                 # pattern) -- fall back to the old best-effort whole-pattern storage
                 # rather than silently dropping the indicator.
                 conn.execute(
-                    "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (obj_id, "indicator", _guess_stix_pattern_type(pattern), name, desc, pattern, valid_from, revoked, feed["id"])
+                    "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id, confidence, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (obj_id, "indicator", _guess_stix_pattern_type(pattern), name, desc, pattern, valid_from, revoked, feed["id"], confidence, tags)
                 )
                 c += 1
     conn.commit(); conn.close()
@@ -149,10 +158,15 @@ def sync_threatfox(feed):
             stix_id = f"threatfox--{ioc_id}"
             malware = e.get('malware_printable') or e.get('malware') or 'Unknown'
             name = f"{malware} ({e.get('threat_type', 'ioc')})"
-            desc = f"ioc_type={e.get('ioc_type')}, confidence={e.get('confidence_level')}"
+            # tags is a real comma-separated STRING in ThreatFox's actual export
+            # (confirmed live, e.g. "CobaltStrike,drb-ra"), not a list -- passed through
+            # as-is rather than re-joining. malware+threat_type already live in `name`
+            # and confidence is now its own column, so there's no leftover free-text
+            # worth forcing into `description` -- left empty rather than re-stuffing it
+            # with the same key=value noise this migration removes.
             conn.execute(
-                "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
-                (stix_id, "indicator", e.get("ioc_type", "") or "unknown", name, desc, e.get("ioc_value", ""), e.get("first_seen_utc", ""), feed["id"])
+                "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id, confidence, tags) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+                (stix_id, "indicator", e.get("ioc_type", "") or "unknown", name, "", e.get("ioc_value", ""), e.get("first_seen_utc", ""), feed["id"], e.get("confidence_level"), e.get("tags") or None)
             )
             c += 1
     conn.commit(); conn.close()
@@ -201,10 +215,9 @@ def sync_urlhaus(feed):
             stix_id = f"urlhaus--{url_id}"
             tags = ", ".join(e.get("tags") or [])
             name = e.get("threat") or "malware_download"
-            desc = f"reporter={e.get('reporter', '')}" + (f", tags={tags}" if tags else "")
             conn.execute(
-                "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) VALUES (?, ?, 'url', ?, ?, ?, ?, ?, ?)",
-                (stix_id, "indicator", name, desc, e.get("url", ""), e.get("dateadded", ""), 1 if e.get("url_status") == "offline" else 0, feed["id"])
+                "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id, tags) VALUES (?, ?, 'url', ?, ?, ?, ?, ?, ?, ?)",
+                (stix_id, "indicator", name, f"reporter={e.get('reporter', '')}" if e.get('reporter') else "", e.get("url", ""), e.get("dateadded", ""), 1 if e.get("url_status") == "offline" else 0, feed["id"], tags or None)
             )
             c += 1
     conn.commit(); conn.close()
@@ -330,14 +343,17 @@ def sync_misp_feed(feed):
             if not value:
                 continue
             stix_id = f"misp--{event_uuid}--{attr.get('uuid') or value}"
-            desc_parts = [f"category={attr.get('category', '')}"]
-            if tags:
-                desc_parts.append(f"tags={tags}")
-            if attr.get("comment"):
-                desc_parts.append(f"comment={attr['comment']}")
+            # A tag literally named "tlp:<level>" is MISP's own real convention for
+            # marking classification (confirmed against MISP's standard taxonomies) --
+            # pulled out into its own column since TLP is already a first-class concept
+            # elsewhere in this app, rather than leaving it buried as just one more
+            # comma-separated tag string.
+            tlp = next((t.get("name", "").split(":", 1)[1].strip() for t in (event.get("Tag") or meta.get("Tag") or [])
+                        if (t.get("name") or "").lower().startswith("tlp:")), None)
             conn.execute(
-                "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
-                (stix_id, "indicator", (attr.get("type") or "unknown").lower(), info, ", ".join(desc_parts), value, event_date, feed["id"])
+                "INSERT OR REPLACE INTO stix_indicators (stix_id, type, ioc_type, name, description, pattern, valid_from, revoked, feed_id, category, tags, tlp) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
+                (stix_id, "indicator", (attr.get("type") or "unknown").lower(), info, attr.get("comment") or "", value, event_date, feed["id"],
+                 attr.get('category') or None, tags or None, tlp)
             )
             c += 1
     conn.commit(); conn.close()
