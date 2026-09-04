@@ -1180,7 +1180,7 @@ def threat_intel():
         active_tab=active_tab, current_user=current_user
     )
 
-TI_FEED_TYPES = ('taxii', 'threatfox', 'otx', 'urlhaus', 'feodotracker', 'yaraify', 'misp', 'sslbl', 'spamhaus_drop', 'tor_exit', 'malwarebazaar', 'csv')
+TI_FEED_TYPES = ('taxii', 'threatfox', 'otx', 'urlhaus', 'feodotracker', 'yaraify', 'yara_forge', 'misp', 'sslbl', 'spamhaus_drop', 'tor_exit', 'malwarebazaar', 'csv')
 
 _CSV_VALUE_COLS = ('value', 'indicator', 'ioc', 'pattern', 'ip', 'url', 'domain', 'hash', 'ioc_value')
 _CSV_TYPE_COLS = ('type', 'ioc_type')
@@ -1330,7 +1330,14 @@ def api_ti_feed_detail(fid):
 def api_ti_feed_sync(fid):
     err = require_permission('threatintel.manage')
     if err: return err
-    result = ti_sync_one(fid)
+    # 'mode' only means anything to sync_yara_forge today (new/updated/all) -- every
+    # other feed_type's sync_* function ignores the kwarg entirely, so passing it
+    # through unconditionally is safe for the whole route, not just YARA Forge feeds.
+    body_mode = (request.get_json(silent=True) or {}).get('mode') if request.data else None
+    mode = request.args.get('mode') or body_mode
+    if mode not in ('new', 'updated', 'all'):
+        mode = 'all'
+    result = ti_sync_one(fid, mode=mode)
     log_audit('ti_feed_sync', 'ti_feed', fid, str(result.get('count', result.get('message', ''))))
     return jsonify(result), (200 if result.get('status') == 'success' else 502)
 
@@ -1850,6 +1857,184 @@ def api_ti_entity_relationship_delete(eid, rid):
     db.commit()
     log_audit('ti_relationship_delete', 'ti_entity', eid, str(rid))
     return jsonify({'ok': 1})
+
+MITRE_ATTACK_BUNDLE_URL = "https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json"
+# MITRE's own CTI repo (github.com/mitre/cti) publishes the full enterprise-attack STIX
+# 2.1 bundle as one ~46MB JSON file, not a zip of many small files like SigmaHQ/Atomic
+# Red Team -- so the fetch step here is "download once, json.loads() once, then walk
+# bundle['objects'] in Python" rather than an extract-and-walk-a-directory step. Group
+# (intrusion-set) and Software (malware/tool) objects carry no top-level "id" field of
+# their own ATT&CK ID -- e.g. G0082 lives inside external_references[0].external_id, not
+# a dedicated field -- and technique/software associations are separate `relationship`
+# (relationship_type='uses') objects pointing at other objects by raw STIX id, not an
+# inline list on the group/software object itself. Both were confirmed directly against
+# a live fetch of the real bundle, not assumed from general STIX documentation.
+_MITRE_ENTITY_LIST_CACHE = {'data': None, 'time': 0}
+_MITRE_ENTITY_LIST_CACHE_TTL = 3600
+
+def _mitre_stix_external_id(obj):
+    for ref in (obj.get('external_references') or []):
+        if ref.get('source_name') == 'mitre-attack' and ref.get('external_id'):
+            return ref['external_id']
+    return None
+
+def _mitre_stix_url(obj):
+    for ref in (obj.get('external_references') or []):
+        if ref.get('source_name') == 'mitre-attack' and ref.get('url'):
+            return ref['url']
+    return None
+
+_MITRE_STIX_TYPE_TO_ENTITY_TYPE = {'intrusion-set': 'actor', 'malware': 'malware', 'tool': 'tool'}
+
+def _fetch_mitre_attack_bundle():
+    import urllib.request, socket
+    old_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(300)  # a real ~46MB fetch needs more than the default
+    try:
+        req = urllib.request.Request(MITRE_ATTACK_BUNDLE_URL, headers={'User-Agent': 'micro-dfir'})
+        with urllib.request.urlopen(req) as resp:
+            raw = resp.read()
+    finally:
+        socket.setdefaulttimeout(old_timeout)
+    bundle = json.loads(raw)
+    objects = bundle.get('objects') or []
+    if not objects:
+        raise ValueError("Downloaded MITRE ATT&CK bundle had no objects -- the download may be incomplete or the format has changed.")
+    return objects
+
+def _list_mitre_entities_available(db):
+    """Two-layer cache (in-memory + DB-persisted in settings), same shape and reasoning
+    as _list_atomic_tests_available -- gunicorn's separate worker processes don't share
+    an in-memory dict, and this fetch+parse is slow enough (tens of MB, tens of thousands
+    of relationship objects) that a request landing on a cold worker shouldn't repeat it
+    if another worker already just did."""
+    import time as _time
+    now = _time.time()
+    if _MITRE_ENTITY_LIST_CACHE['data'] is not None and (now - _MITRE_ENTITY_LIST_CACHE['time']) < _MITRE_ENTITY_LIST_CACHE_TTL:
+        return _MITRE_ENTITY_LIST_CACHE['data']
+    row = db.execute("SELECT value FROM settings WHERE key = 'mitre_entity_catalog_cache'").fetchone()
+    ts_row = db.execute("SELECT value FROM settings WHERE key = 'mitre_entity_catalog_cache_time'").fetchone()
+    if row and row['value'] and ts_row and ts_row['value']:
+        try:
+            cache_time = float(ts_row['value'])
+            if (now - cache_time) < _MITRE_ENTITY_LIST_CACHE_TTL:
+                out = json.loads(row['value'])
+                if out:
+                    _MITRE_ENTITY_LIST_CACHE['data'] = out
+                    _MITRE_ENTITY_LIST_CACHE['time'] = now
+                    return out
+        except (ValueError, TypeError, json.JSONDecodeError):
+            pass
+
+    objects = _fetch_mitre_attack_bundle()
+    by_id = {o['id']: o for o in objects if o.get('id')}
+    # 'uses' relationships are the only place a Group's techniques/software (or a piece
+    # of Software's techniques) are recorded -- build one id-indexed pass over every
+    # relationship rather than re-scanning the full object list per entity.
+    uses_techniques, uses_software = {}, {}
+    for o in objects:
+        if o.get('type') != 'relationship' or o.get('relationship_type') != 'uses':
+            continue
+        if o.get('revoked') or o.get('x_mitre_deprecated'):
+            continue
+        src, tgt = o.get('source_ref'), o.get('target_ref')
+        target_obj = by_id.get(tgt) if src and tgt else None
+        if not target_obj:
+            continue
+        if target_obj.get('type') == 'attack-pattern':
+            eid = _mitre_stix_external_id(target_obj)
+            if eid:
+                uses_techniques.setdefault(src, set()).add(_strip_technique_t_prefix(eid))
+        elif target_obj.get('type') in ('malware', 'tool'):
+            uses_software.setdefault(src, set()).add(tgt)
+
+    out = []
+    for o in objects:
+        entity_type = _MITRE_STIX_TYPE_TO_ENTITY_TYPE.get(o.get('type'))
+        if not entity_type or o.get('revoked') or o.get('x_mitre_deprecated'):
+            continue
+        attack_id = _mitre_stix_external_id(o)
+        name = (o.get('name') or '').strip()
+        if not attack_id or not name:
+            continue
+        software_names = sorted({
+            by_id[s]['name'] for s in uses_software.get(o['id'], set())
+            if s in by_id and by_id[s].get('name')
+        }) if o.get('type') == 'intrusion-set' else []
+        out.append({
+            'stix_id': o['id'], 'attack_id': attack_id, 'name': name, 'entity_type': entity_type,
+            'aliases': sorted({a for a in (o.get('aliases') or []) if a and a != name}),
+            'description': (o.get('description') or '').strip(),
+            'techniques': sorted(uses_techniques.get(o['id'], set())),
+            'software': software_names,
+            'url': _mitre_stix_url(o),
+        })
+    out.sort(key=lambda e: (e['entity_type'], e['name']))
+    if out:  # only cache a genuinely non-empty result -- see _list_atomic_tests_available's identical reasoning
+        _MITRE_ENTITY_LIST_CACHE['data'] = out
+        _MITRE_ENTITY_LIST_CACHE['time'] = now
+        try:
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('mitre_entity_catalog_cache', ?)", (json.dumps(out),))
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('mitre_entity_catalog_cache_time', ?)", (str(now),))
+            db.commit()
+        except Exception:
+            pass
+    return out
+
+@app.route('/api/ti/entities/import/mitre-attack/preview', methods=['GET'])
+@login_required
+def api_ti_entities_mitre_preview():
+    err = require_permission('threatintel.manage')
+    if err: return err
+    db = get_db()
+    try:
+        entities = _list_mitre_entities_available(db)
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch MITRE ATT&CK data: {e}"}), 500
+    existing_names = {r['name'] for r in db.execute("SELECT name FROM ti_entities").fetchall()}
+    out = [{**e, 'already_imported': e['name'] in existing_names} for e in entities]
+    return jsonify({"status": "success", "count": len(out), "entities": out})
+
+@app.route('/api/ti/entities/import/mitre-attack/selected', methods=['POST'])
+@login_required
+def api_ti_entities_mitre_import_selected():
+    err = require_permission('threatintel.manage')
+    if err: return err
+    data = request.json or {}
+    stix_ids = data.get('stix_ids')
+    if not isinstance(stix_ids, list) or not stix_ids:
+        return jsonify({"error": "No entities selected."}), 400
+    db = get_db()
+    try:
+        entities = _list_mitre_entities_available(db)
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch MITRE ATT&CK data: {e}"}), 500
+    by_stix = {e['stix_id']: e for e in entities}
+    inserted, skipped, not_found = 0, 0, 0
+    for sid in stix_ids:
+        e = by_stix.get(sid)
+        if not e:
+            not_found += 1
+            continue
+        if db.execute("SELECT 1 FROM ti_entities WHERE name = ?", (e['name'],)).fetchone():
+            skipped += 1
+            continue
+        description = e['description']
+        if e.get('software'):
+            note = f"Known associated software (per MITRE ATT&CK): {', '.join(e['software'])}"
+            description = f"{description}\n\n{note}".strip() if description else note
+        external_references = f"MITRE ATT&CK ({e['attack_id']}) | {e['url']}" if e.get('url') else ''
+        db.execute(
+            "INSERT INTO ti_entities (entity_type, name, aliases, description, techniques, source, created_by, external_references) "
+            "VALUES (?, ?, ?, ?, ?, 'mitre-attack', ?, ?)",
+            (e['entity_type'], e['name'], ','.join(e['aliases']), description, ','.join(e['techniques']),
+             current_user.username, external_references)
+        )
+        inserted += 1
+    db.commit()
+    _ACTOR_SUMMARY_CACHE.clear()
+    log_audit('mitre_attack_entity_import', 'ti_entity', None, f"selected={len(stix_ids)}, inserted={inserted}, skipped={skipped}, not_found={not_found}")
+    return jsonify({"status": "success", "inserted": inserted, "skipped": skipped, "not_found": not_found})
 
 def _looks_like_ip_or_cidr(value):
     import ipaddress
@@ -8272,6 +8457,24 @@ def migrate_agent_offline_alerts():
     except Exception:
         pass
 
+def migrate_yara_forge_synced_rules():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS yara_forge_synced_rules (
+            feed_id INTEGER NOT NULL,
+            tier TEXT NOT NULL,
+            rule_uid TEXT NOT NULL,
+            rule_name TEXT NOT NULL,
+            modified TEXT,
+            filename TEXT NOT NULL,
+            synced_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (feed_id, tier, rule_uid)
+        )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_atomic_tests():
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
@@ -13823,6 +14026,7 @@ migrate_case_playbook_outbox()
 migrate_agent_offline_alerts()
 migrate_agent_polls_os_detail()
 migrate_atomic_tests()
+migrate_yara_forge_synced_rules()
 migrate_log_source_silent_alerts()
 migrate_sigma_aggregation()
 migrate_sigma_rules_columns()
