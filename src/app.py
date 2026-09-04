@@ -1457,7 +1457,7 @@ def api_ti_iocs():
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     rows = db.execute(
         f"SELECT si.stix_id, si.type, si.ioc_type, si.name, si.description, si.pattern, si.valid_from, si.revoked, "
-        f"si.inserted_at, si.feed_id, tf.name AS source_name, "
+        f"si.inserted_at, si.feed_id, si.confidence, si.category, si.tlp, si.tags, tf.name AS source_name, "
         f"(SELECT COUNT(*) FROM ioc_sightings s WHERE s.stix_id = si.stix_id) AS sighting_count, "
         f"(SELECT MAX(seen_at) FROM ioc_sightings s WHERE s.stix_id = si.stix_id) AS last_sighted, "
         # Cross-feed corroboration, computed at read time rather than merged/deduped at
@@ -8675,6 +8675,27 @@ def migrate_alerts_atomic_test_flag():
     except Exception:
         pass
 
+def migrate_stix_indicators_metadata_columns():
+    # Real per-IOC metadata (confidence, category, TLP, tags) that several feeds
+    # actually carry, but was previously getting dumped as ugly "key=value, key2=value2"
+    # text directly into the description column (ThreatFox's "ioc_type=X,
+    # confidence=Y", MISP's "category=X, tags=Y") for lack of anywhere better to put
+    # it -- these are now real, filterable/toggleable columns instead. Left NULL
+    # ("not assessed"/not applicable) for every feed that has no such concept at all
+    # (Feodo Tracker, SSLBL, Spamhaus DROP, Tor exit list, MalwareBazaar, OTX) rather
+    # than fabricating a value -- same honest-NULL convention this app already uses
+    # for case TLP/PAP.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(stix_indicators)").fetchall()]
+        for col, coltype in (('confidence', 'INTEGER'), ('category', 'TEXT'), ('tlp', 'TEXT'), ('tags', 'TEXT')):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE stix_indicators ADD COLUMN {col} {coltype}")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_yara_repo_synced_files():
     # One table per source (not a shared table with a source column) so each sync's
     # DELETE-stale-rows pass (see _sync_github_yara_repo in taxii_client.py) only ever
@@ -14380,6 +14401,7 @@ migrate_atomic_tests()
 migrate_alerts_atomic_test_flag()
 migrate_yara_forge_synced_rules()
 migrate_yara_repo_synced_files()
+migrate_stix_indicators_metadata_columns()
 migrate_log_source_silent_alerts()
 migrate_sigma_aggregation()
 migrate_sigma_rules_columns()

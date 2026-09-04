@@ -61,15 +61,18 @@
                         <input type="text" id="iocSearch" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:320px;" placeholder="Search by value, name, or STIX ID..." onkeyup="if(event.key === 'Enter') loadIocs()">
                         <button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadIocs()"><i class="fa-solid fa-search me-1"></i>Search</button>
                         <button type="button" class="btn btn-sm btn-outline-secondary" onclick="clearIocFilters()"><i class="fa-solid fa-xmark me-1"></i>Clear Filters</button>
+                        <div class="dropdown">
+                            <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-table-columns me-1"></i>Columns</button>
+                            <div class="dropdown-menu dropdown-menu-dark p-2" id="iocColumnPickerMenu" style="min-width:200px;"></div>
+                        </div>
                     </div>
                     <div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
                         <table class="table table-dark table-hover table-sm mb-0 align-middle" id="iocTable">
                             <thead>
-                                <tr>
+                                <tr id="iocTableHeadRow">
                                     <th>Indicator</th>
                                     <th>Name</th>
-                                    <th>Description</th>
-                                    <th class="ioc-th">
+                                    <th class="ioc-th" id="iocTypeHeaderCell">
                                         <div class="d-flex align-items-center justify-content-between">
                                             <span>Type</span>
                                             <div class="dropdown">
@@ -110,7 +113,7 @@
                                 </tr>
                             </thead>
                             <tbody id="iocTableBody">
-                                <tr><td colspan="9" class="text-center text-muted py-4">Loading indicators...</td></tr>
+                                <tr><td colspan="8" class="text-center text-muted py-4">Loading indicators...</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -1937,8 +1940,9 @@ function populateIocSourceSelect() {
     if (!sel) return;
     const prevValue = sel.value;
     let html = '<option value="">All Feeds (local match)</option>';
-    if (allFeeds && allFeeds.length) {
-        html += '<optgroup label="Specific Feed">' + allFeeds.map(f => `<option value="${f.id}">${escHtml(f.name)}</option>`).join('') + '</optgroup>';
+    const iocOnlyFeeds = (allFeeds || []).filter(f => !RULE_SOURCE_FEED_TYPES.includes(f.feed_type));
+    if (iocOnlyFeeds.length) {
+        html += '<optgroup label="Specific Feed">' + iocOnlyFeeds.map(f => `<option value="${f.id}">${escHtml(f.name)}</option>`).join('') + '</optgroup>';
     }
     if (allAnalyzers && allAnalyzers.length) {
         html += '<optgroup label="Live Lookup">' + allAnalyzers.map(a =>
@@ -2685,7 +2689,11 @@ function clearIocFilters() {
 }
 
 function populateIocFilterMenus() {
-    buildIocFilterMenu('filterMenuFeed_id', 'feed_id', allFeeds.map(f => ({ value: f.id, label: f.name })));
+    // Rule-source feeds (YARAify/YARA Forge/etc.) never write stix_indicators rows --
+    // see RULE_SOURCE_FEED_TYPES -- so they'd only ever appear here as a selectable
+    // "Source" filter that always returns zero results. Excluded rather than left in
+    // as dead options.
+    buildIocFilterMenu('filterMenuFeed_id', 'feed_id', allFeeds.filter(f => !RULE_SOURCE_FEED_TYPES.includes(f.feed_type)).map(f => ({ value: f.id, label: f.name })));
     buildIocFilterMenu('filterMenuStatus', 'status', [{ value: '0', label: 'Active' }, { value: '1', label: 'Revoked' }]);
     buildIocFilterMenu('filterMenuSightings', 'sightings', [{ value: 'has', label: 'Has sightings' }, { value: 'none', label: 'No sightings' }]);
 }
@@ -2738,6 +2746,58 @@ function sourceBadge(name) {
     return `<span class="badge" style="background-color:${sourceColor(name)};">${escHtml(name)}</span>`;
 }
 
+// Core columns (Indicator/Name/Type/Source/First Seen/Status/Sightings) are always
+// shown -- every feed populates them. These extras are real per-IOC metadata several
+// feeds carry (see the sync_* functions in taxii_client.py) but far from all of them
+// do, so they're opt-in rather than permanently taking up table width with mostly-
+// blank cells. Order here is also render/header order.
+const IOC_OPTIONAL_COLUMNS = [
+    {key: 'category', label: 'Category'},
+    {key: 'confidence', label: 'Confidence'},
+    {key: 'tlp', label: 'TLP'},
+    {key: 'tags', label: 'Tags'},
+    {key: 'description', label: 'Description'},
+];
+let iocVisibleColumns = new Set();
+try {
+    const saved = JSON.parse(localStorage.getItem('microdfir_ioc_columns') || 'null');
+    if (Array.isArray(saved)) iocVisibleColumns = new Set(saved.filter(k => IOC_OPTIONAL_COLUMNS.some(c => c.key === k)));
+} catch (e) { /* corrupted/blocked storage -- fall back to the all-off default below */ }
+
+function renderIocColumnPicker() {
+    document.getElementById('iocColumnPickerMenu').innerHTML = IOC_OPTIONAL_COLUMNS.map(c => `
+        <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="iocCol_${c.key}" ${iocVisibleColumns.has(c.key) ? 'checked' : ''} onchange="toggleIocColumn('${c.key}', this.checked)">
+            <label class="form-check-label small" for="iocCol_${c.key}">${escHtml(c.label)}</label>
+        </div>
+    `).join('');
+    const headRow = document.getElementById('iocTableHeadRow');
+    const anchor = document.getElementById('iocTypeHeaderCell');
+    headRow.querySelectorAll('th[data-optional-col]').forEach(th => th.remove());
+    IOC_OPTIONAL_COLUMNS.filter(c => iocVisibleColumns.has(c.key)).forEach(c => {
+        const th = document.createElement('th');
+        th.dataset.optionalCol = c.key;
+        th.innerText = c.label;
+        headRow.insertBefore(th, anchor);
+    });
+}
+
+function toggleIocColumn(key, checked) {
+    if (checked) iocVisibleColumns.add(key); else iocVisibleColumns.delete(key);
+    try { localStorage.setItem('microdfir_ioc_columns', JSON.stringify(Array.from(iocVisibleColumns))); } catch (e) { /* private window / storage blocked -- selection just won't persist */ }
+    renderIocColumnPicker();
+    loadIocs();
+}
+
+function iocOptionalCellsHtml(i) {
+    return IOC_OPTIONAL_COLUMNS.filter(c => iocVisibleColumns.has(c.key)).map(c => {
+        if (c.key === 'confidence') return `<td class="small text-muted">${i.confidence != null ? escHtml(String(i.confidence)) : '—'}</td>`;
+        if (c.key === 'description') return `<td class="text-muted small text-truncate" style="max-width:220px;" title="${escHtml(i.description || '')}">${escHtml(i.description || '—')}</td>`;
+        const val = i[c.key];
+        return `<td class="text-muted small text-truncate" style="max-width:180px;" title="${escHtml(val || '')}">${escHtml(val || '—')}</td>`;
+    }).join('');
+}
+
 function loadIocs() {
     const q = document.getElementById('iocSearch').value;
     const params = new URLSearchParams();
@@ -2758,14 +2818,14 @@ function loadIocs() {
             const tbody = document.getElementById('iocTableBody');
             currentIocs = data.iocs || [];
             if (!currentIocs.length) {
-                tbody.innerHTML = `<tr><td colspan="9" class="text-center text-muted py-4">${filtered ? 'No indicators match your filters.' : 'No indicators ingested yet. Add or sync a feed above.'}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="8" class="text-center text-muted py-4">${filtered ? 'No indicators match your filters.' : 'No indicators ingested yet. Add or sync a feed above.'}</td></tr>`;
                 return;
             }
             tbody.innerHTML = currentIocs.map((i, idx) => `
                 <tr>
                     <td class="font-monospace small">${escHtml(i.pattern)}</td>
                     <td>${escHtml(i.name || '')}</td>
-                    <td class="text-muted small text-truncate" style="max-width:220px;" title="${escHtml(i.description || '')}">${escHtml(i.description || '—')}</td>
+                    ${iocOptionalCellsHtml(i)}
                     <td>${ioTypeBadge(i.ioc_type)}</td>
                     <td class="text-muted small">${sourceBadge(i.source_name)}${i.corroboration_count > 1
                         ? ` <span class="badge bg-info text-dark" title="Independently reported by ${i.corroboration_count} different feeds -- a real confidence signal">+${i.corroboration_count - 1} more</span>`
@@ -3329,6 +3389,7 @@ loadEntities();
 loadWarninglists();
 loadAnalyzers();
 loadIocRetentionSettings();
+renderIocColumnPicker();
 loadIocs();
 loadIocFacets();
 initIocFilterDropdowns();
