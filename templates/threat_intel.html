@@ -410,14 +410,22 @@
                                 <div class="col-lg-7">
                                 <label class="form-label text-info fw-bold">Active Rules ({{ yara_files|length }} loaded)</label>
                                 <div class="text-muted small mb-2"><i class="fa-solid fa-circle-info me-1"></i>Community rules from the <a href="https://github.com/Yara-Rules/rules" target="_blank" rel="noopener" class="text-muted">Yara-Rules/rules</a>, <a href="https://github.com/Neo23x0/signature-base" target="_blank" rel="noopener" class="text-muted">signature-base</a>, and <a href="https://yarahq.github.io/" target="_blank" rel="noopener" class="text-muted">YARA Forge</a> projects are organized by their own real category/package below. YARAify's bulk export has no folder taxonomy of its own, so those are grouped by each rule's submitting author instead (its most consistent per-rule metadata) — use the search box if a specific rule doesn't turn up where expected. Click a rule's name to preview its contents on the right; use the checkbox to include/exclude it from the scan.</div>
-                                <input type="text" id="yaraRuleSearch" class="form-control form-control-sm bg-dark text-light border-secondary mb-2" placeholder="Search rule names or descriptions..." oninput="filterYaraRules()">
+                                <div class="d-flex gap-2 mb-2">
+                                    <input type="text" id="yaraRuleSearch" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Search rule names or descriptions..." oninput="filterYaraRules()">
+                                    <select id="yaraSourceFilter" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width: 220px;" onchange="filterYaraRules()">
+                                        <option value="">All Sources</option>
+                                        {% for src in yara_category_sources.values()|unique|sort %}
+                                        <option value="{{ src }}">{{ src }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
                                 <div class="d-flex justify-content-between mb-2">
                                     <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAll(true)">Select All</button>
                                     <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAll(false)">Clear</button>
                                 </div>
                                 <div class="border border-secondary rounded p-2 bg-black" id="yaraRuleList" style="max-height: 400px; overflow-y: auto;">
                                     {% for category, files in yara_files_by_category.items()|sort %}
-                                    <details class="mb-1 yara-cat-group">
+                                    <details class="mb-1 yara-cat-group" data-source="{{ yara_category_sources.get(category, 'Other') }}">
                                         <summary class="text-uppercase text-muted small fw-bold mt-2 mb-1" style="cursor:pointer;">{{ category }} ({{ files|length }})</summary>
                                         <div class="ms-3">
                                         {% for rf in files %}
@@ -1084,7 +1092,13 @@ function toggleSelectAll(select) {
 // results aren't hidden inside a still-collapsed <details>.
 function filterYaraRules() {
     const q = document.getElementById('yaraRuleSearch').value.trim().toLowerCase();
+    const sourceFilterEl = document.getElementById('yaraSourceFilter');
+    const src = sourceFilterEl ? sourceFilterEl.value : '';
     document.querySelectorAll('#yaraRuleList .yara-cat-group').forEach(group => {
+        if (src && group.dataset.source !== src) {
+            group.style.display = 'none';
+            return;
+        }
         let anyVisible = false;
         group.querySelectorAll('.yara-rule-row').forEach(row => {
             const match = !q || row.dataset.search.includes(q);
