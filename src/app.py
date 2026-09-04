@@ -10707,8 +10707,16 @@ _ATOMIC_LIST_CACHE_TTL = 3600  # the repo changes far less often than SigmaHQ re
 
 def _fetch_atomic_test_files():
     """Downloads+extracts the atomic-red-team repo's default-branch zip to a fresh temp
-    dir; returns (tempdir, [relpath, ...]) for every atomics/T*/T*.yaml file. Caller owns
-    cleanup (shutil.rmtree(tempdir)) -- same contract as _fetch_sigmahq_pack_files."""
+    dir; returns (tempdir, atomics_dir, [relpath, ...]) for every atomics/T*/T*.yaml file.
+    Caller owns cleanup (shutil.rmtree(tempdir), NOT atomics_dir -- rmtree on the outer
+    tempdir also removes the downloaded zip sitting alongside it). Unlike
+    _fetch_sigmahq_pack_files's release-package zips (rules/ directly at the top level,
+    no wrapper folder), GitHub's branch-zip download wraps everything in
+    "<repo>-<branch>/" -- atomics_dir is returned explicitly rather than leaving the
+    caller to reconstruct it and risk missing that wrapper segment (a real bug caught
+    live: the first version of this function returned bare tempdir, and the caller's own
+    os.path.join(tempdir, 'atomics', relpath) silently pointed at a path one level too
+    shallow, so every single file failed to open and the import always came back empty)."""
     import urllib.request, zipfile, tempfile, socket
     t = tempfile.mkdtemp()
     zp = os.path.join(t, "atomics.zip")
@@ -10744,7 +10752,7 @@ def _fetch_atomic_test_files():
         # returning nothing is what stops a transient failure from looking like "the
         # import worked and there's just nothing to show."
         raise ValueError(f"Downloaded archive extracted, but no atomics/*.yaml files were found under {entries[0]}/atomics -- the download may be incomplete or the repo structure has changed.")
-    return t, relpaths
+    return t, atomics_dir, relpaths
 
 def _parse_atomic_test_file(relpath, raw_yaml):
     """One technique YAML -> a list of individual atomic-test candidate dicts (a file can
@@ -10789,12 +10797,12 @@ def _list_atomic_tests_available():
     now = _time.time()
     if _ATOMIC_LIST_CACHE['data'] is not None and (now - _ATOMIC_LIST_CACHE['time']) < _ATOMIC_LIST_CACHE_TTL:
         return _ATOMIC_LIST_CACHE['data']
-    t, relpaths = _fetch_atomic_test_files()
+    t, atomics_dir, relpaths = _fetch_atomic_test_files()
     out = []
     try:
         for rp in relpaths:
             try:
-                with open(os.path.join(t, 'atomics', rp), 'r', encoding='utf-8') as fh:
+                with open(os.path.join(atomics_dir, rp), 'r', encoding='utf-8') as fh:
                     raw = fh.read()
                 out.extend(_parse_atomic_test_file(rp, raw))
             except Exception:
