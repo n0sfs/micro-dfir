@@ -1137,18 +1137,28 @@ def _yara_resolve_path(relpath):
         return None
     return full_path
 
-@app.route('/api/yara/rule-content')
+@app.route('/api/yara/rule-content', methods=['GET', 'DELETE'])
 @login_required
 def api_yara_rule_content():
-    full_path = _yara_resolve_path(request.args.get('path', ''))
+    raw_path = request.args.get('path', '')
+    full_path = _yara_resolve_path(raw_path)
     if not full_path:
         return jsonify({'error': 'Rule file not found'}), 404
+    if request.method == 'DELETE':
+        err = require_permission('rules.manage')
+        if err: return err
+        try:
+            os.remove(full_path)
+        except OSError as e:
+            return jsonify({'error': f'Could not delete rule file: {e}'}), 500
+        log_audit('yara_rule_file_delete', 'yara_rule_file', raw_path)
+        return jsonify({'status': 'success'})
     try:
         with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
     except OSError:
         return jsonify({'error': 'Could not read rule file'}), 500
-    return jsonify({'path': request.args.get('path', ''), 'filename': os.path.basename(full_path), 'content': content})
+    return jsonify({'path': raw_path, 'filename': os.path.basename(full_path), 'content': content})
 
 @app.route('/threat-intel', methods=['GET', 'POST'])
 @login_required

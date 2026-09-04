@@ -448,7 +448,12 @@
                                 <div class="card bg-black border-secondary">
                                     <div class="card-header bg-secondary text-white py-1 px-2 d-flex justify-content-between align-items-center">
                                         <span class="small text-truncate" id="yaraViewerTitle"><i class="fa-solid fa-file-lines me-1"></i>No rule selected</span>
-                                        <button type="button" class="btn btn-sm btn-outline-light py-0 px-1" id="yaraViewerCopyBtn" style="display:none;" onclick="copyYaraViewerContent()" title="Copy raw rule text"><i class="fa-solid fa-copy"></i></button>
+                                        <div>
+                                            <button type="button" class="btn btn-sm btn-outline-light py-0 px-1" id="yaraViewerCopyBtn" style="display:none;" onclick="copyYaraViewerContent()" title="Copy raw rule text"><i class="fa-solid fa-copy"></i></button>
+                                            {% if has_permission('rules.manage') %}
+                                            <button type="button" class="btn btn-sm btn-outline-danger py-0 px-1" id="yaraViewerDeleteBtn" style="display:none;" onclick="deleteYaraRule(yaraViewerCurrentPath)" title="Delete this rule file from disk"><i class="fa-solid fa-trash"></i></button>
+                                            {% endif %}
+                                        </div>
                                     </div>
                                     <div class="card-body p-2" style="max-height: 400px; overflow-y: auto;">
                                         <div id="yaraViewerBody" class="text-muted small">Click a rule name on the left to preview its raw YARA source here.</div>
@@ -1111,8 +1116,10 @@ function filterYaraRules() {
 }
 
 let yaraViewerContent = '';
+let yaraViewerCurrentPath = null;
 function viewYaraRule(relpath) {
     if (!relpath) return;
+    yaraViewerCurrentPath = relpath;
     document.querySelectorAll('.yara-rule-viewlabel').forEach(el => {
         el.classList.toggle('text-info', el.dataset.relpath === relpath);
         el.classList.toggle('fw-bold', el.dataset.relpath === relpath);
@@ -1120,9 +1127,11 @@ function viewYaraRule(relpath) {
     const titleEl = document.getElementById('yaraViewerTitle');
     const bodyEl = document.getElementById('yaraViewerBody');
     const copyBtn = document.getElementById('yaraViewerCopyBtn');
+    const deleteBtn = document.getElementById('yaraViewerDeleteBtn');
     titleEl.innerHTML = `<i class="fa-solid fa-file-lines me-1"></i>${escHtml(relpath.split('/').pop())}`;
     bodyEl.innerHTML = '<div class="text-muted small">Loading...</div>';
     copyBtn.style.display = 'none';
+    if (deleteBtn) deleteBtn.style.display = 'none';
     fetch('/api/yara/rule-content?path=' + encodeURIComponent(relpath))
         .then(res => res.json().then(d => ({ ok: res.ok, d })))
         .then(({ ok, d }) => {
@@ -1133,6 +1142,7 @@ function viewYaraRule(relpath) {
             yaraViewerContent = d.content || '';
             bodyEl.innerHTML = `<pre class="text-light small mb-0" style="white-space:pre-wrap; word-break:break-word;">${escHtml(yaraViewerContent)}</pre>`;
             copyBtn.style.display = '';
+            if (deleteBtn) deleteBtn.style.display = '';
         })
         .catch(() => { bodyEl.innerHTML = '<div class="text-danger small">Network error loading rule.</div>'; });
 }
@@ -1140,6 +1150,21 @@ function viewYaraRule(relpath) {
 function copyYaraViewerContent() {
     if (!yaraViewerContent) return;
     navigator.clipboard.writeText(yaraViewerContent).then(() => toast('Rule copied to clipboard.', 'success')).catch(() => toast('Could not copy to clipboard.', 'danger'));
+}
+
+async function deleteYaraRule(relpath) {
+    if (!relpath) return;
+    const filename = relpath.split('/').pop();
+    if (!(await confirmDialog(`Delete rule file "${filename}"? This removes the actual .yar file from disk. If it came from a synced feed, it may reappear on that feed's next full sync.`, {title: 'Delete YARA rule', danger: true, confirmLabel: 'Delete'}))) return;
+    try {
+        const res = await fetch('/api/yara/rule-content?path=' + encodeURIComponent(relpath), { method: 'DELETE' });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok) { toast(d.error || 'Failed to delete rule file.', 'danger'); return; }
+        toast(`Deleted "${filename}".`, 'success');
+        location.reload();
+    } catch (e) {
+        toast('Network error deleting rule file.', 'danger');
+    }
 }
 
 // ---- YARA Scanning: File Scan vs IOC Hash Sweep mode ----
