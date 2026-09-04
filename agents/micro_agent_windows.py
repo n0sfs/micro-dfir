@@ -4,7 +4,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, tem
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.09.03.5"
+AGENT_VERSION = "2026.09.03.6"
 
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
@@ -669,6 +669,18 @@ def run_agent():
 
                         if data.get('fim_interval_seconds'):
                             fim_interval = data['fim_interval_seconds']
+
+                        # Decoupled from each other server-side (see /api/agent/poll-
+                        # interval) -- a large fleet wants command/upgrade check-ins to
+                        # back off while log shipping stays frequent. CONFIG_INTERVAL
+                        # only gates how often this whole block re-runs; LOG_INTERVAL
+                        # governs both the Get-WinEvent lookback window and the loop's
+                        # own sleep, so it takes effect on the very next iteration
+                        # regardless of how rarely config checks happen.
+                        if data.get('config_interval_seconds'):
+                            CONFIG_INTERVAL = data['config_interval_seconds']
+                        if data.get('log_interval_seconds'):
+                            LOG_INTERVAL = data['log_interval_seconds']
 
                         # Toggling the Sysmon channel on (Log Pipeline tab) is the whole
                         # trigger -- no separate "push install" action exists. Dispatched

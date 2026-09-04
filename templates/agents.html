@@ -155,6 +155,26 @@
                 </table>
             </div>
         </div>
+
+        <!-- Agent Poll Interval -->
+        <div class="card-body border-top border-secondary">
+            <h6 class="text-info mb-2"><i class="fa-solid fa-clock-rotate-left me-2"></i>Agent Poll Interval</h6>
+            <p class="text-muted small mb-2">Independently tune how often agents check in for new commands/config vs. how often they ship logs. A large fleet typically wants command check-ins backed off (fewer "anything new for me?" requests) while log shipping stays frequent. Takes effect on each agent's next check-in.</p>
+            <div class="row g-2 align-items-end mb-2">
+                <div class="col-auto">
+                    <label class="form-label small text-muted mb-1">Command/config check-in (seconds)</label>
+                    <input type="number" min="5" max="3600" id="agentConfigIntervalSeconds" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;" {{ '' if has_permission('edr.fim.manage') else 'disabled' }}>
+                </div>
+                <div class="col-auto">
+                    <label class="form-label small text-muted mb-1">Log shipping (seconds)</label>
+                    <input type="number" min="5" max="300" id="agentLogIntervalSeconds" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;" {{ '' if has_permission('edr.fim.manage') else 'disabled' }}>
+                </div>
+                {% if has_permission('edr.fim.manage') %}
+                <div class="col-auto"><button class="btn btn-outline-primary btn-sm" onclick="saveAgentPollInterval()"><i class="fa-solid fa-floppy-disk me-1"></i>Save</button></div>
+                {% endif %}
+                <div class="col-auto"><span id="agentPollIntervalMsg" class="small" style="display:none;"></span></div>
+            </div>
+        </div>
     </div>
 
     <!-- Response Actions pane -->
@@ -429,6 +449,7 @@ document.addEventListener("DOMContentLoaded", function() {
     initEndpointFilterDropdowns();
     loadFimPaths();
     loadFimInterval();
+    loadAgentPollInterval();
     loadAgentSweepConfig();
     loadAgentGroupsDropdown();
     setInterval(loadUniqueEndpoints, 30000);
@@ -495,6 +516,38 @@ function saveFimInterval() {
         if (ok) {
             msg.className = 'small text-success'; msg.innerText = 'Saved.';
             loadFimInterval();
+        } else {
+            msg.className = 'small text-danger'; msg.innerText = data.error || 'Failed to save.';
+        }
+        setTimeout(() => { msg.style.display = 'none'; }, 4000);
+    }).catch(err => { msg.className = 'small text-danger'; msg.innerText = 'Error: ' + err; msg.style.display = 'inline'; });
+}
+
+// ---- Agent Poll Interval ----
+function loadAgentPollInterval() {
+    fetch('/api/agent/poll-interval').then(r => r.json()).then(data => {
+        document.getElementById('agentConfigIntervalSeconds').value = data.config_interval_seconds;
+        document.getElementById('agentLogIntervalSeconds').value = data.log_interval_seconds;
+    }).catch(err => console.error('Error loading agent poll interval:', err));
+}
+
+function saveAgentPollInterval() {
+    const config_interval_seconds = parseInt(document.getElementById('agentConfigIntervalSeconds').value, 10);
+    const log_interval_seconds = parseInt(document.getElementById('agentLogIntervalSeconds').value, 10);
+    const msg = document.getElementById('agentPollIntervalMsg');
+    if (!config_interval_seconds || config_interval_seconds < 5 || config_interval_seconds > 3600) {
+        msg.className = 'small text-danger'; msg.innerText = 'Command/config interval must be 5-3600 seconds.'; msg.style.display = 'inline'; return;
+    }
+    if (!log_interval_seconds || log_interval_seconds < 5 || log_interval_seconds > 300) {
+        msg.className = 'small text-danger'; msg.innerText = 'Log shipping interval must be 5-300 seconds.'; msg.style.display = 'inline'; return;
+    }
+    fetch('/api/agent/poll-interval', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({config_interval_seconds, log_interval_seconds})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        msg.style.display = 'inline';
+        if (ok) {
+            msg.className = 'small text-success'; msg.innerText = 'Saved.';
+            loadAgentPollInterval();
         } else {
             msg.className = 'small text-danger'; msg.innerText = data.error || 'Failed to save.';
         }

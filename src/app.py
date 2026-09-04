@@ -11142,10 +11142,25 @@ def agent_config():
         fim_interval_seconds = int(s.get('fim_interval_seconds') or DEFAULT_FIM_INTERVAL_SECONDS)
     except (TypeError, ValueError):
         fim_interval_seconds = DEFAULT_FIM_INTERVAL_SECONDS
+    try:
+        config_interval_seconds = int(s.get('agent_config_interval_seconds') or DEFAULT_AGENT_CONFIG_INTERVAL_SECONDS)
+    except (TypeError, ValueError):
+        config_interval_seconds = DEFAULT_AGENT_CONFIG_INTERVAL_SECONDS
+    try:
+        log_interval_seconds = int(s.get('agent_log_interval_seconds') or DEFAULT_AGENT_LOG_INTERVAL_SECONDS)
+    except (TypeError, ValueError):
+        log_interval_seconds = DEFAULT_AGENT_LOG_INTERVAL_SECONDS
 
     return jsonify({
         'channels': channels, 'channel_config': channel_config, 'ingest_url': dynamic_ingest_url,
         'fim_paths': fim_paths, 'fim_interval_seconds': fim_interval_seconds,
+        # Decoupled from each other -- a large fleet wants command/upgrade check-ins
+        # (config_interval_seconds) to back off while logs keep shipping frequently
+        # (log_interval_seconds), not both tied to one value. The agent's own poll loop
+        # sleeps for log_interval_seconds every iteration and only actually re-hits this
+        # route once config_interval_seconds has elapsed, so log shipping cadence is
+        # never held hostage by a longer config-check interval.
+        'config_interval_seconds': config_interval_seconds, 'log_interval_seconds': log_interval_seconds,
         # Toggling the Sysmon channel on (Log Pipeline tab) is the entire trigger -- every
         # Windows agent picks this up on its next config poll (~8s) and installs Sysmon
         # itself if it isn't already present (see _ensure_sysmon_installed() in
@@ -12903,6 +12918,49 @@ def api_agent_heartbeat_history(hostname):
 # it's viewable/settable from the Agents page instead of requiring a code change +
 # redeploy + re-upgrade of every endpoint just to retune how often FIM runs.
 DEFAULT_FIM_INTERVAL_SECONDS = 300
+
+# Both were hardcoded to 8s directly in every agent script -- a fleet of any real size
+# multiplies that into a lot of /api/agent/config traffic purely for "anything new for
+# me?" polling. Split into two independently-tunable values so a large deployment can
+# back the command/upgrade check-in off while log shipping stays frequent.
+DEFAULT_AGENT_CONFIG_INTERVAL_SECONDS = 8
+DEFAULT_AGENT_LOG_INTERVAL_SECONDS = 8
+
+@app.route('/api/agent/poll-interval', methods=['GET', 'POST'])
+@login_required
+def api_agent_poll_interval():
+    db = get_db()
+    if request.method == 'GET':
+        row = db.execute(
+            "SELECT key, value FROM settings WHERE key IN ('agent_config_interval_seconds', 'agent_log_interval_seconds')"
+        ).fetchall()
+        s = {r['key']: r['value'] for r in row}
+        try:
+            config_interval = int(s.get('agent_config_interval_seconds') or DEFAULT_AGENT_CONFIG_INTERVAL_SECONDS)
+        except (TypeError, ValueError):
+            config_interval = DEFAULT_AGENT_CONFIG_INTERVAL_SECONDS
+        try:
+            log_interval = int(s.get('agent_log_interval_seconds') or DEFAULT_AGENT_LOG_INTERVAL_SECONDS)
+        except (TypeError, ValueError):
+            log_interval = DEFAULT_AGENT_LOG_INTERVAL_SECONDS
+        return jsonify({'config_interval_seconds': config_interval, 'log_interval_seconds': log_interval})
+
+    err = require_permission('edr.fim.manage')
+    if err: return err
+    data = request.get_json() or {}
+    try:
+        config_interval = int(data.get('config_interval_seconds'))
+        log_interval = int(data.get('log_interval_seconds'))
+        if not (5 <= config_interval <= 3600):
+            raise ValueError
+        if not (5 <= log_interval <= 300):
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "config_interval_seconds must be 5-3600 and log_interval_seconds must be 5-300"}), 400
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('agent_config_interval_seconds', ?)", (str(config_interval),))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('agent_log_interval_seconds', ?)", (str(log_interval),))
+    db.commit()
+    return jsonify({"status": "success", "config_interval_seconds": config_interval, "log_interval_seconds": log_interval})
 
 @app.route('/api/fim/interval', methods=['GET', 'POST'])
 @login_required
