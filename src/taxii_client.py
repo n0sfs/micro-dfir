@@ -672,6 +672,114 @@ def sync_yara_forge(feed, mode='all'):
     conn.commit(); conn.close()
     return written
 
+# Yara-Rules/rules and Neo23x0/signature-base are both plain GitHub repos of many
+# individual .yar files (unlike YARA Forge's one-big-file-per-tier packages) -- closer
+# in shape to Atomic Red Team's zip-of-many-files than to sync_yara_forge above. Since
+# they're already separate files, there's no need to split anything; "new/updated/all"
+# tracking here is by (relpath, content hash) instead of a rule's own meta fields --
+# more robust than parsing per-rule metadata, since neither repo's rule authors follow
+# a single consistent meta-field convention the way YARA Forge's generated output does.
+import hashlib
+
+def _fetch_github_yara_files(zip_url, subdir):
+    """Downloads+extracts a GitHub repo's branch zip; returns (tempdir, [(relpath,
+    content_bytes), ...]) for every .yar/.yara file under subdir (relative to the
+    repo root, inside GitHub's own "<repo>-<branch>/" wrapper folder). Caller owns
+    cleanup (shutil.rmtree(tempdir))."""
+    fd, tmp_zip_path = tempfile.mkstemp(suffix=".zip")
+    os.close(fd)
+    t = tempfile.mkdtemp()
+    try:
+        res = requests.get(zip_url, timeout=120, headers={'User-Agent': 'micro-dfir'})
+        res.raise_for_status()
+        with open(tmp_zip_path, 'wb') as f:
+            f.write(res.content)
+        with zipfile.ZipFile(tmp_zip_path) as z:
+            z.extractall(t)
+        entries = [e for e in os.listdir(t) if os.path.isdir(os.path.join(t, e)) and e != '__MACOSX']
+        if not entries:
+            raise ValueError("Downloaded archive had no top-level folder")
+        base_dir = os.path.join(t, entries[0], subdir) if subdir else os.path.join(t, entries[0])
+        out = []
+        for root, _, files in os.walk(base_dir):
+            for fn in files:
+                if fn.lower().endswith(('.yar', '.yara')):
+                    full = os.path.join(root, fn)
+                    relpath = os.path.relpath(full, base_dir)
+                    with open(full, 'rb') as fh:
+                        out.append((relpath, fh.read()))
+        if not out:
+            raise ValueError(f"Downloaded archive extracted, but no .yar/.yara files were found under {entries[0]}/{subdir} -- the download may be incomplete or the repo structure has changed.")
+        return t, out
+    except Exception:
+        shutil.rmtree(t, ignore_errors=True)
+        raise
+    finally:
+        try:
+            os.remove(tmp_zip_path)
+        except OSError:
+            pass
+
+def _sync_github_yara_repo(feed, mode, zip_url, subdir, table, source_dirname):
+    """Shared new/updated/all sync body for both Yara-Rules/rules and
+    Neo23x0/signature-base -- writes into rules/yara_imported/<source_dirname>/,
+    preserving each file's own relative path (so Yara-Rules/rules' real category
+    subfolders -- malware/, crypto/, packers/, etc. -- survive; signature-base has no
+    subfolders of its own, so its files land flat, exactly like today's static drop)."""
+    t, files = _fetch_github_yara_files(zip_url, subdir)
+    try:
+        parsed = {relpath: (hashlib.sha256(content).hexdigest(), content) for relpath, content in files}
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+
+    conn = _connect()
+    existing = {row['relpath']: row['content_hash'] for row in conn.execute(
+        f"SELECT relpath, content_hash FROM {table} WHERE feed_id = ?", (feed['id'],)
+    ).fetchall()}
+
+    if mode == 'new':
+        to_write = {k: v for k, v in parsed.items() if k not in existing}
+    elif mode == 'updated':
+        to_write = {k: v for k, v in parsed.items() if k in existing and v[0] != existing[k]}
+    else:
+        to_write = parsed  # 'all' (and any unrecognized value, defaulting safely to a full sync)
+
+    dest_dir = os.path.join(YARA_RULES_DIR, source_dirname)
+    written = 0
+    for relpath, (content_hash, content) in to_write.items():
+        target = os.path.join(dest_dir, relpath)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, 'wb') as f:
+            f.write(content)
+        conn.execute(
+            f"INSERT OR REPLACE INTO {table} (feed_id, relpath, content_hash, synced_at) VALUES (?, ?, ?, datetime('now'))",
+            (feed['id'], relpath, content_hash)
+        )
+        written += 1
+
+    if mode not in ('new', 'updated'):
+        stale = set(existing) - set(parsed)
+        for relpath in stale:
+            try:
+                os.remove(os.path.join(dest_dir, relpath))
+            except OSError:
+                pass
+        if stale:
+            placeholders = ','.join('?' for _ in stale)
+            conn.execute(f"DELETE FROM {table} WHERE feed_id = ? AND relpath IN ({placeholders})", (feed['id'], *stale))
+    conn.commit(); conn.close()
+    return written
+
+YARA_RULES_PROJECT_ZIP_URL = "https://github.com/Yara-Rules/rules/archive/refs/heads/master.zip"
+
+def sync_yara_rules_project(feed, mode='all'):
+    return _sync_github_yara_repo(feed, mode, YARA_RULES_PROJECT_ZIP_URL, '', 'yara_rules_project_synced_files', 'yara_rules_project_synced')
+
+SIGNATURE_BASE_ZIP_URL = "https://github.com/Neo23x0/signature-base/archive/refs/heads/master.zip"
+
+def sync_signature_base(feed, mode='all'):
+    return _sync_github_yara_repo(feed, mode, SIGNATURE_BASE_ZIP_URL, 'yara', 'signature_base_synced_files', 'signature_base_synced')
+
 def sync_feed(feed, mode='all'):
     if feed["feed_type"] == "taxii":
         return sync_taxii(feed)
@@ -687,6 +795,10 @@ def sync_feed(feed, mode='all'):
         return sync_yaraify(feed)
     elif feed["feed_type"] == "yara_forge":
         return sync_yara_forge(feed, mode=mode)
+    elif feed["feed_type"] == "yara_rules_project":
+        return sync_yara_rules_project(feed, mode=mode)
+    elif feed["feed_type"] == "signature_base":
+        return sync_signature_base(feed, mode=mode)
     elif feed["feed_type"] == "misp":
         return sync_misp_feed(feed)
     elif feed["feed_type"] == "sslbl":

@@ -1187,7 +1187,7 @@ def threat_intel():
         active_tab=active_tab, current_user=current_user
     )
 
-TI_FEED_TYPES = ('taxii', 'threatfox', 'otx', 'urlhaus', 'feodotracker', 'yaraify', 'yara_forge', 'misp', 'sslbl', 'spamhaus_drop', 'tor_exit', 'malwarebazaar', 'csv')
+TI_FEED_TYPES = ('taxii', 'threatfox', 'otx', 'urlhaus', 'feodotracker', 'yaraify', 'yara_forge', 'yara_rules_project', 'signature_base', 'misp', 'sslbl', 'spamhaus_drop', 'tor_exit', 'malwarebazaar', 'csv')
 
 _CSV_VALUE_COLS = ('value', 'indicator', 'ioc', 'pattern', 'ip', 'url', 'domain', 'hash', 'ioc_value')
 _CSV_TYPE_COLS = ('type', 'ioc_type')
@@ -8652,6 +8652,26 @@ def migrate_alerts_atomic_test_flag():
     except Exception:
         pass
 
+def migrate_yara_repo_synced_files():
+    # One table per source (not a shared table with a source column) so each sync's
+    # DELETE-stale-rows pass (see _sync_github_yara_repo in taxii_client.py) only ever
+    # scopes to feed_id -- no risk of two different sources' relpaths colliding if they
+    # both happen to use the same filename.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        for table in ('yara_rules_project_synced_files', 'signature_base_synced_files'):
+            conn.execute(f'''CREATE TABLE IF NOT EXISTS {table} (
+                feed_id INTEGER NOT NULL,
+                relpath TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                synced_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (feed_id, relpath)
+            )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_atomic_tests():
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
@@ -14336,6 +14356,7 @@ migrate_agent_polls_os_detail()
 migrate_atomic_tests()
 migrate_alerts_atomic_test_flag()
 migrate_yara_forge_synced_rules()
+migrate_yara_repo_synced_files()
 migrate_log_source_silent_alerts()
 migrate_sigma_aggregation()
 migrate_sigma_rules_columns()
