@@ -405,7 +405,7 @@
                             </div>
                             <div class="mb-3">
                                 <label class="form-label text-info fw-bold">Active Rules ({{ yara_files|length }} loaded)</label>
-                                <div class="text-muted small mb-2"><i class="fa-solid fa-circle-info me-1"></i>Community rules from the <a href="https://github.com/Yara-Rules/rules" target="_blank" rel="noopener" class="text-muted">Yara-Rules/rules</a> project are organized by category below. YARAify-synced rules aren't (that feed's bulk export is a flat file drop with no folder taxonomy or reliable naming convention to group by) — use the search box to find one instead.</div>
+                                <div class="text-muted small mb-2"><i class="fa-solid fa-circle-info me-1"></i>Community rules from the <a href="https://github.com/Yara-Rules/rules" target="_blank" rel="noopener" class="text-muted">Yara-Rules/rules</a>, <a href="https://github.com/Neo23x0/signature-base" target="_blank" rel="noopener" class="text-muted">signature-base</a>, and <a href="https://yarahq.github.io/" target="_blank" rel="noopener" class="text-muted">YARA Forge</a> projects are organized by their own real category/package below. YARAify's bulk export has no folder taxonomy of its own, so those are grouped by each rule's submitting author instead (its most consistent per-rule metadata) — use the search box if a specific rule doesn't turn up where expected.</div>
                                 <input type="text" id="yaraRuleSearch" class="form-control form-control-sm bg-dark text-light border-secondary mb-2" placeholder="Search rule names or descriptions..." oninput="filterYaraRules()">
                                 <div class="d-flex justify-content-between mb-2">
                                     <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAll(true)">Select All</button>
@@ -1439,6 +1439,16 @@ function toggleFeedTypeFields() {
     document.getElementById('syncIntervalField').style.display = isCsv ? 'none' : 'block';
 }
 
+// The full canonical option list, captured once from the real DOM at page load --
+// filtering by rebuilding innerHTML from this every time openFeedModal() runs, rather
+// than toggling each <option>'s hidden property. `hidden` on <option> is unreliable
+// across native <select> dropdown rendering (found live: it doesn't actually hide the
+// option from the popup list in every browser even though the DOM property is set
+// correctly), so a real add/remove is the only dependable way to filter this list.
+const ALL_FEED_TYPE_OPTIONS = Array.from(document.querySelectorAll('#feedType option')).map(o => ({
+    value: o.value, html: o.innerHTML, kind: o.dataset.kind
+}));
+
 function openFeedModal(feed, defaultType, context) {
     initFeedModal();
     document.getElementById('feedModalError').style.display = 'none';
@@ -1448,9 +1458,8 @@ function openFeedModal(feed, defaultType, context) {
     // unusual, not worth the edge cases of filtering it) -- only a fresh Add, opened
     // from a specific tab, narrows the list to that tab's kind of feed. Without a
     // context (e.g. called from somewhere that doesn't know), every option stays.
-    document.querySelectorAll('#feedType option').forEach(opt => {
-        opt.hidden = !feed && context ? opt.dataset.kind !== context : false;
-    });
+    const visibleOptions = (!feed && context) ? ALL_FEED_TYPE_OPTIONS.filter(o => o.kind === context) : ALL_FEED_TYPE_OPTIONS;
+    document.getElementById('feedType').innerHTML = visibleOptions.map(o => `<option value="${escAttr(o.value)}">${o.html}</option>`).join('');
     document.getElementById('feedType').value = feed ? feed.feed_type : (defaultType || (context === 'rule' ? 'yaraify' : 'threatfox'));
     document.getElementById('feedUrl').value = feed ? (feed.discovery_url || '') : '';
     document.getElementById('feedCollection').value = feed ? (feed.collection_id || '') : '';

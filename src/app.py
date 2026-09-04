@@ -1080,12 +1080,13 @@ YARA_RULES_DIR = '/opt/micro-dfir/rules/yara_imported'
 _YARA_DESCRIPTION_RE = re.compile(r'description\s*=\s*"((?:[^"\\]|\\.)*)"')
 _YARA_AUTHOR_RE = re.compile(r'author\s*=\s*"((?:[^"\\]|\\.)*)"')
 
-def _yara_file_description(full_path):
-    try:
-        with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
-    except Exception:
-        return None
+def _yara_file_description(full_path, content=None):
+    if content is None:
+        try:
+            with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+        except Exception:
+            return None
     m = _YARA_DESCRIPTION_RE.search(content)
     if not m:
         return None
@@ -1139,8 +1140,30 @@ def threat_intel():
     for rf in yara_files:
         parts = rf.split(os.sep)
         category = parts[-2] if len(parts) > 1 else 'Other'
+        full_path = os.path.join(yara_dir, rf)
+        # YARAify's bulk export is a flat file drop with no folder taxonomy at all (see
+        # sync_yaraify in taxii_client.py) -- every one of its ~600 rules would
+        # otherwise land in one giant "yaraify_synced" bucket. Checked directly against
+        # a real download: no consistent tags/malpedia_family field (present on <25% of
+        # rules) and filenames don't share a usable prefix (~75% are one-off), but each
+        # rule's own author = "..." meta field is present on ~96% of them and actually
+        # clusters into meaningful groups (the same researcher/team's submissions tend
+        # to cover related malware). Re-bucket by parsed author instead of the flat
+        # source-folder name, purely for this display -- the underlying files/allowlist
+        # are untouched. Reads the file once and reuses it for the description lookup
+        # right below rather than letting _yara_file_description() re-read it.
+        content = None
+        if category == 'yaraify_synced':
+            try:
+                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+            except OSError:
+                content = ''
+            a = _YARA_AUTHOR_RE.search(content)
+            author = a.group(1).replace('\\"', '"').strip() if a else None
+            category = f"YARAify — {author}" if author else "YARAify — Unattributed"
         yara_files_by_category.setdefault(category, []).append(rf)
-        desc = _yara_file_description(os.path.join(yara_dir, rf))
+        desc = _yara_file_description(full_path, content)
         if desc:
             yara_file_descriptions[rf] = desc
 
