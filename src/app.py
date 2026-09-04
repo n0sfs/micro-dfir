@@ -1096,6 +1096,8 @@ def threat_intel():
     from flask import request, flash
 
     active_tab = request.args.get('tab', 'iocs')
+    if active_tab == 'feeds':
+        active_tab = 'iocs'  # Feed Sources merged into the IOCs tab -- old links/bookmarks still work
     matches = []
     yara_files = []
     yara_available = True
