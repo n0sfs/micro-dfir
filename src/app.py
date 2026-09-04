@@ -1103,7 +1103,43 @@ def _yara_source_label(top_dir):
         return 'YARA Forge'
     if top_dir == 'yaraify_synced':
         return 'YARAify'
+    if top_dir == 'custom':
+        return 'Custom'
     return 'Other'
+
+_YARA_CUSTOM_RULE_DIR_NAME = 'custom'
+_YARA_CUSTOM_RULE_NAME_RE = re.compile(r'[^A-Za-z0-9_\-]')
+
+@app.route('/api/yara/custom-rules', methods=['POST'])
+@login_required
+def api_yara_custom_rule_create():
+    err = require_permission('rules.manage')
+    if err: return err
+    d = request.json or {}
+    rule_text = (d.get('rule_text') or '').strip()
+    name = (d.get('name') or '').strip()
+    if not rule_text or not name:
+        return jsonify({'error': 'A rule name and rule text are required'}), 400
+    safe_name = _YARA_CUSTOM_RULE_NAME_RE.sub('_', name)[:100].strip('_')
+    if not safe_name:
+        return jsonify({'error': 'Rule name must contain at least one letter, digit, underscore or hyphen'}), 400
+    try:
+        import yara
+        yara.compile(source=rule_text)
+    except ImportError:
+        return jsonify({'error': 'yara-python is missing on this server.'}), 500
+    except Exception as e:
+        return jsonify({'error': f'Rule failed to compile: {e}'}), 400
+    custom_dir = os.path.join(YARA_RULES_DIR, _YARA_CUSTOM_RULE_DIR_NAME)
+    os.makedirs(custom_dir, exist_ok=True)
+    target = os.path.join(custom_dir, f'{safe_name}.yar')
+    if os.path.exists(target):
+        return jsonify({'error': f'A custom rule file named "{safe_name}.yar" already exists'}), 400
+    with open(target, 'w', encoding='utf-8') as f:
+        f.write(rule_text)
+    relpath = f'{_YARA_CUSTOM_RULE_DIR_NAME}/{safe_name}.yar'
+    log_audit('yara_custom_rule_create', 'yara_rule_file', relpath)
+    return jsonify({'status': 'success', 'path': relpath})
 
 def _yara_file_description(full_path, content=None):
     if content is None:
