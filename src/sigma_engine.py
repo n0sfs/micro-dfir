@@ -537,6 +537,51 @@ def dry_run_rule(conn, rule_yaml, days=7, exclusions=None, preview_limit=20, ioc
     return {'total_matches': total, 'preview': preview, 'preview_truncated': total > preview_limit,
             'window_days': days, 'is_aggregation': agg is not None}
 
+# Same compile-and-execute path as dry_run_rule above, but scoped to one specific host
+# and an exact [start_time, end_time] range instead of "everywhere, last N days" -- built
+# for Atomic Testing's "why didn't this rule fire" diagnosis (app.py's
+# api_atomic_diagnose_rule), where dry_run_rule's own days-window+fleet-wide scope and
+# capped preview could both miss or bury the one host/window that actually matters:
+# a rule that matches thousands of times fleet-wide over a week could fill dry_run_rule's
+# preview cap with unrelated hosts before ever reaching the one atomic-test host, and
+# there's no way to tell from its output alone whether THIS host in THIS window matched
+# at all. Scoping the WHERE clause itself (not a Python post-filter over an already-
+# truncated result) avoids that gap entirely -- also cheaper, since the DB does the
+# filtering instead of every fleet-wide match round-tripping into Python first.
+def dry_run_rule_scoped(conn, rule_yaml, hostname, start_time, end_time, exclusions=None, preview_limit=20, ioc_cache=None):
+    conn.create_function('REGEXP', 2, _sqlite_regexp)
+    cursor = conn.cursor()
+
+    cursor.execute("DROP VIEW IF EXISTS recent_events")
+    cursor.execute(
+        "CREATE TEMP VIEW recent_events AS SELECT * FROM live_logs WHERE timestamp >= ? AND timestamp <= ? AND host = ?",
+        (start_time, end_time, hostname)
+    )
+
+    rule_yaml_text = _prepare_ioc_correlation(_normalize_rule_dates(rule_yaml), cursor, ioc_cache if ioc_cache is not None else {})
+    agg = _extract_aggregation_condition(rule_yaml)
+    if agg:
+        rule_yaml_text = _strip_aggregation_condition(rule_yaml_text, agg)
+    backend = _make_backend()
+    queries = backend.convert(SigmaCollection.from_yaml(rule_yaml_text))  # raises on invalid/unconvertible rule -- caller reports it (the "syntax issue" case)
+
+    seen_ids, matches = set(), []
+    for q in queries:
+        q = _rewrite_ioc_lookups(q)
+        for m in cursor.execute(q).fetchall():
+            if m['id'] in seen_ids:
+                continue
+            if any(_exclusion_matches(e, m) for e in (exclusions or [])):
+                continue
+            seen_ids.add(m['id'])
+            matches.append(m)
+    cursor.execute("DROP VIEW IF EXISTS recent_events")
+
+    matches.sort(key=lambda m: m['id'], reverse=True)
+    total = len(matches)
+    preview = [{k: m[k] for k in DRY_RUN_PREVIEW_FIELDS if k in m.keys()} for m in matches[:preview_limit]]
+    return {'total_matches': total, 'preview': preview, 'preview_truncated': total > preview_limit, 'is_aggregation': agg is not None}
+
 def run_detection_cycle():
     if not os.path.exists(DB_PATH): return
     conn = sqlite3.connect(DB_PATH, timeout=30); conn.row_factory = sqlite3.Row

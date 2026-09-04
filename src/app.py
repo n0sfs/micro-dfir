@@ -11477,6 +11477,66 @@ def api_atomic_catalog_refresh():
     log_audit('atomic_catalog_refresh', 'atomic_test', None, f"count={len(candidates)}")
     return jsonify({"status": "success", "count": len(candidates)})
 
+def _diagnose_raw_logs_sample(db, hostname, start, end, limit=15):
+    rows = db.execute(
+        "SELECT timestamp, app, event_id, message FROM live_logs WHERE host = ? AND timestamp >= ? AND timestamp <= ? ORDER BY id DESC LIMIT ?",
+        (hostname, start, end, limit)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+@app.route('/api/atomic/runs/<int:run_id>/diagnose/<int:rule_id>', methods=['POST'])
+@login_required
+def api_atomic_diagnose_rule(run_id, rule_id):
+    """For a 'Not Detected' atomic run: tests one of the rules already tagged for that
+    run's technique against exactly this run's host and time window (not dry_run_rule's
+    own fleet-wide/days-window scope, which could miss or bury the one host that
+    matters here). Answers the two real questions this can distinguish: did the rule
+    even COMPILE (a real syntax/logic-error issue in the rule itself), and if so, did it
+    match ANYTHING in the exact window this test ran in (0 matches on a compiling rule
+    means either the expected log source genuinely isn't being captured, or the rule's
+    conditions plain don't describe what this test actually did) -- plus a raw sample of
+    what WAS logged for that host/window, so the analyst can compare by eye either way."""
+    err = require_permission('rules.manage')
+    if err: return err
+    db = get_db()
+    run = db.execute(
+        "SELECT r.hostname, r.queued_at FROM atomic_test_runs r WHERE r.id = ?", (run_id,)
+    ).fetchone()
+    if not run:
+        return jsonify({'error': 'Atomic test run not found'}), 404
+    rule = db.execute("SELECT rule_yaml, title FROM sigma_rules WHERE id = ?", (rule_id,)).fetchone()
+    if not rule:
+        return jsonify({'error': 'Rule not found'}), 404
+
+    from datetime import timedelta
+    window_minutes = _validation_window_minutes(db)
+    try:
+        start = datetime.strptime(run['queued_at'], '%Y-%m-%d %H:%M:%S')
+    except (ValueError, TypeError):
+        return jsonify({'error': 'This run has no valid queued_at timestamp to diagnose against'}), 400
+    # queued_at is UTC (SQLite's own CURRENT_TIMESTAMP -- see _check_atomic_run_validation's
+    # comment on this exact convention), so the "now" ceiling here must be UTC too.
+    end = min(start + timedelta(minutes=window_minutes), datetime.utcnow())
+    start_str, end_str = start.strftime('%Y-%m-%d %H:%M:%S'), end.strftime('%Y-%m-%d %H:%M:%S')
+
+    from sigma_engine import dry_run_rule_scoped
+    exclusions = [dict(e) for e in db.execute(
+        "SELECT field, operator, value FROM rule_exclusions WHERE rule_id = ? AND enabled = 1", (rule_id,)
+    ).fetchall()]
+    raw_logs = _diagnose_raw_logs_sample(db, run['hostname'], start_str, end_str)
+    try:
+        result = dry_run_rule_scoped(db, rule['rule_yaml'], run['hostname'], start_str, end_str, exclusions=exclusions)
+    except Exception as e:
+        return jsonify({
+            'compiled': False, 'compile_error': str(e), 'match_count': 0, 'matches_preview': [],
+            'raw_logs_sample': raw_logs, 'window': {'start': start_str, 'end': end_str},
+        })
+    return jsonify({
+        'compiled': True, 'compile_error': None,
+        'match_count': result['total_matches'], 'matches_preview': result['preview'],
+        'raw_logs_sample': raw_logs, 'window': {'start': start_str, 'end': end_str},
+    })
+
 @app.route('/api/atomic/tests', methods=['GET'])
 @login_required
 def api_atomic_tests_list():

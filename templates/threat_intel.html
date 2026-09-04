@@ -3142,13 +3142,61 @@ function atomicGapWorkflowHtml(r) {
     if (!rules.length) {
         rulesHtml = `<div class="alert alert-warning small py-2 mb-2"><i class="fa-solid fa-triangle-exclamation me-1"></i>No detection rule is tagged for ${escHtml(r.technique_id || 'this technique')} at all -- a real coverage gap, not a tuning issue.</div>`;
     } else {
-        rulesHtml = `<div class="small text-muted mb-1">${rules.length} rule(s) already tagged for ${escHtml(r.technique_id || 'this technique')}, but none fired -- worth checking their logic/log-source against what this test actually did:</div>
-            <ul class="small mb-2">${rules.map(rule => `<li><a href="/siem?tab=rules&rule_id=${rule.id}" target="_blank">${escHtml(rule.title)}</a>${rule.enabled ? '' : ' <span class="badge bg-secondary">Disabled</span>'}</li>`).join('')}</ul>`;
+        const allDisabled = rules.every(rule => !rule.enabled);
+        // The single most common, cheapest-to-spot root cause: nothing could have
+        // fired if every candidate rule is off. Called out on its own, ahead of the
+        // per-rule diagnosis below, instead of making the analyst infer it from a
+        // list of badges.
+        const disabledCallout = allDisabled
+            ? `<div class="alert alert-danger small py-2 mb-2"><i class="fa-solid fa-power-off me-1"></i>All ${rules.length} rule(s) tagged for ${escHtml(r.technique_id || 'this technique')} are currently disabled -- the most likely reason nothing fired. Enable one to actually test detection.</div>`
+            : '';
+        rulesHtml = `${disabledCallout}<div class="small text-muted mb-1">${rules.length} rule(s) already tagged for ${escHtml(r.technique_id || 'this technique')}, but none fired -- diagnose one to see whether it's a rule syntax/logic problem or the expected log source just isn't there:</div>
+            <ul class="small mb-2 ps-3">${rules.map(rule => `<li class="mb-1">
+                <a href="/siem?tab=rules&rule_id=${rule.id}" target="_blank">${escHtml(rule.title)}</a>${rule.enabled ? '' : ' <span class="badge bg-secondary">Disabled</span>'}
+                <button type="button" class="btn btn-sm btn-outline-info py-0 px-2 ms-1" onclick="diagnoseAtomicRule(${r.id}, ${rule.id})"><i class="fa-solid fa-stethoscope me-1"></i>Diagnose</button>
+                <div id="atomicDiag_${r.id}_${rule.id}" class="mt-1"></div>
+            </li>`).join('')}</ul>`;
     }
     return `<div class="card bg-black border-secondary p-2">
         ${rulesHtml}
         <a href="${createUrl}" target="_blank" class="btn btn-sm btn-outline-primary"><i class="fa-solid fa-plus me-1"></i>Create Detection Rule</a>
     </div>`;
+}
+
+function diagnoseAtomicRule(runId, ruleId) {
+    const box = document.getElementById(`atomicDiag_${runId}_${ruleId}`);
+    box.innerHTML = '<span class="text-muted small"><i class="fa-solid fa-spinner fa-spin me-1"></i>Testing this rule against exactly this host/time window...</span>';
+    fetch(`/api/atomic/runs/${runId}/diagnose/${ruleId}`, {method: 'POST'})
+        .then(r => r.json().then(data => ({ok: r.ok, data})))
+        .then(({ok, data}) => {
+            if (!ok) { box.innerHTML = `<span class="text-danger small">${escHtml(data.error || 'Diagnosis failed.')}</span>`; return; }
+            box.innerHTML = atomicDiagnosisResultHtml(data);
+        })
+        .catch(err => { box.innerHTML = `<span class="text-danger small">Error: ${escHtml(String(err))}</span>`; });
+}
+
+function atomicDiagnosisResultHtml(d) {
+    const parts = [];
+    if (!d.compiled) {
+        // A real syntax/conversion problem in the rule itself -- direct answer to
+        // "is it a syntax issue" -- shown as-is (the same error dry-run/Validate Rules
+        // would report), not paraphrased.
+        parts.push(`<div class="alert alert-danger small py-2 mb-1"><i class="fa-solid fa-bug me-1"></i><strong>Rule failed to compile</strong> -- this is a syntax/logic problem in the rule itself, not a log-source gap:<br><code class="small">${escHtml(d.compile_error || '')}</code></div>`);
+    } else if (d.match_count > 0) {
+        parts.push(`<div class="alert alert-warning small py-2 mb-1"><i class="fa-solid fa-circle-question me-1"></i>Compiled fine and actually matched <strong>${d.match_count}</strong> event(s) in this exact window/host -- so the query itself works. If it still didn't create a real alert, check whether the rule is disabled, excluded (Tuning tab), or its severity/autocase config, not its detection logic.</div>`);
+    } else {
+        parts.push(`<div class="alert alert-info small py-2 mb-1"><i class="fa-solid fa-circle-info me-1"></i>Compiled fine but matched <strong>zero</strong> events in this exact window/host -- the rule's logic is syntactically valid but genuinely didn't see what it's looking for here. Compare against the raw log sample below: either the expected log source/field isn't being captured for this host, or this test's real behavior doesn't match the rule's conditions.</div>`);
+    }
+    const logs = d.raw_logs_sample || [];
+    if (logs.length) {
+        parts.push(`<div class="small text-muted mt-2 mb-1">Raw logs actually captured for ${escHtml('this host/window')} (${logs.length} shown):</div>`);
+        parts.push(`<div class="table-responsive"><table class="table table-dark table-sm mb-0"><thead><tr><th>Time</th><th>App</th><th>Event ID</th><th>Message</th></tr></thead><tbody>${
+            logs.map(l => `<tr><td class="text-nowrap small">${escHtml(l.timestamp || '')}</td><td class="small">${escHtml(l.app || '')}</td><td class="small">${escHtml(l.event_id || '')}</td><td class="small text-truncate" style="max-width:320px;" title="${escHtml(l.message || '')}">${escHtml(l.message || '')}</td></tr>`).join('')
+        }</tbody></table></div>`);
+    } else {
+        parts.push(`<div class="small text-muted mt-2"><i class="fa-solid fa-triangle-exclamation me-1"></i>No logs at all were captured for this host in this window -- likely the real root cause if the rule otherwise looks correct: check the agent's log channel config (Log Pipeline) for whatever source this rule expects.</div>`);
+    }
+    return parts.join('');
 }
 
 function runAtomicCleanupFromDetail(testId, hostname) {
