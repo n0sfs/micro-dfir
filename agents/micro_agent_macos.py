@@ -21,7 +21,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, ssl, threading, 
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.08.31.2"
+AGENT_VERSION = "2026.08.31.3"
 
 _OS_DETAIL_CACHE = None
 
@@ -370,6 +370,14 @@ def run_agent():
 
                         if data.get('fim_interval_seconds'):
                             fim_interval = data['fim_interval_seconds']
+
+                        # Decoupled from each other server-side (see /api/agent/poll-
+                        # interval) -- a large fleet wants command/upgrade check-ins to
+                        # back off while log shipping stays frequent.
+                        if data.get('config_interval_seconds'):
+                            CONFIG_INTERVAL = data['config_interval_seconds']
+                        if data.get('log_interval_seconds'):
+                            LOG_INTERVAL = data['log_interval_seconds']
 
                     print("[+] Check-in successful!", flush=True)
                     break
