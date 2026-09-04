@@ -599,7 +599,7 @@
         <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
-        <div class="small text-muted mb-2">First load downloads and parses the full test repository -- this can take a little while. Cached for an hour after that.</div>
+        <div class="small text-muted mb-2">First load downloads and parses the full test repository (~170MB) -- this genuinely takes a few minutes, not seconds. Cached for an hour after that, shared across the appliance so it's not repeated per-request.</div>
         <div class="d-flex flex-wrap gap-2 mb-2 align-items-center">
             <input type="text" id="atomicPickerSearch" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:260px;" placeholder="Search technique or test name..." oninput="filterAtomicPicker()">
             <select id="atomicPickerPlatformFilter" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:150px;" onchange="filterAtomicPicker()">
@@ -2761,14 +2761,26 @@ function openAtomicPickerModal() {
 }
 
 function loadAtomicPickerData() {
-    document.getElementById('atomicPickerStatus').innerText = 'Downloading and parsing the Atomic Red Team repository -- this can take up to a minute on first load...';
+    document.getElementById('atomicPickerStatus').innerText = 'Downloading and parsing the Atomic Red Team repository -- this genuinely takes a few minutes on a cold cache (it\'s a large download), faster once cached. Do not close this if it looks slow.';
     document.getElementById('atomicPickerTableBody').innerHTML = '';
-    fetch('/api/atomic/import/preview').then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+    // A real network blip mid-download (or a request landing on a gunicorn worker still
+    // fetching the same thing for someone else) can otherwise leave this fetch hanging
+    // with no error and no timeout, indistinguishable from "still working" -- found live,
+    // reported as "doesn't seem to load any tests" with no way to tell from the stuck UI
+    // alone whether it was still genuinely in progress or had silently died.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6 * 60 * 1000);
+    fetch('/api/atomic/import/preview', {signal: controller.signal}).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        clearTimeout(timeoutId);
         if (!ok) { document.getElementById('atomicPickerStatus').innerText = data.error || 'Failed to load.'; return; }
         atomicPickerCandidates = data.tests || [];
         document.getElementById('atomicPickerStatus').innerText = `${atomicPickerCandidates.length} test(s) available.`;
         renderAtomicPicker();
-    }).catch(err => { document.getElementById('atomicPickerStatus').innerText = 'Error: ' + err; });
+    }).catch(err => {
+        clearTimeout(timeoutId);
+        const msg = err.name === 'AbortError' ? 'Timed out after 6 minutes -- check your connection to the appliance and try again.' : ('Error: ' + err);
+        document.getElementById('atomicPickerStatus').innerText = msg;
+    });
 }
 
 function atomicPickerKey(c) { return `${c.source_path}::${c.test_index}`; }
