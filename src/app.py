@@ -12658,9 +12658,17 @@ def agent_config():
     # (no lookup needed beyond the row existing) for the majority of hosts that have
     # never been assigned a group at all.
     group_row = db.execute("SELECT group_name FROM agent_tokens WHERE hostname = ?", (ua,)).fetchone()
-    all_channels, _ = get_agent_channels_for_group(group_row['group_name'] if group_row else '')
+    agent_group_name = group_row['group_name'] if group_row else ''
+    all_channels, _ = get_agent_channels_for_group(agent_group_name)
     enabled_channels = {name: v for name, v in all_channels.items() if v.get('enabled')}
     channels = ','.join(enabled_channels.keys()) or 'Security,System,Application,PowerShell'
+
+    # Sent unconditionally, same as every other field in this response -- a Windows/
+    # macOS agent that has never heard of 'linux_audit_channels' just ignores the key,
+    # same convention this response already relies on for 'channels'/'channel_config'
+    # being meaningless to a Linux agent.
+    linux_channels, _ = get_linux_channels_for_group(agent_group_name)
+    linux_audit_channels = [key for key, v in linux_channels.items() if v.get('enabled')]
 
     # Rich per-channel config for agents that understand it (capture_xml + a ready-made
     # PowerShell Where-Object clause built from the saved event-ID filter) -- the flat
@@ -12717,6 +12725,11 @@ def agent_config():
         # itself if it isn't already present (see _ensure_sysmon_installed() in
         # micro_agent_windows.py). No separate "push install" action needed.
         'sysmon_required': bool(all_channels.get('Sysmon', {}).get('enabled')),
+        # Linux equivalent of the Windows fields above (Log Pipeline > Linux Channels
+        # tab) -- just a list of enabled catalog keys, since the actual auditd rule text
+        # is curated and lives agent-side (LINUX_AUDIT_CHANNELS in
+        # micro_agent_linux.py), not admin-typed. A Windows/macOS agent ignores this key.
+        'linux_audit_channels': linux_audit_channels,
     })
 
 # Same auth as /api/agent/config above -- served content isn't secret, but there's no
@@ -13707,6 +13720,102 @@ def api_agent_channels():
     return jsonify({'channels': all_templates['__default__'], 'group': group_key, 'is_override': False})
 
 
+# --- LINUX LOG CHANNELS (auditd-rule-based, per-agent-group) ---
+# Genuinely different shape from the Windows channels above: Windows' Get-WinEvent has
+# no "give me everything" call, so admins pick from an enumerated whitelist of Event Log
+# channels. journald is the opposite -- a plain unfiltered `journalctl` already captures
+# nearly everything (syslog, auth, kernel, every systemd unit) by design, so there's no
+# equivalent "which channel" decision to make there, and micro_agent_linux.py's
+# fetch_journal_logs() keeps pulling the whole journal unconditionally, unchanged by
+# this feature -- no regression risk for hosts that upgrade to this version. The real
+# Linux gap is process-execution and sensitive-file-change visibility, neither of which
+# journald sees at all without auditd rules loaded first. This catalog is exactly that:
+# a curated, ready-tested set of auditd rule bundles an admin can toggle on per group,
+# which the agent both LOADS (the "push policy" half, via reconcile_linux_audit_channels
+# in micro_agent_linux.py) and PULLS from via its own dedicated ausearch key (the "pull
+# the logs we intend" half, via fetch_channel_audit_logs) -- mirrored here only for the
+# catalog's labels/descriptions; the actual rule text lives agent-side since that's
+# where it's applied. Dual-definition convention, same as UEBA_DEFAULTS/RISK_SCORE_DEFAULTS.
+LINUX_LOG_CHANNELS = {
+    'process_exec': {
+        'label': 'Process Execution',
+        'description': "Every process execve() call on the host, via a dedicated auditd rule (key: microdfir_ch_exec). Requires auditd to be installed -- the agent skips silently, without erroring, on a host that doesn't have it.",
+    },
+    'identity_changes': {
+        'label': 'User/Group/Sudoers File Changes',
+        'description': 'Writes to /etc/passwd, /etc/group, /etc/shadow, and /etc/sudoers, via auditd watch rules (key: microdfir_identity).',
+    },
+}
+LINUX_CHANNELS_CONFIG_PATH = '/opt/micro-dfir/agent_linux_channels.json'
+
+def _default_linux_channel_setting():
+    return {'enabled': False}
+
+def _normalize_linux_channel_dict(data):
+    # Unlike Windows channels, nothing here is admin-customizable beyond on/off -- the
+    # rule content itself is curated and lives agent-side, not user-typed, so there's no
+    # per-channel format/filter-mode/value to validate or preserve.
+    return {key: {'enabled': bool((data or {}).get(key, {}).get('enabled'))} for key in LINUX_LOG_CHANNELS}
+
+def get_linux_channels_all():
+    file_existed = os.path.exists(LINUX_CHANNELS_CONFIG_PATH)
+    raw = {}
+    if file_existed:
+        try:
+            with open(LINUX_CHANNELS_CONFIG_PATH, 'r') as f:
+                raw = json.load(f)
+        except Exception:
+            raw = {}
+    if '__default__' not in raw:
+        raw = {'__default__': raw} if raw else {'__default__': {}}
+    result = {group: _normalize_linux_channel_dict(channels) for group, channels in raw.items()}
+    if result != raw:
+        save_linux_channels_all(result)
+    return result
+
+def save_linux_channels_all(data):
+    with open(LINUX_CHANNELS_CONFIG_PATH, 'w') as f:
+        json.dump(data, f)
+
+def get_linux_channels_for_group(group_name):
+    all_templates = get_linux_channels_all()
+    group_key = (group_name or '').strip()
+    if group_key and group_key in all_templates:
+        return all_templates[group_key], True
+    return all_templates['__default__'], False
+
+@app.route('/api/agent/linux-channels', methods=['GET', 'POST', 'DELETE'])
+@login_required
+def api_agent_linux_channels():
+    from flask import request, jsonify
+    group_key = (request.args.get('group') or '').strip() or '__default__'
+
+    if request.method == 'DELETE':
+        err = require_permission('edr.agent.manage')
+        if err: return err
+        if group_key == '__default__':
+            return jsonify({'status': 'error', 'message': 'The default template cannot be removed.'}), 400
+        all_templates = get_linux_channels_all()
+        if group_key in all_templates:
+            del all_templates[group_key]
+            save_linux_channels_all(all_templates)
+        return jsonify({'status': 'success'})
+
+    if request.method == 'POST':
+        err = require_permission('edr.agent.manage')
+        if err: return err
+        posted = request.json or {}
+        channels = {key: {'enabled': bool((posted.get(key) or {}).get('enabled'))} for key in LINUX_LOG_CHANNELS}
+        all_templates = get_linux_channels_all()
+        all_templates[group_key] = channels
+        save_linux_channels_all(all_templates)
+        return jsonify({'status': 'success', 'channels': channels, 'group': group_key})
+
+    all_templates = get_linux_channels_all()
+    if group_key in all_templates:
+        return jsonify({'channels': all_templates[group_key], 'group': group_key,
+                         'is_override': group_key != '__default__'})
+    return jsonify({'channels': all_templates['__default__'], 'group': group_key, 'is_override': False})
 
 
 # --- SETTINGS API ENDPOINTS ---

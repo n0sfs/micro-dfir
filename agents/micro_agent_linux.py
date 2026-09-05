@@ -1,10 +1,10 @@
 # Micro DFIR Linux Agent
-import urllib.request, json, time, sys, os, subprocess, socket, ssl, threading, hashlib, re
+import urllib.request, json, time, sys, os, subprocess, socket, ssl, threading, hashlib, re, shutil
 
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.08.25.4"
+AGENT_VERSION = "2026.09.05.1"
 
 _OS_DETAIL_CACHE = None
 
@@ -291,6 +291,140 @@ def run_fim_check(paths):
 _sent_audit_sigs = set()
 _SENT_AUDIT_SIG_CAP = 5000
 
+# Server-driven Linux logging channels (Log Pipeline > Linux Channels tab). Each entry
+# is an auditd rule set + the audit key ausearch pulls by. Deliberately a DIFFERENT key
+# namespace (microdfir_ch_* / microdfir_identity) and a SEPARATE rules file from the
+# older one-off "Enable Exec Auditing" console action (/etc/audit/rules.d/microdfir.rules,
+# key microdfir_exec) so the two mechanisms -- one manual per-host, one automatic
+# per-group -- never overwrite or duplicate-count each other's rules.
+LINUX_AUDIT_CHANNELS = {
+    'process_exec': {
+        'audit_key': 'microdfir_ch_exec',
+        'rules': ['-a exec,always -F arch=b64 -S execve -k microdfir_ch_exec',
+                  '-a exec,always -F arch=b32 -S execve -k microdfir_ch_exec'],
+    },
+    'identity_changes': {
+        'audit_key': 'microdfir_identity',
+        'rules': ['-w /etc/passwd -p wa -k microdfir_identity',
+                  '-w /etc/group -p wa -k microdfir_identity',
+                  '-w /etc/shadow -p wa -k microdfir_identity',
+                  '-w /etc/sudoers -p wa -k microdfir_identity'],
+    },
+}
+LINUX_CHANNEL_RULES_PATH = '/etc/audit/rules.d/microdfir_channels.rules'
+_last_applied_linux_channels = None
+_sent_channel_audit_sigs = set()
+_SENT_CHANNEL_AUDIT_SIG_CAP = 5000  # matches _SENT_AUDIT_SIG_CAP's own convention below
+
+def reconcile_linux_audit_channels(enabled_keys):
+    """Declaratively applies whichever of LINUX_AUDIT_CHANNELS the server says should be
+    enabled for this host's group -- writes/removes LINUX_CHANNEL_RULES_PATH and reloads
+    via augenrules, the same persist-then-load pattern the manual exec-auditing action
+    already uses. A no-op unless the desired set actually changed since the last poll,
+    so this never reloads audit rules on every log-shipping cycle for no reason."""
+    global _last_applied_linux_channels
+    desired = frozenset(enabled_keys or [])
+    if desired == _last_applied_linux_channels:
+        return
+    if shutil.which('auditctl') is None:
+        # Nothing we can do on a host without auditd installed -- remember the desired
+        # set anyway so this doesn't retry (and log a failure) on every single poll.
+        _last_applied_linux_channels = desired
+        return
+    lines = []
+    for key in sorted(desired):
+        chan = LINUX_AUDIT_CHANNELS.get(key)
+        if chan:
+            lines.extend(chan['rules'])
+    try:
+        os.makedirs(os.path.dirname(LINUX_CHANNEL_RULES_PATH), exist_ok=True)
+        if lines:
+            with open(LINUX_CHANNEL_RULES_PATH, 'w') as f:
+                f.write('\n'.join(lines) + '\n')
+        elif os.path.exists(LINUX_CHANNEL_RULES_PATH):
+            os.remove(LINUX_CHANNEL_RULES_PATH)
+        subprocess.run(['augenrules', '--load'], capture_output=True, timeout=15)
+        _last_applied_linux_channels = desired
+        print(f"[+] Reconciled Linux log channels: {sorted(desired) or 'none enabled'}", flush=True)
+    except Exception as e:
+        print(f"[!] Failed to reconcile Linux log channels: {e}", flush=True)
+
+def fetch_channel_audit_logs(enabled_keys, last_seconds):
+    """Pulls ausearch results for each ENABLED channel's own audit key -- generalizes
+    fetch_audit_exec_logs()'s single-key approach to the server-driven channel catalog
+    above. Handles both execve (type=SYSCALL/EXECVE) and file-watch (type=PATH) audit
+    record shapes, since identity_changes uses -w watch rules, not a syscall rule."""
+    logs = []
+    host = socket.gethostname()
+    for key in (enabled_keys or []):
+        chan = LINUX_AUDIT_CHANNELS.get(key)
+        if not chan:
+            continue
+        audit_key = chan['audit_key']
+        try:
+            out = subprocess.check_output(
+                ['ausearch', '-k', audit_key, '-ts', f'-{last_seconds}s', '-i'],
+                encoding='utf-8', errors='ignore', stderr=subprocess.DEVNULL
+            )
+        except Exception:
+            continue
+        for record in out.split('----'):
+            record = record.strip()
+            if not record:
+                continue
+            sig = None
+            exe, cmd_line, uid, paths, is_execve = '', '', 'root', [], False
+            for line in record.splitlines():
+                if 'audit(' in line and sig is None:
+                    try:
+                        sig = line.split('audit(', 1)[1].split(')', 1)[0]
+                    except Exception:
+                        pass
+                if line.startswith('type=SYSCALL'):
+                    for token in line.split():
+                        if token.startswith('exe='):
+                            exe = token.split('=', 1)[1].strip('"')
+                        elif token.startswith('auid=') and 'unset' not in token:
+                            uid = token.split('=', 1)[1]
+                if line.startswith('type=EXECVE'):
+                    is_execve = True
+                    cmd_line = ' '.join(re.findall(r'a\d+="((?:[^"\\]|\\.)*)"', line))
+                if line.startswith('type=PATH'):
+                    for token in line.split():
+                        if token.startswith('name='):
+                            paths.append(token.split('=', 1)[1].strip('"'))
+            if not sig:
+                continue
+            channel_sig = f'{key}:{sig}'
+            if channel_sig in _sent_channel_audit_sigs:
+                continue
+            _sent_channel_audit_sigs.add(channel_sig)
+            if len(_sent_channel_audit_sigs) > _SENT_CHANNEL_AUDIT_SIG_CAP:
+                _sent_channel_audit_sigs.pop()
+            try:
+                ts = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(float(sig.split(':', 1)[0])))
+            except (ValueError, IndexError):
+                ts = ''
+            # is_execve (an actual type=EXECVE record), not just "exe happened to be
+            # set" -- type=SYSCALL's own exe= field is present on nearly every audit
+            # record regardless of which syscall fired, so branching on it alone would
+            # mislabel every identity_changes file-watch hit (open/write syscalls) as
+            # an "exec:" event.
+            if is_execve:
+                message = f"exec: {exe} {cmd_line}".strip()
+                event_id = 'execve'
+            elif paths:
+                message = f"file change: {', '.join(dict.fromkeys(paths))} (by {exe or 'unknown'})"
+                event_id = 'file_watch'
+            else:
+                message = f"audit event (key={audit_key})"
+                event_id = 'audit'
+            logs.append({
+                "time": ts, "host": host, "app": "auditd", "severity": "INFO", "event_id": event_id,
+                "username": uid, "message": message,
+            })
+    return logs
+
 def fetch_audit_exec_logs(last_seconds):
     logs = []
     host = socket.gethostname()
@@ -347,6 +481,7 @@ def run_agent():
     print("[*] Agent starting up! Initializing...", flush=True)
     context = build_ssl_context()
     active_fim_paths = []
+    active_linux_channels = []
     last_config_check = 0
     last_fim_check = 0
     LOG_INTERVAL = 8
@@ -403,6 +538,10 @@ def run_agent():
                         if data.get('fim_paths') is not None:
                             active_fim_paths = data['fim_paths']
 
+                        if data.get('linux_audit_channels') is not None:
+                            active_linux_channels = data['linux_audit_channels']
+                            reconcile_linux_audit_channels(active_linux_channels)
+
                         if data.get('fim_interval_seconds'):
                             fim_interval = data['fim_interval_seconds']
 
@@ -444,6 +583,12 @@ def run_agent():
                 new_logs.extend(fetch_audit_exec_logs(LOG_INTERVAL))
             except Exception as e:
                 print(f"[-] auditd exec log fetch failed: {e}", flush=True)
+
+            if active_linux_channels:
+                try:
+                    new_logs.extend(fetch_channel_audit_logs(active_linux_channels, LOG_INTERVAL))
+                except Exception as e:
+                    print(f"[-] Linux channel audit log fetch failed: {e}", flush=True)
 
             if new_logs:
                 print(f"[*] Sending {len(new_logs)} logs to {INGEST_URL}...", flush=True)
