@@ -4,7 +4,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, ssl, threading, 
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.09.05.1"
+AGENT_VERSION = "2026.09.05.2"
 
 _OS_DETAIL_CACHE = None
 
@@ -415,6 +415,17 @@ def fetch_channel_audit_logs(channel_defs, last_seconds):
             else:
                 message = f"audit event (key={audit_key})"
                 event_id = 'audit'
+            # event_id alone can't tell channels apart -- several channels are all pure
+            # `-w` watch rules and all land on event_id='file_watch' (identity_changes,
+            # ssh_config_changes, cron_changes, pam_changes, login_session_tamper, the
+            # watch half of kernel_modules/time_change/network_config_changes, and even
+            # file_deletion's unlink/rename syscalls, which DO carry a PATH record).
+            # Appending the channel's own key here -- not just the raw ausearch audit_key,
+            # which only ever showed up in the 'audit' fallback branch above -- gives a
+            # Sigma rule (or any downstream consumer) one reliable, always-present
+            # substring to match a specific channel by by, instead of having to guess
+            # from watched-path text alone.
+            message = f"{message} [channel={key}]"
             logs.append({
                 "time": ts, "host": host, "app": "auditd", "severity": "INFO", "event_id": event_id,
                 "username": uid, "message": message,
