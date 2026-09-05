@@ -10,6 +10,23 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-05
 
+### Add 12 custom Sigma rules for the new Linux Log Channels
+
+Community SigmaHQ auditd rules were confirmed (via direct research against pySigma's
+field-mapping code) to silently degrade to dead `message LIKE` clauses against this
+app's schema rather than erroring, so they wouldn't reliably detect anything if
+imported as-is. Instead, wrote 12 rules by hand — one per new Linux Log Channel plus two
+process-execution content rules (reverse-shell one-liners, base64-encoded command
+execution) — using the `category: custom, product: custom` pattern this app's own
+field-mapped fields already support, each keyed to the new `[channel=<key>]` message tag
+added in the prior entry below. Each carries an honest `status: experimental` (none have
+fired against real production traffic yet — no monitored Linux endpoint in this fleet
+today) and a MITRE ATT&CK tag; 13 of 14 tags correctly surface on the Coverage page as
+"active" (the 14th, T1070.002, isn't in this app's own curated technique table — a
+pre-existing curation gap, not a rule defect). All 12 compiled and executed cleanly
+against production's real pySigma pipeline via Validate Selected (0 matches, as
+expected with no Linux endpoint currently reporting).
+
 ### Push Windows Advanced Audit Policy, fix Sysmon config reload, curate Security defaults
 
 Windows had the exact gap just closed for Linux auditd: turning on the Security
