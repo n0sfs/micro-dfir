@@ -10,6 +10,24 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-05
 
+### Add Linux Log Channels: per-group auditd policy that actually pushes and pulls
+
+New Log Pipeline tab mirroring Windows Log Channels' per-group shape, but built for how
+Linux logging actually works: journald already captures almost everything unfiltered
+(kept unconditional, no regression to existing hosts), so the real gap is process-
+execution and sensitive-file-change visibility, neither of which the kernel surfaces at
+all without auditd rules loaded. Two curated, opt-in-by-default channels — Process
+Execution, User/Group/Sudoers File Changes. Enabling one both pushes the required
+auditd rule onto the endpoint and pulls its own tagged `ausearch` log stream, mirroring
+per-group resolution exactly like Windows Log Channels (own override, or inherit a
+`__default__` template) but stored in a fully separate file so it carries zero risk to
+that already-working migration. A real bug was caught and fixed before deploy: the
+audit-record parser initially mislabeled a file-watch hit as a process-execution event
+whenever its `type=SYSCALL` line happened to carry an `exe=` field (which nearly every
+audit record does, regardless of syscall) — fixed to key off an actual `type=EXECVE`
+record instead, caught by a real parser fixture test before this ever reached
+production. Live-verified full isolation against the real "Test" group.
+
 ### Add per-agent-group Windows Log Channel templates
 
 Previously one global channel template applied to every Windows agent fleet-wide —
