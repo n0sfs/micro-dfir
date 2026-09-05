@@ -10,6 +10,23 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-05
 
+### Add per-agent-group Windows Log Channel templates
+
+Previously one global channel template applied to every Windows agent fleet-wide —
+no way to give Servers a different collection profile than Workstations/Laptops.
+`agent_config.json`'s shape now nests per-group templates under the existing
+free-text `agent_tokens.group_name` (admin-assigned per host on the EDR Agents page),
+falling back to a `__default__` template for any host whose group has no override —
+migrated non-destructively from every existing single-template file (verified live:
+production's real single template came through byte-identical after migration). The
+Log Pipeline Channels tab gets a group selector, shows whether the selected group has
+its own override or is inheriting the default, and can remove an override to revert
+a group to the default. Live-verified full isolation against production's real "Test"
+group (the one real group in use, assigned to `DESKTOP-C3LBEGL`): saving an override
+changed only that group's template, left the default and other groups untouched, and
+removing it cleanly reverted to inheritance — cleaned up afterward, no leftover
+override left in the file.
+
 ### Move the light/dark theme toggle into the sidebar
 
 It was a fixed top-right floating button that overlapped page content on some panels.
