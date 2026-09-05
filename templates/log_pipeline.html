@@ -34,8 +34,15 @@
     </div>
 </div>
 
+<ul class="nav nav-tabs border-secondary mb-3" id="logPipelineTabs">
+    <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'droprules' else '' }}" id="tabBtnDroprules" onclick="switchLogPipelineTab('droprules')"><i class="fa-solid fa-filter me-1"></i>Drop Rules</button></li>
+    <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'dns' else '' }}" id="tabBtnDns" onclick="switchLogPipelineTab('dns')"><i class="fa-solid fa-globe me-1"></i>DNS Query Logging</button></li>
+    <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'channels' else '' }}" id="tabBtnChannels" onclick="switchLogPipelineTab('channels')"><i class="fa-solid fa-sliders me-1"></i>Windows Log Channels</button></li>
+</ul>
+
+<!-- ============================= DROP RULES PANE ============================= -->
+<div id="paneDroprules" style="display: {{ 'block' if active_tab == 'droprules' else 'none' }};">
 <div class="row g-4 mb-4">
-    <!-- Active Drop / Filter Rules -->
     <div class="col-lg-12">
         <div class="card bg-dark border-secondary h-100">
             <div class="card-body">
@@ -103,10 +110,12 @@
             </div>
         </div>
     </div>
-
 </div>
+</div>
+<!-- =========================== END DROP RULES PANE =========================== -->
 
-<!-- DNS Query Logging (opt-in dnsmasq) -->
+<!-- ============================= DNS LOGGING PANE ============================= -->
+<div id="paneDns" style="display: {{ 'block' if active_tab == 'dns' else 'none' }};">
 <div class="row g-4 mb-4">
     <div class="col-lg-12">
         <div class="card bg-dark border-secondary">
@@ -124,8 +133,11 @@
         </div>
     </div>
 </div>
+</div>
+<!-- =========================== END DNS LOGGING PANE =========================== -->
 
-<!-- Agent Windows Log Channels -->
+<!-- ============================= CHANNELS PANE ============================= -->
+<div id="paneChannels" style="display: {{ 'block' if active_tab == 'channels' else 'none' }};">
 <div class="row g-4 mb-4">
     <div class="col-lg-12">
         <div class="card bg-dark border-secondary">
@@ -156,6 +168,8 @@
         </div>
     </div>
 </div>
+</div>
+<!-- =========================== END CHANNELS PANE =========================== -->
 
 <script>
 function escHtml(s) {
@@ -177,6 +191,25 @@ function updateSharedStats() {
     setStatTile(1, 'Total Drop Rules', pipelineStats.totalDropRules ?? '—');
     setStatTile(2, 'Log Channels Active', pipelineStats.channelsActive ?? '—');
     setStatTile(3, 'Total Channels', 6);
+}
+
+// =====================================================================
+// TAB SWITCHING
+// =====================================================================
+// Unlike SIEM/Coverage's lazy-loaded tabs, all 3 panes here load eagerly on
+// page load (see INIT below) -- the shared stat-tile row spans data from
+// both Drop Rules and Channels regardless of which pane is visible, and all
+// 3 underlying calls are cheap, so there's no lazy-load benefit worth the
+// "which tiles are stale" bookkeeping it would add.
+const LOG_PIPELINE_TABS = ['droprules', 'dns', 'channels'];
+function logPipelineTabCap(t) { return t.charAt(0).toUpperCase() + t.slice(1); }
+function switchLogPipelineTab(tab) {
+    if (!LOG_PIPELINE_TABS.includes(tab)) return;
+    LOG_PIPELINE_TABS.forEach(t => {
+        document.getElementById('tabBtn' + logPipelineTabCap(t)).classList.toggle('active', t === tab);
+        document.getElementById('pane' + logPipelineTabCap(t)).style.display = (t === tab) ? 'block' : 'none';
+    });
+    try { localStorage.setItem('microdfir_log_pipeline_active_tab', tab); } catch (e) {}
 }
 
 function loadDropRules() {
@@ -413,8 +446,18 @@ function loadDnsLoggingStatus() {
     });
 }
 
-loadDropRules();
-loadChannelSettings();
-loadDnsLoggingStatus();
+// =====================================================================
+// INIT
+// =====================================================================
+document.addEventListener("DOMContentLoaded", function() {
+    let startTab = {{ active_tab|tojson }};
+    const urlTab = new URLSearchParams(window.location.search).get('tab');
+    if (urlTab && LOG_PIPELINE_TABS.includes(urlTab)) startTab = urlTab;
+    if (!LOG_PIPELINE_TABS.includes(startTab)) startTab = 'droprules';
+    switchLogPipelineTab(startTab);
+    loadDropRules();
+    loadChannelSettings();
+    loadDnsLoggingStatus();
+});
 </script>
 {% endblock %}
