@@ -232,16 +232,6 @@ body.sidebar-collapsed .nav-block .nav-badge{
 /* Alerts (flash messages) */
 .alert{border-radius:var(--radius);font-size:.85rem;border-width:1px;}
 
-/* ---------- Theme toggle (fixed top-right) ---------- */
-.theme-toggle-btn{
-  position:fixed; top:16px; right:16px; z-index:1500;
-  width:36px; height:36px; padding:0; display:flex; align-items:center; justify-content:center;
-  background-color:var(--bg-card); border:1px solid var(--border-light); border-radius:50%;
-  color:var(--text-secondary); cursor:pointer; box-shadow:var(--shadow-card);
-  transition:color .12s ease, border-color .12s ease, background-color .12s ease;
-}
-.theme-toggle-btn:hover{color:var(--accent); border-color:var(--accent);}
-
 /* Stat tiles (used across pages) */
 .stat-tile{
   background-color:var(--bg-card);border:1px solid var(--border);
@@ -359,7 +349,6 @@ body.sidebar-collapsed .nav-block .nav-badge{
             }
         } catch (e) {}
     </script>
-    <button type="button" id="themeToggleBtn" class="theme-toggle-btn" onclick="toggleTheme()" title="Switch to light mode"><i class="fa-solid fa-sun"></i></button>
     <div class="sidebar">
         <div class="sidebar-header">
             <a href="/" class="brand" title="Micro DFIR"><i class="fa-solid fa-shield-halved"></i> <span>Micro DFIR</span></a>
@@ -380,6 +369,7 @@ body.sidebar-collapsed .nav-block .nav-badge{
         <div class="sidebar-bottom">
             <div class="sidebar-divider"></div>
             <a href="{{ url_for('settings') }}" class="nav-link {{ 'active' if request.endpoint in ['settings','settings_network'] else '' }}" title="Settings"><i class="fa-solid fa-gear"></i><span>Settings</span></a>
+            <a href="#" id="themeToggleBtn" class="nav-link" onclick="toggleTheme(); return false;" title="Switch to light mode"><i class="fa-solid fa-sun"></i><span>Light Mode</span></a>
         </div>
 
         {% set role_label = current_role_label() %}
@@ -466,7 +456,7 @@ body.sidebar-collapsed .nav-block .nav-badge{
         function updateThemeToggleIcon(theme) {
             const btn = document.getElementById('themeToggleBtn');
             if (!btn) return;
-            btn.innerHTML = theme === 'light' ? '<i class="fa-solid fa-moon"></i>' : '<i class="fa-solid fa-sun"></i>';
+            btn.innerHTML = theme === 'light' ? '<i class="fa-solid fa-moon"></i><span>Dark Mode</span>' : '<i class="fa-solid fa-sun"></i><span>Light Mode</span>';
             btn.title = theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode';
         }
         function toggleTheme() {
