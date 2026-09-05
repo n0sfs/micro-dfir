@@ -12652,7 +12652,13 @@ def agent_config():
                 return jsonify({'command': 'upgrade', 'source': source})
         return jsonify({'run_script': {'id': cmd_row['id'], 'script': cmd_row['script']}})
 
-    all_channels = get_agent_channels()
+    # A host's group (agent_tokens.group_name, admin-assigned in the Agents tab) picks
+    # which channel template it gets -- its own group's override if one has been saved,
+    # else the fleet-wide default (see get_agent_channels_for_group). group_name is ''
+    # (no lookup needed beyond the row existing) for the majority of hosts that have
+    # never been assigned a group at all.
+    group_row = db.execute("SELECT group_name FROM agent_tokens WHERE hostname = ?", (ua,)).fetchone()
+    all_channels, _ = get_agent_channels_for_group(group_row['group_name'] if group_row else '')
     enabled_channels = {name: v for name, v in all_channels.items() if v.get('enabled')}
     channels = ','.join(enabled_channels.keys()) or 'Security,System,Application,PowerShell'
 
@@ -13574,26 +13580,16 @@ _DEFAULT_CHANNEL_ENABLED = {
 def _default_channel_setting(enabled=False):
     return {'enabled': bool(enabled), 'capture_xml': False, 'filter_mode': 'none', 'filter_value': ''}
 
-def get_agent_channels():
-    file_existed = os.path.exists(AGENT_CONFIG_PATH)
-    data = {}
-    if file_existed:
-        try:
-            with open(AGENT_CONFIG_PATH, 'r') as f:
-                data = json.load(f)
-        except Exception:
-            data = {}
-
-    # Transparently upgrades the old flat {"Security": true, ...} shape (each value a
-    # plain bool) to the richer per-channel settings object below -- same lazy-upgrade
-    # spirit as this file's migrate_*() functions, just for a JSON file instead of a
-    # SQL table. Any other malformed entry is dropped rather than crashing the page.
-    upgraded = False
+def _normalize_channel_dict(data):
+    """Per-channel upgrade/validation: transparently upgrades the old flat
+    {"Security": true, ...} shape (each value a plain bool) to the richer
+    per-channel settings object, and ensures every preset exists. Any other
+    malformed entry is dropped rather than crashing the page. Applied per-group
+    now that the file holds one such dict per group (see get_agent_channels_all)."""
     channels = {}
-    for name, value in data.items():
+    for name, value in (data or {}).items():
         if isinstance(value, bool):
             channels[name] = _default_channel_setting(value)
-            upgraded = True
         elif isinstance(value, dict):
             setting = _default_channel_setting(value.get('enabled', False))
             setting['capture_xml'] = bool(value.get('capture_xml', False))
@@ -13601,25 +13597,68 @@ def get_agent_channels():
                 setting['filter_mode'] = value.get('filter_mode')
             setting['filter_value'] = str(value.get('filter_value') or '')
             channels[name] = setting
-
     for name, default_enabled in _DEFAULT_CHANNEL_ENABLED.items():
-        if name not in channels:
-            channels[name] = _default_channel_setting(default_enabled)
-            if file_existed:
-                upgraded = True
-
-    if file_existed and upgraded:
-        save_agent_channels(channels)
+        channels.setdefault(name, _default_channel_setting(default_enabled))
     return channels
 
-def save_agent_channels(data):
+def get_agent_channels_all():
+    """Returns the full {group_or_'__default__': {channel: {...}}} structure.
+    '__default__' is served to any agent whose own group has no template of its
+    own -- including every agent with group_name='' (still the vast majority,
+    since agent_tokens.group_name is free-text and admin-assigned one host at a
+    time, per migrate_agent_groups()'s own comment that group was originally
+    organizational-only). A pre-per-group file was just the one flat channel
+    dict at the top level (no '__default__' key) -- wrapped once, non-
+    destructively, into {'__default__': <that dict>} so every existing agent's
+    behavior is unchanged until an admin explicitly creates a group override."""
+    file_existed = os.path.exists(AGENT_CONFIG_PATH)
+    raw = {}
+    if file_existed:
+        try:
+            with open(AGENT_CONFIG_PATH, 'r') as f:
+                raw = json.load(f)
+        except Exception:
+            raw = {}
+    if '__default__' not in raw:
+        raw = {'__default__': raw}
+    result = {group: _normalize_channel_dict(channels) for group, channels in raw.items()}
+    if '__default__' not in result:
+        result['__default__'] = _normalize_channel_dict({})
+    if file_existed and result != raw:
+        save_agent_channels_all(result)
+    return result
+
+def save_agent_channels_all(data):
     with open(AGENT_CONFIG_PATH, 'w') as f:
         json.dump(data, f)
 
-@app.route('/api/agent/channels', methods=['GET', 'POST'])
+def get_agent_channels_for_group(group_name):
+    """Resolves the effective channel template for a host in this group (or
+    ungrouped, group_name=''): that group's own saved override if one exists,
+    else '__default__'. Returns (channels_dict, is_override)."""
+    all_templates = get_agent_channels_all()
+    group_key = (group_name or '').strip()
+    if group_key and group_key in all_templates:
+        return all_templates[group_key], True
+    return all_templates['__default__'], False
+
+@app.route('/api/agent/channels', methods=['GET', 'POST', 'DELETE'])
 @login_required
 def api_agent_channels():
     from flask import request, jsonify
+    group_key = (request.args.get('group') or '').strip() or '__default__'
+
+    if request.method == 'DELETE':
+        err = require_permission('edr.agent.manage')
+        if err: return err
+        if group_key == '__default__':
+            return jsonify({'status': 'error', 'message': 'The default template cannot be removed.'}), 400
+        all_templates = get_agent_channels_all()
+        if group_key in all_templates:
+            del all_templates[group_key]
+            save_agent_channels_all(all_templates)
+        return jsonify({'status': 'success'})
+
     if request.method == 'POST':
         # Ingestion filters/collection config, same "backend data" bucket as the
         # Sigma drop-rules pipeline -- this was previously ungated (any logged-in
@@ -13656,9 +13695,16 @@ def api_agent_channels():
         # Presets always exist even if the posted payload omitted one.
         for name, default_enabled in _DEFAULT_CHANNEL_ENABLED.items():
             channels.setdefault(name, _default_channel_setting(default_enabled))
-        save_agent_channels(channels)
-        return jsonify({'status': 'success', 'channels': channels})
-    return jsonify(get_agent_channels())
+        all_templates = get_agent_channels_all()
+        all_templates[group_key] = channels
+        save_agent_channels_all(all_templates)
+        return jsonify({'status': 'success', 'channels': channels, 'group': group_key})
+
+    all_templates = get_agent_channels_all()
+    if group_key in all_templates:
+        return jsonify({'channels': all_templates[group_key], 'group': group_key,
+                         'is_override': group_key != '__default__'})
+    return jsonify({'channels': all_templates['__default__'], 'group': group_key, 'is_override': False})
 
 
 
