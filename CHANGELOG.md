@@ -10,6 +10,26 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-05
 
+### Add nightly database backup scheduling + a documented restore script
+
+Directly motivated by the `siem.db` corruption incident earlier the same day, which had
+no backup to recover from. `src/backup_db.py` takes a nightly (2 AM) consistent snapshot
+via SQLite's own `VACUUM INTO` — safe against a live, actively-written database, unlike a
+plain file copy (the likeliest suspect for that corruption) — gzips it, and rotates old
+backups past a configurable retention window (default 7 days). Wired into `update.sh`'s
+existing cron-scheduling pattern; surfaced in Settings > System with a manual "Backup Now"
+button. Restore is deliberately a manual, documented script (`restore_db.sh`, repo root)
+run via SSH with real sudo — not a UI button or part of `update.sh`'s passwordless scope —
+since it stops services and swaps the live database file, which should stay a confirmed,
+human-run step.
+
+**Real production tuning during live-verification**: the default gzip compression level
+(6) took over 20 minutes against this appliance's actual ~8.3GB database — long enough to
+fail the "Backup Now" button's request and risk overlapping the next scheduled maintenance
+job. Switched to `compresslevel=1`: a real backup of the full production database
+completed in ~5 minutes, 662MB compressed. Disk space was never the real constraint here
+(hundreds of GB free) — a job that reliably finishes was.
+
 ### Add YARA rule tagging (auto-derived + manual) to File Scan
 
 Derives real filter tags from each rule's own content, following the yarGen/Neo23x0
