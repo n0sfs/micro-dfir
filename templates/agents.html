@@ -175,6 +175,29 @@
                 <div class="col-auto"><span id="agentPollIntervalMsg" class="small" style="display:none;"></span></div>
             </div>
         </div>
+
+        <!-- Agent Offline Alert -- relocated from Settings since it's genuinely EDR
+             fleet-health config, not a general system setting. Same route/permission. -->
+        <div class="card-body border-top border-secondary">
+            <h6 class="text-info mb-2"><i class="fa-solid fa-triangle-exclamation me-2"></i>Agent Offline Alert</h6>
+            <p class="text-muted small mb-2">When an EDR agent hasn't checked in for this long, an "Agent Offline" alert is created automatically (which can trigger an Alert-Created SOAR playbook). The cooldown prevents re-alerting the same host on every poll cycle while it stays offline.</p>
+            <div class="row g-2 align-items-end mb-2">
+                <div class="col-auto">
+                    <label class="form-label small text-muted mb-1">Offline after (minutes)</label>
+                    <input type="number" min="1" id="agentOfflineMinutes" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:130px;" {{ '' if has_permission('settings.system.manage') else 'disabled' }}>
+                </div>
+                <div class="col-auto">
+                    <label class="form-label small text-muted mb-1">Cooldown (minutes)</label>
+                    <input type="number" min="1" id="agentOfflineCooldown" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:130px;" {{ '' if has_permission('settings.system.manage') else 'disabled' }}>
+                </div>
+                {% if has_permission('settings.system.manage') %}
+                <div class="col-auto">
+                    <button class="btn btn-outline-primary btn-sm" onclick="saveAgentOfflineAlertConfig()"><i class="fa-solid fa-save me-1"></i> Save</button>
+                </div>
+                {% endif %}
+            </div>
+            <div class="small text-muted" id="agentOfflineAlertStatus"></div>
+        </div>
     </div>
 
     <!-- Response Actions pane -->
@@ -450,6 +473,7 @@ document.addEventListener("DOMContentLoaded", function() {
     loadFimPaths();
     loadFimInterval();
     loadAgentPollInterval();
+    loadAgentOfflineAlertConfig();
     loadAgentSweepConfig();
     loadAgentGroupsDropdown();
     setInterval(loadUniqueEndpoints, 30000);
@@ -553,6 +577,40 @@ function saveAgentPollInterval() {
         }
         setTimeout(() => { msg.style.display = 'none'; }, 4000);
     }).catch(err => { msg.className = 'small text-danger'; msg.innerText = 'Error: ' + err; msg.style.display = 'inline'; });
+}
+
+// ---- Agent Offline Alert (relocated from Settings, same route/permission) ----
+function loadAgentOfflineAlertConfig() {
+    fetch('/api/settings/agent-offline-alert')
+        .then(r => r.json())
+        .then(data => {
+            document.getElementById('agentOfflineMinutes').value = data.offline_minutes;
+            document.getElementById('agentOfflineCooldown').value = data.cooldown_minutes;
+            document.getElementById('agentOfflineAlertStatus').innerText =
+                `Currently: no check-in for ${data.offline_minutes} minute(s) creates an Agent Offline alert, at most once every ${data.cooldown_minutes} minute(s) per host.`;
+        })
+        .catch(e => console.error('Agent offline alert settings load issue:', e));
+}
+
+function saveAgentOfflineAlertConfig() {
+    const offlineMinutes = parseInt(document.getElementById('agentOfflineMinutes').value, 10);
+    const cooldownMinutes = parseInt(document.getElementById('agentOfflineCooldown').value, 10);
+    if (!(offlineMinutes >= 1) || !(cooldownMinutes >= 1)) {
+        toast('Offline threshold and cooldown must both be a positive number of minutes.', 'warning');
+        return;
+    }
+    fetch('/api/settings/agent-offline-alert', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({offline_minutes: offlineMinutes, cooldown_minutes: cooldownMinutes})
+    }).then(r => r.json()).then(res => {
+        if (res.status === 'success') {
+            loadAgentOfflineAlertConfig();
+            toast('Agent offline alert settings saved.', 'success');
+        } else {
+            toast(res.error || 'Failed to save agent offline alert settings.', 'danger');
+        }
+    }).catch(err => toast('Error saving agent offline alert settings: ' + err, 'danger'));
 }
 
 function loadAgentSweepConfig() {

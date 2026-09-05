@@ -26,6 +26,7 @@
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnQueues" onclick="switchSoarTab('queues')"><i class="fa-solid fa-inbox me-2"></i>Queues</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnActions" onclick="switchSoarTab('actions')"><i class="fa-solid fa-list me-2"></i>Actions</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnNotifications" onclick="switchSoarTab('notifications')"><i class="fa-solid fa-tower-broadcast me-2"></i>Notifications</button></li>
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnAutomation" onclick="switchSoarTab('automation')"><i class="fa-solid fa-gears me-2"></i>Automation</button></li>
         </ul>
     </div>
 
@@ -246,6 +247,50 @@
             <p class="text-muted small mt-3 mb-0"><i class="fa-solid fa-lock me-1"></i>Tier 3 (Senior Analyst) or Admin role required to change notification channel settings.</p>
             {% endif %}
             <div id="notifMsg" class="mt-2 small" style="display:none;"></div>
+        </div>
+    </div>
+
+    <!-- Automation pane -- case-lifecycle automation config relocated from Settings
+         since both are genuinely SOAR concerns (one creates cases, one fires a
+         playbook trigger event), not general system settings. Same routes/
+         permission as before. -->
+    <div id="paneAutomation" style="display:none;">
+        <div class="card-body">
+            <h6 class="text-info mb-3">Alert Escalation</h6>
+            <p class="text-muted small mb-3">Single-rule dedup already collapses repeats of the same rule on a host. This is the separate, cross-rule signal: when this many <em>distinct</em> rules fire on one host within the window, a case is created automatically (or an existing open case for that host gets a note) — surfacing a correlation an analyst would otherwise have to notice by hand.</p>
+            <div class="row g-2 align-items-end mb-3">
+                <div class="col-auto">
+                    <label class="form-label small text-muted mb-1">Distinct rules</label>
+                    <input type="number" min="2" id="escalationThreshold" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:100px;" {{ '' if has_permission('settings.system.manage') else 'disabled' }}>
+                </div>
+                <div class="col-auto">
+                    <label class="form-label small text-muted mb-1">Window (minutes)</label>
+                    <input type="number" min="1" id="escalationWindow" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;" {{ '' if has_permission('settings.system.manage') else 'disabled' }}>
+                </div>
+                {% if has_permission('settings.system.manage') %}
+                <div class="col-auto">
+                    <button class="btn btn-outline-primary btn-sm" onclick="saveEscalationConfig()"><i class="fa-solid fa-save me-1"></i> Save</button>
+                </div>
+                {% endif %}
+            </div>
+            <div class="small text-muted" id="escalationStatus"></div>
+
+            <hr class="border-secondary my-4">
+
+            <h6 class="text-info mb-3">Case Stale Nudge</h6>
+            <p class="text-muted small mb-3">When an open case has had no activity (no status/assignee/queue/severity/workflow change logged to its timeline) for this long, a "Case gone stale" playbook trigger fires — a proactive nudge distinct from SLA breach, which only tracks the case's age, not whether anyone has actually touched it since. Fires again after a fresh period of silence following any new activity.</p>
+            <div class="row g-2 align-items-end mb-3">
+                <div class="col-auto">
+                    <label class="form-label small text-muted mb-1">Stale after (hours)</label>
+                    <input type="number" min="1" id="caseStaleHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:130px;" {{ '' if has_permission('settings.system.manage') else 'disabled' }}>
+                </div>
+                {% if has_permission('settings.system.manage') %}
+                <div class="col-auto">
+                    <button class="btn btn-outline-primary btn-sm" onclick="saveCaseStaleConfig()"><i class="fa-solid fa-save me-1"></i> Save</button>
+                </div>
+                {% endif %}
+            </div>
+            <div class="small text-muted" id="caseStaleStatus"></div>
         </div>
     </div>
 </div>
@@ -1676,7 +1721,7 @@ async function decideApproval(approvalId, decision) {
 // requested tab's elements aren't in the DOM (a permission-gated tab hidden for this
 // role), persisted across visits via localStorage.
 const SOAR_TAB_KEY = 'microdfir_soar_active_tab';
-const SOAR_TABS = ['playbooks', 'casetemplates', 'queues', 'actions', 'notifications'];
+const SOAR_TABS = ['playbooks', 'casetemplates', 'queues', 'actions', 'notifications', 'automation'];
 
 function switchSoarTab(tab) {
     if (!SOAR_TABS.includes(tab)) tab = 'playbooks';
@@ -1691,6 +1736,72 @@ function switchSoarTab(tab) {
     });
     if (resolvedTab !== tab) switchSoarTab(resolvedTab);
     try { localStorage.setItem(SOAR_TAB_KEY, tab); } catch (e) {}
+}
+
+// ---- Alert Escalation (relocated from Settings, same route/permission) ----
+function loadEscalationConfig() {
+    fetch('/api/settings/alert-escalation')
+        .then(r => r.json())
+        .then(data => {
+            document.getElementById('escalationThreshold').value = data.rule_threshold;
+            document.getElementById('escalationWindow').value = data.window_minutes;
+            document.getElementById('escalationStatus').innerText =
+                `Currently: ${data.rule_threshold}+ distinct rules on one host within ${data.window_minutes} minute(s) creates or annotates a case.`;
+        })
+        .catch(e => console.error('Alert escalation settings load issue:', e));
+}
+
+function saveEscalationConfig() {
+    const threshold = parseInt(document.getElementById('escalationThreshold').value, 10);
+    const windowMinutes = parseInt(document.getElementById('escalationWindow').value, 10);
+    if (!(threshold >= 2) || !(windowMinutes >= 1)) {
+        toast('Distinct rules must be at least 2, and window must be a positive number of minutes.', 'warning');
+        return;
+    }
+    fetch('/api/settings/alert-escalation', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({rule_threshold: threshold, window_minutes: windowMinutes})
+    }).then(r => r.json()).then(res => {
+        if (res.status === 'success') {
+            loadEscalationConfig();
+            toast('Alert escalation settings saved.', 'success');
+        } else {
+            toast(res.error || 'Failed to save alert escalation settings.', 'danger');
+        }
+    }).catch(err => toast('Error saving alert escalation settings: ' + err, 'danger'));
+}
+
+// ---- Case Stale Nudge (relocated from Settings, same route/permission) ----
+function loadCaseStaleConfig() {
+    fetch('/api/settings/case-stale-nudge')
+        .then(r => r.json())
+        .then(data => {
+            document.getElementById('caseStaleHours').value = data.stale_hours;
+            document.getElementById('caseStaleStatus').innerText =
+                `Currently: an open case with no activity for ${data.stale_hours} hour(s) triggers a "Case gone stale" nudge.`;
+        })
+        .catch(e => console.error('Case stale nudge settings load issue:', e));
+}
+
+function saveCaseStaleConfig() {
+    const hours = parseInt(document.getElementById('caseStaleHours').value, 10);
+    if (!(hours >= 1)) {
+        toast('Stale threshold must be a positive number of hours.', 'warning');
+        return;
+    }
+    fetch('/api/settings/case-stale-nudge', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({stale_hours: hours})
+    }).then(r => r.json()).then(res => {
+        if (res.status === 'success') {
+            loadCaseStaleConfig();
+            toast('Case stale nudge settings saved.', 'success');
+        } else {
+            toast(res.error || 'Failed to save case stale nudge settings.', 'danger');
+        }
+    }).catch(err => toast('Error saving case stale nudge settings: ' + err, 'danger'));
 }
 
 function loadAlertNotifications() {
@@ -1789,6 +1900,8 @@ document.addEventListener('DOMContentLoaded', () => {
     loadPlaybooks();
     loadPendingApprovals();
     loadAlertNotifications();
+    loadEscalationConfig();
+    loadCaseStaleConfig();
     loadQueuesForSoar();
     initActionsCatalogFilters();
     renderActionsCatalog();
