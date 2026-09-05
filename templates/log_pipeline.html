@@ -176,7 +176,20 @@
         <div class="card bg-dark border-secondary">
             <div class="card-body">
                 <h5 class="card-title text-light mb-3"><i class="fa-solid fa-sliders me-2"></i>Agent Windows Log Channels</h5>
-                <p class="text-muted small mb-3">Select event channels to enforce across all deployed endpoint collector agents. Each channel can optionally capture the raw event XML (more reliable field extraction than the rendered message) and filter which Windows Event IDs get collected.</p>
+                <p class="text-muted small mb-3">Select event channels to enforce across deployed endpoint collector agents. Each channel can optionally capture the raw event XML (more reliable field extraction than the rendered message) and filter which Windows Event IDs get collected. A host follows its own agent group's template if one has been set (assign a group per host on the EDR Agents page) -- otherwise it follows the fleet-wide default below.</p>
+
+                <div class="row g-2 align-items-end mb-3">
+                    <div class="col-auto">
+                        <label class="form-label small text-muted mb-1">Template for</label>
+                        <select id="channelGroupSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="min-width:220px;" onchange="onChannelGroupChange()">
+                            <option value="">Default (fleet-wide)</option>
+                        </select>
+                    </div>
+                    <div class="col-auto">
+                        <button type="button" class="btn btn-outline-danger btn-sm" id="removeChannelOverrideBtn" style="display:none;" onclick="removeChannelOverride()"><i class="fa-solid fa-rotate-left me-1"></i>Remove Override (use Default)</button>
+                    </div>
+                </div>
+                <div id="channelGroupStatus" class="small text-muted mb-3"></div>
 
                 <div class="row g-2 text-muted small mb-1 d-none d-md-flex">
                     <div class="col-md-4">Channel</div>
@@ -390,10 +403,33 @@ function onChannelFilterModeChange(select) {
     valInput.disabled = (select.value === 'none');
 }
 
+let currentChannelGroup = '';
+
+// Populates the group selector from the SAME agent-group list the EDR Agents page's
+// group-dispatch dropdown uses (/api/agent/groups, DISTINCT group_name from
+// agent_tokens) -- group is fully admin-defined free text, no fixed enum, so this list
+// is whatever the fleet has actually been organized into (e.g. Servers/Workstations/
+// Laptops), not a hardcoded set.
+function loadChannelGroupsDropdown() {
+    fetch('/api/agent/groups').then(r => r.json()).then(groups => {
+        const sel = document.getElementById('channelGroupSelect');
+        if (!sel) return;
+        const extra = (groups || []).map(g => `<option value="${escAttr(g)}">${escHtml(g)}</option>`).join('');
+        sel.innerHTML = `<option value="">Default (fleet-wide)</option>${extra}`;
+        sel.value = currentChannelGroup;
+    }).catch(err => console.error('Error loading agent groups:', err));
+}
+
+function onChannelGroupChange() {
+    currentChannelGroup = document.getElementById('channelGroupSelect').value;
+    loadChannelSettings();
+}
+
 function loadChannelSettings() {
-    fetch('/api/agent/channels')
+    fetch('/api/agent/channels?group=' + encodeURIComponent(currentChannelGroup))
         .then(r => r.json())
-        .then(data => {
+        .then(res => {
+            const data = res.channels || {};
             let container = document.getElementById('channelsContainer');
             if (!container) return;
             let html = '';
@@ -406,8 +442,28 @@ function loadChannelSettings() {
                 }
             }
             container.innerHTML = html;
-            pipelineStats.channelsActive = Object.values(data).filter(v => v && v.enabled).length;
-            updateSharedStats();
+
+            const statusEl = document.getElementById('channelGroupStatus');
+            const removeBtn = document.getElementById('removeChannelOverrideBtn');
+            if (!currentChannelGroup) {
+                if (statusEl) statusEl.innerText = 'Applies to every agent whose group (if any) has no template of its own.';
+                if (removeBtn) removeBtn.style.display = 'none';
+            } else if (res.is_override) {
+                if (statusEl) statusEl.innerText = `"${currentChannelGroup}" has its own saved template, applied only to agents in that group.`;
+                if (removeBtn) removeBtn.style.display = '';
+            } else {
+                if (statusEl) statusEl.innerText = `"${currentChannelGroup}" has no template of its own yet -- showing the default below. Save to create one just for this group.`;
+                if (removeBtn) removeBtn.style.display = 'none';
+            }
+
+            // The fleet-health stat tile only ever reflects the default template
+            // (what most agents actually run), not whatever group is being edited --
+            // otherwise switching this dropdown would make the top stat tile flicker
+            // to a single group's numbers.
+            if (!currentChannelGroup) {
+                pipelineStats.channelsActive = Object.values(data).filter(v => v && v.enabled).length;
+                updateSharedStats();
+            }
         }).catch(err => console.error("Error loading channels:", err));
 }
 
@@ -441,7 +497,7 @@ function saveChannels() {
     let errBox = document.getElementById('channelSaveError');
     if (errBox) errBox.style.display = 'none';
 
-    fetch('/api/agent/channels', {
+    fetch('/api/agent/channels?group=' + encodeURIComponent(currentChannelGroup), {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(payload)
@@ -461,6 +517,20 @@ function saveChannels() {
         }
         loadChannelSettings();
     }).catch(err => toast('Error saving channels: ' + err, 'danger'));
+}
+
+async function removeChannelOverride() {
+    if (!currentChannelGroup) return;
+    if (!(await confirmDialog(`Remove "${currentChannelGroup}"'s own channel template? Agents in this group will go back to following the default.`, {title: 'Remove override', danger: true, confirmLabel: 'Remove'}))) return;
+    fetch('/api/agent/channels?group=' + encodeURIComponent(currentChannelGroup), { method: 'DELETE' })
+        .then(r => r.json()).then(res => {
+            if (res.status === 'success') {
+                toast(`"${currentChannelGroup}" now follows the default template.`, 'success');
+                loadChannelSettings();
+            } else {
+                toast(res.message || 'Failed to remove override.', 'danger');
+            }
+        }).catch(err => toast('Error removing override: ' + err, 'danger'));
 }
 
 // Read-only status/parser view for the opt-in DNS query logging feature (dnsmasq) --
@@ -525,6 +595,7 @@ document.addEventListener("DOMContentLoaded", function() {
     if (!LOG_PIPELINE_TABS.includes(startTab)) startTab = 'droprules';
     switchLogPipelineTab(startTab);
     loadDropRules();
+    loadChannelGroupsDropdown();
     loadChannelSettings();
     loadDnsLoggingStatus();
     loadLogSourceSilentConfig();
