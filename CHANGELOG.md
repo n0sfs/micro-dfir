@@ -10,6 +10,12 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-05
 
+### Move Log Pipeline out of SIEM into its own top-level nav page
+
+Drop rules, DNS query logging, and Windows log channel config used to live as a SIEM
+sub-tab; moved to `/log-pipeline`, a standalone page in the sidebar positioned just above
+SIEM. Old `/siem?tab=pipeline` bookmarks redirect cleanly instead of rendering a dead tab.
+
 ### Production incident: `siem.db` corruption and recovery
 
 Around 16:43 on 2026-09-04, `/opt/micro-dfir/siem.db`'s first page (the 4096-byte header +
