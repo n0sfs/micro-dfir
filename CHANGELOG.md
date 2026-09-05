@@ -10,6 +10,15 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-05
 
+### Move 4 settings blocks out of Settings into their own contextual pages
+
+Agent Offline Alert → EDR Agents page (fleet-health config, not a general system
+setting). Log Source Silent Alert → Log Pipeline's Drop Rules tab (pipeline health
+monitoring). Alert Escalation + Case Stale Nudge → SOAR, new "Automation" tab (both
+create/annotate cases or fire a playbook trigger event — genuinely SOAR concerns).
+Same backend routes/permissions throughout; only the UI moved, following the exact
+precedent already set when Notification Channels moved from Settings into SOAR.
+
 ### Add nightly database backup scheduling + a documented restore script
 
 Directly motivated by the `siem.db` corruption incident earlier the same day, which had
