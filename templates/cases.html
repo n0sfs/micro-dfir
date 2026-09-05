@@ -319,9 +319,13 @@ function caseIocRow(i, isClosed) {
             <td>${iocTypeBadge(i.ioc_type)}</td>
             <td class="small font-monospace">${escHtml(i.value)}</td>
             <td class="small text-muted">${escHtml(i.notes || '')}</td>
-            <td class="small" id="iocResult${i.id}"></td>
+            <td class="small">
+                <div id="iocResult${i.id}"></div>
+                <div id="iocExternalResult${i.id}" class="mt-1"></div>
+            </td>
             <td class="text-end text-nowrap">
                 <button type="button" class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="Check against the local Threat Intel set" onclick="checkCaseIoc(${i.id}, '${escJs(i.value)}')"><i class="fa-solid fa-magnifying-glass"></i></button>
+                <button type="button" class="btn btn-sm btn-outline-warning py-0 px-2 me-1" title="Check against external enrichment sources (VirusTotal, AbuseIPDB, URLhaus, etc.)" onclick="checkCaseIocExternal(${i.id}, '${escJs(i.value)}', '${i.ioc_type}')"><i class="fa-solid fa-globe"></i></button>
                 <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove indicator" onclick="removeCaseIoc(${i.id})" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-xmark"></i></button>
             </td>
         </tr>`;
@@ -343,6 +347,32 @@ function checkCaseIoc(iocId, value) {
         } else {
             cell.innerHTML = '<span class="text-danger small">Error</span>';
         }
+    }).catch(err => { cell.innerHTML = '<span class="text-danger small">Error</span>'; console.error(err); });
+}
+
+// Local duplicate of threat_intel.html's enrichVerdictBadge -- per-file self-contained
+// templates convention, not a cross-template import.
+function enrichVerdictBadge(verdict) {
+    const map = {malicious: 'bg-danger', suspicious: 'bg-warning text-dark', clean: 'bg-success', info: 'bg-info text-dark', unconfigured: 'bg-secondary', error: 'bg-secondary'};
+    return `<span class="badge ${map[verdict] || 'bg-secondary'}">${escHtml(verdict)}</span>`;
+}
+
+// Live outbound lookup against analyzers.py's ANALYZERS (VirusTotal, AbuseIPDB, URLhaus,
+// Shodan InternetDB) via the same /api/ti/enrich endpoint Threat Intel's Quick IOC
+// Lookup already uses -- results are cached server-side (enrichment_results, 24h TTL),
+// so re-checking the same indicator shortly after doesn't re-hit a free-tier API twice.
+function checkCaseIocExternal(iocId, value, iocType) {
+    const cell = document.getElementById(`iocExternalResult${iocId}`);
+    cell.innerHTML = '<span class="text-muted">Checking external sources&hellip;</span>';
+    fetch('/api/ti/enrich', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({value, ioc_type: iocType})
+    }).then(r => r.json()).then(data => {
+        if (!data.results || !data.results.length) {
+            cell.innerHTML = `<span class="text-muted">${escHtml(data.message || 'No external sources configured for this type.')}</span>`;
+            return;
+        }
+        cell.innerHTML = data.results.map(r => `<div><strong>${escHtml(r.source)}</strong> ${enrichVerdictBadge(r.verdict)}<div class="text-muted">${escHtml(r.summary)}</div></div>`).join('');
     }).catch(err => { cell.innerHTML = '<span class="text-danger small">Error</span>'; console.error(err); });
 }
 

@@ -2248,7 +2248,7 @@ async function runIocEnrich() {
 // Only 'abuseipdb' requires a key today (see analyzers.py's ANALYZERS) -- mapping its
 // analyzer key to the settings blob's key name here rather than changing
 // /api/settings/enrichment's shape for a single caller.
-const ANALYZER_SETTINGS_KEY = { abuseipdb: 'abuseipdb_api_key' };
+const ANALYZER_SETTINGS_KEY = { abuseipdb: 'abuseipdb_api_key', virustotal: 'virustotal_api_key' };
 
 async function saveAnalyzerKey(analyzerKey) {
     const input = document.getElementById(`analyzerKeyInput_${analyzerKey}`);
@@ -2324,16 +2324,18 @@ function saveIocRetentionPolicy() {
 }
 
 function loadEnrichmentSettings() {
-    const input = document.getElementById('analyzerKeyInput_abuseipdb');
-    if (!input) return;  // non-admin, or the analyzers table hasn't rendered yet
     fetch('/api/settings/enrichment').then(r => r.json()).then(data => {
         // Pre-fill with the masked PLACEHOLDER VALUE (not just a hint in .placeholder) --
         // same convention as the alert-notifications SMTP password field. This is what
         // makes clicking Save without touching the field a no-op server-side (the route
         // recognizes the placeholder and skips overwriting) rather than silently wiping
         // an already-configured key by submitting an empty string.
-        input.value = data.abuseipdb_api_key || '';
-        input.placeholder = data.abuseipdb_api_key ? '' : 'Not configured';
+        Object.entries(ANALYZER_SETTINGS_KEY).forEach(([analyzerKey, settingsKey]) => {
+            const input = document.getElementById(`analyzerKeyInput_${analyzerKey}`);
+            if (!input) return;  // non-admin, or the analyzers table hasn't rendered yet
+            input.value = data[settingsKey] || '';
+            input.placeholder = data[settingsKey] ? '' : 'Not configured';
+        });
     }).catch(err => console.error('Error loading enrichment settings:', err));
 }
 
