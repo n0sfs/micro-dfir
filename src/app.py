@@ -222,6 +222,15 @@ def generate_vector_config():
     ingest_port = _resolve_ingest_port(s.get("ui_port", "5001"))
     soc_token = get_soc_secret(db) or ''
     tcp_enabled = s.get("syslog_tcp_enabled") == "1"
+    # Vector posts to the app's own /api/ingest on this same host. A gunicorn bind of
+    # 0.0.0.0 accepts loopback connections fine, but Settings > Network's dual-bind
+    # save flow (app.py:12258) binds to one SPECIFIC IP instead -- a socket bound to
+    # e.g. 192.168.86.101 only accepts requests addressed to that exact IP, never
+    # 127.0.0.1. Found live: with a specific ingest_ip configured, the sink below was
+    # hardcoded to 127.0.0.1 regardless, so every post failed with "connection refused"
+    # and syslog-sourced events (dnsmasq DNS queries, any real syslog device) silently
+    # never reached live_logs -- target whichever address will actually be listening.
+    vector_sink_ip = "127.0.0.1" if ingest_ip == "0.0.0.0" else ingest_ip
 
     # Drop rules are defined (in the Log Pipeline UI) against live_logs' own field names
     # (app/host/event_id/message), so they're applied AFTER the remap below renames
@@ -325,7 +334,7 @@ source = '''
 [sinks.microsoc_out]
 type = "http"
 inputs = ["shape_logs"]
-uri = "https://127.0.0.1:{ingest_port}/api/ingest"
+uri = "https://{vector_sink_ip}:{ingest_port}/api/ingest"
 encoding.codec = "json"
 tls.verify_certificate = false
 auth.strategy = "bearer"
