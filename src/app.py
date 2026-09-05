@@ -1068,7 +1068,7 @@ def api_ti_enrich():
     if not analyzers:
         msg = f'"{source}" does not apply to type "{ioc_type or "unknown"}".' if source else \
               f'No enrichment analyzers apply to type "{ioc_type or "unknown"}" yet.'
-        return jsonify({'results': [], 'message': msg})
+        return jsonify({'results': [], 'message': msg, 'overall_verdict': 'unknown'})
 
     db = get_db()
     key_row = db.execute("SELECT value FROM settings WHERE key = 'enrichment_api_keys'").fetchone()
@@ -1094,7 +1094,20 @@ def api_ti_enrich():
         )
         db.commit()
         results.append({'source': a['label'], 'verdict': out['verdict'], 'summary': out['summary'], 'cached': False})
-    return jsonify({'results': results})
+    return jsonify({'results': results, 'overall_verdict': _overall_enrichment_verdict(results)})
+
+# IntelOwl-style aggregated verdict: worst-case wins across every source that actually
+# returned a real signal. 'unconfigured'/'error' aren't signals about the IOC itself
+# (they're about this appliance's own setup), so they're excluded from the decision --
+# an indicator with zero configured analyzers should read as 'unknown', not silently as
+# "clean" because the one unconfigured source technically didn't say "malicious".
+_ENRICHMENT_VERDICT_RANK = {'malicious': 3, 'suspicious': 2, 'clean': 1}
+
+def _overall_enrichment_verdict(results):
+    real = [r['verdict'] for r in results if r['verdict'] in _ENRICHMENT_VERDICT_RANK]
+    if not real:
+        return 'unknown'
+    return max(real, key=lambda v: _ENRICHMENT_VERDICT_RANK[v])
 
 
 # ==========================================

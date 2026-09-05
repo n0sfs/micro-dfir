@@ -10,6 +10,22 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-05
 
+### Aggregated enrichment verdict badge + external check on the IOC catalog table
+
+Closed out the remaining IntelOwl-inspired ideas from the enrichment work above. Added
+an `overall_verdict` (worst-case-wins across every source that returned a real signal,
+excluding unconfigured/error sources so a badly-configured analyzer can't quietly read
+as "clean") to `/api/ti/enrich`'s response, shown as one summary badge above the
+per-source breakdown in both the case Indicators check and Quick IOC Lookup. Also
+extended the Threat Intel IOC catalog table with its own "Check External Sources"
+button per row (reusing Quick IOC Lookup's existing enrich machinery rather than adding
+a second results area) and fixed a real gap this surfaced: Quick IOC Lookup's own
+Enrich button only ever appeared for IP-shaped values (a leftover from before
+VirusTotal/URLhaus added hash/domain/url coverage) -- it now recognizes all four shapes
+client-side. (Cross-case IOC correlation, the other item on the IntelOwl list, turned
+out to already exist via the Related Cases card built earlier this session -- no new
+work needed there.)
+
 ### Add VirusTotal + URLhaus enrichment analyzers, wire external lookup into case Indicators
 
 Research into IntelOwl surfaced a live outbound IOC enrichment mechanism this app
