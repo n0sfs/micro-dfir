@@ -41,7 +41,13 @@ def run_backup(retention_override=None):
     cursor.execute("VACUUM INTO ?", (snapshot_path,))
     conn.close()
 
-    with open(snapshot_path, 'rb') as f_in, gzip.open(gz_path, 'wb') as f_out:
+    # compresslevel=1 (fastest), not the default 6 -- measured against this appliance's
+    # real ~8GB production database, level 6 took over 20 minutes of single-threaded
+    # DEFLATE work, long enough to fail the "Backup Now" button's request (and to risk
+    # overlapping the next scheduled maintenance job when run from cron). Disk space is
+    # not the constraint here (hundreds of GB free vs a few GB per backup even lightly
+    # compressed) -- speed is what actually matters for a job that must reliably finish.
+    with open(snapshot_path, 'rb') as f_in, gzip.open(gz_path, 'wb', compresslevel=1) as f_out:
         shutil.copyfileobj(f_in, f_out)
     os.remove(snapshot_path)
     duration = time.time() - start
