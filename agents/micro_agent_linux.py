@@ -291,51 +291,45 @@ def run_fim_check(paths):
 _sent_audit_sigs = set()
 _SENT_AUDIT_SIG_CAP = 5000
 
-# Server-driven Linux logging channels (Log Pipeline > Linux Channels tab). Each entry
-# is an auditd rule set + the audit key ausearch pulls by. Deliberately a DIFFERENT key
-# namespace (microdfir_ch_* / microdfir_identity) and a SEPARATE rules file from the
-# older one-off "Enable Exec Auditing" console action (/etc/audit/rules.d/microdfir.rules,
-# key microdfir_exec) so the two mechanisms -- one manual per-host, one automatic
-# per-group -- never overwrite or duplicate-count each other's rules.
-LINUX_AUDIT_CHANNELS = {
-    'process_exec': {
-        'audit_key': 'microdfir_ch_exec',
-        'rules': ['-a exec,always -F arch=b64 -S execve -k microdfir_ch_exec',
-                  '-a exec,always -F arch=b32 -S execve -k microdfir_ch_exec'],
-    },
-    'identity_changes': {
-        'audit_key': 'microdfir_identity',
-        'rules': ['-w /etc/passwd -p wa -k microdfir_identity',
-                  '-w /etc/group -p wa -k microdfir_identity',
-                  '-w /etc/shadow -p wa -k microdfir_identity',
-                  '-w /etc/sudoers -p wa -k microdfir_identity'],
-    },
-}
+# Server-driven Linux logging channels (Log Pipeline > Linux Channels tab). The server
+# sends the FULL rule text for every enabled channel -- both its curated catalog (11
+# CIS/STIG-aligned bundles) and any admin-defined custom "watch this path" channels --
+# as a list of {'key', 'audit_key', 'rules': [...]} dicts, so the agent needs no local
+# knowledge of what a channel key even means; it just applies whatever it's handed. This
+# also means a custom channel (a path/perms the admin typed into the UI, unknowable to
+# this file ahead of time) works through the exact same code path as a built-in one.
+# Deliberately a DIFFERENT key namespace (microdfir_ch_*/microdfir_identity/etc) and a
+# SEPARATE rules file from the older one-off "Enable Exec Auditing" console action
+# (/etc/audit/rules.d/microdfir.rules, key microdfir_exec) so the two mechanisms -- one
+# manual per-host, one automatic per-group -- never overwrite or duplicate-count each
+# other's rules.
 LINUX_CHANNEL_RULES_PATH = '/etc/audit/rules.d/microdfir_channels.rules'
 _last_applied_linux_channels = None
 _sent_channel_audit_sigs = set()
 _SENT_CHANNEL_AUDIT_SIG_CAP = 5000  # matches _SENT_AUDIT_SIG_CAP's own convention below
 
-def reconcile_linux_audit_channels(enabled_keys):
-    """Declaratively applies whichever of LINUX_AUDIT_CHANNELS the server says should be
-    enabled for this host's group -- writes/removes LINUX_CHANNEL_RULES_PATH and reloads
-    via augenrules, the same persist-then-load pattern the manual exec-auditing action
-    already uses. A no-op unless the desired set actually changed since the last poll,
-    so this never reloads audit rules on every log-shipping cycle for no reason."""
+def reconcile_linux_audit_channels(channel_defs):
+    """Declaratively applies whichever channel definitions the server sent for this
+    host's group -- writes/removes LINUX_CHANNEL_RULES_PATH and reloads via augenrules,
+    the same persist-then-load pattern the manual exec-auditing action already uses. A
+    no-op unless the desired set actually changed since the last poll, so this never
+    reloads audit rules on every log-shipping cycle for no reason."""
     global _last_applied_linux_channels
-    desired = frozenset(enabled_keys or [])
-    if desired == _last_applied_linux_channels:
+    channel_defs = channel_defs or []
+    # Rule text is part of the signature (not just the key) -- editing a custom
+    # channel's watched path server-side must trigger a real reload here, not get
+    # silently ignored because its key didn't change.
+    desired_sig = frozenset((d.get('key'), tuple(d.get('rules') or [])) for d in channel_defs)
+    if desired_sig == _last_applied_linux_channels:
         return
     if shutil.which('auditctl') is None:
         # Nothing we can do on a host without auditd installed -- remember the desired
         # set anyway so this doesn't retry (and log a failure) on every single poll.
-        _last_applied_linux_channels = desired
+        _last_applied_linux_channels = desired_sig
         return
     lines = []
-    for key in sorted(desired):
-        chan = LINUX_AUDIT_CHANNELS.get(key)
-        if chan:
-            lines.extend(chan['rules'])
+    for d in sorted(channel_defs, key=lambda x: x.get('key') or ''):
+        lines.extend(d.get('rules') or [])
     try:
         os.makedirs(os.path.dirname(LINUX_CHANNEL_RULES_PATH), exist_ok=True)
         if lines:
@@ -344,23 +338,25 @@ def reconcile_linux_audit_channels(enabled_keys):
         elif os.path.exists(LINUX_CHANNEL_RULES_PATH):
             os.remove(LINUX_CHANNEL_RULES_PATH)
         subprocess.run(['augenrules', '--load'], capture_output=True, timeout=15)
-        _last_applied_linux_channels = desired
-        print(f"[+] Reconciled Linux log channels: {sorted(desired) or 'none enabled'}", flush=True)
+        _last_applied_linux_channels = desired_sig
+        applied_keys = sorted(d.get('key') for d in channel_defs)
+        print(f"[+] Reconciled Linux log channels: {applied_keys or 'none enabled'}", flush=True)
     except Exception as e:
         print(f"[!] Failed to reconcile Linux log channels: {e}", flush=True)
 
-def fetch_channel_audit_logs(enabled_keys, last_seconds):
+def fetch_channel_audit_logs(channel_defs, last_seconds):
     """Pulls ausearch results for each ENABLED channel's own audit key -- generalizes
-    fetch_audit_exec_logs()'s single-key approach to the server-driven channel catalog
-    above. Handles both execve (type=SYSCALL/EXECVE) and file-watch (type=PATH) audit
-    record shapes, since identity_changes uses -w watch rules, not a syscall rule."""
+    fetch_audit_exec_logs()'s single-key approach to the server-driven channel
+    definitions above. Handles both execve (type=SYSCALL/EXECVE) and file-watch
+    (type=PATH) audit record shapes, since most channels here use -w watch rules,
+    not a syscall rule."""
     logs = []
     host = socket.gethostname()
-    for key in (enabled_keys or []):
-        chan = LINUX_AUDIT_CHANNELS.get(key)
-        if not chan:
+    for d in (channel_defs or []):
+        key = d.get('key')
+        audit_key = d.get('audit_key')
+        if not key or not audit_key:
             continue
-        audit_key = chan['audit_key']
         try:
             out = subprocess.check_output(
                 ['ausearch', '-k', audit_key, '-ts', f'-{last_seconds}s', '-i'],

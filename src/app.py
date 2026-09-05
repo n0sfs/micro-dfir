@@ -12666,9 +12666,14 @@ def agent_config():
     # Sent unconditionally, same as every other field in this response -- a Windows/
     # macOS agent that has never heard of 'linux_audit_channels' just ignores the key,
     # same convention this response already relies on for 'channels'/'channel_config'
-    # being meaningless to a Linux agent.
+    # being meaningless to a Linux agent. The agent itself carries no channel catalog of
+    # its own any more -- every enabled channel's full rule text (fixed or admin-defined
+    # custom) is resolved here and sent as-is, so a custom channel needs zero agent-side
+    # code to work.
     linux_channels, _ = get_linux_channels_for_group(agent_group_name)
-    linux_audit_channels = [key for key, v in linux_channels.items() if v.get('enabled')]
+    linux_custom_channels = get_linux_custom_channels()
+    enabled_linux_keys = [key for key, v in linux_channels.items() if v.get('enabled')]
+    linux_audit_channels = _linux_channel_defs_for_enabled(enabled_linux_keys, linux_custom_channels)
 
     # Rich per-channel config for agents that understand it (capture_xml + a ready-made
     # PowerShell Where-Object clause built from the saved event-ID filter) -- the flat
@@ -12726,9 +12731,10 @@ def agent_config():
         # micro_agent_windows.py). No separate "push install" action needed.
         'sysmon_required': bool(all_channels.get('Sysmon', {}).get('enabled')),
         # Linux equivalent of the Windows fields above (Log Pipeline > Linux Channels
-        # tab) -- just a list of enabled catalog keys, since the actual auditd rule text
-        # is curated and lives agent-side (LINUX_AUDIT_CHANNELS in
-        # micro_agent_linux.py), not admin-typed. A Windows/macOS agent ignores this key.
+        # tab) -- a list of {'key','audit_key','rules'} dicts, one per enabled channel
+        # (fixed catalog or admin-defined custom), fully resolved server-side so the
+        # agent applies whatever it's handed with no local catalog of its own. A
+        # Windows/macOS agent ignores this key.
         'linux_audit_channels': linux_audit_channels,
     })
 
@@ -13728,48 +13734,164 @@ def api_agent_channels():
 # equivalent "which channel" decision to make there, and micro_agent_linux.py's
 # fetch_journal_logs() keeps pulling the whole journal unconditionally, unchanged by
 # this feature -- no regression risk for hosts that upgrade to this version. The real
-# Linux gap is process-execution and sensitive-file-change visibility, neither of which
-# journald sees at all without auditd rules loaded first. This catalog is exactly that:
-# a curated, ready-tested set of auditd rule bundles an admin can toggle on per group,
-# which the agent both LOADS (the "push policy" half, via reconcile_linux_audit_channels
-# in micro_agent_linux.py) and PULLS from via its own dedicated ausearch key (the "pull
-# the logs we intend" half, via fetch_channel_audit_logs) -- mirrored here only for the
-# catalog's labels/descriptions; the actual rule text lives agent-side since that's
-# where it's applied. Dual-definition convention, same as UEBA_DEFAULTS/RISK_SCORE_DEFAULTS.
+# Linux gap is process-execution and sensitive-file/config-change visibility, none of
+# which journald sees at all without auditd rules loaded first. This catalog is exactly
+# that: a curated set of CIS/STIG-aligned auditd rule bundles an admin can toggle on per
+# group. Both `audit_key` and `rules` live here now (not just agent-side) -- the server
+# builds and sends the complete rule text for every enabled channel on each poll
+# (agent_config()), which is what lets an admin-defined CUSTOM channel (see
+# LINUX_CUSTOM_CHANNELS handling below) go through the exact same delivery path with no
+# special-casing on the agent: it has no local catalog of its own anymore, it just
+# applies whatever rule text it's handed (reconcile_linux_audit_channels in
+# micro_agent_linux.py, the "push policy" half) and pulls each one's own ausearch key
+# (fetch_channel_audit_logs, the "pull the logs we intend" half).
+#
+# The 64/32-bit syscall rule pairs, watch paths, and audit keys below are the standard,
+# widely-published CIS Benchmark / NSA auditd baseline for these categories (unlink/
+# rename for file deletion, setuid/setgid family for privilege escalation, init_module/
+# delete_module for kernel modules, adjtimex/settimeofday/clock_settime for time
+# tampering) -- not invented here. A `-w` watch on a path that doesn't exist on a given
+# distro (e.g. /etc/cron.d on a system that doesn't ship it) fails to load for just that
+# one line without affecting any other rule in the same file -- auditctl loads each rule
+# as its own netlink message, so this is a harmless, known, per-distro variance, not a
+# reason to omit a rule that's valid and useful everywhere else.
 LINUX_LOG_CHANNELS = {
     'process_exec': {
         'label': 'Process Execution',
-        'description': "Every process execve() call on the host, via a dedicated auditd rule (key: microdfir_ch_exec). Requires auditd to be installed -- the agent skips silently, without erroring, on a host that doesn't have it.",
+        'description': 'Every process execve() call on the host.',
+        'audit_key': 'microdfir_ch_exec',
+        'rules': ['-a exec,always -F arch=b64 -S execve -k microdfir_ch_exec',
+                  '-a exec,always -F arch=b32 -S execve -k microdfir_ch_exec'],
     },
     'identity_changes': {
         'label': 'User/Group/Sudoers File Changes',
-        'description': 'Writes to /etc/passwd, /etc/group, /etc/shadow, and /etc/sudoers, via auditd watch rules (key: microdfir_identity).',
+        'description': 'Writes to /etc/passwd, /etc/group, /etc/shadow, /etc/gshadow, /etc/sudoers, and the password-history file.',
+        'audit_key': 'microdfir_identity',
+        'rules': ['-w /etc/passwd -p wa -k microdfir_identity', '-w /etc/group -p wa -k microdfir_identity',
+                  '-w /etc/shadow -p wa -k microdfir_identity', '-w /etc/gshadow -p wa -k microdfir_identity',
+                  '-w /etc/sudoers -p wa -k microdfir_identity', '-w /etc/sudoers.d -p wa -k microdfir_identity',
+                  '-w /etc/security/opasswd -p wa -k microdfir_identity'],
+    },
+    'file_deletion': {
+        'label': 'Successful File Deletions',
+        'description': 'Every file/directory delete or rename by a real (non-system) user -- a classic anti-forensics/log-tampering signal.',
+        'audit_key': 'microdfir_delete',
+        'rules': ['-a always,exit -F arch=b64 -S unlink,unlinkat,rename,renameat -F auid>=1000 -F auid!=4294967295 -k microdfir_delete',
+                  '-a always,exit -F arch=b32 -S unlink,unlinkat,rename,renameat -F auid>=1000 -F auid!=4294967295 -k microdfir_delete'],
+    },
+    'privilege_escalation': {
+        'label': 'Privilege Escalation (setuid/setgid)',
+        'description': 'Calls to setuid/setgid/setreuid/setregid/setresuid/setresgid -- the syscalls a process uses to change its own effective user or group.',
+        'audit_key': 'microdfir_privesc',
+        'rules': ['-a always,exit -F arch=b64 -S setuid,setgid,setreuid,setregid,setresuid,setresgid -k microdfir_privesc',
+                  '-a always,exit -F arch=b32 -S setuid,setgid,setreuid,setregid,setresuid,setresgid -k microdfir_privesc'],
+    },
+    'kernel_modules': {
+        'label': 'Kernel Module Load/Unload',
+        'description': 'insmod/rmmod/modprobe and the underlying init_module/finit_module/delete_module syscalls -- a common rootkit and persistence vector.',
+        'audit_key': 'microdfir_modules',
+        'rules': ['-a always,exit -F arch=b64 -S init_module,finit_module,delete_module -k microdfir_modules',
+                  '-a always,exit -F arch=b32 -S init_module,finit_module,delete_module -k microdfir_modules',
+                  '-w /sbin/insmod -p x -k microdfir_modules', '-w /sbin/rmmod -p x -k microdfir_modules',
+                  '-w /sbin/modprobe -p x -k microdfir_modules'],
+    },
+    'time_change': {
+        'label': 'System Time Changes',
+        'description': 'adjtimex/settimeofday/clock_settime calls and writes to /etc/localtime -- detects clock manipulation used to make log timestamps misleading.',
+        'audit_key': 'microdfir_time',
+        'rules': ['-a always,exit -F arch=b64 -S adjtimex,settimeofday,clock_settime -k microdfir_time',
+                  '-a always,exit -F arch=b32 -S adjtimex,settimeofday,clock_settime -k microdfir_time',
+                  '-w /etc/localtime -p wa -k microdfir_time'],
+    },
+    'ssh_config_changes': {
+        'label': 'SSH Configuration Changes',
+        'description': 'Writes to /etc/ssh/sshd_config and its drop-in directory.',
+        'audit_key': 'microdfir_ssh_config',
+        'rules': ['-w /etc/ssh/sshd_config -p wa -k microdfir_ssh_config', '-w /etc/ssh/sshd_config.d -p wa -k microdfir_ssh_config'],
+    },
+    'cron_changes': {
+        'label': 'Scheduled Task (Cron) Changes',
+        'description': 'Writes to crontab/cron.d and the periodic cron directories -- a common persistence mechanism.',
+        'audit_key': 'microdfir_cron',
+        'rules': ['-w /etc/crontab -p wa -k microdfir_cron', '-w /etc/cron.d -p wa -k microdfir_cron',
+                  '-w /etc/cron.daily -p wa -k microdfir_cron', '-w /etc/cron.hourly -p wa -k microdfir_cron',
+                  '-w /etc/cron.weekly -p wa -k microdfir_cron', '-w /etc/cron.monthly -p wa -k microdfir_cron',
+                  '-w /var/spool/cron -p wa -k microdfir_cron'],
+    },
+    'pam_changes': {
+        'label': 'PAM Configuration Changes',
+        'description': 'Writes to /etc/pam.d -- a classic backdoor/persistence vector (a modified PAM stack can accept an attacker-chosen password).',
+        'audit_key': 'microdfir_pam',
+        'rules': ['-w /etc/pam.d -p wa -k microdfir_pam'],
+    },
+    'network_config_changes': {
+        'label': 'Network Configuration Changes',
+        'description': '/etc/hosts and /etc/resolv.conf writes (DNS hijacking) plus sethostname/setdomainname calls.',
+        'audit_key': 'microdfir_netconfig',
+        'rules': ['-w /etc/hosts -p wa -k microdfir_netconfig', '-w /etc/resolv.conf -p wa -k microdfir_netconfig',
+                  '-a always,exit -F arch=b64 -S sethostname,setdomainname -k microdfir_netconfig',
+                  '-a always,exit -F arch=b32 -S sethostname,setdomainname -k microdfir_netconfig'],
+    },
+    'login_session_tamper': {
+        'label': 'Login Record Tampering',
+        'description': 'Write access to the login/session record files themselves (wtmp/btmp/utmp/lastlog/faillog/tallylog) -- detects an attacker wiping their own login trail, distinct from the actual auth events journald already carries in full.',
+        'audit_key': 'microdfir_logins',
+        'rules': ['-w /var/log/faillog -p wa -k microdfir_logins', '-w /var/log/lastlog -p wa -k microdfir_logins',
+                  '-w /var/log/tallylog -p wa -k microdfir_logins', '-w /var/run/utmp -p wa -k microdfir_logins',
+                  '-w /var/log/wtmp -p wa -k microdfir_logins', '-w /var/log/btmp -p wa -k microdfir_logins'],
     },
 }
 LINUX_CHANNELS_CONFIG_PATH = '/opt/micro-dfir/agent_linux_channels.json'
+_CUSTOM_CHANNEL_ID_RE = re.compile(r'^[a-z0-9_]{1,40}$')
+_CUSTOM_CHANNEL_PATH_RE = re.compile(r'^/[\w\-./]*$')
+_CUSTOM_CHANNEL_VALID_PERM_CHARS = set('rwxa')
+
+def _custom_channel_audit_key(custom_id):
+    return f'microdfir_custom_{custom_id}'
+
+def get_linux_custom_channels():
+    """{'custom_id': {'label', 'path', 'perms'}, ...} -- admin-defined "watch this path"
+    channels, stored once (not per-group) and then enabled/disabled per group exactly
+    like the fixed catalog above, keyed into the SAME per-group dict. Deliberately a
+    structured (path + rwxa checkboxes) definition, not a raw admin-typed auditctl rule
+    line -- this is written directly into a rules FILE the agent's own reconciliation
+    loads, so keeping it to one validated, single-line watch rule per custom channel
+    avoids any control-character/rule-injection surface a free-text rule body would open."""
+    all_data = _read_linux_channels_file()
+    return all_data.get('custom_channels', {})
+
+def _read_linux_channels_file():
+    if not os.path.exists(LINUX_CHANNELS_CONFIG_PATH):
+        return {}
+    try:
+        with open(LINUX_CHANNELS_CONFIG_PATH, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 def _default_linux_channel_setting():
     return {'enabled': False}
 
-def _normalize_linux_channel_dict(data):
+def _normalize_linux_channel_dict(data, valid_keys):
     # Unlike Windows channels, nothing here is admin-customizable beyond on/off -- the
-    # rule content itself is curated and lives agent-side, not user-typed, so there's no
-    # per-channel format/filter-mode/value to validate or preserve.
-    return {key: {'enabled': bool((data or {}).get(key, {}).get('enabled'))} for key in LINUX_LOG_CHANNELS}
+    # rule content itself is curated (or, for a custom channel, defined once in
+    # custom_channels) rather than typed per-group, so there's no per-channel format/
+    # filter-mode/value to validate or preserve here.
+    return {key: {'enabled': bool((data or {}).get(key, {}).get('enabled'))} for key in valid_keys}
 
 def get_linux_channels_all():
-    file_existed = os.path.exists(LINUX_CHANNELS_CONFIG_PATH)
-    raw = {}
-    if file_existed:
-        try:
-            with open(LINUX_CHANNELS_CONFIG_PATH, 'r') as f:
-                raw = json.load(f)
-        except Exception:
-            raw = {}
-    if '__default__' not in raw:
-        raw = {'__default__': raw} if raw else {'__default__': {}}
-    result = {group: _normalize_linux_channel_dict(channels) for group, channels in raw.items()}
-    if result != raw:
+    raw = _read_linux_channels_file()
+    file_existed = bool(raw) or os.path.exists(LINUX_CHANNELS_CONFIG_PATH)
+    custom_channels = raw.get('custom_channels', {})
+    valid_keys = set(LINUX_LOG_CHANNELS) | set(custom_channels)
+    groups_raw = {k: v for k, v in raw.items() if k != 'custom_channels'}
+    if '__default__' not in groups_raw:
+        groups_raw = {'__default__': groups_raw} if groups_raw else {'__default__': {}}
+    result_groups = {group: _normalize_linux_channel_dict(channels, valid_keys) for group, channels in groups_raw.items()}
+    result = {'custom_channels': custom_channels, **result_groups}
+    if file_existed and result != raw:
+        save_linux_channels_all(result)
+    elif not file_existed:
         save_linux_channels_all(result)
     return result
 
@@ -13783,6 +13905,22 @@ def get_linux_channels_for_group(group_name):
     if group_key and group_key in all_templates:
         return all_templates[group_key], True
     return all_templates['__default__'], False
+
+def _linux_channel_defs_for_enabled(enabled_channel_keys, custom_channels):
+    """Builds the {'key','audit_key','rules'} list agent_config() sends to the agent --
+    the single place fixed-catalog and custom-channel definitions get resolved into the
+    same shape, so the agent needs no local catalog of its own (see the module comment
+    above LINUX_LOG_CHANNELS)."""
+    defs = []
+    for key in enabled_channel_keys:
+        if key in LINUX_LOG_CHANNELS:
+            chan = LINUX_LOG_CHANNELS[key]
+            defs.append({'key': key, 'audit_key': chan['audit_key'], 'rules': chan['rules']})
+        elif key in custom_channels:
+            c = custom_channels[key]
+            audit_key = _custom_channel_audit_key(key)
+            defs.append({'key': key, 'audit_key': audit_key, 'rules': [f"-w {c['path']} -p {c['perms']} -k {audit_key}"]})
+    return defs
 
 @app.route('/api/agent/linux-channels', methods=['GET', 'POST', 'DELETE'])
 @login_required
@@ -13805,8 +13943,9 @@ def api_agent_linux_channels():
         err = require_permission('edr.agent.manage')
         if err: return err
         posted = request.json or {}
-        channels = {key: {'enabled': bool((posted.get(key) or {}).get('enabled'))} for key in LINUX_LOG_CHANNELS}
         all_templates = get_linux_channels_all()
+        valid_keys = set(LINUX_LOG_CHANNELS) | set(all_templates.get('custom_channels', {}))
+        channels = {key: {'enabled': bool((posted.get(key) or {}).get('enabled'))} for key in valid_keys}
         all_templates[group_key] = channels
         save_linux_channels_all(all_templates)
         return jsonify({'status': 'success', 'channels': channels, 'group': group_key})
@@ -13816,6 +13955,83 @@ def api_agent_linux_channels():
         return jsonify({'channels': all_templates[group_key], 'group': group_key,
                          'is_override': group_key != '__default__'})
     return jsonify({'channels': all_templates['__default__'], 'group': group_key, 'is_override': False})
+
+# Custom Linux channel DEFINITIONS (label/path/perms) -- separate from the per-group
+# enable/disable route above, matching how a custom channel is defined once and then
+# toggled on per group just like a fixed catalog entry.
+@app.route('/api/agent/linux-channels/custom', methods=['GET', 'POST'])
+@login_required
+def api_agent_linux_custom_channels():
+    from flask import request, jsonify
+    if request.method == 'GET':
+        return jsonify(get_linux_custom_channels())
+
+    err = require_permission('edr.agent.manage')
+    if err: return err
+    d = request.json or {}
+    label = (d.get('label') or '').strip()[:100]
+    path = (d.get('path') or '').strip()
+    perms = ''.join(sorted(set((d.get('perms') or '').lower()) & _CUSTOM_CHANNEL_VALID_PERM_CHARS))
+    if not label:
+        return jsonify({'error': 'A label is required'}), 400
+    if not _CUSTOM_CHANNEL_PATH_RE.match(path):
+        return jsonify({'error': 'Path must be an absolute path with no spaces or special characters'}), 400
+    if not perms:
+        return jsonify({'error': 'Select at least one of read/write/execute/attribute-change'}), 400
+    custom_id = re.sub(r'[^a-z0-9_]', '_', label.lower())[:40].strip('_') or 'custom'
+    all_templates = get_linux_channels_all()
+    custom_channels = all_templates.get('custom_channels', {})
+    base_id, n = custom_id, 2
+    while custom_id in custom_channels or custom_id in LINUX_LOG_CHANNELS:
+        custom_id = f'{base_id}_{n}'[:40]
+        n += 1
+    custom_channels[custom_id] = {'label': label, 'path': path, 'perms': perms}
+    all_templates['custom_channels'] = custom_channels
+    save_linux_channels_all(all_templates)
+    log_audit('linux_custom_channel_create', 'linux_channel', custom_id, f'path={path}, perms={perms}')
+    return jsonify({'status': 'success', 'id': custom_id, 'channel': custom_channels[custom_id]})
+
+@app.route('/api/agent/linux-channels/custom/<custom_id>', methods=['PUT', 'DELETE'])
+@login_required
+def api_agent_linux_custom_channel_detail(custom_id):
+    from flask import request, jsonify
+    err = require_permission('edr.agent.manage')
+    if err: return err
+    if not _CUSTOM_CHANNEL_ID_RE.match(custom_id):
+        return jsonify({'error': 'Unknown custom channel'}), 404
+    all_templates = get_linux_channels_all()
+    custom_channels = all_templates.get('custom_channels', {})
+    if custom_id not in custom_channels:
+        return jsonify({'error': 'Custom channel not found'}), 404
+
+    if request.method == 'DELETE':
+        del custom_channels[custom_id]
+        all_templates['custom_channels'] = custom_channels
+        # Also drop this id's enable-state from every group so a deleted custom
+        # channel doesn't linger as a stale key inside some group's saved template.
+        for group_key in list(all_templates.keys()):
+            if group_key == 'custom_channels':
+                continue
+            all_templates[group_key].pop(custom_id, None)
+        save_linux_channels_all(all_templates)
+        log_audit('linux_custom_channel_delete', 'linux_channel', custom_id)
+        return jsonify({'status': 'success'})
+
+    d = request.json or {}
+    label = (d.get('label') or '').strip()[:100]
+    path = (d.get('path') or '').strip()
+    perms = ''.join(sorted(set((d.get('perms') or '').lower()) & _CUSTOM_CHANNEL_VALID_PERM_CHARS))
+    if not label:
+        return jsonify({'error': 'A label is required'}), 400
+    if not _CUSTOM_CHANNEL_PATH_RE.match(path):
+        return jsonify({'error': 'Path must be an absolute path with no spaces or special characters'}), 400
+    if not perms:
+        return jsonify({'error': 'Select at least one of read/write/execute/attribute-change'}), 400
+    custom_channels[custom_id] = {'label': label, 'path': path, 'perms': perms}
+    all_templates['custom_channels'] = custom_channels
+    save_linux_channels_all(all_templates)
+    log_audit('linux_custom_channel_update', 'linux_channel', custom_id, f'path={path}, perms={perms}')
+    return jsonify({'status': 'success', 'id': custom_id, 'channel': custom_channels[custom_id]})
 
 
 # --- SETTINGS API ENDPOINTS ---
