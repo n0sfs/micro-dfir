@@ -10,6 +10,30 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-05
 
+### Push Windows Advanced Audit Policy, fix Sysmon config reload, curate Security defaults
+
+Windows had the exact gap just closed for Linux auditd: turning on the Security
+channel's Event ID filter is meaningless for several high-value events (4688 with
+command line, account/group management, Kerberos/NTLM auth) unless the endpoint's own
+Advanced Audit Policy has the matching subcategory enabled — confirmed zero `auditpol`
+usage existed anywhere. `reconcile_windows_audit_policy()` now pushes the standard
+CIS/NSA-aligned subcategory set plus the process-creation-command-line and PowerShell-
+script-block-logging registry keys, tied directly to whether the Security/PowerShell
+channels are enabled — symmetric, so disabling a channel unwinds its policy too.
+Deliberately targets Advanced Audit Policy only, never Basic (Microsoft's own guidance:
+mixing the two via policy causes "unexpected results").
+
+Also fixed a real, separate bug: `_ensure_sysmon_installed()` only ever applied
+`sysmon_config.xml` on a host's *first* install — editing the config afterward silently
+never reached an already-enrolled endpoint. `agent_config()` now sends a content hash;
+the agent reloads live via Sysmon's own `-c` flag whenever it changes. New "Sysmon
+Configuration (Advanced)" section in Log Pipeline lets an admin view/edit the raw XML
+directly, stored as an override file outside the git tree so it survives future deploys.
+
+Security channel's default Event ID filter is now a curated ~28-ID baseline instead of
+collecting every Security event unfiltered — scoped to fresh installs/new channels
+only; confirmed live that production's existing saved template was left untouched.
+
 ### Expand Linux Log Channels to 11 CIS/STIG-aligned channels + custom channels
 
 Grew the curated auditd catalog from 2 to 11 channels, researched against current
