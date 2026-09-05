@@ -15,6 +15,9 @@ Full commit-level detail is always available via `git log`.
 Drop rules, DNS query logging, and Windows log channel config used to live as a SIEM
 sub-tab; moved to `/log-pipeline`, a standalone page in the sidebar positioned just above
 SIEM. Old `/siem?tab=pipeline` bookmarks redirect cleanly instead of rendering a dead tab.
+The 3 cards were then split into their own sub-tabs (Drop Rules / DNS Query Logging /
+Windows Log Channels) so more Log Pipeline tabs can be added later without the page
+becoming an ever-growing scroll.
 
 ### Production incident: `siem.db` corruption and recovery
 
