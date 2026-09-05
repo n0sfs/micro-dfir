@@ -65,7 +65,6 @@
 
 <ul class="nav nav-tabs border-secondary mb-3" id="siemTabs">
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'search' else '' }}" id="tabBtnSearch" onclick="switchSiemTab('search')"><i class="fa-solid fa-magnifying-glass-chart me-1"></i>Log Search</button></li>
-    <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'pipeline' else '' }}" id="tabBtnPipeline" onclick="switchSiemTab('pipeline')"><i class="fa-solid fa-filter me-1"></i>Log Pipeline</button></li>
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'rules' else '' }}" id="tabBtnRules" onclick="switchSiemTab('rules')"><i class="fa-solid fa-file-shield me-1"></i>Detection Rules</button></li>
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'tuning' else '' }}" id="tabBtnTuning" onclick="switchSiemTab('tuning')"><i class="fa-solid fa-sliders me-1"></i>Detection Tuning</button></li>
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'reports' else '' }}" id="tabBtnReports" onclick="switchSiemTab('reports')"><i class="fa-solid fa-file-pdf me-1"></i>Reports</button></li>
@@ -305,133 +304,6 @@
 
 </div>
 <!-- =========================== END LOG SEARCH PANE =========================== -->
-
-<!-- ============================= LOG PIPELINE PANE ============================= -->
-<div id="panePipeline" style="display: {{ 'block' if active_tab == 'pipeline' else 'none' }};">
-<div class="row g-4 mb-4">
-    <!-- Active Drop / Filter Rules -->
-    <div class="col-lg-12">
-        <div class="card bg-dark border-secondary h-100">
-            <div class="card-body">
-                <h5 class="card-title text-light mb-3"><i class="fa-solid fa-filter me-2"></i>Active Drop / Filter Rules</h5>
-                <label class="form-label text-muted small mb-3">Configure ingestion drop rules to filter noisy telemetry at the edge.</label>
-
-                <div class="row g-2 mb-3">
-                    <div class="col-md-4">
-                        <label class="form-label text-muted small mb-1">Field</label>
-                        <select id="dropField" class="form-select bg-dark text-light border-secondary form-select-sm">
-                            <option value="app">App Name</option>
-                            <option value="event_id">Event ID</option>
-                            <option value="host">Host</option>
-                        </select>
-                    </div>
-                    <div class="col-md-3">
-                        <label class="form-label text-muted small mb-1">Operator</label>
-                        <select id="dropOp" class="form-select bg-dark text-light border-secondary form-select-sm">
-                            <option value="equals">Equals</option>
-                            <option value="contains">Contains</option>
-                        </select>
-                    </div>
-                    <div class="col-md-5">
-                        <label class="form-label text-muted small mb-1">Value</label>
-                        <input type="text" id="dropVal" class="form-control bg-dark text-light border-secondary form-control-sm" placeholder="Match value...">
-                    </div>
-                </div>
-                <div class="mb-3">
-                    <label class="form-label text-muted small mb-1">Description</label>
-                    <input type="text" id="dropDesc" class="form-control bg-dark text-light border-secondary form-control-sm" placeholder="Rule purpose...">
-                </div>
-                <div class="d-flex gap-2 mb-3">
-                    <button type="button" class="btn btn-outline-info btn-sm flex-fill" onclick="previewDropRule()"><i class="fa-solid fa-magnifying-glass me-1"></i>Preview</button>
-                    <button type="button" class="btn btn-primary btn-sm flex-fill" onclick="addDropRule()">Add Rule</button>
-                </div>
-
-                <div id="dropRulePreview" class="mb-3" style="display:none;">
-                    <div class="border border-secondary rounded p-2 bg-black">
-                        <div id="dropRulePreviewSummary" class="small text-info mb-2"></div>
-                        <div class="table-responsive" style="max-height:220px; overflow-y:auto;">
-                            <table class="table table-dark table-sm mb-0 small">
-                                <thead><tr><th>Time</th><th>Host</th><th>App</th><th>Message</th></tr></thead>
-                                <tbody id="dropRulePreviewBody"></tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="table-responsive">
-                    <table class="table table-dark table-striped table-hover mb-0 align-middle small">
-                        <thead>
-                            <tr>
-                                <th>ID</th>
-                                <th>Condition</th>
-                                <th>Description</th>
-                                <th>Active</th>
-                                <th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody id="dropRulesTableBody">
-                            <tr><td colspan="5" class="text-center text-muted py-3">No drop rules configured yet. Fill in the form above and click "Add Rule" to filter out noisy log sources.</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-
-</div>
-
-<!-- DNS Query Logging (opt-in dnsmasq) -->
-<div class="row g-4 mb-4">
-    <div class="col-lg-12">
-        <div class="card bg-dark border-secondary">
-            <div class="card-body">
-                <h5 class="card-title text-light mb-3"><i class="fa-solid fa-globe me-2"></i>DNS Query Logging</h5>
-                <p class="text-muted small mb-3">Opt-in DNS query capture via a separate dnsmasq process (config/microsoc-dnsmasq.service) -- never this network's DHCP or default resolver. Point a specific device's own DNS setting at this appliance's IP to opt it in; nothing here changes automatically for the rest of the network. Read-only: this panel shows status and the exact parser in use, but editing the parser or dnsmasq's own config is not done from the UI.</p>
-                <div class="row g-3 mb-3" id="dnsLoggingHero">
-                    <div class="col-6 col-md-3 text-center"><div class="fs-4 fw-bold" id="dnsLoggingActive">—</div><div class="text-muted small">Status</div></div>
-                    <div class="col-6 col-md-3 text-center"><div class="fs-4 fw-bold" id="dnsLoggingCount">—</div><div class="text-muted small">Queries (24h)</div></div>
-                    <div class="col-12 col-md-6 text-center"><div class="fs-6" id="dnsLoggingLastSeen">—</div><div class="text-muted small">Last Query</div></div>
-                </div>
-                <label class="form-label text-muted small mb-1">Parser in use (read-only)</label>
-                <pre class="bg-black border border-secondary rounded p-2 small text-info mb-0" id="dnsLoggingParser" style="white-space:pre-wrap;">Loading…</pre>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- Agent Windows Log Channels -->
-<div class="row g-4 mb-4">
-    <div class="col-lg-12">
-        <div class="card bg-dark border-secondary">
-            <div class="card-body">
-                <h5 class="card-title text-light mb-3"><i class="fa-solid fa-sliders me-2"></i>Agent Windows Log Channels</h5>
-                <p class="text-muted small mb-3">Select event channels to enforce across all deployed endpoint collector agents. Each channel can optionally capture the raw event XML (more reliable field extraction than the rendered message) and filter which Windows Event IDs get collected.</p>
-
-                <div class="row g-2 text-muted small mb-1 d-none d-md-flex">
-                    <div class="col-md-4">Channel</div>
-                    <div class="col-md-2">Format</div>
-                    <div class="col-md-2">Event ID Filter</div>
-                    <div class="col-md-3">Value</div>
-                    <div class="col-md-1"></div>
-                </div>
-                <div id="channelsContainer"></div>
-
-                <div class="d-flex gap-2 mt-3 mb-2">
-                    <input type="text" id="newChannelName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Custom channel LogName, e.g. Microsoft-Windows-TaskScheduler/Operational">
-                    <button type="button" class="btn btn-outline-secondary btn-sm text-nowrap" onclick="addCustomChannel()"><i class="fa-solid fa-plus me-1"></i>Add Custom Channel</button>
-                </div>
-                <div id="channelSaveError" class="text-danger small mb-2" style="display:none;"></div>
-
-                <button type="button" class="btn btn-primary btn-sm" onclick="saveChannels()">
-                    <i class="fa-solid fa-floppy-disk me-1"></i> Save & Push Channel Template
-                </button>
-                <span id="saveSuccessMsg" class="text-success small ms-2 fw-bold" style="display: none;"><i class="fa-solid fa-circle-check me-1"></i>Saved and push completed.</span>
-            </div>
-        </div>
-    </div>
-</div>
-</div>
-<!-- =========================== END LOG PIPELINE PANE =========================== -->
 
 <!-- ============================= DETECTION RULES PANE ============================= -->
 <div id="paneRules" style="display: {{ 'block' if active_tab == 'rules' else 'none' }};">
@@ -992,7 +864,6 @@ function onReportTypeChange() {
 }
 let reportHistoryData = [];
 let searchStats = {};
-let pipelineStats = {};
 
 function updateSharedStats(tab) {
     if (tab === 'search') {
@@ -1005,11 +876,6 @@ function updateSharedStats(tab) {
         setStatTile(1, 'Alerts/Anomalies (This Page)', searchStats.alertCount ?? '—');
         setStatTile(2, 'Unique Hosts (This Page)', searchStats.uniqueHosts ?? '—');
         setStatTile(3, 'Time Window', searchStats.timeWindow ?? '—', true);
-    } else if (tab === 'pipeline') {
-        setStatTile(0, 'Active Drop Rules', pipelineStats.activeDropRules ?? '—');
-        setStatTile(1, 'Total Drop Rules', pipelineStats.totalDropRules ?? '—');
-        setStatTile(2, 'Log Channels Active', pipelineStats.channelsActive ?? '—');
-        setStatTile(3, 'Total Channels', 6);
     } else if (tab === 'rules') {
         const enabledCount = allRules.filter(r => r.enabled).length;
         setStatTile(0, 'Total Rules', allRules.length);
@@ -1031,8 +897,8 @@ function updateSharedStats(tab) {
     }
 }
 
-const SIEM_TABS = ['search', 'pipeline', 'rules', 'tuning', 'reports'];
-let siemTabLoaded = { search: false, pipeline: false, rules: false, tuning: false, reports: false };
+const SIEM_TABS = ['search', 'rules', 'tuning', 'reports'];
+let siemTabLoaded = { search: false, rules: false, tuning: false, reports: false };
 
 function siemTabCap(tab) { return tab.charAt(0).toUpperCase() + tab.slice(1); }
 
@@ -1045,7 +911,6 @@ function switchSiemTab(tab) {
     if (!siemTabLoaded[tab]) {
         siemTabLoaded[tab] = true;
         if (tab === 'search') initSearchTab();
-        else if (tab === 'pipeline') initPipelineTab();
         else if (tab === 'rules') initRulesTab();
         else if (tab === 'tuning') initTuningTab();
         else if (tab === 'reports') initReportsTab();
@@ -2231,249 +2096,6 @@ function initSearchTab() {
     loadAppFacets();
     renderLogsTableHead();
     loadDashboardData();
-}
-
-// =====================================================================
-// LOG PIPELINE TAB
-// =====================================================================
-function loadDropRules() {
-    fetch('/api/droprules')
-        .then(r => r.json())
-        .then(data => {
-            pipelineStats.activeDropRules = Array.isArray(data) ? data.filter(r => r.enabled).length : 0;
-            pipelineStats.totalDropRules = Array.isArray(data) ? data.length : 0;
-            updateSharedStats('pipeline');
-            let tbody = document.getElementById('dropRulesTableBody');
-            if (!Array.isArray(data) || data.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">No drop rules configured yet. Fill in the form above and click "Add Rule" to filter out noisy log sources.</td></tr>';
-                return;
-            }
-            tbody.innerHTML = data.map(r => `
-                <tr>
-                    <td>${r.id}</td>
-                    <td><code>${r.field} ${r.operator} "${r.value}"</code></td>
-                    <td>${r.description || ''}</td>
-                    <td>
-                        <div class="form-check form-switch mb-0">
-                            <input class="form-check-input" type="checkbox" ${r.enabled ? 'checked' : ''} onchange="toggleDropRule(${r.id})">
-                        </div>
-                    </td>
-                    <td><button class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete drop rule" onclick="deleteDropRule(${r.id})"><i class="fa-solid fa-trash"></i></button></td>
-                </tr>
-            `).join('');
-        }).catch(err => console.error("Error loading drop rules:", err));
-}
-
-function addDropRule() {
-    let field = document.getElementById('dropField').value;
-    let operator = document.getElementById('dropOp').value;
-    let value = document.getElementById('dropVal').value.trim();
-    let description = document.getElementById('dropDesc').value.trim();
-    if (!value) { toast('Match value is required.', 'warning'); return; }
-
-    fetch('/api/droprules', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({field, operator, value, description})
-    }).then(r => r.json()).then(() => {
-        document.getElementById('dropVal').value = '';
-        document.getElementById('dropDesc').value = '';
-        document.getElementById('dropRulePreview').style.display = 'none';
-        loadDropRules();
-    }).catch(err => toast('Error adding rule: ' + err, 'danger'));
-}
-
-// Dry-runs the field/operator/value currently in the form against real recent logs,
-// without saving anything -- drop rules act at the Vector layer before a log ever
-// reaches live_logs, so once a rule is live there's no way to see what it silently
-// ate. This is the only chance to check before committing to one.
-function previewDropRule() {
-    let field = document.getElementById('dropField').value;
-    let operator = document.getElementById('dropOp').value;
-    let value = document.getElementById('dropVal').value.trim();
-    if (!value) { toast('Enter a match value to preview.', 'warning'); return; }
-
-    const panel = document.getElementById('dropRulePreview');
-    const summary = document.getElementById('dropRulePreviewSummary');
-    const body = document.getElementById('dropRulePreviewBody');
-    panel.style.display = 'block';
-    summary.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i>Checking recent logs...';
-    body.innerHTML = '';
-
-    fetch('/api/droprules/preview', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({field, operator, value})
-    }).then(r => r.json().then(d => ({ok: r.ok, d}))).then(({ok, d}) => {
-        if (!ok) { summary.innerHTML = `<span class="text-danger">${escHtml(d.error || 'Preview failed.')}</span>`; return; }
-        if (!d.count) {
-            summary.innerHTML = `No logs in the last ${d.window_days} days would match this rule.`;
-            body.innerHTML = '';
-            return;
-        }
-        const shown = d.sample.length;
-        summary.innerHTML = `<strong>${d.count}</strong> log(s) in the last ${d.window_days} days would be dropped by this rule` +
-            (shown < d.count ? ` — showing the ${shown} most recent` : '') + `.`;
-        body.innerHTML = d.sample.map(r => `
-            <tr>
-                <td class="text-muted text-nowrap">${escHtml(r.timestamp)}</td>
-                <td>${escHtml(r.host || '')}</td>
-                <td>${escHtml(r.app || '')}</td>
-                <td class="text-truncate" style="max-width:280px;" title="${escHtml(r.message)}">${escHtml(r.message)}</td>
-            </tr>`).join('');
-    }).catch(err => { summary.innerHTML = `<span class="text-danger">Error: ${escHtml(err)}</span>`; body.innerHTML = ''; });
-}
-
-function toggleDropRule(id) {
-    fetch(`/api/droprules/${id}/toggle`, { method: 'PUT' }).then(() => loadDropRules());
-}
-
-async function deleteDropRule(id) {
-    if (await confirmDialog('Delete this drop rule?', {title: 'Delete drop rule', danger: true, confirmLabel: 'Delete'})) {
-        fetch(`/api/droprules/${id}`, { method: 'DELETE' }).then(() => loadDropRules());
-    }
-}
-
-const CHANNEL_PRESET_LABELS = {
-    'Security': 'Security (Logon / Process creation)',
-    'System': 'System (Hardware & service events)',
-    'Application': 'Application (App crashes & errors)',
-    'PowerShell': 'PowerShell (Script block execution)',
-    'Sysmon': 'Sysmon (Advanced telemetry)',
-    'WindowsDefender': 'Windows Defender (Threat quarantines)',
-};
-const CHANNEL_PRESET_ORDER = ['Security', 'System', 'Application', 'PowerShell', 'Sysmon', 'WindowsDefender'];
-
-function renderChannelRow(name, setting, isPreset) {
-    const filterMode = setting.filter_mode || 'none';
-    const label = isPreset
-        ? `<label class="text-light small mb-0">${escHtml(CHANNEL_PRESET_LABELS[name] || name)}</label>`
-        : `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary chan-name" value="${escAttr(name)}" placeholder="LogName">`;
-    return `
-        <div class="row g-2 align-items-center border-bottom border-secondary py-2 channel-row" data-preset="${isPreset ? '1' : ''}" data-original-name="${escAttr(name)}">
-            <div class="col-md-4 d-flex align-items-center gap-2">
-                <input type="checkbox" class="form-check-input chan-enabled flex-shrink-0" ${setting.enabled ? 'checked' : ''}>
-                ${label}
-            </div>
-            <div class="col-md-2 form-check">
-                <input type="checkbox" class="form-check-input chan-xml" ${setting.capture_xml ? 'checked' : ''}>
-                <label class="form-check-label text-muted small">Capture XML</label>
-            </div>
-            <div class="col-md-2">
-                <select class="form-select form-select-sm bg-dark text-light border-secondary chan-filter-mode" onchange="onChannelFilterModeChange(this)">
-                    <option value="none" ${filterMode === 'none' ? 'selected' : ''}>No filter</option>
-                    <option value="include" ${filterMode === 'include' ? 'selected' : ''}>Include</option>
-                    <option value="exclude" ${filterMode === 'exclude' ? 'selected' : ''}>Exclude</option>
-                </select>
-            </div>
-            <div class="col-md-3">
-                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary chan-filter-value" placeholder="e.g. 4000-5000, 5200" value="${escAttr(setting.filter_value || '')}" ${filterMode === 'none' ? 'disabled' : ''}>
-            </div>
-            <div class="col-md-1 text-end">
-                ${isPreset ? '' : '<button type="button" class="btn btn-sm btn-outline-danger" onclick="this.closest(\'.channel-row\').remove()"><i class="fa-solid fa-trash"></i></button>'}
-            </div>
-        </div>
-    `;
-}
-
-function onChannelFilterModeChange(select) {
-    let valInput = select.closest('.channel-row').querySelector('.chan-filter-value');
-    valInput.disabled = (select.value === 'none');
-}
-
-function loadChannelSettings() {
-    fetch('/api/agent/channels')
-        .then(r => r.json())
-        .then(data => {
-            let container = document.getElementById('channelsContainer');
-            if (!container) return;
-            let html = '';
-            for (const name of CHANNEL_PRESET_ORDER) {
-                html += renderChannelRow(name, data[name] || {}, true);
-            }
-            for (const name of Object.keys(data)) {
-                if (!CHANNEL_PRESET_ORDER.includes(name)) {
-                    html += renderChannelRow(name, data[name], false);
-                }
-            }
-            container.innerHTML = html;
-            pipelineStats.channelsActive = Object.values(data).filter(v => v && v.enabled).length;
-            updateSharedStats('pipeline');
-        }).catch(err => console.error("Error loading channels:", err));
-}
-
-function addCustomChannel() {
-    let input = document.getElementById('newChannelName');
-    let name = input.value.trim();
-    if (!name) return;
-    if (CHANNEL_PRESET_ORDER.includes(name)) {
-        toast(`"${name}" is already a preset channel above.`, 'warning');
-        return;
-    }
-    document.getElementById('channelsContainer').insertAdjacentHTML('beforeend',
-        renderChannelRow(name, {enabled: true, capture_xml: false, filter_mode: 'none', filter_value: ''}, false));
-    input.value = '';
-}
-
-function saveChannels() {
-    let payload = {};
-    document.querySelectorAll('#channelsContainer .channel-row').forEach(row => {
-        let isPreset = !!row.dataset.preset;
-        let name = isPreset ? row.dataset.originalName : (row.querySelector('.chan-name').value.trim());
-        if (!name) return;
-        payload[name] = {
-            enabled: row.querySelector('.chan-enabled').checked,
-            capture_xml: row.querySelector('.chan-xml').checked,
-            filter_mode: row.querySelector('.chan-filter-mode').value,
-            filter_value: row.querySelector('.chan-filter-value').value.trim(),
-        };
-    });
-
-    let errBox = document.getElementById('channelSaveError');
-    if (errBox) errBox.style.display = 'none';
-
-    fetch('/api/agent/channels', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(payload)
-    }).then(async r => {
-        let res = await r.json();
-        if (!r.ok) {
-            if (errBox) {
-                errBox.textContent = res.message || 'Failed to save channel template.';
-                errBox.style.display = 'block';
-            }
-            return;
-        }
-        let msg = document.getElementById('saveSuccessMsg');
-        if (msg) {
-            msg.style.display = 'inline';
-            setTimeout(() => { msg.style.display = 'none'; }, 3000);
-        }
-        loadChannelSettings();
-    }).catch(err => toast('Error saving channels: ' + err, 'danger'));
-}
-
-function initPipelineTab() {
-    loadDropRules();
-    loadChannelSettings();
-    loadDnsLoggingStatus();
-}
-
-// Read-only status/parser view for the opt-in DNS query logging feature (dnsmasq) --
-// no create/edit/save here by design, see /api/dns-logging/status's own comment.
-function loadDnsLoggingStatus() {
-    fetch('/api/dns-logging/status').then(r => r.json()).then(d => {
-        const activeEl = document.getElementById('dnsLoggingActive');
-        activeEl.innerText = d.active ? 'Active' : 'Inactive';
-        activeEl.className = 'fs-4 fw-bold ' + (d.active ? 'text-success' : 'text-muted');
-        document.getElementById('dnsLoggingCount').innerText = d.query_count_24h.toLocaleString();
-        document.getElementById('dnsLoggingLastSeen').innerText = d.last_seen || 'Never';
-        document.getElementById('dnsLoggingParser').innerText = `${d.parser_pattern}\n\nSource: ${d.parser_source}`;
-    }).catch(err => {
-        console.error('Error loading DNS logging status:', err);
-        document.getElementById('dnsLoggingParser').innerText = 'Error loading parser info.';
-    });
 }
 
 // =====================================================================
