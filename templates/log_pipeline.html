@@ -246,6 +246,45 @@
                     <i class="fa-solid fa-floppy-disk me-1"></i> Save & Push Channel Template
                 </button>
                 <span id="linuxChannelSaveSuccessMsg" class="text-success small ms-2 fw-bold" style="display: none;"><i class="fa-solid fa-circle-check me-1"></i>Saved and push completed.</span>
+
+                <hr class="border-secondary my-4">
+
+                <h6 class="text-info mb-2">Custom Channels</h6>
+                <p class="text-muted small mb-3">Watch any additional path on the endpoint via an auditd watch rule -- e.g. an app's own config file or a directory not covered above. Defined once here, then enabled per group above just like a built-in channel.</p>
+                <div class="row g-2 align-items-end mb-2">
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted mb-1">Label</label>
+                        <input type="text" id="customChanLabel" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Nginx Config Changes">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted mb-1">Path to watch</label>
+                        <input type="text" id="customChanPath" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="/etc/nginx">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted mb-1 d-block">Watch for</label>
+                        <div class="form-check form-check-inline">
+                            <input class="form-check-input" type="checkbox" id="customChanPermW" checked>
+                            <label class="form-check-label small" for="customChanPermW">Write</label>
+                        </div>
+                        <div class="form-check form-check-inline">
+                            <input class="form-check-input" type="checkbox" id="customChanPermA" checked>
+                            <label class="form-check-label small" for="customChanPermA">Attr change</label>
+                        </div>
+                        <div class="form-check form-check-inline">
+                            <input class="form-check-input" type="checkbox" id="customChanPermR">
+                            <label class="form-check-label small" for="customChanPermR">Read</label>
+                        </div>
+                        <div class="form-check form-check-inline">
+                            <input class="form-check-input" type="checkbox" id="customChanPermX">
+                            <label class="form-check-label small" for="customChanPermX">Execute</label>
+                        </div>
+                    </div>
+                    <div class="col-md-2">
+                        <button type="button" class="btn btn-outline-primary btn-sm w-100" id="customChanSubmitBtn" onclick="saveCustomLinuxChannel()"><i class="fa-solid fa-plus me-1"></i>Add</button>
+                        <button type="button" class="btn btn-outline-secondary btn-sm w-100 mt-1" id="customChanCancelBtn" style="display:none;" onclick="cancelEditCustomLinuxChannel()">Cancel</button>
+                    </div>
+                </div>
+                <div id="customChanError" class="text-danger small mb-2" style="display:none;"></div>
             </div>
         </div>
     </div>
@@ -570,22 +609,29 @@ async function removeChannelOverride() {
 }
 
 // ---- Linux Log Channels (auditd-rule-based, per group) ----
-// Unlike Windows' presets (format/filter-mode/value all admin-customizable), each entry
-// here is just a curated on/off toggle -- the rule content itself lives agent-side
-// (LINUX_AUDIT_CHANNELS in micro_agent_linux.py), matching app.py's LINUX_LOG_CHANNELS
-// dict (dual-definition convention, same as e.g. UEBA_DEFAULTS).
+// Unlike Windows' presets (format/filter-mode/value all admin-customizable), each fixed
+// entry here is just a curated on/off toggle -- the rule content itself lives in
+// app.py's LINUX_LOG_CHANNELS (dual-definition convention, same as e.g. UEBA_DEFAULTS).
+// Custom channels (below) are the one genuinely admin-authored piece: a path + which
+// accesses to watch, defined once via /api/agent/linux-channels/custom and then
+// enabled per group through this exact same toggle list.
 const LINUX_LOG_CHANNELS = {
-    process_exec: {
-        label: 'Process Execution',
-        description: "Every process execve() call on the host, via a dedicated auditd rule (key: microdfir_ch_exec). Requires auditd to be installed -- silently skipped, not errored, on a host that doesn't have it.",
-    },
-    identity_changes: {
-        label: 'User/Group/Sudoers File Changes',
-        description: 'Writes to /etc/passwd, /etc/group, /etc/shadow, and /etc/sudoers, via auditd watch rules (key: microdfir_identity).',
-    },
+    process_exec: { label: 'Process Execution', description: 'Every process execve() call on the host.' },
+    identity_changes: { label: 'User/Group/Sudoers File Changes', description: 'Writes to /etc/passwd, /etc/group, /etc/shadow, /etc/gshadow, /etc/sudoers, and the password-history file.' },
+    file_deletion: { label: 'Successful File Deletions', description: 'Every file/directory delete or rename by a real (non-system) user -- a classic anti-forensics/log-tampering signal.' },
+    privilege_escalation: { label: 'Privilege Escalation (setuid/setgid)', description: 'Calls to setuid/setgid/setreuid/setregid/setresuid/setresgid -- the syscalls a process uses to change its own effective user or group.' },
+    kernel_modules: { label: 'Kernel Module Load/Unload', description: 'insmod/rmmod/modprobe and the underlying init_module/finit_module/delete_module syscalls -- a common rootkit and persistence vector.' },
+    time_change: { label: 'System Time Changes', description: 'adjtimex/settimeofday/clock_settime calls and writes to /etc/localtime -- detects clock manipulation used to make log timestamps misleading.' },
+    ssh_config_changes: { label: 'SSH Configuration Changes', description: 'Writes to /etc/ssh/sshd_config and its drop-in directory.' },
+    cron_changes: { label: 'Scheduled Task (Cron) Changes', description: 'Writes to crontab/cron.d and the periodic cron directories -- a common persistence mechanism.' },
+    pam_changes: { label: 'PAM Configuration Changes', description: 'Writes to /etc/pam.d -- a classic backdoor/persistence vector (a modified PAM stack can accept an attacker-chosen password).' },
+    network_config_changes: { label: 'Network Configuration Changes', description: '/etc/hosts and /etc/resolv.conf writes (DNS hijacking) plus sethostname/setdomainname calls.' },
+    login_session_tamper: { label: 'Login Record Tampering', description: 'Write access to the login/session record files themselves (wtmp/btmp/utmp/lastlog/faillog/tallylog) -- detects an attacker wiping their own login trail.' },
 };
 
 let currentLinuxChannelGroup = '';
+let linuxCustomChannels = {};
+let editingCustomChannelId = null;
 
 function loadLinuxChannelGroupsDropdown() {
     fetch('/api/agent/groups').then(r => r.json()).then(groups => {
@@ -602,44 +648,143 @@ function onLinuxChannelGroupChange() {
     loadLinuxChannels();
 }
 
-function renderLinuxChannelRow(key, meta, setting) {
+function permsLabel(perms) {
+    const names = {r: 'read', w: 'write', x: 'execute', a: 'attr'};
+    return (perms || '').split('').map(c => names[c] || c).join('+');
+}
+
+function renderLinuxChannelRow(key, meta, setting, isCustom) {
+    const customControls = isCustom ? `
+        <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 me-1" title="Edit" onclick="editCustomLinuxChannel('${escAttr(key)}')"><i class="fa-solid fa-pen"></i></button>
+        <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete" onclick="deleteCustomLinuxChannel('${escAttr(key)}')"><i class="fa-solid fa-trash"></i></button>
+    ` : '';
     return `
         <div class="d-flex align-items-start gap-3 border-bottom border-secondary py-2 linux-channel-row" data-key="${escAttr(key)}">
             <div class="form-check form-switch mt-1">
                 <input class="form-check-input linux-chan-enabled" type="checkbox" ${setting.enabled ? 'checked' : ''}>
             </div>
-            <div>
-                <div class="text-light">${escHtml(meta.label)}</div>
+            <div class="flex-grow-1">
+                <div class="text-light">${escHtml(meta.label)} ${isCustom ? '<span class="badge bg-secondary ms-1">Custom</span>' : ''}</div>
                 <div class="text-muted small">${escHtml(meta.description)}</div>
             </div>
+            <div class="text-nowrap">${customControls}</div>
         </div>
     `;
 }
 
 function loadLinuxChannels() {
-    fetch('/api/agent/linux-channels?group=' + encodeURIComponent(currentLinuxChannelGroup))
-        .then(r => r.json())
-        .then(res => {
-            const data = res.channels || {};
-            const container = document.getElementById('linuxChannelsContainer');
-            if (!container) return;
-            container.innerHTML = Object.keys(LINUX_LOG_CHANNELS).map(key =>
-                renderLinuxChannelRow(key, LINUX_LOG_CHANNELS[key], data[key] || {enabled: false})
-            ).join('');
+    Promise.all([
+        fetch('/api/agent/linux-channels?group=' + encodeURIComponent(currentLinuxChannelGroup)).then(r => r.json()),
+        fetch('/api/agent/linux-channels/custom').then(r => r.json()),
+    ]).then(([res, custom]) => {
+        linuxCustomChannels = custom || {};
+        const data = res.channels || {};
+        const container = document.getElementById('linuxChannelsContainer');
+        if (!container) return;
+        let html = Object.keys(LINUX_LOG_CHANNELS).map(key =>
+            renderLinuxChannelRow(key, LINUX_LOG_CHANNELS[key], data[key] || {enabled: false}, false)
+        ).join('');
+        html += Object.keys(linuxCustomChannels).map(key => {
+            const c = linuxCustomChannels[key];
+            const meta = {label: c.label, description: `Watches ${c.path} for: ${permsLabel(c.perms)}.`};
+            return renderLinuxChannelRow(key, meta, data[key] || {enabled: false}, true);
+        }).join('');
+        container.innerHTML = html;
 
-            const statusEl = document.getElementById('linuxChannelGroupStatus');
-            const removeBtn = document.getElementById('removeLinuxChannelOverrideBtn');
-            if (!currentLinuxChannelGroup) {
-                if (statusEl) statusEl.innerText = 'Applies to every Linux agent whose group (if any) has no template of its own.';
-                if (removeBtn) removeBtn.style.display = 'none';
-            } else if (res.is_override) {
-                if (statusEl) statusEl.innerText = `"${currentLinuxChannelGroup}" has its own saved template, applied only to Linux agents in that group.`;
-                if (removeBtn) removeBtn.style.display = '';
+        const statusEl = document.getElementById('linuxChannelGroupStatus');
+        const removeBtn = document.getElementById('removeLinuxChannelOverrideBtn');
+        if (!currentLinuxChannelGroup) {
+            if (statusEl) statusEl.innerText = 'Applies to every Linux agent whose group (if any) has no template of its own.';
+            if (removeBtn) removeBtn.style.display = 'none';
+        } else if (res.is_override) {
+            if (statusEl) statusEl.innerText = `"${currentLinuxChannelGroup}" has its own saved template, applied only to Linux agents in that group.`;
+            if (removeBtn) removeBtn.style.display = '';
+        } else {
+            if (statusEl) statusEl.innerText = `"${currentLinuxChannelGroup}" has no template of its own yet -- showing the default below. Save to create one just for this group.`;
+            if (removeBtn) removeBtn.style.display = 'none';
+        }
+    }).catch(err => console.error('Error loading Linux channels:', err));
+}
+
+function collectCustomChanPerms() {
+    let perms = '';
+    if (document.getElementById('customChanPermR').checked) perms += 'r';
+    if (document.getElementById('customChanPermW').checked) perms += 'w';
+    if (document.getElementById('customChanPermX').checked) perms += 'x';
+    if (document.getElementById('customChanPermA').checked) perms += 'a';
+    return perms;
+}
+
+function saveCustomLinuxChannel() {
+    const label = document.getElementById('customChanLabel').value.trim();
+    const path = document.getElementById('customChanPath').value.trim();
+    const perms = collectCustomChanPerms();
+    const errBox = document.getElementById('customChanError');
+    errBox.style.display = 'none';
+    if (!label || !path) {
+        errBox.textContent = 'A label and a path are both required.';
+        errBox.style.display = 'block';
+        return;
+    }
+    const isEdit = !!editingCustomChannelId;
+    const url = isEdit ? `/api/agent/linux-channels/custom/${encodeURIComponent(editingCustomChannelId)}` : '/api/agent/linux-channels/custom';
+    fetch(url, {
+        method: isEdit ? 'PUT' : 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({label, path, perms})
+    }).then(async r => {
+        const res = await r.json();
+        if (!r.ok || res.status !== 'success') {
+            errBox.textContent = res.error || 'Failed to save custom channel.';
+            errBox.style.display = 'block';
+            return;
+        }
+        toast(isEdit ? 'Custom channel updated.' : 'Custom channel added.', 'success');
+        cancelEditCustomLinuxChannel();
+        loadLinuxChannels();
+    }).catch(err => { errBox.textContent = 'Error: ' + err; errBox.style.display = 'block'; });
+}
+
+function editCustomLinuxChannel(key) {
+    const c = linuxCustomChannels[key];
+    if (!c) return;
+    editingCustomChannelId = key;
+    document.getElementById('customChanLabel').value = c.label;
+    document.getElementById('customChanPath').value = c.path;
+    document.getElementById('customChanPermR').checked = c.perms.includes('r');
+    document.getElementById('customChanPermW').checked = c.perms.includes('w');
+    document.getElementById('customChanPermX').checked = c.perms.includes('x');
+    document.getElementById('customChanPermA').checked = c.perms.includes('a');
+    document.getElementById('customChanSubmitBtn').innerHTML = '<i class="fa-solid fa-save me-1"></i>Save';
+    document.getElementById('customChanCancelBtn').style.display = '';
+}
+
+function cancelEditCustomLinuxChannel() {
+    editingCustomChannelId = null;
+    document.getElementById('customChanLabel').value = '';
+    document.getElementById('customChanPath').value = '';
+    document.getElementById('customChanPermR').checked = false;
+    document.getElementById('customChanPermW').checked = true;
+    document.getElementById('customChanPermX').checked = false;
+    document.getElementById('customChanPermA').checked = true;
+    document.getElementById('customChanSubmitBtn').innerHTML = '<i class="fa-solid fa-plus me-1"></i>Add';
+    document.getElementById('customChanCancelBtn').style.display = 'none';
+    document.getElementById('customChanError').style.display = 'none';
+}
+
+async function deleteCustomLinuxChannel(key) {
+    const c = linuxCustomChannels[key];
+    if (!(await confirmDialog(`Delete the custom channel "${c ? c.label : key}"? This removes it (and its auditd rule) from every group that has it enabled.`, {title: 'Delete custom channel', danger: true, confirmLabel: 'Delete'}))) return;
+    fetch(`/api/agent/linux-channels/custom/${encodeURIComponent(key)}`, { method: 'DELETE' })
+        .then(r => r.json()).then(res => {
+            if (res.status === 'success') {
+                toast('Custom channel deleted.', 'success');
+                if (editingCustomChannelId === key) cancelEditCustomLinuxChannel();
+                loadLinuxChannels();
             } else {
-                if (statusEl) statusEl.innerText = `"${currentLinuxChannelGroup}" has no template of its own yet -- showing the default below. Save to create one just for this group.`;
-                if (removeBtn) removeBtn.style.display = 'none';
+                toast(res.error || 'Failed to delete custom channel.', 'danger');
             }
-        }).catch(err => console.error('Error loading Linux channels:', err));
+        }).catch(err => toast('Error deleting custom channel: ' + err, 'danger'));
 }
 
 function saveLinuxChannels() {
