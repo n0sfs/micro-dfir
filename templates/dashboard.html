@@ -2095,7 +2095,19 @@ function initSearchTab() {
     loadSavedSearches();
     loadAppFacets();
     renderLogsTableHead();
-    loadDashboardData();
+
+    // Deep link from MITRE Coverage's Validated-tier popup ("View Alert" link) -- opens
+    // straight to that exact alert instead of leaving the analyst to search for it by
+    // hand. Same ?param-read-on-init idiom as Detection Rules' ?rule_id= deep link.
+    const _params = new URLSearchParams(window.location.search);
+    const _deepLinkAlertId = _params.get('alert_id');
+    if (_deepLinkAlertId) {
+        document.getElementById('searchQuery').value = `id:${_deepLinkAlertId}`;
+        document.querySelectorAll('.type-chk').forEach(c => { c.checked = (c.value === 'alert'); });
+        updateFilters();
+    } else {
+        loadDashboardData();
+    }
 }
 
 // =====================================================================
