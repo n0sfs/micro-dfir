@@ -10,6 +10,20 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-05
 
+### Add YARA rule tagging (auto-derived + manual) to File Scan
+
+Derives real filter tags from each rule's own content, following the yarGen/Neo23x0
+community convention (reference: github.com/Neo23x0/yarGen-Go) instead of inventing a new
+taxonomy: underscore-segmented rule names (`MAL_APT_Loader_WIN_...` → Category/Intent/
+Type/OS/Arch/Tech/Modifier tags), real YARA `rule X : tag1 tag2 {` syntax, and known
+actor/malware-family names (reusing `threat_actors.ACTORS`, the same curated list Threat
+Intel entity matching already uses) found in a rule's name or description. Admins can
+also add/remove manual tags per rule (`yara_rule_tags` table). A new Tag filter in File
+Scan combines with the existing Source/Category filters. Live-verified against the real
+signature-base corpus (748 rules): 104 distinct tags derived with no code changes needed,
+including several genuine YARA `tags:` values (e.g. `cve_2021_27065`) the taxonomy/actor
+list never anticipated.
+
 ### Move Log Pipeline out of SIEM into its own top-level nav page
 
 Drop rules, DNS query logging, and Windows log channel config used to live as a SIEM
