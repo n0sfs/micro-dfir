@@ -310,25 +310,40 @@
 <div class="card shadow-sm border-secondary bg-dark text-light mb-4">
     <div class="card-body">
 
-        <!-- Bulk Actions Toolbar -->
-        <div class="d-flex gap-2 mb-3 align-items-center bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
-            <button class="btn btn-sm btn-outline-secondary" onclick="toggleAll(true)">Select All Visible</button>
-            <button class="btn btn-sm btn-outline-secondary" onclick="toggleAll(false)">Clear Selection</button>
+        <!-- Toolbar -->
+        <div class="d-flex gap-2 mb-3 align-items-center flex-wrap bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
             <input type="text" id="titleSearchBox" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width: 260px;" placeholder="Search rule names..." oninput="colFilters.q = this.value.toLowerCase(); f();">
+            <div class="dropdown">
+                <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" id="selectedActionsBtn" data-bs-toggle="dropdown" data-bs-auto-close="outside" disabled>
+                    <i class="fa-solid fa-square-check"></i> <span id="selectedActionsLabel">Select Rules</span>
+                </button>
+                <ul class="dropdown-menu dropdown-menu-dark">
+                    <li><button class="dropdown-item" onclick="bulkAction(true)"><i class="fa-solid fa-play text-success me-2"></i>Enable Selected</button></li>
+                    <li><button class="dropdown-item" onclick="bulkAction(false)"><i class="fa-solid fa-stop text-danger me-2"></i>Disable Selected</button></li>
+                    <li><button class="dropdown-item" id="validateSelectedBtn" onclick="validateSelectedRules()" title="Backtest just the checked rules against real recent logs and see what they'd actually match, before enabling them"><i class="fa-solid fa-flask text-info me-2"></i>Validate Selected</button></li>
+                    <li><hr class="dropdown-divider"></li>
+                    <li><button class="dropdown-item" onclick="toggleAll(false)"><i class="fa-solid fa-xmark me-2"></i>Clear Selection</button></li>
+                </ul>
+            </div>
             <div class="ms-auto d-flex gap-2">
-                <button class="btn btn-sm btn-outline-success" onclick="bulkAction(true)"><i class="fa-solid fa-play"></i> Enable Selected</button>
-                <button class="btn btn-sm btn-outline-danger" onclick="bulkAction(false)"><i class="fa-solid fa-stop"></i> Disable Selected</button>
-                <button class="btn btn-sm btn-outline-info" id="validateSelectedBtn" onclick="validateSelectedRules()" title="Backtest just the checked rules against real recent logs and see what they'd actually match, before enabling them"><i class="fa-solid fa-flask"></i> Validate Selected</button>
                 <button class="btn btn-sm btn-outline-warning" id="validateRulesBtn" onclick="validateAllRules()" title="Backtest every enabled rule against a 1-day log window to catch any that silently fail to convert or run"><i class="fa-solid fa-stethoscope"></i> Validate Rules</button>
-                <select id="sigmaPackSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" title="Which SigmaHQ release package to pull rules from">
-                    <option value="all" selected>All Rules</option>
-                    <option value="core">Core (high-confidence only)</option>
-                    <option value="core_plus">Core+ (adds medium-level rules)</option>
-                    <option value="core_plus_plus">Core++ (adds experimental rules)</option>
-                    <option value="et_addon">Emerging Threats Add-On</option>
-                </select>
-                <button class="btn btn-sm btn-outline-info" id="importSigmaBtn" onclick="importSigmaHQ()"><i class="fa-solid fa-cloud-arrow-down"></i> Import SigmaHQ Rules</button>
-                <button class="btn btn-sm btn-outline-info" id="browseSigmaBtn" onclick="openSigmaPickerModal()"><i class="fa-solid fa-list-check"></i> Browse &amp; Select Rules...</button>
+                <div class="dropdown">
+                    <button class="btn btn-sm btn-outline-info dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-cloud-arrow-down"></i> Import Rules</button>
+                    <ul class="dropdown-menu dropdown-menu-dark p-2" style="min-width: 270px;">
+                        <li class="px-1 pb-2">
+                            <select id="sigmaPackSelect" class="form-select form-select-sm bg-dark text-light border-secondary" title="Which SigmaHQ release package to pull rules from">
+                                <option value="all" selected>All Rules</option>
+                                <option value="core">Core (high-confidence only)</option>
+                                <option value="core_plus">Core+ (adds medium-level rules)</option>
+                                <option value="core_plus_plus">Core++ (adds experimental rules)</option>
+                                <option value="et_addon">Emerging Threats Add-On</option>
+                            </select>
+                        </li>
+                        <li><button class="dropdown-item" id="importSigmaBtn" onclick="importSigmaHQ()"><i class="fa-solid fa-cloud-arrow-down me-2"></i>Import Whole Package</button></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><button class="dropdown-item" id="browseSigmaBtn" onclick="openSigmaPickerModal()"><i class="fa-solid fa-list-check me-2"></i>Browse &amp; Select Rules...</button></li>
+                    </ul>
+                </div>
                 <button class="btn btn-sm btn-primary" onclick="openRuleModal()"><i class="fa-solid fa-plus"></i> New Rule</button>
             </div>
         </div>
@@ -338,7 +353,7 @@
             <table class="table table-dark table-hover table-sm align-middle" id="rulesTable">
                 <thead>
                     <tr>
-                        <th style="width: 32px;"></th>
+                        <th style="width: 32px;"><input type="checkbox" class="form-check-input bg-dark border-secondary" id="selectAllRulesCb" onchange="toggleAll(this.checked)" title="Select all visible"></th>
                         <th class="rule-th" data-col="source" style="width: 92px;">
                             <div class="th-inner">
                                 <span>Source</span>
@@ -2586,6 +2601,8 @@ async function ld(){
 function renderTable(rules) {
     if (!rules.length) {
         document.getElementById('rt').innerHTML = '<tr><td colspan="12" class="text-center text-muted py-4">No rules match the current filters. Clear filters above, or use "Import SigmaHQ Rules" / "New Rule" to add detection coverage.</td></tr>';
+        selectedIds.clear();
+        refreshSelectionUI();
         return;
     }
     document.getElementById('rt').innerHTML = rules.map(rl => {
@@ -2633,6 +2650,7 @@ function renderTable(rules) {
     `;
     }).join('');
     selectedIds.clear();
+    refreshSelectionUI();
     // Dropdowns default to absolute positioning, which gets clipped by this table's own
     // scroll container — same issue fixed on the Agents page. Force fixed-strategy Popper
     // positioning so the action menu always renders in full.
@@ -2676,6 +2694,23 @@ function toggleAll(state) {
 function updateSelection(cb) {
     if (cb.checked) selectedIds.add(cb.value);
     else selectedIds.delete(cb.value);
+    refreshSelectionUI();
+}
+
+// Keeps the "N Selected" dropdown toggle and the header select-all checkbox in sync
+// with selectedIds -- called on every checkbox change and after renderTable() resets
+// selection on a re-render/filter change.
+function refreshSelectionUI() {
+    const n = selectedIds.size;
+    const btn = document.getElementById('selectedActionsBtn');
+    const label = document.getElementById('selectedActionsLabel');
+    if (label) label.textContent = n === 0 ? 'Select Rules' : `${n} Selected`;
+    if (btn) btn.disabled = n === 0;
+    const headerCb = document.getElementById('selectAllRulesCb');
+    if (headerCb) {
+        const visible = document.querySelectorAll('.rule-cb').length;
+        headerCb.checked = visible > 0 && n === visible;
+    }
 }
 
 async function toggleSingle(id, state) {
