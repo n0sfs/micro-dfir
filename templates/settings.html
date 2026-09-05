@@ -321,6 +321,25 @@
             </div>
             <button class="btn btn-outline-primary btn-sm" onclick="saveArchivePolicy()"><i class="fa-solid fa-save me-1"></i> Save Archive Policy</button>
             <div class="small text-muted mt-2" id="archiveStatus"></div>
+
+            <hr class="border-secondary my-4">
+
+            <!-- Database Backups -->
+            <h6 class="text-info mb-3">Database Backups</h6>
+            <p class="text-muted small mb-3">Nightly consistent snapshots of the full database (SQLite's own safe-copy mechanism, not a plain file copy, so it can run against a live, actively-written database without risk of a torn/corrupted copy). Restoring from a backup needs SSH access to the server and stops services briefly to swap the database file -- see <code>restore_db.sh</code> in the repo root for the documented procedure; it isn't offered as a button here for that reason.</p>
+            <div class="row g-2 align-items-end mb-3">
+                <div class="col-auto">
+                    <label class="form-label small text-muted mb-1">Keep backups for (days)</label>
+                    <input type="number" min="1" id="dbBackupRetentionDays" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;">
+                </div>
+                <div class="col-auto">
+                    <button class="btn btn-outline-primary btn-sm" onclick="saveDbBackupRetention()"><i class="fa-solid fa-save me-1"></i> Save</button>
+                </div>
+                <div class="col-auto">
+                    <button class="btn btn-outline-secondary btn-sm" onclick="runDbBackupNow()" id="dbBackupNowBtn" title="Can take a minute or more depending on database size"><i class="fa-solid fa-database me-1"></i> Backup Now</button>
+                </div>
+            </div>
+            <div class="small text-muted" id="dbBackupStatus"></div>
         </div>
     </div>
     {% endif %}
@@ -588,6 +607,7 @@ document.addEventListener("DOMContentLoaded", function() {
     loadCaseStaleConfig();
     loadLogSourceSilentConfig();
     loadArchiveSettings();
+    loadDbBackupSettings();
     loadReportBranding();
     loadReportSchedule();
     setInterval(loadMetrics, 5000);
@@ -1325,6 +1345,62 @@ function saveArchivePolicy() {
             toast(res.error || 'Failed to save archive policy.', 'danger');
         }
     }).catch(err => toast('Error saving archive policy: ' + err, 'danger'));
+}
+
+// ---- Database Backups ----
+function loadDbBackupSettings() {
+    fetch('/api/settings/db-backup')
+        .then(r => r.json())
+        .then(data => {
+            document.getElementById('dbBackupRetentionDays').value = data.retention_days || 7;
+            renderDbBackupStatus(data);
+        })
+        .catch(e => console.error('Database backup settings load issue:', e));
+}
+
+function renderDbBackupStatus(data) {
+    const el = document.getElementById('dbBackupStatus');
+    const last = data.last_run ? `Last backup: ${data.last_run}` : 'No backup has run yet (runs nightly at 2 AM).';
+    const size = data.last_size_bytes ? ` (${(data.last_size_bytes / 1024 / 1024).toFixed(1)} MB)` : '';
+    el.innerText = `${last}${size}. ${data.backup_count || 0} backup(s) currently retained.`;
+}
+
+function runDbBackupNow() {
+    const btn = document.getElementById('dbBackupNowBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i> Backing up...';
+    fetch('/api/settings/db-backup/run', { method: 'POST' })
+        .then(r => r.json().then(d => ({ ok: r.ok, d })))
+        .then(({ ok, d }) => {
+            if (ok) {
+                toast(`Backup complete: ${d.filename} (${(d.size_bytes / 1024 / 1024).toFixed(1)} MB, ${d.duration_seconds}s).`, 'success', {duration: 6000});
+                loadDbBackupSettings();
+            } else {
+                toast(d.error || 'Backup failed.', 'danger');
+            }
+        })
+        .catch(err => toast('Error running backup: ' + err, 'danger'))
+        .finally(() => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fa-solid fa-database me-1"></i> Backup Now';
+        });
+}
+
+function saveDbBackupRetention() {
+    const days = parseInt(document.getElementById('dbBackupRetentionDays').value, 10);
+    if (!days || days < 1) { toast('Enter a valid number of days.', 'warning'); return; }
+    fetch('/api/settings/db-backup', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({retention_days: days})
+    }).then(r => r.json()).then(res => {
+        if (res.status === 'success') {
+            toast('Backup retention saved.', 'success');
+            loadDbBackupSettings();
+        } else {
+            toast(res.error || 'Failed to save backup retention.', 'danger');
+        }
+    }).catch(err => toast('Error saving backup retention: ' + err, 'danger'));
 }
 
 // ---- Audit Log ----

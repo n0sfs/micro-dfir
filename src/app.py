@@ -12307,6 +12307,59 @@ def api_settings_archive_run():
     log_audit('manual_log_archive', 'settings', None, f"archived={result['archived']}, cutoff={result['cutoff']}")
     return jsonify({'status': 'success', **result})
 
+DEFAULT_DB_BACKUP_RETENTION_DAYS = 7
+
+@app.route('/api/settings/db-backup', methods=['GET', 'POST'])
+@login_required
+def api_settings_db_backup():
+    from flask import request, jsonify
+    db = get_db()
+
+    import backup_db
+    if request.method == 'GET':
+        days_row = db.execute("SELECT value FROM settings WHERE key = 'db_backup_retention_days'").fetchone()
+        last_row = db.execute("SELECT value FROM settings WHERE key = 'db_backup_last_run'").fetchone()
+        size_row = db.execute("SELECT value FROM settings WHERE key = 'db_backup_last_size_bytes'").fetchone()
+        days = int(days_row['value']) if days_row and days_row['value'] else DEFAULT_DB_BACKUP_RETENTION_DAYS
+        backup_count = 0
+        try:
+            backup_count = len([f for f in os.listdir(backup_db.BACKUP_DIR) if f.startswith('siem_') and f.endswith('.db.gz')])
+        except OSError:
+            pass  # backup directory doesn't exist yet -- no backups have run
+        return jsonify({
+            'retention_days': days,
+            'last_run': last_row['value'] if last_row and last_row['value'] else None,
+            'last_size_bytes': int(size_row['value']) if size_row and size_row['value'] else None,
+            'backup_count': backup_count,
+        })
+
+    err = require_permission('settings.system.manage')
+    if err: return err
+    d = request.json or {}
+    try:
+        days = int(d.get('retention_days'))
+        if days < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({'error': 'retention_days must be a positive integer'}), 400
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('db_backup_retention_days', ?)", (str(days),))
+    db.commit()
+    log_audit('db_backup_retention_change', 'settings', None, f'{days} days')
+    return jsonify({'status': 'success', 'retention_days': days})
+
+@app.route('/api/settings/db-backup/run', methods=['POST'])
+@login_required
+def api_settings_db_backup_run():
+    err = require_permission('settings.system.manage')
+    if err: return err
+    import backup_db
+    try:
+        result = backup_db.run_backup()
+    except Exception as e:
+        return jsonify({'error': f'Backup failed: {e}'}), 500
+    log_audit('manual_db_backup', 'settings', None, f"file={result['filename']}, size_bytes={result['size_bytes']}")
+    return jsonify({'status': 'success', **result})
+
 @app.route('/api/settings/ioc-retention', methods=['GET', 'POST'])
 @login_required
 def api_settings_ioc_retention():

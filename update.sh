@@ -34,6 +34,9 @@ if [ ! -f "$SOC_DIR/data/geoip/dbip-country-lite.mmdb" ]; then
     venv/bin/python src/geoip_update.py
 fi
 
+echo "[*] Ensuring the database backup cron job is scheduled..."
+(crontab -l 2>/dev/null | grep -v "backup_db.py"; echo "0 2 * * * $SOC_DIR/venv/bin/python3 $SOC_DIR/src/backup_db.py >> /var/log/microdfir-backup.log 2>&1") | crontab -
+
 echo "[*] Ensuring the log archiving cron job is scheduled..."
 (crontab -l 2>/dev/null | grep -v "archive_logs.py"; echo "0 4 * * * $SOC_DIR/venv/bin/python3 $SOC_DIR/src/archive_logs.py >> /var/log/microdfir-archive.log 2>&1") | crontab -
 
