@@ -18,13 +18,15 @@ results) but that was scoped to IP-only (Shodan InternetDB, AbuseIPDB) and reach
 only from a standalone "Quick IOC Lookup" tool on the Threat Intel page — an analyst
 investigating a hash/domain/URL already sitting in a case's Indicators list had no way
 to check it externally without re-typing the value elsewhere. Added two more analyzers
-(VirusTotal, keyed, covering ip/hash/domain/url; URLhaus, free/keyless, covering
-domain/url), generalized `applicable_analyzers()`'s dispatch and the
-`/api/settings/enrichment` key-storage route (previously hardcoded to one key) to
-support more than one keyed analyzer, and added a "Check External Sources" button
-directly on each case Indicator row (next to the existing local Threat-Intel-set check)
-that calls the same `/api/ti/enrich` endpoint the Quick Lookup tool already uses — no
-new backend mechanism, just wider analyzer coverage and a second UI call site.
+(VirusTotal, keyed, covering ip/hash/domain/url; URLhaus, covering domain/url —
+live-caught during testing that abuse.ch now requires a free Auth-Key for every
+URLhaus call, not the fully keyless access its docs implied when this was scoped),
+generalized `applicable_analyzers()`'s dispatch and the `/api/settings/enrichment`
+key-storage route (previously hardcoded to one key) to support more than one keyed
+analyzer, and added a "Check External Sources" button directly on each case Indicator
+row (next to the existing local Threat-Intel-set check) that calls the same
+`/api/ti/enrich` endpoint the Quick Lookup tool already uses — no new backend
+mechanism, just wider analyzer coverage and a second UI call site.
 
 ### Add 12 custom Sigma rules for the new Linux Log Channels
 

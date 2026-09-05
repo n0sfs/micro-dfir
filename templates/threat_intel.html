@@ -2248,7 +2248,7 @@ async function runIocEnrich() {
 // Only 'abuseipdb' requires a key today (see analyzers.py's ANALYZERS) -- mapping its
 // analyzer key to the settings blob's key name here rather than changing
 // /api/settings/enrichment's shape for a single caller.
-const ANALYZER_SETTINGS_KEY = { abuseipdb: 'abuseipdb_api_key', virustotal: 'virustotal_api_key' };
+const ANALYZER_SETTINGS_KEY = { abuseipdb: 'abuseipdb_api_key', virustotal: 'virustotal_api_key', urlhaus: 'urlhaus_api_key' };
 
 async function saveAnalyzerKey(analyzerKey) {
     const input = document.getElementById(`analyzerKeyInput_${analyzerKey}`);
