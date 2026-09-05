@@ -1020,6 +1020,12 @@ def api_ti_analyzers():
         'configured': (not a['requires_key']) or bool(api_keys.get(a['settings_key'])),
     } for a in ANALYZERS])
 
+# Every requires_key=True analyzer's settings_key (see analyzers.py's ANALYZERS) must be
+# listed here -- this is the sole allowlist gating what api_enrichment_settings() will
+# read/write in the enrichment_api_keys settings blob, so adding a new keyed analyzer
+# means adding its settings_key here too.
+ENRICHMENT_SETTINGS_KEYS = ('abuseipdb_api_key', 'virustotal_api_key')
+
 @app.route('/api/settings/enrichment', methods=['GET', 'POST'])
 @login_required
 def api_enrichment_settings():
@@ -1029,16 +1035,21 @@ def api_enrichment_settings():
     if request.method == 'GET':
         # Never echo a real key back to the browser -- same masked-placeholder pattern
         # as the alert-notifications SMTP password.
-        return jsonify({'abuseipdb_api_key': _ENRICHMENT_KEY_PLACEHOLDER if keys.get('abuseipdb_api_key') else ''})
+        return jsonify({k: _ENRICHMENT_KEY_PLACEHOLDER if keys.get(k) else '' for k in ENRICHMENT_SETTINGS_KEYS})
     err = require_permission('threatintel.manage')
     if err: return err
     d = request.json or {}
-    new_key = d.get('abuseipdb_api_key')
-    if new_key is not None and new_key != _ENRICHMENT_KEY_PLACEHOLDER:
-        keys['abuseipdb_api_key'] = new_key
+    changed = []
+    for k in ENRICHMENT_SETTINGS_KEYS:
+        new_key = d.get(k)
+        if new_key is not None and new_key != _ENRICHMENT_KEY_PLACEHOLDER:
+            keys[k] = new_key
+            changed.append(k)
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('enrichment_api_keys', ?)", (json.dumps(keys),))
     db.commit()
-    log_audit('enrichment_settings_change', 'settings', None, 'abuseipdb_api_key ' + ('set' if keys.get('abuseipdb_api_key') else 'cleared'))
+    if changed:
+        log_audit('enrichment_settings_change', 'settings', None,
+                   ', '.join(f"{k} {'set' if keys.get(k) else 'cleared'}" for k in changed))
     return jsonify({'status': 'success'})
 
 @app.route('/api/ti/enrich', methods=['POST'])
@@ -1075,7 +1086,7 @@ def api_ti_enrich():
                              'cached': True, 'fetched_at': cached['fetched_at']})
             continue
         api_key = api_keys.get(a['settings_key']) if a.get('requires_key') else None
-        out = a['run'](value, api_key)
+        out = a['run'](value, api_key, ioc_type)
         db.execute(
             "INSERT INTO enrichment_results (value, source, verdict, summary, raw_json, fetched_at) VALUES (?, ?, ?, ?, ?, datetime('now')) "
             "ON CONFLICT(value, source) DO UPDATE SET verdict=excluded.verdict, summary=excluded.summary, raw_json=excluded.raw_json, fetched_at=excluded.fetched_at",
