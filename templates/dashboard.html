@@ -2104,6 +2104,10 @@ function initSearchTab() {
     if (_deepLinkAlertId) {
         document.getElementById('searchQuery').value = `item_id:${_deepLinkAlertId}`;
         document.querySelectorAll('.type-chk').forEach(c => { c.checked = (c.value === 'alert'); });
+        // The default 5-minute window would hide any alert not fired in the last few
+        // minutes -- widen to "All" so the deep-linked alert is never invisible just
+        // because it's not brand new. updateFilters() -> loadDashboardData() runs after.
+        selectTimePreset('all');
         updateFilters();
     } else {
         loadDashboardData();
