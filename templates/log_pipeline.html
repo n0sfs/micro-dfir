@@ -230,7 +230,9 @@
                         <div id="sysmonConfigError" class="text-danger small mt-2" style="display:none;"></div>
                         <div class="mt-2 d-flex gap-2 align-items-center">
                             <button type="button" class="btn btn-primary btn-sm" onclick="saveSysmonConfig()"><i class="fa-solid fa-floppy-disk me-1"></i>Save Config</button>
-                            <button type="button" class="btn btn-outline-danger btn-sm" id="resetSysmonConfigBtn" style="display:none;" onclick="resetSysmonConfig()"><i class="fa-solid fa-rotate-left me-1"></i>Revert to Default</button>
+                            <button type="button" class="btn btn-outline-secondary btn-sm" onclick="document.getElementById('sysmonConfigFileInput').click()"><i class="fa-solid fa-file-import me-1"></i>Import Config...</button>
+                            <input type="file" id="sysmonConfigFileInput" accept=".xml" style="display:none;" onchange="importSysmonConfigFile(event)">
+                            <button type="button" class="btn btn-outline-danger btn-sm" id="resetSysmonConfigBtn" onclick="resetSysmonConfig()"><i class="fa-solid fa-rotate-left me-1"></i>Revert to Default</button>
                             <span id="sysmonConfigSaveMsg" class="text-success small fw-bold" style="display:none;"><i class="fa-solid fa-circle-check me-1"></i>Saved. Already-installed agents pick this up on their next poll.</span>
                         </div>
                     </div>
@@ -647,8 +649,26 @@ function loadSysmonConfig() {
         document.getElementById('sysmonConfigStatus').innerText = res.is_custom
             ? 'Using a saved custom override.'
             : 'Using the repo-shipped default (no custom override saved yet).';
-        document.getElementById('resetSysmonConfigBtn').style.display = res.is_custom ? '' : 'none';
     }).catch(err => console.error('Error loading Sysmon config:', err));
+}
+
+// Loads a .xml file straight into the textarea for review/editing -- client-side only,
+// nothing is saved until "Save Config" is clicked. Lets an admin start from a downloaded
+// community config (e.g. SwiftOnSecurity's or Olaf Hartong's) instead of hand-typing one.
+function importSysmonConfigFile(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        document.getElementById('sysmonConfigXml').value = e.target.result;
+        document.getElementById('sysmonConfigError').style.display = 'none';
+        toast(`Imported ${file.name} -- review and click "Save Config" to apply it.`, 'info');
+    };
+    reader.onerror = function() {
+        toast('Could not read the selected file.', 'danger');
+    };
+    reader.readAsText(file);
+    event.target.value = '';
 }
 
 function saveSysmonConfig() {
