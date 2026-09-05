@@ -10,6 +10,26 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-05
 
+### MITRE Coverage: enabled-first rule sort, collapsible disabled rules, alert links
+
+Technique drilldown modal now lists enabled rules first, collapsing disabled ones into
+a `<details>` section — a technique with dozens of rules no longer buries the handful
+that can actually fire under a long scroll of disabled ones. Fixed a real, previously-
+silent bug found in the same pass: the 25-rule-per-technique cap was applied in
+insertion order during accumulation, so a technique with many disabled rules could
+crowd an enabled rule out of the kept set before any sorting ever happened. The cap now
+applies after sorting.
+
+The Validated tier popup (click the "Validated" chip on the MITRE tab) now shows last
+seen + a "View Alert" link per technique, deep-linking into Log Search scoped to that
+exact alert. Required a new `item_id:` exact-match field-scoped query (Log Search's
+existing `field:value` syntax only ever did substring `LIKE`, which would have made
+`item_id:5` also match 15/25/51). Two real bugs caught live during verification and
+fixed same-session: the unified log/alert/anomaly view's id column is actually named
+`item_id`, not `id` (first attempt hit a real `no such column` SQL error), and the
+deep link's query was silently ignored the first time because Advanced Query mode can
+be toggled off by a saved preference — fixed by forcing it on for this one code path.
+
 ### Move 4 settings blocks out of Settings into their own contextual pages
 
 Agent Offline Alert → EDR Agents page (fleet-health config, not a general system
