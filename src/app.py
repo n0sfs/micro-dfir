@@ -3630,6 +3630,32 @@ def _get_validated_technique_counts(db, days):
                 counts[tid] = counts.get(tid, 0) + 1
     return counts
 
+def _get_validated_technique_details(db, days):
+    """technique_id -> {'alert_id', 'last_seen'} for the MOST RECENT alert (by
+    COALESCE(last_seen, timestamp), matching how a recurring/deduped alert's
+    freshness is judged everywhere else in this app) in the window whose
+    triggering rule was tagged for that technique. Companion to
+    _get_validated_technique_counts (same source column/window, just also
+    keeping which alert to link to) -- used by the Coverage page's Validated-
+    tier popup so an analyst can jump straight to real evidence instead of
+    just seeing a count."""
+    details = {}
+    rows = db.execute(
+        "SELECT id, mitre_techniques, COALESCE(last_seen, timestamp) as effective_seen "
+        "FROM alerts WHERE timestamp >= datetime('now', ?) "
+        "AND mitre_techniques IS NOT NULL AND mitre_techniques != '' "
+        "ORDER BY effective_seen ASC",
+        (f'-{days} days',)
+    ).fetchall()
+    for r in rows:
+        for tid in (r['mitre_techniques'] or '').split(','):
+            tid = tid.strip()
+            if tid:
+                # Rows are ordered oldest-first, so the last write per tid naturally
+                # ends up being the most recent -- no per-tid comparison needed.
+                details[tid] = {'alert_id': r['id'], 'last_seen': r['effective_seen']}
+    return details
+
 def _get_validated_compliance_counts(db, days):
     """framework_key -> count of alerts in the last `days` whose triggering rule is
     CURRENTLY tagged for that framework. Unlike _get_validated_technique_counts, there's
@@ -3822,7 +3848,18 @@ def _build_actor_technique_index(db):
             index.setdefault(tid, []).append({'id': e['id'], 'name': e['name']})
     return index
 
-def _build_mitre_coverage(rules, validated, actor_techniques):
+def _sorted_capped_tech_rules(rule_list, cap=25):
+    """Enabled rules sort before disabled ones (a technique's enabled rules are what
+    can actually fire/alert -- the drilldown modal wants those visible first, not
+    crowded out by whichever rules happened to be inserted first). Capped AFTER
+    sorting, not during accumulation, so a technique with many disabled rules can't
+    push an enabled one out of the kept set before this sort ever runs."""
+    ordered = sorted(rule_list, key=lambda r: not r['enabled'])
+    if len(ordered) > cap:
+        return ordered[:cap] + [{'more': True}]
+    return ordered
+
+def _build_mitre_coverage(rules, validated, actor_techniques, validated_details=None):
     """Aggregates MITRE technique coverage across all rules (each a dict with
     'id', 'title', 'enabled', 'level', 'status' and 'mitre_techniques',
     matching _get_rules_cache()'s shape), grouped by tactic, into 4 tiers per
@@ -3871,11 +3908,7 @@ def _build_mitre_coverage(rules, validated, actor_techniques):
                     enabled_log_source_ok[key] = True
             else:
                 disabled_counts[key] = disabled_counts.get(key, 0) + 1
-            bucket = rules_by_tech.setdefault(tech['id'], [])
-            if len(bucket) < 25:
-                bucket.append(rule_ref)
-            elif len(bucket) == 25:
-                bucket.append({'more': True})
+            rules_by_tech.setdefault(tech['id'], []).append(rule_ref)
 
     seen_ids = set()
     tactics_out = []
@@ -3905,12 +3938,15 @@ def _build_mitre_coverage(rules, validated, actor_techniques):
             # own way, and 'validated' means a real alert already proved the log source
             # works regardless of what this static mapping says.
             log_source_gap = tier == 'active' and not enabled_log_source_ok.get((tactic, tid), False)
+            detail = validated_details.get(tid) if validated_details and validated_n > 0 else None
             techs.append({
                 'id': tid, 'name': name, 'count': enabled_n,
                 'disabled_count': disabled_n, 'validated_count': validated_n,
-                'tier': tier, 'rules': rules_by_tech.get(tid, []),
+                'tier': tier, 'rules': _sorted_capped_tech_rules(rules_by_tech.get(tid, [])),
                 'threat_actors': actor_techniques.get(tid, []) if tier == 'gap' else [],
                 'log_source_gap': log_source_gap,
+                'last_seen': detail['last_seen'] if detail else None,
+                'last_alert_id': detail['alert_id'] if detail else None,
             })
         techs.sort(key=lambda x: (-x['count'], x['id']))
         tactics_out.append({
@@ -3973,8 +4009,9 @@ def api_mitre_coverage():
     days = _dashboard_window_days(request)
     rules = _get_rules_cache(db)
     validated = _get_validated_technique_counts(db, days)
+    validated_details = _get_validated_technique_details(db, days)
     actor_techniques = _build_actor_technique_index(db)
-    result = _build_mitre_coverage(rules, validated, actor_techniques)
+    result = _build_mitre_coverage(rules, validated, actor_techniques, validated_details)
     result['log_sources'] = _log_source_gap_summary(db)
     return jsonify(result)
 
@@ -12808,6 +12845,7 @@ def _parse_datetime_local(s):
 # added to the picklist that silently fell back to searching `message` server-side with
 # no indication anything was wrong -- this list is what closes that gap.
 LOG_SEARCH_ALLOWED_FIELDS = [
+    {'key': 'id', 'label': 'ID'},
     {'key': 'username', 'label': 'User'},
     {'key': 'host', 'label': 'Host'},
     {'key': 'event_id', 'label': 'Event ID'},
@@ -12949,7 +12987,21 @@ def _parse_search_query(q):
 
         like_value = _wildcard_term_to_like(value).lower()
 
-        if field:
+        if field == 'id':
+            # Exact match, not the generic substring LIKE every other field uses below --
+            # id:5 matching 5/15/25/51 via substring LIKE would make this deep-link
+            # mechanism (MITRE Coverage's Validated popup, ?alert_id= on Log Search)
+            # silently wrong. Combined with a type filter (id-space isn't unique across
+            # the logs/alerts/anomalies union) by whoever builds the link. A non-numeric
+            # id: value can never match a real row -- resolved to an always-false clause
+            # rather than raising, so a malformed query just returns zero results.
+            try:
+                sql = "id = ?"
+                term_params = [int(value)]
+            except ValueError:
+                sql = "1 = 0"
+                term_params = []
+        elif field:
             sql = f"LOWER({field}) LIKE ? ESCAPE '\\'"
             term_params = [like_value]
         else:

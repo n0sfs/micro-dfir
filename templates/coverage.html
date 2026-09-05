@@ -46,6 +46,8 @@
     .cov-tier-pop-id{font-family:var(--font-mono); font-size:.68rem; color:var(--text-muted); flex-shrink:0; min-width:64px;}
     .cov-tier-pop-name{color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
     .cov-tier-pop-tactic{color:var(--text-muted); font-size:.68rem; margin-left:auto; flex-shrink:0; padding-left:6px;}
+    .cov-tier-pop-sub{font-size:.68rem; color:var(--text-muted); padding:0 4px 4px 72px;}
+    .cov-tier-pop-sub a{color:var(--accent);}
     .cov-logsrc-apps{display:flex; flex-wrap:wrap; gap:4px; margin-bottom:4px;}
     .cov-logsrc-app-chip{background:var(--bg-card-alt); border:1px solid var(--border); border-radius:4px; padding:2px 7px; font-size:.7rem; color:var(--text-secondary);}
     .cov-logsrc-gap-item{display:flex; justify-content:space-between; align-items:baseline; gap:8px; font-size:.76rem; padding:4px; border-radius:4px;}
@@ -421,15 +423,15 @@ function renderCoverageHero() {
     }
 }
 
-// Flat list of {id, name, tactic} for every technique currently in the given tier,
-// across all tactics -- built client-side from the same coverageData the grid below
-// already renders from, so the two never disagree.
+// Flat list of {id, name, tactic, last_seen, last_alert_id} for every technique
+// currently in the given tier, across all tactics -- built client-side from the same
+// coverageData the grid below already renders from, so the two never disagree.
 function coverageTechniquesByTier(tierKey) {
     const out = [];
     if (!coverageData) return out;
     coverageData.tactics.forEach(t => {
         t.techniques.forEach(tech => {
-            if (tech.tier === tierKey) out.push({ id: tech.id, name: tech.name, tactic: t.label });
+            if (tech.tier === tierKey) out.push({ id: tech.id, name: tech.name, tactic: t.label, last_seen: tech.last_seen, last_alert_id: tech.last_alert_id });
         });
     });
     return out;
@@ -475,11 +477,20 @@ function toggleCovTierPopover(tierKey, chipEl) {
     } else {
         const tierMeta = COVERAGE_TIERS.find(t => t.key === tierKey);
         const techs = coverageTechniquesByTier(tierKey).sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+        // Validated is the one tier backed by a real, specific alert -- surface last
+        // seen + a direct link to it (Log Search, scoped to that exact alert id) so an
+        // analyst can jump straight to the evidence instead of just seeing a count.
+        const techItem = t => {
+            const topRow = `<span class="cov-tier-pop-id">${escHtml(t.id)}</span><span class="cov-tier-pop-name">${escHtml(t.name || '')}</span><span class="cov-tier-pop-tactic">${escHtml(t.tactic || '')}</span>`;
+            const subRow = (tierKey === 'validated' && t.last_seen)
+                ? `<div class="cov-tier-pop-sub">Last seen ${escHtml(t.last_seen)}${t.last_alert_id ? ` &middot; <a href="/siem?tab=search&alert_id=${encodeURIComponent(t.last_alert_id)}" target="_blank">View Alert</a>` : ''}</div>`
+                : '';
+            return `<div class="cov-tier-pop-item">${topRow}</div>${subRow}`;
+        };
         pop.innerHTML = `
             <div class="cov-tier-pop-header"><span class="dot ${tierMeta.dot}"></span>${escHtml(tierMeta.label)} &mdash; ${techs.length} technique${techs.length === 1 ? '' : 's'}</div>
             <div class="cov-tier-pop-list">
-                ${techs.length ? techs.map(t => `<div class="cov-tier-pop-item"><span class="cov-tier-pop-id">${escHtml(t.id)}</span><span class="cov-tier-pop-name">${escHtml(t.name || '')}</span><span class="cov-tier-pop-tactic">${escHtml(t.tactic || '')}</span></div>`).join('')
-                            : '<div class="text-muted small">None right now.</div>'}
+                ${techs.length ? techs.map(techItem).join('') : '<div class="text-muted small">None right now.</div>'}
             </div>`;
     }
     const hero = document.getElementById('coverageHero');
@@ -647,21 +658,43 @@ function openCoverageDrilldown(tactic, techId) {
     if (!tech.rules.length) {
         html += '<div class="text-muted small">No rules are mapped to this technique.</div>';
     } else {
-        html += '<div class="table-responsive"><table class="table table-dark table-hover table-sm align-middle"><thead><tr><th>Rule</th><th>Level</th><th>Status</th></tr></thead><tbody>';
-        tech.rules.forEach(r => {
-            if (r.more) {
-                html += `<tr><td colspan="3" class="text-muted small">+ more rules not shown</td></tr>`;
-                return;
-            }
+        const moreEntry = tech.rules.find(r => r.more);
+        const realRules = tech.rules.filter(r => !r.more);
+        // Already sorted enabled-first server-side (_sorted_capped_tech_rules) -- split
+        // on that same boundary so enabled rules (the ones that can actually alert) are
+        // always visible immediately, and disabled ones collapse out of the way instead
+        // of pushing them down a long list.
+        const enabledRules = realRules.filter(r => r.enabled);
+        const disabledRules = realRules.filter(r => !r.enabled);
+
+        const ruleRow = r => {
             const noLogSource = r.log_source_ingestible === false
                 ? ' <i class="fa-solid fa-plug-circle-xmark text-warning" title="Its expected log source does not appear to be ingested here"></i>' : '';
-            html += `<tr>
+            return `<tr>
                 <td><a href="/rules?rule_id=${r.id}" target="_blank">${escHtml(r.title)}</a> ${r.enabled ? '' : '<span class="badge bg-secondary ms-1">disabled</span>'}${noLogSource}</td>
                 <td><span class="badge ${LEVEL_BADGE[r.level] || 'bg-secondary'}">${escHtml(r.level || 'medium')}</span></td>
                 <td><span class="badge ${STATUS_BADGE[r.status] || 'bg-secondary'}">${escHtml(r.status || 'unknown')}</span></td>
             </tr>`;
-        });
-        html += '</tbody></table></div>';
+        };
+
+        if (enabledRules.length) {
+            html += '<div class="table-responsive"><table class="table table-dark table-hover table-sm align-middle mb-2"><thead><tr><th>Rule</th><th>Level</th><th>Status</th></tr></thead><tbody>';
+            html += enabledRules.map(ruleRow).join('');
+            html += '</tbody></table></div>';
+        } else {
+            html += '<div class="text-muted small mb-2">No enabled rules are mapped to this technique.</div>';
+        }
+
+        if (disabledRules.length) {
+            html += `<details class="mb-2"><summary class="text-muted small" style="cursor:pointer;">${disabledRules.length} disabled rule${disabledRules.length === 1 ? '' : 's'} &mdash; click to expand</summary>`;
+            html += '<div class="table-responsive mt-2"><table class="table table-dark table-hover table-sm align-middle"><thead><tr><th>Rule</th><th>Level</th><th>Status</th></tr></thead><tbody>';
+            html += disabledRules.map(ruleRow).join('');
+            html += '</tbody></table></div></details>';
+        }
+
+        if (moreEntry) {
+            html += '<div class="text-muted small">+ more rules not shown</div>';
+        }
     }
 
     document.getElementById('coverageDrilldownBody').innerHTML = html;
