@@ -38,6 +38,7 @@
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'droprules' else '' }}" id="tabBtnDroprules" onclick="switchLogPipelineTab('droprules')"><i class="fa-solid fa-filter me-1"></i>Drop Rules</button></li>
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'dns' else '' }}" id="tabBtnDns" onclick="switchLogPipelineTab('dns')"><i class="fa-solid fa-globe me-1"></i>DNS Query Logging</button></li>
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'channels' else '' }}" id="tabBtnChannels" onclick="switchLogPipelineTab('channels')"><i class="fa-solid fa-sliders me-1"></i>Windows Log Channels</button></li>
+    <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'linuxchannels' else '' }}" id="tabBtnLinuxchannels" onclick="switchLogPipelineTab('linuxchannels')"><i class="fa-brands fa-linux me-1"></i>Linux Log Channels</button></li>
 </ul>
 
 <!-- ============================= DROP RULES PANE ============================= -->
@@ -217,6 +218,41 @@
 </div>
 <!-- =========================== END CHANNELS PANE =========================== -->
 
+<!-- ============================= LINUX CHANNELS PANE ============================= -->
+<div id="paneLinuxchannels" style="display: {{ 'block' if active_tab == 'linuxchannels' else 'none' }};">
+<div class="row g-4 mb-4">
+    <div class="col-lg-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-body">
+                <h5 class="card-title text-light mb-3"><i class="fa-brands fa-linux me-2"></i>Linux Log Channels</h5>
+                <p class="text-muted small mb-3">System journal (syslog, auth, kernel, every systemd unit) is always collected in full -- journald has no equivalent of a Windows "channel" to selectively filter. The real gap on Linux is process-execution and sensitive-file-change visibility, which the kernel doesn't surface at all without auditd rules loaded. Enabling a channel below both installs the required auditd rule on the endpoint (the "push" half) and starts pulling its specific audit log entries (the "pull" half) -- toggling it off removes the rule again. Requires auditd to be installed on the endpoint; hosts without it are silently skipped, not errored.</p>
+
+                <div class="row g-2 align-items-end mb-3">
+                    <div class="col-auto">
+                        <label class="form-label small text-muted mb-1">Template for</label>
+                        <select id="linuxChannelGroupSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="min-width:220px;" onchange="onLinuxChannelGroupChange()">
+                            <option value="">Default (fleet-wide)</option>
+                        </select>
+                    </div>
+                    <div class="col-auto">
+                        <button type="button" class="btn btn-outline-danger btn-sm" id="removeLinuxChannelOverrideBtn" style="display:none;" onclick="removeLinuxChannelOverride()"><i class="fa-solid fa-rotate-left me-1"></i>Remove Override (use Default)</button>
+                    </div>
+                </div>
+                <div id="linuxChannelGroupStatus" class="small text-muted mb-3"></div>
+
+                <div id="linuxChannelsContainer"></div>
+
+                <button type="button" class="btn btn-primary btn-sm mt-2" onclick="saveLinuxChannels()">
+                    <i class="fa-solid fa-floppy-disk me-1"></i> Save & Push Channel Template
+                </button>
+                <span id="linuxChannelSaveSuccessMsg" class="text-success small ms-2 fw-bold" style="display: none;"><i class="fa-solid fa-circle-check me-1"></i>Saved and push completed.</span>
+            </div>
+        </div>
+    </div>
+</div>
+</div>
+<!-- =========================== END LINUX CHANNELS PANE =========================== -->
+
 <script>
 function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -247,7 +283,7 @@ function updateSharedStats() {
 // both Drop Rules and Channels regardless of which pane is visible, and all
 // 3 underlying calls are cheap, so there's no lazy-load benefit worth the
 // "which tiles are stale" bookkeeping it would add.
-const LOG_PIPELINE_TABS = ['droprules', 'dns', 'channels'];
+const LOG_PIPELINE_TABS = ['droprules', 'dns', 'channels', 'linuxchannels'];
 function logPipelineTabCap(t) { return t.charAt(0).toUpperCase() + t.slice(1); }
 function switchLogPipelineTab(tab) {
     if (!LOG_PIPELINE_TABS.includes(tab)) return;
@@ -533,6 +569,117 @@ async function removeChannelOverride() {
         }).catch(err => toast('Error removing override: ' + err, 'danger'));
 }
 
+// ---- Linux Log Channels (auditd-rule-based, per group) ----
+// Unlike Windows' presets (format/filter-mode/value all admin-customizable), each entry
+// here is just a curated on/off toggle -- the rule content itself lives agent-side
+// (LINUX_AUDIT_CHANNELS in micro_agent_linux.py), matching app.py's LINUX_LOG_CHANNELS
+// dict (dual-definition convention, same as e.g. UEBA_DEFAULTS).
+const LINUX_LOG_CHANNELS = {
+    process_exec: {
+        label: 'Process Execution',
+        description: "Every process execve() call on the host, via a dedicated auditd rule (key: microdfir_ch_exec). Requires auditd to be installed -- silently skipped, not errored, on a host that doesn't have it.",
+    },
+    identity_changes: {
+        label: 'User/Group/Sudoers File Changes',
+        description: 'Writes to /etc/passwd, /etc/group, /etc/shadow, and /etc/sudoers, via auditd watch rules (key: microdfir_identity).',
+    },
+};
+
+let currentLinuxChannelGroup = '';
+
+function loadLinuxChannelGroupsDropdown() {
+    fetch('/api/agent/groups').then(r => r.json()).then(groups => {
+        const sel = document.getElementById('linuxChannelGroupSelect');
+        if (!sel) return;
+        const extra = (groups || []).map(g => `<option value="${escAttr(g)}">${escHtml(g)}</option>`).join('');
+        sel.innerHTML = `<option value="">Default (fleet-wide)</option>${extra}`;
+        sel.value = currentLinuxChannelGroup;
+    }).catch(err => console.error('Error loading agent groups:', err));
+}
+
+function onLinuxChannelGroupChange() {
+    currentLinuxChannelGroup = document.getElementById('linuxChannelGroupSelect').value;
+    loadLinuxChannels();
+}
+
+function renderLinuxChannelRow(key, meta, setting) {
+    return `
+        <div class="d-flex align-items-start gap-3 border-bottom border-secondary py-2 linux-channel-row" data-key="${escAttr(key)}">
+            <div class="form-check form-switch mt-1">
+                <input class="form-check-input linux-chan-enabled" type="checkbox" ${setting.enabled ? 'checked' : ''}>
+            </div>
+            <div>
+                <div class="text-light">${escHtml(meta.label)}</div>
+                <div class="text-muted small">${escHtml(meta.description)}</div>
+            </div>
+        </div>
+    `;
+}
+
+function loadLinuxChannels() {
+    fetch('/api/agent/linux-channels?group=' + encodeURIComponent(currentLinuxChannelGroup))
+        .then(r => r.json())
+        .then(res => {
+            const data = res.channels || {};
+            const container = document.getElementById('linuxChannelsContainer');
+            if (!container) return;
+            container.innerHTML = Object.keys(LINUX_LOG_CHANNELS).map(key =>
+                renderLinuxChannelRow(key, LINUX_LOG_CHANNELS[key], data[key] || {enabled: false})
+            ).join('');
+
+            const statusEl = document.getElementById('linuxChannelGroupStatus');
+            const removeBtn = document.getElementById('removeLinuxChannelOverrideBtn');
+            if (!currentLinuxChannelGroup) {
+                if (statusEl) statusEl.innerText = 'Applies to every Linux agent whose group (if any) has no template of its own.';
+                if (removeBtn) removeBtn.style.display = 'none';
+            } else if (res.is_override) {
+                if (statusEl) statusEl.innerText = `"${currentLinuxChannelGroup}" has its own saved template, applied only to Linux agents in that group.`;
+                if (removeBtn) removeBtn.style.display = '';
+            } else {
+                if (statusEl) statusEl.innerText = `"${currentLinuxChannelGroup}" has no template of its own yet -- showing the default below. Save to create one just for this group.`;
+                if (removeBtn) removeBtn.style.display = 'none';
+            }
+        }).catch(err => console.error('Error loading Linux channels:', err));
+}
+
+function saveLinuxChannels() {
+    let payload = {};
+    document.querySelectorAll('#linuxChannelsContainer .linux-channel-row').forEach(row => {
+        payload[row.dataset.key] = { enabled: row.querySelector('.linux-chan-enabled').checked };
+    });
+    fetch('/api/agent/linux-channels?group=' + encodeURIComponent(currentLinuxChannelGroup), {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+    }).then(async r => {
+        let res = await r.json();
+        if (!r.ok || res.status !== 'success') {
+            toast(res.message || 'Failed to save Linux channel template.', 'danger');
+            return;
+        }
+        let msg = document.getElementById('linuxChannelSaveSuccessMsg');
+        if (msg) {
+            msg.style.display = 'inline';
+            setTimeout(() => { msg.style.display = 'none'; }, 3000);
+        }
+        loadLinuxChannels();
+    }).catch(err => toast('Error saving Linux channels: ' + err, 'danger'));
+}
+
+async function removeLinuxChannelOverride() {
+    if (!currentLinuxChannelGroup) return;
+    if (!(await confirmDialog(`Remove "${currentLinuxChannelGroup}"'s own Linux channel template? Agents in this group will go back to following the default.`, {title: 'Remove override', danger: true, confirmLabel: 'Remove'}))) return;
+    fetch('/api/agent/linux-channels?group=' + encodeURIComponent(currentLinuxChannelGroup), { method: 'DELETE' })
+        .then(r => r.json()).then(res => {
+            if (res.status === 'success') {
+                toast(`"${currentLinuxChannelGroup}" now follows the default template.`, 'success');
+                loadLinuxChannels();
+            } else {
+                toast(res.message || 'Failed to remove override.', 'danger');
+            }
+        }).catch(err => toast('Error removing override: ' + err, 'danger'));
+}
+
 // Read-only status/parser view for the opt-in DNS query logging feature (dnsmasq) --
 // no create/edit/save here by design, see /api/dns-logging/status's own comment.
 function loadDnsLoggingStatus() {
@@ -599,6 +746,8 @@ document.addEventListener("DOMContentLoaded", function() {
     loadChannelSettings();
     loadDnsLoggingStatus();
     loadLogSourceSilentConfig();
+    loadLinuxChannelGroupsDropdown();
+    loadLinuxChannels();
 });
 </script>
 {% endblock %}
