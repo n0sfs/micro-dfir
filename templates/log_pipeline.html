@@ -215,6 +215,30 @@
         </div>
     </div>
 </div>
+
+<!-- Sysmon Configuration (Advanced) -->
+<div class="row g-4 mb-4">
+    <div class="col-lg-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-body">
+                <details id="sysmonConfigDetails">
+                    <summary class="text-light" style="cursor:pointer;"><i class="fa-solid fa-gear me-2"></i>Sysmon Configuration (Advanced)</summary>
+                    <div class="mt-3">
+                        <p class="text-muted small mb-2">Raw Sysmon XML config, served to every agent that has the Sysmon channel enabled (fleet-wide -- not per-group). Edit directly if you know what you're changing; only checked for well-formed XML, not Sysmon's own schema. Saving here does <strong>not</strong> touch the git-tracked repo default -- your edit is a separate override that survives future deploys, and can be reverted at any time.</p>
+                        <div id="sysmonConfigStatus" class="small text-muted mb-2"></div>
+                        <textarea id="sysmonConfigXml" class="form-control bg-black text-light border-secondary font-monospace small" rows="16" spellcheck="false" style="white-space:pre;"></textarea>
+                        <div id="sysmonConfigError" class="text-danger small mt-2" style="display:none;"></div>
+                        <div class="mt-2 d-flex gap-2 align-items-center">
+                            <button type="button" class="btn btn-primary btn-sm" onclick="saveSysmonConfig()"><i class="fa-solid fa-floppy-disk me-1"></i>Save Config</button>
+                            <button type="button" class="btn btn-outline-danger btn-sm" id="resetSysmonConfigBtn" style="display:none;" onclick="resetSysmonConfig()"><i class="fa-solid fa-rotate-left me-1"></i>Revert to Default</button>
+                            <span id="sysmonConfigSaveMsg" class="text-success small fw-bold" style="display:none;"><i class="fa-solid fa-circle-check me-1"></i>Saved. Already-installed agents pick this up on their next poll.</span>
+                        </div>
+                    </div>
+                </details>
+            </div>
+        </div>
+    </div>
+</div>
 </div>
 <!-- =========================== END CHANNELS PANE =========================== -->
 
@@ -606,6 +630,59 @@ async function removeChannelOverride() {
                 toast(res.message || 'Failed to remove override.', 'danger');
             }
         }).catch(err => toast('Error removing override: ' + err, 'danger'));
+}
+
+// ---- Sysmon Configuration (Advanced) ----
+let sysmonConfigLoaded = false;
+document.getElementById('sysmonConfigDetails').addEventListener('toggle', function() {
+    if (this.open && !sysmonConfigLoaded) {
+        sysmonConfigLoaded = true;
+        loadSysmonConfig();
+    }
+});
+
+function loadSysmonConfig() {
+    fetch('/api/settings/sysmon-config').then(r => r.json()).then(res => {
+        document.getElementById('sysmonConfigXml').value = res.xml || '';
+        document.getElementById('sysmonConfigStatus').innerText = res.is_custom
+            ? 'Using a saved custom override.'
+            : 'Using the repo-shipped default (no custom override saved yet).';
+        document.getElementById('resetSysmonConfigBtn').style.display = res.is_custom ? '' : 'none';
+    }).catch(err => console.error('Error loading Sysmon config:', err));
+}
+
+function saveSysmonConfig() {
+    const xml = document.getElementById('sysmonConfigXml').value;
+    const errBox = document.getElementById('sysmonConfigError');
+    errBox.style.display = 'none';
+    fetch('/api/settings/sysmon-config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({xml})
+    }).then(async r => {
+        const res = await r.json();
+        if (!r.ok || res.status !== 'success') {
+            errBox.textContent = res.error || 'Failed to save Sysmon config.';
+            errBox.style.display = 'block';
+            return;
+        }
+        const msg = document.getElementById('sysmonConfigSaveMsg');
+        msg.style.display = 'inline';
+        setTimeout(() => { msg.style.display = 'none'; }, 4000);
+        loadSysmonConfig();
+    }).catch(err => { errBox.textContent = 'Error: ' + err; errBox.style.display = 'block'; });
+}
+
+async function resetSysmonConfig() {
+    if (!(await confirmDialog('Revert to the repo-shipped default Sysmon config? Your custom override will be deleted.', {title: 'Revert Sysmon config', danger: true, confirmLabel: 'Revert'}))) return;
+    fetch('/api/settings/sysmon-config', { method: 'DELETE' }).then(r => r.json()).then(res => {
+        if (res.status === 'success') {
+            toast('Reverted to the default Sysmon config.', 'success');
+            loadSysmonConfig();
+        } else {
+            toast(res.error || 'Failed to revert.', 'danger');
+        }
+    }).catch(err => toast('Error reverting Sysmon config: ' + err, 'danger'));
 }
 
 // ---- Linux Log Channels (auditd-rule-based, per group) ----

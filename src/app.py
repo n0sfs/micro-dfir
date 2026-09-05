@@ -12730,6 +12730,22 @@ def agent_config():
         # itself if it isn't already present (see _ensure_sysmon_installed() in
         # micro_agent_windows.py). No separate "push install" action needed.
         'sysmon_required': bool(all_channels.get('Sysmon', {}).get('enabled')),
+        # Lets an already-Sysmon-installed agent tell a genuine server-side config edit
+        # apart from a routine poll and reload it live via `sysmon64.exe -c` -- see
+        # _get_sysmon_config_hash()'s own comment for why this didn't exist before.
+        'sysmon_config_hash': _get_sysmon_config_hash(),
+        # Windows equivalent of Linux's "push required policy" half (see
+        # reconcile_windows_audit_policy() in micro_agent_windows.py): enabling the
+        # Security channel is meaningless for several high-value events (4688 w/
+        # command line, account/group management, Kerberos/NTLM auth) unless the
+        # endpoint's own Advanced Audit Policy has the matching subcategory turned on --
+        # an Event ID filter alone can't make Windows generate an event nobody enabled.
+        # Tied directly to channel enablement, not a separate setting, so turning a
+        # channel off also turns its underlying policy back off.
+        'windows_audit_policy': {
+            'security_advanced_audit': bool(all_channels.get('Security', {}).get('enabled')),
+            'powershell_scriptblock_logging': bool(all_channels.get('PowerShell', {}).get('enabled')),
+        },
         # Linux equivalent of the Windows fields above (Log Pipeline > Linux Channels
         # tab) -- a list of {'key','audit_key','rules'} dicts, one per enabled channel
         # (fixed catalog or admin-defined custom), fully resolved server-side so the
@@ -12742,6 +12758,31 @@ def agent_config():
 # reason for this to be reachable by anything that couldn't already read the rest of an
 # agent's config. Kept as a real repo file (agents/sysmon_config.xml), not a Python
 # string constant, so it's easy to review/diff/tune independent of any code change.
+#
+# SYSMON_CUSTOM_CONFIG_PATH is deliberately OUTSIDE the git-tracked agents/ tree: an
+# admin-saved edit (via Settings' Advanced XML editor) must survive the next `git pull`
+# + rsync update.sh does on every deploy -- writing straight into agents/sysmon_config.xml
+# would get silently clobbered by whatever's checked into the repo on the next update.
+# When the custom file doesn't exist, the repo-shipped default is served unchanged.
+SYSMON_DEFAULT_CONFIG_PATH = '/opt/micro-dfir/agents/sysmon_config.xml'
+SYSMON_CUSTOM_CONFIG_PATH = '/opt/micro-dfir/sysmon_config_custom.xml'
+
+def _get_active_sysmon_config_path():
+    return SYSMON_CUSTOM_CONFIG_PATH if os.path.exists(SYSMON_CUSTOM_CONFIG_PATH) else SYSMON_DEFAULT_CONFIG_PATH
+
+def _get_sysmon_config_hash():
+    """16-char content hash sent alongside sysmon_required in agent_config() so an
+    already-Sysmon-installed endpoint can tell a genuine config change apart from a
+    routine poll -- see _update_sysmon_config() in micro_agent_windows.py, which
+    previously had no way to detect this and so never re-applied a config edited after
+    a host's initial Sysmon install."""
+    import hashlib
+    try:
+        with open(_get_active_sysmon_config_path(), 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest()[:16]
+    except OSError:
+        return ''
+
 @app.route('/api/agent/sysmon-config', methods=['GET'])
 def api_agent_sysmon_config():
     from flask import request, Response
@@ -12750,10 +12791,54 @@ def api_agent_sysmon_config():
     if not _validate_agent_auth(db, request.headers.get('X-Agent-Token'), ua):
         return jsonify({'error': 'Unauthorized'}), 401
     try:
-        with open('/opt/micro-dfir/agents/sysmon_config.xml', 'r', encoding='utf-8') as f:
+        with open(_get_active_sysmon_config_path(), 'r', encoding='utf-8') as f:
             return Response(f.read(), mimetype='application/xml')
     except OSError:
         return jsonify({'error': 'Sysmon config not found on server'}), 404
+
+# Web-UI-facing (login-gated, not agent-token-gated) view/edit of the Sysmon config --
+# distinct from the agent-facing route above. Lets an advanced admin see exactly what's
+# currently enabled and tune it directly, without needing a code change + git deploy for
+# every tweak. Only checks the XML is well-formed, not Sysmon's own schema -- a real
+# schema validator would need to track Sysmon's schema version, which changes across
+# releases; a malformed rule still fails safely (Sysmon itself rejects a bad config at
+# apply time, logged in _update_sysmon_config()'s output, rather than silently no-op).
+@app.route('/api/settings/sysmon-config', methods=['GET', 'POST', 'DELETE'])
+@login_required
+def api_settings_sysmon_config():
+    from flask import request
+    import xml.etree.ElementTree as ET
+
+    if request.method == 'DELETE':
+        err = require_permission('edr.agent.manage')
+        if err: return err
+        if os.path.exists(SYSMON_CUSTOM_CONFIG_PATH):
+            os.remove(SYSMON_CUSTOM_CONFIG_PATH)
+        log_audit('sysmon_config_reset', 'settings', None, 'reverted to repo-shipped default')
+        return jsonify({'status': 'success'})
+
+    if request.method == 'POST':
+        err = require_permission('edr.agent.manage')
+        if err: return err
+        xml_content = (request.json or {}).get('xml', '')
+        if not xml_content.strip():
+            return jsonify({'error': 'Config cannot be empty'}), 400
+        try:
+            ET.fromstring(xml_content)
+        except ET.ParseError as e:
+            return jsonify({'error': f'Not well-formed XML: {e}'}), 400
+        with open(SYSMON_CUSTOM_CONFIG_PATH, 'w', encoding='utf-8') as f:
+            f.write(xml_content)
+        log_audit('sysmon_config_update', 'settings', None, f'{len(xml_content)} bytes')
+        return jsonify({'status': 'success'})
+
+    path = _get_active_sysmon_config_path()
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except OSError:
+        return jsonify({'error': 'Sysmon config not found on server'}), 404
+    return jsonify({'xml': content, 'is_custom': path == SYSMON_CUSTOM_CONFIG_PATH})
 
 # Log Search spans three tables that were previously siloed from each other: raw
 # ingested events (live_logs), Sigma/custom detection-rule hits (alerts), and UEBA
@@ -13599,6 +13684,32 @@ _DEFAULT_CHANNEL_ENABLED = {
 def _default_channel_setting(enabled=False):
     return {'enabled': bool(enabled), 'capture_xml': False, 'filter_mode': 'none', 'filter_value': ''}
 
+# A curated Include filter for a channel newly created by _normalize_channel_dict's
+# setdefault below -- NEVER applied to a channel an admin already has a saved value for
+# (setdefault is a no-op if the key exists at all, regardless of its value), so this only
+# ever reaches a fresh install or a brand-new channel type introduced by a later version,
+# matching this repo's existing "never silently override an already-saved setting"
+# convention. Security defaults to the standard, widely-published CIS/NSA high-value
+# subset (logon, account/group management, Kerberos/NTLM auth, process creation, audit-
+# policy tampering, security-state changes) instead of collecting every Security event
+# unfiltered -- reduces volume drastically while keeping the events that actually matter
+# for detection. Every ID here depends on the matching Advanced Audit Policy subcategory
+# actually being enabled on the endpoint (see reconcile_windows_audit_policy in
+# micro_agent_windows.py, computed from whether this channel ends up enabled) -- an
+# Event ID filter alone can't make Windows generate an event nobody turned on.
+_CHANNEL_RECOMMENDED_FILTERS = {
+    'Security': {
+        'filter_mode': 'include',
+        'filter_value': '4608,4609,1102,4624,4625,4634,4648,4672,4688,4698,4702,4719,'
+                         '4720,4722,4724,4725,4726,4728,4729,4732,4733,4738,4740,4756,4757,4768,4769,4776',
+    },
+}
+
+def _recommended_channel_setting(name, enabled=False):
+    setting = _default_channel_setting(enabled)
+    setting.update(_CHANNEL_RECOMMENDED_FILTERS.get(name, {}))
+    return setting
+
 def _normalize_channel_dict(data):
     """Per-channel upgrade/validation: transparently upgrades the old flat
     {"Security": true, ...} shape (each value a plain bool) to the richer
@@ -13617,7 +13728,7 @@ def _normalize_channel_dict(data):
             setting['filter_value'] = str(value.get('filter_value') or '')
             channels[name] = setting
     for name, default_enabled in _DEFAULT_CHANNEL_ENABLED.items():
-        channels.setdefault(name, _default_channel_setting(default_enabled))
+        channels.setdefault(name, _recommended_channel_setting(name, default_enabled))
     return channels
 
 def get_agent_channels_all():
@@ -13713,7 +13824,7 @@ def api_agent_channels():
             }
         # Presets always exist even if the posted payload omitted one.
         for name, default_enabled in _DEFAULT_CHANNEL_ENABLED.items():
-            channels.setdefault(name, _default_channel_setting(default_enabled))
+            channels.setdefault(name, _recommended_channel_setting(name, default_enabled))
         all_templates = get_agent_channels_all()
         all_templates[group_key] = channels
         save_agent_channels_all(all_templates)
