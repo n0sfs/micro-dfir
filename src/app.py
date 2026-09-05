@@ -12845,7 +12845,7 @@ def _parse_datetime_local(s):
 # added to the picklist that silently fell back to searching `message` server-side with
 # no indication anything was wrong -- this list is what closes that gap.
 LOG_SEARCH_ALLOWED_FIELDS = [
-    {'key': 'id', 'label': 'ID'},
+    {'key': 'item_id', 'label': 'ID'},
     {'key': 'username', 'label': 'User'},
     {'key': 'host', 'label': 'Host'},
     {'key': 'event_id', 'label': 'Event ID'},
@@ -12987,16 +12987,17 @@ def _parse_search_query(q):
 
         like_value = _wildcard_term_to_like(value).lower()
 
-        if field == 'id':
+        if field == 'item_id':
             # Exact match, not the generic substring LIKE every other field uses below --
-            # id:5 matching 5/15/25/51 via substring LIKE would make this deep-link
+            # item_id:5 matching 5/15/25/51 via substring LIKE would make this deep-link
             # mechanism (MITRE Coverage's Validated popup, ?alert_id= on Log Search)
-            # silently wrong. Combined with a type filter (id-space isn't unique across
-            # the logs/alerts/anomalies union) by whoever builds the link. A non-numeric
-            # id: value can never match a real row -- resolved to an always-false clause
-            # rather than raising, so a malformed query just returns zero results.
+            # silently wrong. Combined with a type filter (item_id-space isn't unique
+            # across the logs/alerts/anomalies union) by whoever builds the link. A
+            # non-numeric item_id: value can never match a real row -- resolved to an
+            # always-false clause rather than raising, so a malformed query just returns
+            # zero results.
             try:
-                sql = "id = ?"
+                sql = "item_id = ?"
                 term_params = [int(value)]
             except ValueError:
                 sql = "1 = 0"

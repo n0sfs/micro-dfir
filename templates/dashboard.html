@@ -2102,7 +2102,7 @@ function initSearchTab() {
     const _params = new URLSearchParams(window.location.search);
     const _deepLinkAlertId = _params.get('alert_id');
     if (_deepLinkAlertId) {
-        document.getElementById('searchQuery').value = `id:${_deepLinkAlertId}`;
+        document.getElementById('searchQuery').value = `item_id:${_deepLinkAlertId}`;
         document.querySelectorAll('.type-chk').forEach(c => { c.checked = (c.value === 'alert'); });
         updateFilters();
     } else {
