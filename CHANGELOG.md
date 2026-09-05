@@ -10,6 +10,11 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-05
 
+### Move the light/dark theme toggle into the sidebar
+
+It was a fixed top-right floating button that overlapped page content on some panels.
+Now a normal sidebar nav-link right below Settings, matching every other nav item.
+
 ### MITRE Coverage: enabled-first rule sort, collapsible disabled rules, alert links
 
 Technique drilldown modal now lists enabled rules first, collapsing disabled ones into
