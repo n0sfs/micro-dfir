@@ -801,7 +801,8 @@ def coverage_page():
 @app.route('/log-pipeline')
 @login_required
 def log_pipeline_page():
-    return render_template('log_pipeline.html', current_user=current_user)
+    active_tab = request.args.get('tab', 'droprules')
+    return render_template('log_pipeline.html', active_tab=active_tab, current_user=current_user)
 
 # Home count queries reuse existing canonical data sources rather than new bookkeeping:
 # ueba_entity_baselines is already this app's registry of every host/user the UEBA
