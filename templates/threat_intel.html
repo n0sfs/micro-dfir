@@ -429,6 +429,12 @@
                                         <option value="{{ category }}">{{ category }} ({{ yara_files_by_category[category]|length }})</option>
                                         {% endfor %}
                                     </select>
+                                    <select id="yaraTagFilter" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width: 200px;" onchange="filterYaraRules()">
+                                        <option value="">All Tags</option>
+                                        {% for tag in yara_all_tags %}
+                                        <option value="{{ tag|lower }}">{{ tag }}</option>
+                                        {% endfor %}
+                                    </select>
                                 </div>
                                 <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
                                     <div>
@@ -449,10 +455,11 @@
                                         <summary class="text-uppercase text-muted small fw-bold mt-2 mb-1" style="cursor:pointer;">{{ category }} ({{ files|length }})</summary>
                                         <div class="ms-3">
                                         {% for rf in files %}
-                                        <div class="form-check yara-rule-row d-flex align-items-start" data-search="{{ (rf.split('/')[-1] ~ ' ' ~ (yara_file_descriptions.get(rf) or ''))|lower }}">
+                                        <div class="form-check yara-rule-row d-flex align-items-start" data-search="{{ (rf.split('/')[-1] ~ ' ' ~ (yara_file_descriptions.get(rf) or '') ~ ' ' ~ (yara_file_tags.get(rf, [])|join(' ')))|lower }}" data-tags="{{ yara_file_tags.get(rf, [])|join(',')|lower }}">
                                             <input class="form-check-input rule-checkbox" type="checkbox" name="selected_rules" value="{{ rf }}" id="rule-{{ loop.index0 }}-{{ category }}" checked onchange="updateHuntStats()">
                                             <label class="form-check-label text-light small yara-rule-viewlabel flex-grow-1" data-relpath="{{ rf }}" style="cursor:pointer;" onclick="viewYaraRule(this.dataset.relpath)"{% if yara_file_descriptions.get(rf) %} title="{{ yara_file_descriptions[rf] }}"{% endif %}>
                                                 {{ rf.split('/')[-1] }}{% if yara_file_descriptions.get(rf) %}<span class="text-muted"> — {{ yara_file_descriptions[rf] | truncate(70) }}</span>{% endif %}
+                                                {% if yara_file_tags.get(rf) %}<span class="ms-1">{% for tag in yara_file_tags[rf] %}<span class="badge bg-secondary bg-opacity-50 fw-normal me-1" style="font-size:0.65rem;">{{ tag }}</span>{% endfor %}</span>{% endif %}
                                             </label>
                                             {% if has_permission('rules.manage') %}
                                             <input type="checkbox" class="ms-2 mt-1 yara-delete-select" data-relpath="{{ rf }}" title="Select for bulk delete" onchange="updateYaraBulkDeleteButton()">
@@ -1178,6 +1185,8 @@ function filterYaraRules() {
     const src = sourceFilterEl ? sourceFilterEl.value : '';
     const categoryFilterEl = document.getElementById('yaraCategoryFilter');
     const cat = categoryFilterEl ? categoryFilterEl.value : '';
+    const tagFilterEl = document.getElementById('yaraTagFilter');
+    const tag = tagFilterEl ? tagFilterEl.value : '';
     document.querySelectorAll('#yaraRuleList .yara-cat-group').forEach(group => {
         if (src && group.dataset.source !== src) {
             group.style.display = 'none';
@@ -1189,12 +1198,13 @@ function filterYaraRules() {
         }
         let anyVisible = false;
         group.querySelectorAll('.yara-rule-row').forEach(row => {
-            const match = !q || row.dataset.search.includes(q);
+            const rowTags = (row.dataset.tags || '').split(',');
+            const match = (!q || row.dataset.search.includes(q)) && (!tag || rowTags.includes(tag));
             row.style.display = match ? '' : 'none';
             if (match) anyVisible = true;
         });
         group.style.display = anyVisible ? '' : 'none';
-        if (q) { if (anyVisible) group.open = true; } else { group.open = false; }
+        if (q || tag) { if (anyVisible) group.open = true; } else { group.open = false; }
     });
 }
 
@@ -1223,11 +1233,79 @@ function viewYaraRule(relpath) {
                 return;
             }
             yaraViewerContent = d.content || '';
-            bodyEl.innerHTML = `<pre class="text-light small mb-0" style="white-space:pre-wrap; word-break:break-word;">${escHtml(yaraViewerContent)}</pre>`;
+            bodyEl.innerHTML = renderYaraViewerTags(relpath, d.tags || [], d.manual_tags || []) +
+                `<pre class="text-light small mb-0" style="white-space:pre-wrap; word-break:break-word;">${escHtml(yaraViewerContent)}</pre>`;
             copyBtn.style.display = '';
             if (deleteBtn) deleteBtn.style.display = '';
         })
         .catch(() => { bodyEl.innerHTML = '<div class="text-danger small">Network error loading rule.</div>'; });
+}
+
+function renderYaraViewerTags(relpath, tags, manualTags) {
+    const canManage = hasPermission('rules.manage');
+    const manualSet = new Set(manualTags);
+    const chips = tags.map(t => {
+        const isManual = manualSet.has(t);
+        const removeBtn = (canManage && isManual)
+            ? ` <a href="#" class="text-white-50 yara-tag-remove" data-tag="${escAttr(t)}" title="Remove this manual tag">&times;</a>`
+            : '';
+        return `<span class="badge bg-secondary me-1 mb-1">${escHtml(t)}${removeBtn}</span>`;
+    }).join('');
+    const addForm = canManage ? `
+        <div class="d-flex gap-1 mt-1 mb-2">
+            <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="yaraNewTagInput" placeholder="Add a tag..." style="max-width:160px;">
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="yaraAddTagBtn"><i class="fa-solid fa-tag"></i></button>
+        </div>` : '';
+    return `<div class="mb-2 pb-2 border-bottom border-secondary" id="yaraViewerTags" data-relpath="${escAttr(relpath)}">
+        <div class="mb-1">${chips || '<span class="text-muted small">No tags.</span>'}</div>
+        ${addForm}
+    </div>`;
+}
+
+// Delegated (not inline onclick) since tag/relpath values may contain characters
+// (quotes, etc.) unsafe to interpolate directly into an inline JS string literal.
+document.addEventListener('click', function(e) {
+    const removeLink = e.target.closest('.yara-tag-remove');
+    if (removeLink) {
+        e.preventDefault();
+        const relpath = removeLink.closest('#yaraViewerTags').dataset.relpath;
+        removeYaraRuleTag(relpath, removeLink.dataset.tag);
+        return;
+    }
+    if (e.target.id === 'yaraAddTagBtn') {
+        const relpath = document.getElementById('yaraViewerTags').dataset.relpath;
+        addYaraRuleTag(relpath);
+    }
+});
+document.addEventListener('keydown', function(e) {
+    if (e.target && e.target.id === 'yaraNewTagInput' && e.key === 'Enter') {
+        e.preventDefault();
+        const relpath = document.getElementById('yaraViewerTags').dataset.relpath;
+        addYaraRuleTag(relpath);
+    }
+});
+
+function addYaraRuleTag(relpath) {
+    const input = document.getElementById('yaraNewTagInput');
+    const tag = (input.value || '').trim();
+    if (!tag) return;
+    fetch('/api/yara/rule-tags', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({path: relpath, tag})
+    }).then(res => res.json().then(d => ({ ok: res.ok, d }))).then(({ ok, d }) => {
+        if (!ok) { toast(d.error || 'Failed to add tag.', 'danger'); return; }
+        viewYaraRule(relpath);
+    }).catch(() => toast('Network error adding tag.', 'danger'));
+}
+
+function removeYaraRuleTag(relpath, tag) {
+    fetch('/api/yara/rule-tags?path=' + encodeURIComponent(relpath) + '&tag=' + encodeURIComponent(tag), {
+        method: 'DELETE'
+    }).then(res => res.json().then(d => ({ ok: res.ok, d }))).then(({ ok, d }) => {
+        if (!ok) { toast(d.error || 'Failed to remove tag.', 'danger'); return; }
+        viewYaraRule(relpath);
+    }).catch(() => toast('Network error removing tag.', 'danger'));
 }
 
 function copyYaraViewerContent() {

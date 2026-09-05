@@ -1107,6 +1107,94 @@ _YARA_AUTHOR_RE = re.compile(r'author\s*=\s*"((?:[^"\\]|\\.)*)"')
 # wherever YARA files are discovered.
 _YARA_HAS_RULE_RE = re.compile(r'^\s*(?:private\s+|global\s+)*rule\s+\S+', re.MULTILINE)
 
+# Rule-name segment taxonomy modeled on the yarGen/Neo23x0 naming convention (e.g.
+# MAL_APT_Loader_WIN_PE_Lazarus_Backdoor_2021_Jan26) -- community rules from
+# signature-base and Yara-Rules/rules commonly follow this pattern, so splitting a
+# rule's name on underscores/hyphens and matching each segment against these axes
+# derives real, useful filter tags without re-authoring anything. Matches real YARA
+# `rule X : tag1 tag2 {` syntax too, when a rule actually declares tags.
+YARA_TAG_TAXONOMY = {
+    'category': ['MAL', 'HKTL', 'WEBSHELL', 'EXPL', 'SUSP', 'PUA'],
+    'intent': ['APT', 'CRIME', 'RANSOM'],
+    'type': ['RAT', 'Implant', 'Stealer', 'Loader', 'Dropper', 'Miner', 'Botnet', 'Backdoor', 'Wiper', 'Keylogger'],
+    'os': ['LNX', 'MacOS', 'WIN', 'Android'],
+    'arch': ['ARM', 'MIPS'],
+    'tech': ['ELF', 'PE', 'PS1', 'VBS', 'BAT', 'JS', 'NET', 'GO', 'Rust', 'PHP', 'Python', 'MalDoc', 'LNK'],
+    'modifier': ['OBFUSC', 'Encoded', 'Packed', 'InMemory'],
+}
+_YARA_TAG_LOOKUP = {v.lower(): v for vals in YARA_TAG_TAXONOMY.values() for v in vals}
+_YARA_RULE_DEF_RE = re.compile(r'(?:^|\n)\s*(?:private\s+|global\s+)*rule\s+(?P<name>\w+)\s*(?::\s*(?P<tags>[\w\s]+?))?\s*\{')
+
+_YARA_ACTOR_WORD_INDEX = None
+
+def _yara_actor_word_index():
+    """yarGen-style rule names embed a single distinctive word from an actor's name
+    (e.g. "Lazarus" for "Lazarus Group"), not the full multi-word name -- an
+    underscore-segment match needs a word-level index, not just the full name/alias.
+    A generic word shared across actors ("Group", "Team") would be a noisy, low-
+    confidence tag on its own, so those are excluded; anything else 4+ characters is
+    specific enough to keep false positives rare. Built once and cached -- ACTORS is
+    a small, static, hand-curated list (threat_actors.py), never modified at runtime."""
+    global _YARA_ACTOR_WORD_INDEX
+    if _YARA_ACTOR_WORD_INDEX is not None:
+        return _YARA_ACTOR_WORD_INDEX
+    from threat_actors import ACTORS
+    stoplist = {'group', 'team'}
+    index = {}
+    for actor in ACTORS:
+        words = {actor['name'].replace(' ', '').lower()}
+        for n in [actor['name']] + actor.get('aliases', []):
+            words.add(n.replace(' ', '').lower())
+            for w in re.split(r'\s+', n):
+                if len(w) >= 4 and w.lower() not in stoplist:
+                    words.add(w.lower())
+        for w in words:
+            index.setdefault(w, actor['name'])
+    _YARA_ACTOR_WORD_INDEX = index
+    return _YARA_ACTOR_WORD_INDEX
+
+def _yara_extract_tags(content):
+    """Derives filterable tags from a YARA rule file's already-read-into-memory
+    content (no extra I/O beyond what the caller's directory walk already did):
+    (a) real YARA `rule X : tag1 tag2 {` tag syntax, (b) yarGen/Neo23x0-style
+    underscore-segmented rule names matched against YARA_TAG_TAXONOMY, and
+    (c) known actor/malware-family names (reusing threat_actors.ACTORS, the
+    same curated list Threat Intel entity matching already uses) found in a
+    rule's name or its meta description -- deliberately scoped to those two
+    short fields, not the raw file body, so a coincidental byte-string match
+    inside a detection pattern can't produce a false tag."""
+    from threat_actors import ACTORS
+    actor_words = _yara_actor_word_index()
+    tags = set()
+    rule_names = []
+    for m in _YARA_RULE_DEF_RE.finditer(content):
+        name = m.group('name')
+        rule_names.append(name)
+        raw_tags = m.group('tags')
+        if raw_tags:
+            tags.update(t for t in raw_tags.split() if t)
+        for segment in re.split(r'[_\-]', name):
+            hit = _YARA_TAG_LOOKUP.get(segment.lower())
+            if hit:
+                tags.add(hit)
+            actor_hit = actor_words.get(segment.lower())
+            if actor_hit:
+                tags.add(actor_hit)
+    # A rule-name segment only ever catches ONE distinctive word of a multi-word actor
+    # name (see _yara_actor_word_index) -- the description is free natural-language
+    # text, so it's checked separately against full names/aliases, which are far more
+    # likely to appear there written out in full (e.g. "Cozy Bear implant...").
+    desc_m = _YARA_DESCRIPTION_RE.search(content)
+    if desc_m:
+        description = desc_m.group(1)
+        for actor in ACTORS:
+            for n in [actor['name']] + actor.get('aliases', []):
+                pattern = re.escape(n).replace(r'\ ', r'[\s_-]?')
+                if re.search(r'(?<![A-Za-z0-9])' + pattern + r'(?![A-Za-z0-9])', description, re.IGNORECASE):
+                    tags.add(actor['name'])
+                    break
+    return sorted(tags)
+
 def _yara_source_label(top_dir):
     """Maps a YARA rule's top-level directory under YARA_RULES_DIR back to the real
     upstream project it came from, for the File Scan tab's Source filter. rules-master
@@ -1205,6 +1293,9 @@ def api_yara_rule_content():
             os.remove(full_path)
         except OSError as e:
             return jsonify({'error': f'Could not delete rule file: {e}'}), 500
+        db = get_db()
+        db.execute("DELETE FROM yara_rule_tags WHERE relpath = ?", (raw_path,))
+        db.commit()
         log_audit('yara_rule_file_delete', 'yara_rule_file', raw_path)
         return jsonify({'status': 'success'})
     try:
@@ -1212,7 +1303,42 @@ def api_yara_rule_content():
             content = f.read()
     except OSError:
         return jsonify({'error': 'Could not read rule file'}), 500
-    return jsonify({'path': raw_path, 'filename': os.path.basename(full_path), 'content': content})
+    manual_tags = sorted(r['tag'] for r in get_db().execute(
+        "SELECT tag FROM yara_rule_tags WHERE relpath = ?", (raw_path,)
+    ).fetchall())
+    all_tags = sorted(set(_yara_extract_tags(content)) | set(manual_tags))
+    return jsonify({'path': raw_path, 'filename': os.path.basename(full_path), 'content': content,
+                     'tags': all_tags, 'manual_tags': manual_tags})
+
+@app.route('/api/yara/rule-tags', methods=['POST', 'DELETE'])
+@login_required
+def api_yara_rule_tags():
+    err = require_permission('rules.manage')
+    if err: return err
+    db = get_db()
+    if request.method == 'DELETE':
+        relpath = request.args.get('path', '')
+        tag = request.args.get('tag', '')
+        db.execute("DELETE FROM yara_rule_tags WHERE relpath = ? AND tag = ?", (relpath, tag))
+        db.commit()
+        log_audit('yara_rule_tag_remove', 'yara_rule_file', relpath, tag)
+        return jsonify({'status': 'success'})
+    d = request.json or {}
+    relpath = (d.get('path') or '').strip()
+    tag = (d.get('tag') or '').strip()
+    if not relpath or not tag:
+        return jsonify({'error': 'path and tag are required'}), 400
+    if len(tag) > 40:
+        return jsonify({'error': 'Tag must be 40 characters or fewer'}), 400
+    if not _yara_resolve_path(relpath):
+        return jsonify({'error': 'Rule file not found'}), 404
+    try:
+        db.execute("INSERT INTO yara_rule_tags (relpath, tag, created_by) VALUES (?, ?, ?)", (relpath, tag, current_user.username))
+        db.commit()
+    except sqlite3.IntegrityError:
+        pass  # already tagged -- idempotent
+    log_audit('yara_rule_tag_add', 'yara_rule_file', relpath, tag)
+    return jsonify({'status': 'success', 'tag': tag})
 
 @app.route('/threat-intel', methods=['GET', 'POST'])
 @login_required
@@ -1255,10 +1381,16 @@ def threat_intel():
     # directory instead, via _yara_source_label() -- a distinct axis from category
     # (e.g. rules-master/ and yara_rules_project_synced/ are different top-level dirs
     # but the same real upstream project).
+    manual_tags_by_relpath = {}
+    for r in get_db().execute("SELECT relpath, tag FROM yara_rule_tags").fetchall():
+        manual_tags_by_relpath.setdefault(r['relpath'], []).append(r['tag'])
+
     yara_files = []
     yara_files_by_category = {}
     yara_file_descriptions = {}
     yara_category_sources = {}
+    yara_file_tags = {}
+    yara_all_tags = set()
     for rf in candidate_files:
         full_path = os.path.join(yara_dir, rf)
         try:
@@ -1291,6 +1423,10 @@ def threat_intel():
         desc = _yara_file_description(full_path, content)
         if desc:
             yara_file_descriptions[rf] = desc
+        tags = sorted(set(_yara_extract_tags(content)) | set(manual_tags_by_relpath.get(rf, [])))
+        if tags:
+            yara_file_tags[rf] = tags
+            yara_all_tags.update(tags)
     yara_files_set = set(yara_files)
 
     if request.method == 'POST' and yara_available:
@@ -1333,7 +1469,8 @@ def threat_intel():
     return render_template(
         'threat_intel.html', matches=matches, yara_files=yara_files,
         yara_files_by_category=yara_files_by_category, yara_file_descriptions=yara_file_descriptions,
-        yara_category_sources=yara_category_sources,
+        yara_category_sources=yara_category_sources, yara_file_tags=yara_file_tags,
+        yara_all_tags=sorted(yara_all_tags),
         active_tab=active_tab, current_user=current_user
     )
 
@@ -10226,6 +10363,23 @@ def migrate_ioc_sightings():
     except Exception:
         pass
 
+def migrate_yara_rule_tags():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS yara_rule_tags (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            relpath TEXT NOT NULL,
+            tag TEXT NOT NULL,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(relpath, tag)
+        )''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_yara_rule_tags_relpath ON yara_rule_tags(relpath)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_ioc_sightings_alert_id():
     # log_ref was always a free-text "alert_id=N, host=..." string (sigma_engine.py's
     # _record_ioc_sightings) -- fine for a human reading it, useless for a query. This
@@ -14701,6 +14855,7 @@ migrate_enrichment_results()
 migrate_ti_entities()
 migrate_ti_entities_confidence()
 migrate_ti_entities_references()
+migrate_yara_rule_tags()
 
 try:
     # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every
