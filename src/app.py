@@ -1024,7 +1024,7 @@ def api_ti_analyzers():
 # listed here -- this is the sole allowlist gating what api_enrichment_settings() will
 # read/write in the enrichment_api_keys settings blob, so adding a new keyed analyzer
 # means adding its settings_key here too.
-ENRICHMENT_SETTINGS_KEYS = ('abuseipdb_api_key', 'virustotal_api_key')
+ENRICHMENT_SETTINGS_KEYS = ('abuseipdb_api_key', 'virustotal_api_key', 'urlhaus_api_key')
 
 @app.route('/api/settings/enrichment', methods=['GET', 'POST'])
 @login_required

@@ -92,13 +92,18 @@ def _virustotal(value, api_key=None, ioc_type=None):
         return {'ok': False, 'verdict': 'error', 'summary': str(e), 'raw': {}}
 
 
-# URLhaus (abuse.ch) -- free, keyless, no account needed. Separate endpoints for a full
-# URL vs. just a host/domain; case_iocs already distinguishes 'url' from 'domain', so no
-# guessing needed here.
+# URLhaus (abuse.ch) -- free, but as of abuse.ch's 2025 policy change every API call
+# needs a free "Auth-Key" (registered at https://auth.abuse.ch/, no payment/account
+# approval), sent as an Auth-Key header -- confirmed live against production (a keyless
+# call returns 401). Separate endpoints for a full URL vs. just a host/domain;
+# case_iocs already distinguishes 'url' from 'domain', so no guessing needed here.
 def _urlhaus(value, api_key=None, ioc_type=None):
+    if not api_key:
+        return {'ok': False, 'verdict': 'unconfigured', 'summary': 'No URLhaus Auth-Key configured.', 'raw': {}}
     endpoint, field = ('url', 'url') if 'url' in (ioc_type or '').lower() else ('host', 'host')
     try:
-        res = requests.post(f"https://urlhaus-api.abuse.ch/v1/{endpoint}/", data={field: value}, timeout=8)
+        res = requests.post(f"https://urlhaus-api.abuse.ch/v1/{endpoint}/", data={field: value},
+                             headers={'Auth-Key': api_key}, timeout=8)
         res.raise_for_status()
         data = res.json()
         if data.get('query_status') != 'ok':
@@ -122,7 +127,7 @@ ANALYZERS = [
     {'key': 'virustotal', 'label': 'VirusTotal', 'ioc_types': ('ip', 'hash', 'domain', 'url'),
      'requires_key': True, 'settings_key': 'virustotal_api_key', 'run': _virustotal},
     {'key': 'urlhaus', 'label': 'URLhaus', 'ioc_types': ('domain', 'url'),
-     'requires_key': False, 'settings_key': None, 'run': _urlhaus},
+     'requires_key': True, 'settings_key': 'urlhaus_api_key', 'run': _urlhaus},
 ]
 
 
