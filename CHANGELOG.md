@@ -10,6 +10,28 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-05
 
+### Expand Linux Log Channels to 11 CIS/STIG-aligned channels + custom channels
+
+Grew the curated auditd catalog from 2 to 11 channels, researched against current
+CIS Benchmark/NSA auditd baseline guidance: file deletion, privilege escalation
+(setuid/setgid), kernel module load/unload, system time tampering, SSH/PAM/cron
+config changes, network config changes, and login-record tampering, alongside the
+existing process execution and identity file changes.
+
+Also adds admin-defined custom channels — a label + path + which accesses
+(read/write/execute/attribute-change) to watch, defined once and enabled per group
+exactly like a built-in channel. Required a real refactor: the server now resolves
+every enabled channel's full rule text (fixed or custom) and sends it directly to
+the agent on each poll, so `micro_agent_linux.py` carries no local channel catalog
+of its own anymore — a custom channel needs zero agent-side code to work. Custom
+channel paths are validated against a strict single-line, no-whitespace charset
+before being written into the generated rules file, closing off a rule-injection
+route a raw multi-line path value could otherwise open — confirmed live against
+production (`\n-a always,exit ... -k pwned` correctly rejected with a 400). Full
+add/edit/delete lifecycle live-verified against production, including confirming a
+deleted custom channel's enable-state is cleaned out of every group with no stale
+leftover key.
+
 ### Add Linux Log Channels: per-group auditd policy that actually pushes and pulls
 
 New Log Pipeline tab mirroring Windows Log Channels' per-group shape, but built for how
