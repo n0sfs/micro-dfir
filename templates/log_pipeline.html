@@ -111,6 +111,39 @@
         </div>
     </div>
 </div>
+
+<!-- Log Source Silent Alert -- relocated from Settings since it's genuinely pipeline
+     health monitoring, not a general system setting. Same route/permission. -->
+<div class="row g-4 mb-4">
+    <div class="col-lg-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-body">
+                <h5 class="card-title text-light mb-3"><i class="fa-solid fa-volume-xmark me-2"></i>Log Source Silent Alert</h5>
+                <p class="text-muted small mb-3">Distinct from a log source that has never ingested anything at all (see Coverage) -- this flags a source that WAS recently active and then stopped, the "pipeline broke" case. The threshold adapts per log source from its own recent history (multiples of its typical time between events), so a naturally continuous source and a naturally bursty one don't need separate hand-tuned thresholds.</p>
+                <div class="row g-2 align-items-end mb-3">
+                    <div class="col-auto">
+                        <label class="form-label small text-muted mb-1">Sensitivity (&times; typical gap)</label>
+                        <input type="number" min="1" step="0.5" id="logSourceSilentMultiplier" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:140px;" {{ '' if has_permission('settings.system.manage') else 'disabled' }}>
+                    </div>
+                    <div class="col-auto">
+                        <label class="form-label small text-muted mb-1">Minimum floor (hours)</label>
+                        <input type="number" min="0" step="0.5" id="logSourceSilentMinHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:140px;" {{ '' if has_permission('settings.system.manage') else 'disabled' }}>
+                    </div>
+                    <div class="col-auto">
+                        <label class="form-label small text-muted mb-1">Cooldown (hours)</label>
+                        <input type="number" min="1" id="logSourceSilentCooldown" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:130px;" {{ '' if has_permission('settings.system.manage') else 'disabled' }}>
+                    </div>
+                    {% if has_permission('settings.system.manage') %}
+                    <div class="col-auto">
+                        <button class="btn btn-outline-primary btn-sm" onclick="saveLogSourceSilentConfig()"><i class="fa-solid fa-save me-1"></i> Save</button>
+                    </div>
+                    {% endif %}
+                </div>
+                <div class="small text-muted" id="logSourceSilentStatus"></div>
+            </div>
+        </div>
+    </div>
+</div>
 </div>
 <!-- =========================== END DROP RULES PANE =========================== -->
 
@@ -446,6 +479,42 @@ function loadDnsLoggingStatus() {
     });
 }
 
+// ---- Log Source Silent Alert (relocated from Settings, same route/permission) ----
+function loadLogSourceSilentConfig() {
+    fetch('/api/settings/log-source-silent-alert')
+        .then(r => r.json())
+        .then(data => {
+            document.getElementById('logSourceSilentMultiplier').value = data.multiplier;
+            document.getElementById('logSourceSilentMinHours').value = data.min_hours;
+            document.getElementById('logSourceSilentCooldown').value = data.cooldown_hours;
+            document.getElementById('logSourceSilentStatus').innerText =
+                `Currently: a log source silent for ${data.multiplier}x its own typical gap (minimum ${data.min_hours}h) triggers a "Log Source Silent" alert, at most once every ${data.cooldown_hours}h per source.`;
+        })
+        .catch(e => console.error('Log source silent alert settings load issue:', e));
+}
+
+function saveLogSourceSilentConfig() {
+    const multiplier = parseFloat(document.getElementById('logSourceSilentMultiplier').value);
+    const minHours = parseFloat(document.getElementById('logSourceSilentMinHours').value);
+    const cooldown = parseFloat(document.getElementById('logSourceSilentCooldown').value);
+    if (!(multiplier >= 1) || !(minHours >= 0) || !(cooldown >= 1)) {
+        toast('Sensitivity must be >= 1, minimum floor must be >= 0, and cooldown must be >= 1 hour.', 'warning');
+        return;
+    }
+    fetch('/api/settings/log-source-silent-alert', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({multiplier, min_hours: minHours, cooldown_hours: cooldown})
+    }).then(r => r.json()).then(res => {
+        if (res.status === 'success') {
+            loadLogSourceSilentConfig();
+            toast('Log source silent alert settings saved.', 'success');
+        } else {
+            toast(res.error || 'Failed to save log source silent alert settings.', 'danger');
+        }
+    }).catch(err => toast('Error saving log source silent alert settings: ' + err, 'danger'));
+}
+
 // =====================================================================
 // INIT
 // =====================================================================
@@ -458,6 +527,7 @@ document.addEventListener("DOMContentLoaded", function() {
     loadDropRules();
     loadChannelSettings();
     loadDnsLoggingStatus();
+    loadLogSourceSilentConfig();
 });
 </script>
 {% endblock %}
