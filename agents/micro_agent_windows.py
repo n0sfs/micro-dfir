@@ -4,7 +4,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, tem
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.09.03.6"
+AGENT_VERSION = "2026.09.05.1"
 
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
@@ -197,8 +197,65 @@ def _sysmon_already_installed():
         pass
     return False
 
-def _ensure_sysmon_installed(context):
+def _sysmon_exe_name():
+    for svc in ('Sysmon64', 'Sysmon'):
+        try:
+            result = subprocess.run(['sc', 'query', svc], capture_output=True, text=True, timeout=10)
+            if 'RUNNING' in result.stdout or 'STOPPED' in result.stdout:
+                return svc
+        except Exception:
+            pass
+    return 'Sysmon64'
+
+SYSMON_CONFIG_HASH_PATH = os.path.join(INSTALL_DIR, "sysmon_config_hash.txt")
+
+def _read_applied_sysmon_hash():
+    try:
+        with open(SYSMON_CONFIG_HASH_PATH, 'r') as f:
+            return f.read().strip()
+    except Exception:
+        return None
+
+def _write_applied_sysmon_hash(h):
+    try:
+        os.makedirs(INSTALL_DIR, exist_ok=True)
+        with open(SYSMON_CONFIG_HASH_PATH, 'w') as f:
+            f.write(h or '')
+    except Exception:
+        pass
+
+def _update_sysmon_config(context):
+    """Sysmon was already installed on a PREVIOUS config, and the server's config has
+    since changed (server_hash != what we last applied) -- reconciles it live via
+    Sysmon's own `-c <file>` config-reload flag, which takes effect immediately with no
+    reinstall/restart needed. Previously this app only ever applied sysmon_config.xml
+    once, at first install -- editing the config server-side after that point silently
+    never reached an already-enrolled endpoint. Runs on its own thread, same as install."""
+    tmp_dir = tempfile.mkdtemp(prefix="microdfir_sysmon_update_")
+    try:
+        config_path = os.path.join(tmp_dir, "sysmon_config.xml")
+        config_req = urllib.request.Request(SYSMON_CONFIG_URL, headers={'X-Agent-Hostname': socket.gethostname(), 'X-Agent-Token': SOC_TOKEN})
+        with urllib.request.urlopen(config_req, context=context, timeout=15) as resp:
+            config_bytes = resp.read()
+        with open(config_path, 'wb') as f:
+            f.write(config_bytes)
+        applied_hash = hashlib.sha256(config_bytes).hexdigest()
+        exe = _sysmon_exe_name()
+        result = subprocess.run(f'{exe}.exe -c "{config_path}"', shell=True, capture_output=True, text=True, timeout=60)
+        print(f"[*] Sysmon config update output: {(result.stdout or '')[-500:]}", flush=True)
+        _write_applied_sysmon_hash(applied_hash)
+        print("[+] Sysmon config updated to the latest server version.", flush=True)
+    except Exception as e:
+        print(f"[-] Sysmon config update failed: {e}", flush=True)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+def _ensure_sysmon_installed(context, server_config_hash=None):
     if _sysmon_already_installed():
+        # Not a fresh install -- just check whether the server's config has moved on
+        # since we last applied one, and if so reload it live.
+        if server_config_hash and server_config_hash != _read_applied_sysmon_hash():
+            _update_sysmon_config(context)
         return
     marker_path = os.path.join(INSTALL_DIR, "sysmon_install_attempt.json")
     try:
@@ -234,17 +291,23 @@ def _ensure_sysmon_installed(context):
             return
 
         # Config comes from the server, not bundled in this script -- editable/tunable
-        # server-side (agents/sysmon_config.xml) without redistributing a new agent
-        # install to every endpoint.
+        # server-side (agents/sysmon_config.xml, or a custom override) without
+        # redistributing a new agent install to every endpoint. Once installed, a later
+        # server-side config change is picked up by _update_sysmon_config() above
+        # (compares server_config_hash against SYSMON_CONFIG_HASH_PATH each poll), not
+        # by this first-install path again.
         config_path = os.path.join(tmp_dir, "sysmon_config.xml")
         config_req = urllib.request.Request(SYSMON_CONFIG_URL, headers={'X-Agent-Hostname': socket.gethostname(), 'X-Agent-Token': SOC_TOKEN})
-        with urllib.request.urlopen(config_req, context=context, timeout=15) as resp, open(config_path, 'wb') as f:
-            f.write(resp.read())
+        with urllib.request.urlopen(config_req, context=context, timeout=15) as resp:
+            config_bytes = resp.read()
+        with open(config_path, 'wb') as f:
+            f.write(config_bytes)
 
         result = subprocess.run(f'"{sysmon_exe}" -accepteula -i "{config_path}"', shell=True, capture_output=True, text=True, timeout=60)
         print(f"[*] Sysmon install output: {(result.stdout or '')[-500:]}", flush=True)
 
         if _sysmon_already_installed():
+            _write_applied_sysmon_hash(hashlib.sha256(config_bytes).hexdigest())
             print("[+] Sysmon successfully installed and running.", flush=True)
         else:
             print("[-] Sysmon install command completed but the service isn't showing as installed -- check permissions/AV interference.", flush=True)
@@ -252,6 +315,56 @@ def _ensure_sysmon_installed(context):
         print(f"[-] Sysmon auto-install failed: {e}", flush=True)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+# Windows equivalent of reconcile_linux_audit_channels in micro_agent_linux.py: turning
+# on the Security channel's Event ID filtering is only half the picture -- several of
+# the highest-value Security events (process creation with command line, account/group
+# management, Kerberos/NTLM auth) are NOT generated at all unless the endpoint's own
+# Advanced Audit Policy has the matching subcategory enabled (Basic's 9-category audit
+# policy is deliberately never touched here -- Microsoft's own guidance is that mixing
+# Basic and Advanced via policy causes "unexpected results"). Likewise PowerShell script
+# block logging (event 4104) needs its own registry policy regardless of any Event ID
+# filter on the PowerShell channel. This is the "push the required policy" half; the
+# existing Event-ID filter in fetch_windows_logs() below is the "pull what we intend"
+# half -- turning a channel off here also turns the underlying policy back off, so
+# disabling a channel doesn't quietly leave endpoint policy changed behind it.
+_WINDOWS_AUDIT_POLICY_SUBCATEGORIES = [
+    "Logon", "Logoff", "Special Logon",
+    "Kerberos Authentication Service", "Kerberos Service Ticket Operations", "Credential Validation",
+    "User Account Management", "Security Group Management",
+    "Process Creation",
+    "Audit Policy Change",
+    "Security State Change",
+]
+_last_applied_windows_audit_policy = None
+
+def reconcile_windows_audit_policy(desired):
+    """desired: {'security_advanced_audit': bool, 'powershell_scriptblock_logging': bool},
+    computed server-side from whether the Security/PowerShell channels are enabled."""
+    global _last_applied_windows_audit_policy
+    desired_sig = (bool((desired or {}).get('security_advanced_audit')),
+                   bool((desired or {}).get('powershell_scriptblock_logging')))
+    if desired_sig == _last_applied_windows_audit_policy:
+        return
+    try:
+        audit_state = 'enable' if desired_sig[0] else 'disable'
+        for subcat in _WINDOWS_AUDIT_POLICY_SUBCATEGORIES:
+            subprocess.run(f'auditpol /set /subcategory:"{subcat}" /success:{audit_state} /failure:{audit_state}',
+                            shell=True, capture_output=True, timeout=10)
+        # Without this, Process Creation (4688) fires but its command-line field is empty.
+        cmdline_val = 1 if desired_sig[0] else 0
+        subprocess.run(
+            rf'reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit" /v ProcessCreationIncludeCmdLine_Enabled /t REG_DWORD /d {cmdline_val} /f',
+            shell=True, capture_output=True, timeout=10)
+        sbl_val = 1 if desired_sig[1] else 0
+        subprocess.run(
+            rf'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging" /v EnableScriptBlockLogging /t REG_DWORD /d {sbl_val} /f',
+            shell=True, capture_output=True, timeout=10)
+        _last_applied_windows_audit_policy = desired_sig
+        print(f"[+] Reconciled Windows audit policy: security_advanced_audit={desired_sig[0]}, "
+              f"powershell_scriptblock_logging={desired_sig[1]}", flush=True)
+    except Exception as e:
+        print(f"[!] Failed to reconcile Windows audit policy: {e}", flush=True)
 
 def install_agent():
     try:
@@ -687,9 +800,13 @@ def run_agent():
                         # on its own thread (same pattern as run_remote_script above) so
                         # a slow download/install can never delay this agent's own
                         # check-ins or log shipping. _ensure_sysmon_installed() itself
-                        # no-ops immediately if Sysmon is already installed.
+                        # no-ops immediately if Sysmon is already installed AND its
+                        # config hash matches what the server currently serves.
                         if data.get('sysmon_required'):
-                            threading.Thread(target=_ensure_sysmon_installed, args=(context,), daemon=True).start()
+                            threading.Thread(target=_ensure_sysmon_installed, args=(context, data.get('sysmon_config_hash')), daemon=True).start()
+
+                        if data.get('windows_audit_policy') is not None:
+                            threading.Thread(target=reconcile_windows_audit_policy, args=(data['windows_audit_policy'],), daemon=True).start()
 
                     print("[+] Check-in successful!", flush=True)
                     break
