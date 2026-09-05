@@ -33,6 +33,18 @@ directly, stored as an override file outside the git tree so it survives future 
 Security channel's default Event ID filter is now a curated ~28-ID baseline instead of
 collecting every Security event unfiltered — scoped to fresh installs/new channels
 only; confirmed live that production's existing saved template was left untouched.
+The Sysmon editor also gained an "Import Config" file picker (loads a `.xml` file into
+the textarea client-side for review before saving — e.g. starting from a downloaded
+SwiftOnSecurity or Olaf Hartong config) and an always-available "Revert to Default"
+button (previously hidden unless a custom override already existed).
+
+Separately: every Linux channel audit event now carries a `[channel=<key>]` tag in its
+message. `event_id` alone can't tell channels apart — several are pure `-w` watch rules
+and all land on `event_id='file_watch'` (identity_changes, ssh_config_changes,
+cron_changes, pam_changes, login_session_tamper, and even file_deletion's unlink/rename
+syscalls, which carry a PATH record) — so this is what makes it possible to write a
+Sigma rule (or anything else) that reliably targets one specific channel's events
+instead of guessing from watched-path text alone.
 
 ### Expand Linux Log Channels to 11 CIS/STIG-aligned channels + custom channels
 
