@@ -77,14 +77,17 @@ $result | ConvertTo-Json -Depth 4 -Compress
 """
 
 def collect_file(path):
-    # Backtick must be escaped first — escaping "/$ afterward would otherwise
-    # produce a fresh backtick that pairs with a pre-existing one in the input
-    # and cancels out, letting an embedded $(...) execute as a subexpression.
+    # 40KB raw, not 4MB -- base64 inflates size by ~4/3, and the server truncates a
+    # command's whole stdout (this JSON wrapper included) to 60,000 chars
+    # (api_agent_result, app.py) with no decode-aware truncation. A 4MB file's base64
+    # blows straight through that limit and gets cut mid-string into invalid JSON --
+    # confirmed as a real bug, not a hypothetical. 40KB raw -> ~54KB base64, leaving
+    # headroom for the path/size/sha256 fields around it.
     esc = path.replace('`', '``').replace('"', '`"').replace('$', '`$')
     return f"""$p = "{esc}"
 if (-not (Test-Path $p)) {{ '{{"error":"file not found"}}'; exit }}
 $size = (Get-Item $p).Length
-if ($size -gt 4MB) {{ "{{`"error`":`"file too large ($size bytes, 4MB limit)`"}}"; exit }}
+if ($size -gt 40KB) {{ "{{`"error`":`"file too large ($size bytes, 40KB limit)`"}}"; exit }}
 $bytes = [IO.File]::ReadAllBytes($p)
 $b64 = [Convert]::ToBase64String($bytes)
 $hash = (Get-FileHash $p -Algorithm SHA256).Hash
@@ -999,6 +1002,9 @@ def collect_file_linux(path):
     # A quoted heredoc delimiter ('PYEOF') disables all shell expansion inside the
     # block, so the path only needs escaping for its own Python string-literal context
     # below — not for bash at all, unlike the PowerShell version of this template.
+    # 40KB raw, not 4MB -- see collect_file()'s comment: base64 inflation blows through
+    # the server's 60,000-char stdout truncation (api_agent_result, app.py) well before
+    # 4MB, corrupting the JSON mid-string. Same fix applied identically here.
     esc = path.replace('\\', '\\\\').replace("'", "\\'")
     return f"""python3 - <<'PYEOF'
 import base64, hashlib, json, os
@@ -1007,8 +1013,8 @@ if not os.path.isfile(p):
     print(json.dumps({{'error': 'file not found'}}))
 else:
     size = os.path.getsize(p)
-    if size > 4 * 1024 * 1024:
-        print(json.dumps({{'error': 'file too large (%d bytes, 4MB limit)' % size}}))
+    if size > 40 * 1024:
+        print(json.dumps({{'error': 'file too large (%d bytes, 40KB limit)' % size}}))
     else:
         with open(p, 'rb') as f:
             data = f.read()
@@ -1441,6 +1447,87 @@ getent passwd | awk -F: '$3>=1000 || $3==0 {print $1":"$6}' | while IFS=: read -
 done
 """
 
+# Linux counterpart to collect_live_forensics() (Windows) -- same JSON shape/field-
+# naming convention (arrays capped with an explicit *_truncated flag, a closing 'note'
+# disclaimer) so agents.html's generic collect_*/persistence_sweep renderer displays it
+# identically with zero JS changes. Windows' own fields don't all have a clean Linux
+# equivalent (no registry, no BitLocker, no .lnk shortcuts; shell history/authorized_keys/
+# known_hosts are already covered by collect_ssh_artifacts_linux, not duplicated here) --
+# this covers the two gaps that ARE real and missing: recent USB/removable-media activity
+# and a general recent-file-changes scan, plus a short recent-auth-events pull as the
+# closest Linux analog to Windows' targeted Security-log events.
+def collect_live_forensics_linux():
+    return r"""python3 - <<'PYEOF'
+import json, shutil, subprocess
+
+def run(cmd, timeout=15):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:
+        return ''
+
+result = {}
+
+# Best-effort, not a real audit trail -- there's no persistent USB-history equivalent to
+# Windows' USBSTOR registry key without auditd rules already watching for it. journalctl
+# (present on any systemd host) is tried first since it survives a reboot via the
+# persistent journal; dmesg (ring-buffer only, lost on reboot) is the fallback for
+# non-systemd or non-persistent-journal hosts.
+max_usb_lines = 50
+usb_lines = []
+if shutil.which('journalctl'):
+    out = run(['journalctl', '-k', '--no-pager', '-g', 'usb|mmc', '-i', '--since', '-7 days'], timeout=20)
+    usb_lines = [l for l in out.splitlines() if l.strip()]
+elif shutil.which('dmesg'):
+    out = run(['dmesg'], timeout=10)
+    usb_lines = [l for l in out.splitlines() if 'usb' in l.lower() or 'mmc' in l.lower()]
+result['usb_removable_media_events'] = usb_lines[-max_usb_lines:]
+result['usb_removable_media_events_truncated'] = len(usb_lines) > max_usb_lines
+
+# Recent auth activity -- the closest Linux analog to Windows' targeted 4624/4625/4648/
+# 4672/4688 Security-log pull. journalctl again preferred over grepping /var/log/auth.log
+# or /var/log/secure directly since which file exists (and whether it's even text, vs.
+# binary wtmp/btmp) varies by distro; journalctl abstracts that away.
+max_auth_lines = 60
+auth_lines = []
+if shutil.which('journalctl'):
+    out = run(['journalctl', '--no-pager', '-g', 'sshd|sudo|su:|useradd|passwd', '-i', '--since', '-24 hours'], timeout=20)
+    auth_lines = [l for l in out.splitlines() if l.strip()]
+result['auth_events'] = auth_lines[-max_auth_lines:]
+result['auth_events_truncated'] = len(auth_lines) > max_auth_lines
+
+# General recent-file-changes scan -- the gap persistence_sweep_linux's own "Autostart
+# Files Modified in the Last 7 Days" section doesn't cover (that's scoped to
+# /etc/cron.d and /etc/systemd/system only). -xdev on each starting path keeps this
+# from wandering into a separately-mounted network share or removable volume.
+max_file_changes = 100
+out = run(['find', '/tmp', '/var/tmp', '/root', '/home', '/etc', '-xdev', '-type', 'f',
+           '-newermt', '-24 hours'], timeout=30)
+file_lines = [l for l in out.splitlines() if l.strip()]
+result['recent_file_changes'] = file_lines[:max_file_changes]
+result['recent_file_changes_truncated'] = len(file_lines) > max_file_changes
+
+# Current mount snapshot for context -- deliberately labeled as a snapshot, not
+# "history" (no persistent mount-history mechanism exists here without auditd).
+mounts = []
+try:
+    with open('/proc/mounts') as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) >= 3 and not parts[0].startswith(('proc', 'sysfs', 'cgroup', 'devpts', 'tmpfs', 'devtmpfs')):
+                mounts.append({'device': parts[0], 'mount_point': parts[1], 'fstype': parts[2]})
+except Exception:
+    pass
+result['current_mounts'] = mounts
+
+result['note'] = ("USB/removable-media and recent-file-change data here is a best-effort snapshot from "
+                   "kernel/journal logs and a timestamp scan, not a full audit trail -- shell history, "
+                   "authorized_keys, and known_hosts are covered separately by Collect-SSH-Artifacts. "
+                   "Use 'Collect File' for anything needing deeper offline analysis.")
+print(json.dumps(result))
+PYEOF
+"""
+
 def enable_exec_auditing():
     return r"""RULES_FILE=/etc/audit/rules.d/microdfir.rules
 if ! command -v auditctl >/dev/null 2>&1; then
@@ -1695,6 +1782,7 @@ LINUX_TEMPLATES = {
     'collect_file': (lambda params: collect_file_linux(params['path']), ['path']),
     'quarantine_file': (lambda params: quarantine_file_linux(params['path']), ['path']),
     'collect_ssh_artifacts': (lambda params: collect_ssh_artifacts_linux(), []),
+    'collect_live_forensics': (lambda params: collect_live_forensics_linux(), []),
     'collect_software_inventory': (lambda params: collect_software_inventory_linux(), []),
     'sca_check': (lambda params: sca_check_linux(), []),
     'collect_network_connections': (lambda params: collect_network_connections_linux(), []),
@@ -1820,7 +1908,9 @@ find /Library/LaunchAgents /Library/LaunchDaemons ~/Library/LaunchAgents -type f
 def collect_file_macos(path):
     # Identical shape/escaping to collect_file_linux() -- a quoted heredoc delimiter
     # disables all shell expansion, so the path only needs Python string-literal
-    # escaping, not bash escaping.
+    # escaping, not bash escaping. 40KB raw, not 4MB -- see collect_file()'s comment:
+    # base64 inflation blows through the server's 60,000-char stdout truncation
+    # (api_agent_result, app.py) well before 4MB, corrupting the JSON mid-string.
     esc = path.replace('\\', '\\\\').replace("'", "\\'")
     return f"""python3 - <<'PYEOF'
 import base64, hashlib, json, os
@@ -1829,8 +1919,8 @@ if not os.path.isfile(p):
     print(json.dumps({{'error': 'file not found'}}))
 else:
     size = os.path.getsize(p)
-    if size > 4 * 1024 * 1024:
-        print(json.dumps({{'error': 'file too large (%d bytes, 4MB limit)' % size}}))
+    if size > 40 * 1024:
+        print(json.dumps({{'error': 'file too large (%d bytes, 40KB limit)' % size}}))
     else:
         with open(p, 'rb') as f:
             data = f.read()

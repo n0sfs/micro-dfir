@@ -1939,8 +1939,14 @@ async function deleteIdentity(iid) {
 // Old bookmarks/links to the since-removed Anomaly Detections tab (?tab=detections) just
 // fall through here and land on Timeline -- its merged replacement, and already the
 // default active pane -- instead of matching nothing.
-const _uebaUrlTab = new URLSearchParams(window.location.search).get('tab');
+const _uebaUrlParams = new URLSearchParams(window.location.search);
+const _uebaUrlTab = _uebaUrlParams.get('tab');
 if (_uebaUrlTab && UEBA_TABS.includes(_uebaUrlTab)) switchUebaTab(_uebaUrlTab);
+// Deep-link support for "View Timeline" links from Agents/Cases (?tab=timeline&host=...)
+// -- pre-fills the free-text search box rather than adding a dedicated host param/filter,
+// since tlSearch already matches host/user/message and loadTimeline() reads it as-is.
+const _uebaUrlHost = _uebaUrlParams.get('host');
+if (_uebaUrlHost) document.getElementById('tlSearch').value = _uebaUrlHost;
 
 onAnomalyRuleSourceChange();
 loadTimeline();
