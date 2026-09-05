@@ -2102,6 +2102,10 @@ function initSearchTab() {
     const _params = new URLSearchParams(window.location.search);
     const _deepLinkAlertId = _params.get('alert_id');
     if (_deepLinkAlertId) {
+        // buildLogQueryParams() ignores #searchQuery entirely unless this is checked --
+        // loadSearchModePrefs() (just above) may have just turned it off from a saved
+        // preference, so the deep link's query would otherwise be silently dropped.
+        document.getElementById('toggleAdvancedQuery').checked = true;
         document.getElementById('searchQuery').value = `item_id:${_deepLinkAlertId}`;
         document.querySelectorAll('.type-chk').forEach(c => { c.checked = (c.value === 'alert'); });
         // The default 5-minute window would hide any alert not fired in the last few
