@@ -353,7 +353,7 @@ function checkCaseIoc(iocId, value) {
 // Local duplicate of threat_intel.html's enrichVerdictBadge -- per-file self-contained
 // templates convention, not a cross-template import.
 function enrichVerdictBadge(verdict) {
-    const map = {malicious: 'bg-danger', suspicious: 'bg-warning text-dark', clean: 'bg-success', info: 'bg-info text-dark', unconfigured: 'bg-secondary', error: 'bg-secondary'};
+    const map = {malicious: 'bg-danger', suspicious: 'bg-warning text-dark', clean: 'bg-success', info: 'bg-info text-dark', unconfigured: 'bg-secondary', error: 'bg-secondary', unknown: 'bg-secondary'};
     return `<span class="badge ${map[verdict] || 'bg-secondary'}">${escHtml(verdict)}</span>`;
 }
 
@@ -372,7 +372,8 @@ function checkCaseIocExternal(iocId, value, iocType) {
             cell.innerHTML = `<span class="text-muted">${escHtml(data.message || 'No external sources configured for this type.')}</span>`;
             return;
         }
-        cell.innerHTML = data.results.map(r => `<div><strong>${escHtml(r.source)}</strong> ${enrichVerdictBadge(r.verdict)}<div class="text-muted">${escHtml(r.summary)}</div></div>`).join('');
+        const overall = data.results.length > 1 ? `<div class="mb-1">Overall: ${enrichVerdictBadge(data.overall_verdict)}</div>` : '';
+        cell.innerHTML = overall + data.results.map(r => `<div><strong>${escHtml(r.source)}</strong> ${enrichVerdictBadge(r.verdict)}<div class="text-muted">${escHtml(r.summary)}</div></div>`).join('');
     }).catch(err => { cell.innerHTML = '<span class="text-danger small">Error</span>'; console.error(err); });
 }
 

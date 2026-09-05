@@ -134,7 +134,7 @@
                         <span id="iocLookupResult" class="small"></span>
                     </div>
                     <div id="iocEnrichResults" class="mt-2 small" style="display:none;"></div>
-                    <div class="form-text text-muted" id="iocLookupHint">Exact-match check against the local IOC set synced from your Threat Feeds below — not a live external lookup. "Enrich" queries free-tier external sources (Shodan InternetDB, AbuseIPDB) on demand, cached 24h. Pick a specific source above to check or verify against just that one.</div>
+                    <div class="form-text text-muted" id="iocLookupHint">Exact-match check against the local IOC set synced from your Threat Feeds below — not a live external lookup. "Enrich" queries free-tier external sources (Shodan InternetDB, AbuseIPDB, VirusTotal, URLhaus) on demand, cached 24h. Pick a specific source above to check or verify against just that one.</div>
                 </div>
             </div>
 
@@ -2151,6 +2151,21 @@ function renderRuleSourcesTable(feeds, isAdmin) {
 let lastLookupValue = '';
 let lastLookupIocType = '';
 const _IPV4_SHAPE_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
+const _HASH_SHAPE_RE = /^[a-fA-F0-9]{32}$|^[a-fA-F0-9]{40}$|^[a-fA-F0-9]{64}$/;
+const _URL_SHAPE_RE = /^https?:\/\//i;
+const _DOMAIN_SHAPE_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/i;
+
+// Best-effort client-side shape guess so the Enrich button can appear even when there's
+// no local IOC match to derive a type from (matches analyzers.py's ioc_types: ip, hash,
+// domain, url) -- server-side applicable_analyzers() is still the source of truth and
+// degrades gracefully (a friendly "no analyzers apply" message) if this guesses wrong.
+function _guessIocShape(value) {
+    if (_IPV4_SHAPE_RE.test(value)) return 'ip';
+    if (_HASH_SHAPE_RE.test(value)) return 'hash';
+    if (_URL_SHAPE_RE.test(value)) return 'url';
+    if (_DOMAIN_SHAPE_RE.test(value)) return 'domain';
+    return '';
+}
 
 function onIocSourceChange() {
     document.getElementById('iocLookupResult').innerHTML = '';
@@ -2168,7 +2183,7 @@ async function runIocLookup() {
     if (!ioc) { resultEl.innerHTML = '<span class="text-muted">Enter a value to check.</span>'; enrichBtn.style.display = 'none'; return; }
     resultEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
     lastLookupValue = ioc;
-    lastLookupIocType = _IPV4_SHAPE_RE.test(ioc) ? 'ip' : '';
+    lastLookupIocType = _guessIocShape(ioc);
 
     if (sourceVal.startsWith('live:')) {
         // A specific live source was picked -- Check IS the verify action here, no
@@ -2209,7 +2224,7 @@ async function runIocLookup() {
             const corrobNote = data.corroboration_count > 1 ? `, corroborated by ${data.corroboration_count} independent feeds` : '';
             resultEl.innerHTML = `<span class="text-danger"><i class="fa-solid fa-triangle-exclamation me-1"></i>MATCH — ${escHtml(m.name || m.ioc_type)} (source: ${escHtml(m.source_name || 'Unknown')}${corrobNote}${sightingNote})</span>`;
         }
-        enrichBtn.style.display = lastLookupIocType.includes('ip') ? 'inline-block' : 'none';
+        enrichBtn.style.display = lastLookupIocType ? 'inline-block' : 'none';
     } catch (e) {
         resultEl.innerHTML = `<span class="text-danger">Error: ${escHtml(String(e))}</span>`;
         enrichBtn.style.display = 'none';
@@ -2217,7 +2232,7 @@ async function runIocLookup() {
 }
 
 function enrichVerdictBadge(verdict) {
-    const map = {malicious: 'bg-danger', suspicious: 'bg-warning text-dark', clean: 'bg-success', info: 'bg-info text-dark', unconfigured: 'bg-secondary', error: 'bg-secondary'};
+    const map = {malicious: 'bg-danger', suspicious: 'bg-warning text-dark', clean: 'bg-success', info: 'bg-info text-dark', unconfigured: 'bg-secondary', error: 'bg-secondary', unknown: 'bg-secondary'};
     return `<span class="badge ${map[verdict] || 'bg-secondary'}">${escHtml(verdict)}</span>`;
 }
 
@@ -2234,7 +2249,8 @@ async function runIocEnrich() {
         const data = await res.json();
         if (!res.ok || !data.results) { resultsEl.innerHTML = `<span class="text-danger">${escHtml(data.message || data.error || 'Enrichment failed.')}</span>`; return; }
         if (!data.results.length) { resultsEl.innerHTML = `<span class="text-muted">${escHtml(data.message || 'No analyzers available for this value.')}</span>`; return; }
-        resultsEl.innerHTML = data.results.map(r => `
+        const overall = data.results.length > 1 ? `<div class="mb-1">Overall: ${enrichVerdictBadge(data.overall_verdict)}</div>` : '';
+        resultsEl.innerHTML = overall + data.results.map(r => `
             <div class="border border-secondary rounded p-2 mb-1">
                 <strong>${escHtml(r.source)}</strong> ${enrichVerdictBadge(r.verdict)}
                 ${r.cached ? `<span class="text-muted small">(cached, ${escHtml(r.fetched_at || '')})</span>` : ''}
@@ -3266,11 +3282,31 @@ function loadIocs() {
                     <td>${i.sighting_count > 0
                         ? `<span class="badge bg-danger" title="Last observed here: ${escHtml(i.last_sighted || '')}">${i.sighting_count}</span>`
                         : '<span class="text-muted small">—</span>'}</td>
-                    <td class="text-end"><button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1" title="Link to entity" onclick="openLinkIocModal(${idx})"><i class="fa-solid fa-link"></i></button></td>
+                    <td class="text-end text-nowrap">
+                        <button type="button" class="btn btn-sm btn-outline-warning py-0 px-1 me-1" title="Check against external enrichment sources" onclick="enrichCatalogIoc(${idx})"><i class="fa-solid fa-globe"></i></button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1" title="Link to entity" onclick="openLinkIocModal(${idx})"><i class="fa-solid fa-link"></i></button>
+                    </td>
                 </tr>
             `).join('');
         })
         .catch(err => console.error('Error loading IOCs:', err));
+}
+
+// Reuses the Quick IOC Lookup card's existing enrich machinery rather than adding a
+// second results area to this already-dense table -- populates its state directly from
+// the catalog row's own known ioc_type (more reliable than the Lookup card's own
+// client-side shape guess) and jumps straight to the external check.
+function enrichCatalogIoc(idx) {
+    const ioc = currentIocs[idx];
+    if (!ioc) return;
+    document.getElementById('iocLookupInput').value = ioc.pattern;
+    document.getElementById('iocLookupSource').value = '';
+    document.getElementById('iocLookupResult').innerHTML = `<span class="text-muted">Checking external sources for ${escHtml(ioc.pattern)} below&hellip;</span>`;
+    document.getElementById('iocEnrichBtn').style.display = 'inline-block';
+    lastLookupValue = ioc.pattern;
+    lastLookupIocType = ioc.ioc_type || '';
+    document.getElementById('iocLookupInput').scrollIntoView({behavior: 'smooth', block: 'center'});
+    runIocEnrich();
 }
 
 function cveSeverityBadge(severity) {
