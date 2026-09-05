@@ -423,6 +423,12 @@
                                         <option value="{{ src }}">{{ src }}</option>
                                         {% endfor %}
                                     </select>
+                                    <select id="yaraCategoryFilter" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width: 260px;" onchange="filterYaraRules()">
+                                        <option value="">All Categories</option>
+                                        {% for category in yara_files_by_category.keys()|sort %}
+                                        <option value="{{ category }}">{{ category }} ({{ yara_files_by_category[category]|length }})</option>
+                                        {% endfor %}
+                                    </select>
                                 </div>
                                 <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
                                     <div>
@@ -430,12 +436,16 @@
                                         <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAll(false)">Clear</button>
                                     </div>
                                     {% if has_permission('rules.manage') %}
-                                    <button type="button" class="btn btn-sm btn-outline-danger" id="yaraBulkDeleteBtn" onclick="bulkDeleteYaraRules()" disabled><i class="fa-solid fa-trash me-1"></i>Delete Selected (<span id="yaraBulkDeleteCount">0</span>)</button>
+                                    <div>
+                                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAllVisibleForDelete(true)" title="Check the delete-box for every rule currently visible under the active search/filters"><i class="fa-solid fa-square-check me-1"></i>Select Visible</button>
+                                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleSelectAllVisibleForDelete(false)">Clear</button>
+                                        <button type="button" class="btn btn-sm btn-outline-danger" id="yaraBulkDeleteBtn" onclick="bulkDeleteYaraRules()" disabled><i class="fa-solid fa-trash me-1"></i>Delete Selected (<span id="yaraBulkDeleteCount">0</span>)</button>
+                                    </div>
                                     {% endif %}
                                 </div>
                                 <div class="border border-secondary rounded p-2 bg-black flex-grow-1" id="yaraRuleList" style="overflow-y: auto; min-height: 400px;">
                                     {% for category, files in yara_files_by_category.items()|sort %}
-                                    <details class="mb-1 yara-cat-group" data-source="{{ yara_category_sources.get(category, 'Other') }}">
+                                    <details class="mb-1 yara-cat-group" data-source="{{ yara_category_sources.get(category, 'Other') }}" data-category="{{ category }}">
                                         <summary class="text-uppercase text-muted small fw-bold mt-2 mb-1" style="cursor:pointer;">{{ category }} ({{ files|length }})</summary>
                                         <div class="ms-3">
                                         {% for rf in files %}
@@ -1166,8 +1176,14 @@ function filterYaraRules() {
     const q = document.getElementById('yaraRuleSearch').value.trim().toLowerCase();
     const sourceFilterEl = document.getElementById('yaraSourceFilter');
     const src = sourceFilterEl ? sourceFilterEl.value : '';
+    const categoryFilterEl = document.getElementById('yaraCategoryFilter');
+    const cat = categoryFilterEl ? categoryFilterEl.value : '';
     document.querySelectorAll('#yaraRuleList .yara-cat-group').forEach(group => {
         if (src && group.dataset.source !== src) {
+            group.style.display = 'none';
+            return;
+        }
+        if (cat && group.dataset.category !== cat) {
             group.style.display = 'none';
             return;
         }
@@ -1237,6 +1253,23 @@ async function deleteYaraRule(relpath) {
 // A separate, dedicated checkbox per row (default unchecked) rather than reusing the
 // scan-selection checkboxes (default CHECKED for every rule) -- reusing those would
 // make it dangerously easy to bulk-delete every loaded rule by accident.
+// Scoped to whatever filterYaraRules() currently shows (search/source/category), not
+// literally on-screen -- a collapsed (unexpanded) category still counts as "visible"
+// here, matching "select what my filter matched" rather than "select what I can see
+// without scrolling/expanding". Makes bulk-deleting a whole filtered-down category
+// practical without hand-checking every individual rule.
+function toggleSelectAllVisibleForDelete(state) {
+    document.querySelectorAll('.yara-cat-group').forEach(group => {
+        if (group.style.display === 'none') return;
+        group.querySelectorAll('.yara-rule-row').forEach(row => {
+            if (row.style.display === 'none') return;
+            const cb = row.querySelector('.yara-delete-select');
+            if (cb) cb.checked = state;
+        });
+    });
+    updateYaraBulkDeleteButton();
+}
+
 function updateYaraBulkDeleteButton() {
     const count = document.querySelectorAll('.yara-delete-select:checked').length;
     const btn = document.getElementById('yaraBulkDeleteBtn');
