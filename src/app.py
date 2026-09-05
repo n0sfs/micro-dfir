@@ -781,11 +781,14 @@ def api_ingest():
 @login_required
 def dash():
     active_tab = request.args.get('tab', 'search')
-    # MITRE Coverage moved to its own top-level page -- redirect old ?tab=coverage
-    # bookmarks/links instead of rendering a dead tab (switchSiemTab would silently
-    # no-op against a tab no longer in SIEM_TABS, leaving the page blank).
+    # MITRE Coverage and Log Pipeline both moved to their own top-level pages --
+    # redirect old ?tab= bookmarks/links instead of rendering a dead tab
+    # (switchSiemTab would silently no-op against a tab no longer in SIEM_TABS,
+    # leaving the page blank).
     if active_tab == 'coverage':
         return redirect(url_for('coverage_page'))
+    if active_tab == 'pipeline':
+        return redirect(url_for('log_pipeline_page'))
     return render_template('dashboard.html', active_tab=active_tab, current_user=current_user,
                             compliance_frameworks=COMPLIANCE_FRAMEWORKS, log_search_allowed_fields=LOG_SEARCH_ALLOWED_FIELDS)
 
@@ -794,6 +797,11 @@ def dash():
 def coverage_page():
     active_tab = request.args.get('tab', 'mitre')
     return render_template('coverage.html', active_tab=active_tab, current_user=current_user)
+
+@app.route('/log-pipeline')
+@login_required
+def log_pipeline_page():
+    return render_template('log_pipeline.html', current_user=current_user)
 
 # Home count queries reuse existing canonical data sources rather than new bookkeeping:
 # ueba_entity_baselines is already this app's registry of every host/user the UEBA

@@ -367,7 +367,8 @@ body.sidebar-collapsed .nav-block .nav-badge{
         </div>
         <nav class="sidebar-nav">
             <a href="{{ url_for('dashboards_page') }}" class="nav-block {{ 'active' if request.endpoint in ['home', 'dashboards_page'] else '' }}" title="Home"><i class="fa-solid fa-house"></i><span>Home</span></a>
-            <a href="{{ url_for('dash') }}" class="nav-block {{ 'active' if request.endpoint in ['dash','pipeline','rules','detection_tuning','reports','download_report','trigger_report'] else '' }}" title="SIEM"><i class="fa-solid fa-shield-halved"></i><span>SIEM</span></a>
+            <a href="{{ url_for('log_pipeline_page') }}" class="nav-block {{ 'active' if request.endpoint == 'log_pipeline_page' else '' }}" title="Log Pipeline"><i class="fa-solid fa-filter"></i><span>Log Pipeline</span></a>
+            <a href="{{ url_for('dash') }}" class="nav-block {{ 'active' if request.endpoint in ['dash','rules','detection_tuning','reports','download_report','trigger_report'] else '' }}" title="SIEM"><i class="fa-solid fa-shield-halved"></i><span>SIEM</span></a>
             <a href="{{ url_for('coverage_page') }}" class="nav-block {{ 'active' if request.endpoint == 'coverage_page' else '' }}" title="Coverage"><i class="fa-solid fa-diagram-project"></i><span>Coverage</span></a>
             <a href="/agents" class="nav-block {{ 'active' if request.endpoint == 'agents' else '' }}" title="EDR"><i class="fa-solid fa-laptop-medical"></i><span>EDR</span></a>
             <a href="/ueba" class="nav-block {{ 'active' if request.endpoint in ['ueba', 'ueba_tuning'] else '' }}" title="UEBA"><i class="fa-solid fa-user-secret"></i><span>UEBA</span></a>
