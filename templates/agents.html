@@ -880,6 +880,7 @@ function showHostInfoMenu(evt, hostname) {
             </table>
             <hr class="dropdown-divider my-1">
             <a class="dropdown-item small text-primary px-1" href="#" onclick="hideHostInfoMenu(); openInConsole('${hostname.replace(/'/g, "\\'")}'); return false;"><i class="fa-solid fa-terminal me-2"></i>Interact in Console</a>
+            <a class="dropdown-item small text-primary px-1" href="/ueba?tab=timeline&host=${encodeURIComponent(hostname)}"><i class="fa-solid fa-timeline me-2"></i>View Timeline</a>
         </div>
     `;
     const x = Math.min(evt.clientX, window.innerWidth - 280);
@@ -917,7 +918,7 @@ let heartbeatHistoryChart = null;
 function openHostDetailModal(hostname) {
     const dev = allEndpoints.find(e => e.hostname === hostname);
     if (!dev) return;
-    document.getElementById('hostDetailTitle').innerHTML = `<i class="fa-solid fa-laptop-medical me-2"></i>${escHtml(hostname)}`;
+    document.getElementById('hostDetailTitle').innerHTML = `<i class="fa-solid fa-laptop-medical me-2"></i>${escHtml(hostname)} <a href="/ueba?tab=timeline&host=${encodeURIComponent(hostname)}" class="small ms-2" title="View this host's activity on the UEBA Timeline"><i class="fa-solid fa-timeline me-1"></i>Timeline</a>`;
     const body = document.getElementById('hostDetailBody');
     body.innerHTML = `
         <table class="table table-sm table-dark table-borderless mb-3">
@@ -1328,6 +1329,7 @@ const CONSOLE_ACTION_DISPLAY = {
         collect_software_inventory: 'Collect-Software-Inventory (dpkg/rpm package list -- feeds the "Check for Vulnerabilities" CVE correlation)',
         sca_check: 'SCA-Check (hand-authored, CIS-Benchmark-flavored hardening checks -- SSH config, file permissions, password policy, ASLR, and more)',
         collect_ssh_artifacts: 'Collect-SSH-Artifacts (shell history, authorized_keys, known_hosts, all real users)',
+        collect_live_forensics: 'Collect-Live-Forensics (recent USB/removable-media kernel events, recent auth activity, recent file changes across common drop locations, current mount snapshot)',
         collect_network_connections: 'Collect-Network-Connections (ss/netstat: live TCP/UDP connections with owning process)',
         collect_dns_arp: 'Collect-DNS-ARP (ip neigh/arp ARP table + systemd-resolved cache stats if active)',
         check_process_injection_indicators: 'Check-Process-Injection-Indicators (deleted-but-running executables, anonymous executable memory mappings -- informational, not a verdict)',
@@ -1342,7 +1344,7 @@ const CONSOLE_ACTION_DISPLAY = {
     macos: {
         list_processes: 'ps (list running processes)',
         collect_triage: 'Collect-Triage (processes, connections, LaunchAgents/LaunchDaemons, logged-in users)',
-        collect_file: 'Collect-File (hash + base64 content, 4MB limit)',
+        collect_file: 'Collect-File (hash + base64 content, 40KB limit)',
         kill_process_by_name: 'Kill-Process-By-Name (terminates every process whose name or command line matches, not just one live PID)',
         quarantine_file: 'Quarantine-File (move to a locked-down folder, chmod 000 + chflags uchg if supported -- contain, not just collect)',
         isolate_host: 'Isolate-Host (pfctl: block all traffic except this SOC server -- not yet live-verified on real macOS hardware)',
@@ -1380,7 +1382,7 @@ const CONSOLE_DROPDOWN_ACTIONS = [
     { value: 'collect_browser_artifacts', label: 'Browser Artifacts', permission: 'edr.command.advanced', osOnly: 'windows' },
     { value: 'collect_forensic_timestamps', label: 'Forensic Timestamps', permission: 'edr.command.advanced', osOnly: 'windows' },
     { value: 'collect_recent_file_changes', label: 'Recent File Changes', permission: 'edr.command.advanced', osOnly: 'windows' },
-    { value: 'collect_live_forensics', label: 'Live Forensic Triage', permission: 'edr.command.advanced', osOnly: 'windows' },
+    { value: 'collect_live_forensics', label: 'Live Forensic Triage', permission: 'edr.command.advanced', osOnly: ['windows', 'linux'] },
     { value: 'collect_ssh_artifacts', label: 'SSH Artifacts', permission: 'edr.command.advanced', osOnly: 'linux' },
 ];
 
@@ -1701,7 +1703,7 @@ function consoleShowParamForm(label) {
             </div>`;
     } else if (label === 'collect_file') {
         wrap.innerHTML = `
-            <label class="form-label small text-muted mb-1">Full file path (max 4MB)</label>
+            <label class="form-label small text-muted mb-1">Full file path (max 40KB)</label>
             <div class="input-group input-group-sm">
                 <input type="text" id="paramPath" class="form-control bg-dark text-light border-secondary" placeholder="C:\\Users\\...\\file.exe" onkeydown="if(event.key==='Enter') submitCollectFile()">
                 <button class="btn btn-outline-primary" onclick="submitCollectFile()">Run</button>

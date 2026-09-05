@@ -305,7 +305,10 @@ function caseAssetRow(a, isClosed) {
             </td>
             <td class="small">${escHtml(a.related_indicator || '')}</td>
             <td class="small text-muted">${escHtml(a.notes || '')}</td>
-            <td class="text-nowrap">${caseAssetEdrActions(a)}</td>
+            <td class="text-nowrap">
+                <a href="/ueba?tab=timeline&host=${encodeURIComponent(a.host)}" class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="View this host's activity on the UEBA Timeline"><i class="fa-solid fa-timeline"></i></a>
+                ${caseAssetEdrActions(a)}
+            </td>
             <td class="text-end"><button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove asset" onclick="removeCaseAsset(${a.id})" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-xmark"></i></button></td>
         </tr>`;
 }

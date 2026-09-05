@@ -10,6 +10,30 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-05
 
+### EDR: fix collect_file truncation bug, add Linux live forensics, deep-link into the UEBA Timeline
+
+Research comparing against Heimdall-DFIR (a real, active offline-artifact/timeline DFIR
+tool) found Micro DFIR's EDR agents already cover most of that ground -- the real,
+narrowly-scoped gaps were: (1) a genuine bug where `collect_file`'s advertised 4MB limit
+produces base64 output that blows straight through the server's 60,000-char stdout
+truncation (`api_agent_result`), silently corrupting the JSON mid-string for anything
+over ~44KB raw -- fixed by lowering the real, honest limit to 40KB on all three platforms
+(Windows/Linux/macOS), verified by executing the actual generated collector code against
+real temp files at the boundary; (2) Linux had no `collect_live_forensics` action at all
+(Windows-only) -- added a Linux equivalent covering the genuinely-missing pieces (recent
+USB/removable-media kernel events via journalctl with a dmesg fallback, recent
+auth activity, a general recent-file-changes scan, a current-mounts snapshot), without
+duplicating shell history/authorized_keys/known_hosts already covered by
+Collect-SSH-Artifacts; (3) the existing UEBA Timeline (already a real unified per-host
+chronological view merging anomalies/alerts/EDR results/logs -- not purely UEBA-scoped
+as assumed) had no entry point from Agents or Cases, so an analyst had to manually type
+a hostname into it -- added `?host=` deep-link support plus "View Timeline" links from
+the Agents context menu, the Host Detail modal, and each Case Asset row. Explicitly not
+pursued: Plaso-style super-timelines or Volatility memory-forensics integration -- both
+would be shallow, infrastructure-incompatible imitations of Heimdall's much heavier
+stack (distributed job queue, object storage) rather than real capability gains on a
+single-box Flask+SQLite appliance.
+
 ### Aggregated enrichment verdict badge + external check on the IOC catalog table
 
 Closed out the remaining IntelOwl-inspired ideas from the enrichment work above. Added
