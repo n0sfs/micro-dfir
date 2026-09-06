@@ -1936,17 +1936,22 @@ async function deleteIdentity(iid) {
 }
 
 // ---- Init ----
+// Deep-link support for "View Timeline" links from Agents/Cases (?tab=timeline&host=...)
+// -- the host param already carries the field-scoped "host:<value>" query syntax (built
+// at the link-emission side), so this just pre-fills the search box; loadTimeline()
+// reads tlSearch.value as-is and the existing host: query-DSL support does the rest.
+// Applied BEFORE switchUebaTab() below (not after) so its own loadTimeline() call --
+// fired because timelineLoadedOnce is still false on a fresh page load -- already sees
+// the host filter, instead of firing once unfiltered and racing the later filtered call.
+const _uebaUrlParams = new URLSearchParams(window.location.search);
+const _uebaUrlHost = _uebaUrlParams.get('host');
+if (_uebaUrlHost) document.getElementById('tlSearch').value = _uebaUrlHost;
+
 // Old bookmarks/links to the since-removed Anomaly Detections tab (?tab=detections) just
 // fall through here and land on Timeline -- its merged replacement, and already the
 // default active pane -- instead of matching nothing.
-const _uebaUrlParams = new URLSearchParams(window.location.search);
 const _uebaUrlTab = _uebaUrlParams.get('tab');
 if (_uebaUrlTab && UEBA_TABS.includes(_uebaUrlTab)) switchUebaTab(_uebaUrlTab);
-// Deep-link support for "View Timeline" links from Agents/Cases (?tab=timeline&host=...)
-// -- pre-fills the free-text search box rather than adding a dedicated host param/filter,
-// since tlSearch already matches host/user/message and loadTimeline() reads it as-is.
-const _uebaUrlHost = _uebaUrlParams.get('host');
-if (_uebaUrlHost) document.getElementById('tlSearch').value = _uebaUrlHost;
 
 onAnomalyRuleSourceChange();
 loadTimeline();

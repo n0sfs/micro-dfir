@@ -880,7 +880,7 @@ function showHostInfoMenu(evt, hostname) {
             </table>
             <hr class="dropdown-divider my-1">
             <a class="dropdown-item small text-primary px-1" href="#" onclick="hideHostInfoMenu(); openInConsole('${hostname.replace(/'/g, "\\'")}'); return false;"><i class="fa-solid fa-terminal me-2"></i>Interact in Console</a>
-            <a class="dropdown-item small text-primary px-1" href="/ueba?tab=timeline&host=${encodeURIComponent(hostname)}"><i class="fa-solid fa-timeline me-2"></i>View Timeline</a>
+            <a class="dropdown-item small text-primary px-1" href="/ueba?tab=timeline&host=${encodeURIComponent('host:' + hostname)}"><i class="fa-solid fa-timeline me-2"></i>View Timeline</a>
         </div>
     `;
     const x = Math.min(evt.clientX, window.innerWidth - 280);
@@ -918,7 +918,7 @@ let heartbeatHistoryChart = null;
 function openHostDetailModal(hostname) {
     const dev = allEndpoints.find(e => e.hostname === hostname);
     if (!dev) return;
-    document.getElementById('hostDetailTitle').innerHTML = `<i class="fa-solid fa-laptop-medical me-2"></i>${escHtml(hostname)} <a href="/ueba?tab=timeline&host=${encodeURIComponent(hostname)}" class="small ms-2" title="View this host's activity on the UEBA Timeline"><i class="fa-solid fa-timeline me-1"></i>Timeline</a>`;
+    document.getElementById('hostDetailTitle').innerHTML = `<i class="fa-solid fa-laptop-medical me-2"></i>${escHtml(hostname)} <a href="/ueba?tab=timeline&host=${encodeURIComponent('host:' + hostname)}" class="small ms-2" title="View this host's activity on the UEBA Timeline"><i class="fa-solid fa-timeline me-1"></i>Timeline</a>`;
     const body = document.getElementById('hostDetailBody');
     body.innerHTML = `
         <table class="table table-sm table-dark table-borderless mb-3">
