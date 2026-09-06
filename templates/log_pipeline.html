@@ -53,7 +53,7 @@
 
                 <div class="row g-2 mb-3">
                     <div class="col-md-4">
-                        <label class="form-label text-muted small mb-1">Field</label>
+                        <label class="form-label text-muted small mb-1" for="dropField">Field</label>
                         <select id="dropField" class="form-select bg-dark text-light border-secondary form-select-sm">
                             <option value="app">App Name</option>
                             <option value="event_id">Event ID</option>
@@ -61,19 +61,19 @@
                         </select>
                     </div>
                     <div class="col-md-3">
-                        <label class="form-label text-muted small mb-1">Operator</label>
+                        <label class="form-label text-muted small mb-1" for="dropOp">Operator</label>
                         <select id="dropOp" class="form-select bg-dark text-light border-secondary form-select-sm">
                             <option value="equals">Equals</option>
                             <option value="contains">Contains</option>
                         </select>
                     </div>
                     <div class="col-md-5">
-                        <label class="form-label text-muted small mb-1">Value</label>
+                        <label class="form-label text-muted small mb-1" for="dropVal">Value</label>
                         <input type="text" id="dropVal" class="form-control bg-dark text-light border-secondary form-control-sm" placeholder="Match value...">
                     </div>
                 </div>
                 <div class="mb-3">
-                    <label class="form-label text-muted small mb-1">Description</label>
+                    <label class="form-label text-muted small mb-1" for="dropDesc">Description</label>
                     <input type="text" id="dropDesc" class="form-control bg-dark text-light border-secondary form-control-sm" placeholder="Rule purpose...">
                 </div>
                 <div class="d-flex gap-2 mb-3">
@@ -133,15 +133,15 @@
                 <p class="text-muted small mb-3">Distinct from a log source that has never ingested anything at all (see Coverage) -- this flags a HOST that WAS recently sending logs and then stopped sending anything at all, the "this endpoint went dark" case. Grouped by host (not by individual log channel), since a host going quiet usually silences every source on it at once -- one alert per incident instead of one per channel. The threshold adapts per host from its own recent history (multiples of its typical time between events), so a naturally chatty host and a naturally quiet one don't need separate hand-tuned thresholds.</p>
                 <div class="row g-2 align-items-end mb-3">
                     <div class="col-auto">
-                        <label class="form-label small text-muted mb-1">Sensitivity (&times; typical gap)</label>
+                        <label class="form-label small text-muted mb-1" for="logSourceSilentMultiplier">Sensitivity (&times; typical gap)</label>
                         <input type="number" min="1" step="0.5" id="logSourceSilentMultiplier" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:140px;" {{ '' if has_permission('settings.system.manage') else 'disabled' }}>
                     </div>
                     <div class="col-auto">
-                        <label class="form-label small text-muted mb-1">Minimum floor (hours)</label>
+                        <label class="form-label small text-muted mb-1" for="logSourceSilentMinHours">Minimum floor (hours)</label>
                         <input type="number" min="0" step="0.5" id="logSourceSilentMinHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:140px;" {{ '' if has_permission('settings.system.manage') else 'disabled' }}>
                     </div>
                     <div class="col-auto">
-                        <label class="form-label small text-muted mb-1">Cooldown (hours)</label>
+                        <label class="form-label small text-muted mb-1" for="logSourceSilentCooldown">Cooldown (hours)</label>
                         <input type="number" min="1" id="logSourceSilentCooldown" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:130px;" {{ '' if has_permission('settings.system.manage') else 'disabled' }}>
                     </div>
                     {% if has_permission('settings.system.manage') %}
@@ -223,7 +223,7 @@
 
                 <div class="row g-2 align-items-end mb-3">
                     <div class="col-auto">
-                        <label class="form-label small text-muted mb-1">Template for</label>
+                        <label class="form-label small text-muted mb-1" for="channelGroupSelect">Template for</label>
                         <select id="channelGroupSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="min-width:220px;" onchange="onChannelGroupChange()">
                             <option value="">Default (fleet-wide)</option>
                         </select>
@@ -297,7 +297,7 @@
 
                 <div class="row g-2 align-items-end mb-3">
                     <div class="col-auto">
-                        <label class="form-label small text-muted mb-1">Template for</label>
+                        <label class="form-label small text-muted mb-1" for="linuxChannelGroupSelect">Template for</label>
                         <select id="linuxChannelGroupSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="min-width:220px;" onchange="onLinuxChannelGroupChange()">
                             <option value="">Default (fleet-wide)</option>
                         </select>
@@ -321,11 +321,11 @@
                 <p class="text-muted small mb-3">Watch any additional path on the endpoint via an auditd watch rule -- e.g. an app's own config file or a directory not covered above. Defined once here, then enabled per group above just like a built-in channel.</p>
                 <div class="row g-2 align-items-end mb-2">
                     <div class="col-md-3">
-                        <label class="form-label small text-muted mb-1">Label</label>
+                        <label class="form-label small text-muted mb-1" for="customChanLabel">Label</label>
                         <input type="text" id="customChanLabel" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Nginx Config Changes">
                     </div>
                     <div class="col-md-4">
-                        <label class="form-label small text-muted mb-1">Path to watch</label>
+                        <label class="form-label small text-muted mb-1" for="customChanPath">Path to watch</label>
                         <input type="text" id="customChanPath" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="/etc/nginx">
                     </div>
                     <div class="col-md-3">

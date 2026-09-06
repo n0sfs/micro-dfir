@@ -190,7 +190,7 @@
                     <p class="text-muted small mb-3">ThreatFox/URLhaus/Feodo Tracker sync "recent" rolling-window data hourly, but nothing removes an indicator once it ages out of that window — left unchecked, the local IOC set grows unbounded. Automatic purge is on by default; the actual "this was observed in your environment" sighting history is kept regardless.</p>
                     <div class="row g-2 align-items-end mb-3">
                         <div class="col-auto">
-                            <label class="form-label small text-muted mb-1">Retention (days)</label>
+                            <label class="form-label small text-muted mb-1" for="iocRetentionDays">Retention (days)</label>
                             <input type="number" min="1" id="iocRetentionDays" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;">
                         </div>
                         <div class="col-auto">
@@ -689,7 +689,7 @@
         <div id="atomicRunModalDesc" class="small text-muted mb-3"></div>
         <div class="alert alert-warning small py-2" id="atomicRunModalWarning"><i class="fa-solid fa-triangle-exclamation me-1"></i>This runs a real command on the target host. Review the command below before confirming.</div>
         <pre id="atomicRunModalCommand" class="bg-black p-2 rounded border border-secondary small font-monospace" style="white-space:pre-wrap; max-height:180px; overflow-y:auto;"></pre>
-        <label class="form-label small text-muted mb-1 mt-2">Target Host</label>
+        <label class="form-label small text-muted mb-1 mt-2" for="atomicRunHostSelect">Target Host</label>
         <select id="atomicRunHostSelect" class="form-select form-select-sm bg-dark text-light border-secondary"></select>
       </div>
       <div class="modal-footer border-secondary">
@@ -855,11 +855,11 @@
       </div>
       <div class="modal-body">
         <div class="mb-3">
-          <label class="form-label">Name</label>
+          <label class="form-label" for="entityName">Name</label>
           <input type="text" id="entityName" class="form-control bg-dark text-light border-secondary" placeholder="e.g. Emotet">
         </div>
         <div class="mb-3">
-          <label class="form-label">Type</label>
+          <label class="form-label" for="entityType">Type</label>
           <select id="entityType" class="form-select bg-dark text-light border-secondary">
             <option value="actor">Threat Actor</option>
             <option value="malware">Malware</option>
@@ -868,20 +868,20 @@
           </select>
         </div>
         <div class="mb-3">
-          <label class="form-label">Aliases <span class="text-muted small">(comma-separated)</span></label>
+          <label class="form-label" for="entityAliases">Aliases <span class="text-muted small">(comma-separated)</span></label>
           <input type="text" id="entityAliases" class="form-control bg-dark text-light border-secondary" placeholder="e.g. Heodo">
         </div>
         <div class="mb-3">
-          <label class="form-label">Description</label>
+          <label class="form-label" for="entityDescription">Description</label>
           <textarea id="entityDescription" class="form-control bg-dark text-light border-secondary" rows="2"></textarea>
         </div>
         <div class="mb-3">
-          <label class="form-label">MITRE ATT&amp;CK Technique IDs <span class="text-muted small">(comma-separated, e.g. 1566.001,1059.001)</span></label>
+          <label class="form-label" for="entityTechniques">MITRE ATT&amp;CK Technique IDs <span class="text-muted small">(comma-separated, e.g. 1566.001,1059.001)</span></label>
           <input type="text" id="entityTechniques" class="form-control bg-dark text-light border-secondary" placeholder="1566.001, 1059.001">
         </div>
         <div class="row g-2 mb-3">
           <div class="col-md-5">
-            <label class="form-label">Confidence <span class="text-muted small">(optional)</span></label>
+            <label class="form-label" for="entityConfidence">Confidence <span class="text-muted small">(optional)</span></label>
             <select id="entityConfidence" class="form-select bg-dark text-light border-secondary">
               <option value="">Not assessed</option>
               <option value="confirmed">Confirmed</option>
@@ -890,12 +890,12 @@
             </select>
           </div>
           <div class="col-md-7">
-            <label class="form-label">Attribution Note <span class="text-muted small">(optional)</span></label>
+            <label class="form-label" for="entityAttributionNote">Attribution Note <span class="text-muted small">(optional)</span></label>
             <input type="text" id="entityAttributionNote" class="form-control bg-dark text-light border-secondary" placeholder="e.g. per Mandiant M-Trends 2024">
           </div>
         </div>
         <div class="mb-3">
-          <label class="form-label">External References <span class="text-muted small">(optional, one per line: Label | https://...)</span></label>
+          <label class="form-label" for="entityExternalReferences">External References <span class="text-muted small">(optional, one per line: Label | https://...)</span></label>
           <textarea id="entityExternalReferences" class="form-control bg-dark text-light border-secondary font-monospace small" rows="3" placeholder="Mandiant APT28 Profile | https://www.mandiant.com/resources/apt28"></textarea>
         </div>
         <div id="entityModalError" class="text-danger small" style="display:none;"></div>
@@ -935,11 +935,11 @@
             <div class="font-monospace small" id="linkIocPattern"></div>
         </div>
         <div class="mb-2">
-            <label class="form-label small text-muted mb-1">Entity</label>
+            <label class="form-label small text-muted mb-1" for="linkIocEntitySelect">Entity</label>
             <select id="linkIocEntitySelect" class="form-select bg-dark text-light border-secondary"></select>
         </div>
         <div class="mb-2">
-            <label class="form-label small text-muted mb-1">Relationship</label>
+            <label class="form-label small text-muted mb-1" for="linkIocRelationshipType">Relationship</label>
             <select id="linkIocRelationshipType" class="form-select bg-dark text-light border-secondary">
                 <option value="indicates">indicates</option>
                 <option value="attributed-to">attributed-to</option>
@@ -966,20 +966,20 @@
       <div class="modal-body">
         <div class="row g-2 mb-2">
             <div class="col-md-6">
-                <label class="form-label small text-muted mb-1">Rule Name</label>
+                <label class="form-label small text-muted mb-1" for="customRuleName">Rule Name</label>
                 <input type="text" id="customRuleName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. suspicious_dropper" oninput="updateCustomRulePreview()">
             </div>
             <div class="col-md-6">
-                <label class="form-label small text-muted mb-1">Author</label>
+                <label class="form-label small text-muted mb-1" for="customRuleAuthor">Author</label>
                 <input type="text" id="customRuleAuthor" class="form-control form-control-sm bg-dark text-light border-secondary" oninput="updateCustomRulePreview()">
             </div>
         </div>
         <div class="mb-2">
-            <label class="form-label small text-muted mb-1">Description</label>
+            <label class="form-label small text-muted mb-1" for="customRuleDescription">Description</label>
             <input type="text" id="customRuleDescription" class="form-control form-control-sm bg-dark text-light border-secondary" oninput="updateCustomRulePreview()">
         </div>
         <div class="mb-3">
-            <label class="form-label small text-muted mb-1">Reference (optional)</label>
+            <label class="form-label small text-muted mb-1" for="customRuleReference">Reference (optional)</label>
             <input type="text" id="customRuleReference" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. a case ID, ticket, or CTI report link" oninput="updateCustomRulePreview()">
         </div>
         <div class="d-flex justify-content-between align-items-center mb-1">
@@ -988,7 +988,7 @@
         </div>
         <div id="customRuleStringsList" class="mb-3"></div>
         <div class="mb-3">
-            <label class="form-label small text-muted mb-1">Condition</label>
+            <label class="form-label small text-muted mb-1" for="customRuleConditionMode">Condition</label>
             <select id="customRuleConditionMode" class="form-select form-select-sm bg-dark text-light border-secondary mb-2" onchange="toggleCustomRuleConditionMode()">
                 <option value="any">Any of the strings above</option>
                 <option value="all">All of the strings above</option>
@@ -1019,11 +1019,11 @@
       </div>
       <div class="modal-body">
         <div class="mb-3">
-            <label class="form-label">Feed Name</label>
+            <label class="form-label" for="feedName">Feed Name</label>
             <input type="text" id="feedName" class="form-control bg-dark text-light border-secondary" placeholder="e.g. Internal TAXII Server">
         </div>
         <div class="mb-3">
-            <label class="form-label">Feed Type</label>
+            <label class="form-label" for="feedType">Feed Type</label>
             <select id="feedType" class="form-select bg-dark text-light border-secondary" onchange="toggleFeedTypeFields()">
                 <option value="threatfox" data-kind="ioc">ThreatFox Recent IOCs (public — API key optional)</option>
                 <option value="urlhaus" data-kind="ioc">URLhaus Malicious URLs (public — API key optional)</option>
@@ -1046,7 +1046,7 @@
         </div>
         <div id="csvFields" style="display:none;">
             <div class="mb-3">
-                <label class="form-label">CSV File</label>
+                <label class="form-label" for="feedCsvFile">CSV File</label>
                 <input type="file" id="feedCsvFile" accept=".csv" class="form-control bg-dark text-light border-secondary">
                 <div class="form-text text-muted">A column named <code>value</code>/<code>indicator</code>/<code>ioc</code> (plus optional <code>type</code> and <code>name</code> columns), or one IOC per line with no header. IOC type is auto-detected when not given. This is a one-time snapshot — it won't auto-resync, so re-upload as a new feed to refresh it.</div>
             </div>
@@ -1054,23 +1054,23 @@
         </div>
         <div id="urlField" style="display:none;">
             <div class="mb-3">
-                <label class="form-label" id="feedUrlLabel">Discovery / API Root URL</label>
+                <label class="form-label" id="feedUrlLabel" for="feedUrl">Discovery / API Root URL</label>
                 <input type="text" id="feedUrl" class="form-control bg-dark text-light border-secondary" placeholder="https://taxii.example.com/api/v1/taxii2/feeds">
                 <div id="feedUrlHelp" class="form-text text-muted"></div>
             </div>
         </div>
         <div id="taxiiFields" style="display:none;">
             <div class="mb-3">
-                <label class="form-label">Collection ID</label>
+                <label class="form-label" for="feedCollection">Collection ID</label>
                 <input type="text" id="feedCollection" class="form-control bg-dark text-light border-secondary" placeholder="collection-id-or-number">
             </div>
             <div class="row g-2 mb-3">
                 <div class="col-6">
-                    <label class="form-label">Username (optional)</label>
+                    <label class="form-label" for="feedUsername">Username (optional)</label>
                     <input type="text" id="feedUsername" class="form-control bg-dark text-light border-secondary">
                 </div>
                 <div class="col-6">
-                    <label class="form-label">Password (optional)</label>
+                    <label class="form-label" for="feedPassword">Password (optional)</label>
                     <input type="password" id="feedPassword" class="form-control bg-dark text-light border-secondary" placeholder="Leave blank to keep existing">
                 </div>
             </div>
@@ -1078,14 +1078,14 @@
         </div>
         <div id="apiKeyField" style="display:none;">
             <div class="mb-3">
-                <label class="form-label" id="feedApiKeyLabel">API Key</label>
+                <label class="form-label" id="feedApiKeyLabel" for="feedApiKey">API Key</label>
                 <input type="password" id="feedApiKey" class="form-control bg-dark text-light border-secondary" placeholder="Leave blank to keep existing">
                 <div id="apiKeyStatus" class="form-text text-muted"></div>
             </div>
         </div>
         <div id="yaraForgeFields" style="display:none;">
             <div class="mb-3">
-                <label class="form-label">Rule Package</label>
+                <label class="form-label" for="feedYaraForgePackage">Rule Package</label>
                 <select id="feedYaraForgePackage" class="form-select bg-dark text-light border-secondary">
                     <option value="core">Core — highest-accuracy rules, minimal false positives</option>
                     <option value="extended">Extended — adds threat-hunting coverage, more false positives</option>
@@ -1095,7 +1095,7 @@
             </div>
         </div>
         <div id="syncIntervalField" class="mb-3">
-            <label class="form-label">Auto-Sync Interval</label>
+            <label class="form-label" for="feedSyncInterval">Auto-Sync Interval</label>
             <select id="feedSyncInterval" class="form-select bg-dark text-light border-secondary">
                 <option value="">Manual only (no auto-sync)</option>
                 <option value="15">Every 15 minutes</option>

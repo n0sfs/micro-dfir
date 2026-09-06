@@ -192,19 +192,19 @@
                     <div id="cfgLoadError" class="text-danger small mb-3" style="display:none;"></div>
                     <div class="row g-3">
                         <div class="col-md-3">
-                            <label class="form-label">Baseline Lookback (days)</label>
+                            <label class="form-label" for="cfgLookback">Baseline Lookback (days)</label>
                             <input type="number" id="cfgLookback" class="form-control bg-dark text-light border-secondary" min="1" max="365" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         </div>
                         <div class="col-md-3">
-                            <label class="form-label">Spread Multiplier</label>
+                            <label class="form-label" for="cfgStddev">Spread Multiplier</label>
                             <input type="number" id="cfgStddev" class="form-control bg-dark text-light border-secondary" min="0.5" max="10" step="0.1" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         </div>
                         <div class="col-md-3">
-                            <label class="form-label">Minimum Baseline Floor (events/day)</label>
+                            <label class="form-label" for="cfgMinBaseline">Minimum Baseline Floor (events/day)</label>
                             <input type="number" id="cfgMinBaseline" class="form-control bg-dark text-light border-secondary" min="0" step="1" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         </div>
                         <div class="col-md-3">
-                            <label class="form-label">Min. Same-Weekday Samples</label>
+                            <label class="form-label" for="cfgMinDaysObserved">Min. Same-Weekday Samples</label>
                             <input type="number" id="cfgMinDaysObserved" class="form-control bg-dark text-light border-secondary" min="1" max="52" step="1" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                             <p class="text-muted small mt-1 mb-0">Below this, falls back to a flat baseline across all weekdays until enough same-weekday history builds up.</p>
                         </div>
@@ -332,18 +332,18 @@
                     </button>
                     <div class="row g-2 align-items-end bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
                         <div class="col-md-2">
-                            <label class="form-label small text-muted mb-1">Type</label>
+                            <label class="form-label small text-muted mb-1" for="ueExclType">Type</label>
                             <select id="ueExclType" class="form-select form-select-sm bg-dark text-light border-secondary">
                                 <option value="host">Host</option>
                                 <option value="user">User</option>
                             </select>
                         </div>
                         <div class="col-md-3">
-                            <label class="form-label small text-muted mb-1">Entity ID</label>
+                            <label class="form-label small text-muted mb-1" for="ueExclEntityId">Entity ID</label>
                             <input type="text" id="ueExclEntityId" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. BACKUP-SVR-01">
                         </div>
                         <div class="col-md-5">
-                            <label class="form-label small text-muted mb-1">Description (optional)</label>
+                            <label class="form-label small text-muted mb-1" for="ueExclDescription">Description (optional)</label>
                             <input type="text" id="ueExclDescription" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Why this is excluded">
                         </div>
                         <div class="col-md-2">
@@ -369,7 +369,7 @@
                     <div id="riskCfgLoadError" class="text-danger small mb-3" style="display:none;"></div>
                     <div class="row g-3 mb-4">
                         <div class="col-md-3">
-                            <label class="form-label">Scoring Window (days) <i class="fa-solid fa-circle-info text-muted small" title="How many days of history are summed to compute an entity's current composite risk score. Contributing events older than this fall out of the total automatically as time passes -- it does not delete anything, it just stops counting toward the score."></i></label>
+                            <label class="form-label" for="riskCfgWindowDays">Scoring Window (days) <i class="fa-solid fa-circle-info text-muted small" title="How many days of history are summed to compute an entity's current composite risk score. Contributing events older than this fall out of the total automatically as time passes -- it does not delete anything, it just stops counting toward the score."></i></label>
                             <input type="number" id="riskCfgWindowDays" class="form-control bg-dark text-light border-secondary" min="1" max="90" oninput="onDynamicScoringFieldChange()" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         </div>
                     </div>
@@ -383,7 +383,7 @@
                                 <i class="fa-solid fa-code me-1"></i> Show Raw JSON
                             </button>
                             <div id="rawJsonWrap" style="display:none;">
-                                <label class="form-label small text-muted mb-1">Raw JSON <span class="text-muted">— edits here sync back to the fields on the left and vice versa; mainly useful for pasting in a whole config at once</span></label>
+                                <label class="form-label small text-muted mb-1" for="riskCfgPointsJson">Raw JSON <span class="text-muted">— edits here sync back to the fields on the left and vice versa; mainly useful for pasting in a whole config at once</span></label>
                                 <textarea id="riskCfgPointsJson" class="form-control bg-dark text-light border-secondary font-monospace small" rows="16" spellcheck="false" oninput="onDynamicScoringJsonChange()" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}></textarea>
                                 <p class="small mt-1 mb-0" id="dynamicScoringJsonStatus">&nbsp;</p>
                             </div>
@@ -518,11 +518,11 @@
       <div class="modal-body">
         <div class="row g-3">
             <div class="col-md-6">
-                <label class="form-label small text-muted mb-1">Name</label>
+                <label class="form-label small text-muted mb-1" for="arName">Name</label>
                 <input type="text" id="arName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Mimikatz detected bonus">
             </div>
             <div class="col-md-6">
-                <label class="form-label small text-muted mb-1">Source</label>
+                <label class="form-label small text-muted mb-1" for="arSource">Source</label>
                 <select id="arSource" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onAnomalyRuleSourceChange()">
                     <option value="alerts">Sigma Alert</option>
                 </select>
@@ -537,25 +537,25 @@
         </div>
         <div class="row g-3 mt-1">
             <div class="col-md-4">
-                <label class="form-label small text-muted mb-1">Score Entity</label>
+                <label class="form-label small text-muted mb-1" for="arEntityField">Score Entity</label>
                 <select id="arEntityField" class="form-select form-select-sm bg-dark text-light border-secondary"></select>
             </div>
             <div class="col-md-4">
-                <label class="form-label small text-muted mb-1">Points</label>
+                <label class="form-label small text-muted mb-1" for="arPoints">Points</label>
                 <input type="number" id="arPoints" class="form-control form-control-sm bg-dark text-light border-secondary" value="10" min="1" step="1">
             </div>
             <div class="col-md-4">
-                <label class="form-label small text-muted mb-1">First-Time Bonus (optional)</label>
+                <label class="form-label small text-muted mb-1" for="arBonus">First-Time Bonus (optional)</label>
                 <input type="number" id="arBonus" class="form-control form-control-sm bg-dark text-light border-secondary" min="0" step="1" placeholder="none">
             </div>
         </div>
         <div class="row g-3 mt-1">
             <div class="col-md-6">
-                <label class="form-label small text-muted mb-1">Sequence Name (optional) <i class="fa-solid fa-circle-info text-muted" title="Give two or more rules the same Sequence Name and increasing Stage numbers to define an ordered progression -- see Sequence Chain Progression in Risk Scoring config."></i></label>
+                <label class="form-label small text-muted mb-1" for="arSequenceName">Sequence Name (optional) <i class="fa-solid fa-circle-info text-muted" title="Give two or more rules the same Sequence Name and increasing Stage numbers to define an ordered progression -- see Sequence Chain Progression in Risk Scoring config."></i></label>
                 <input type="text" id="arSequenceName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. lateral-movement-chain">
             </div>
             <div class="col-md-6">
-                <label class="form-label small text-muted mb-1">Sequence Stage (required if Sequence Name is set)</label>
+                <label class="form-label small text-muted mb-1" for="arSequenceStage">Sequence Stage (required if Sequence Name is set)</label>
                 <input type="number" id="arSequenceStage" class="form-control form-control-sm bg-dark text-light border-secondary" min="1" max="20" step="1" placeholder="e.g. 2">
             </div>
         </div>

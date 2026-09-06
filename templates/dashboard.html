@@ -219,9 +219,9 @@
                 </div>
                 <hr class="border-secondary my-2">
                 <div class="small text-muted fw-bold mb-1">Custom Date/Time Range</div>
-                <label class="form-label small mb-1">Start</label>
+                <label for="customStart" class="form-label small mb-1">Start</label>
                 <input type="datetime-local" id="customStart" class="form-control form-control-sm bg-dark text-light border-secondary mb-1">
-                <label class="form-label small mb-1">End</label>
+                <label for="customEnd" class="form-label small mb-1">End</label>
                 <input type="datetime-local" id="customEnd" class="form-control form-control-sm bg-dark text-light border-secondary mb-2">
                 <button type="button" class="btn btn-sm btn-primary w-100" onclick="applyCustomRange()">Apply Custom Range</button>
                 <hr class="border-secondary my-2">
@@ -612,11 +612,11 @@
         <div id="paneBuilder">
             <div class="row g-2 mb-3">
                 <div class="col-md-6">
-                    <label class="form-label small text-muted mb-1">Rule Title</label>
+                    <label for="bTitle" class="form-label small text-muted mb-1">Rule Title</label>
                     <input type="text" id="bTitle" class="form-control bg-dark text-light border-secondary" placeholder="e.g. Multiple Failed Logins Followed by Success" oninput="renderYamlPreview()">
                 </div>
                 <div class="col-md-3">
-                    <label class="form-label small text-muted mb-1">Severity</label>
+                    <label for="bSeverity" class="form-label small text-muted mb-1">Severity</label>
                     <select id="bSeverity" class="form-select bg-dark text-light border-secondary" onchange="renderYamlPreview()">
                         <option value="informational">Informational</option>
                         <option value="low">Low</option>
@@ -626,15 +626,15 @@
                     </select>
                 </div>
                 <div class="col-md-3">
-                    <label class="form-label small text-muted mb-1">Platform / Log Source</label>
+                    <label for="bPlatform" class="form-label small text-muted mb-1">Platform / Log Source</label>
                     <input type="text" id="bPlatform" class="form-control bg-dark text-light border-secondary" placeholder="custom" oninput="renderYamlPreview()">
                 </div>
                 <div class="col-md-8">
-                    <label class="form-label small text-muted mb-1">Description</label>
+                    <label for="bDescription" class="form-label small text-muted mb-1">Description</label>
                     <input type="text" id="bDescription" class="form-control bg-dark text-light border-secondary" placeholder="What this rule detects and why it matters" oninput="renderYamlPreview()">
                 </div>
                 <div class="col-md-4">
-                    <label class="form-label small text-muted mb-1">MITRE ATT&CK Tags (comma-separated)</label>
+                    <label for="bMitre" class="form-label small text-muted mb-1">MITRE ATT&CK Tags (comma-separated)</label>
                     <input type="text" id="bMitre" class="form-control bg-dark text-light border-secondary" placeholder="attack.t1110, attack.brute-force" oninput="renderYamlPreview()">
                 </div>
             </div>
@@ -824,19 +824,19 @@
         {% if has_permission('rules.manage') %}
         <div class="row g-2 align-items-end bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
             <div class="col-md-2">
-                <label class="form-label small text-muted mb-1">Field</label>
+                <label for="exclField" class="form-label small text-muted mb-1">Field</label>
                 <select id="exclField" class="form-select form-select-sm bg-dark text-light border-secondary"></select>
             </div>
             <div class="col-md-2">
-                <label class="form-label small text-muted mb-1">Operator</label>
+                <label for="exclOp" class="form-label small text-muted mb-1">Operator</label>
                 <select id="exclOp" class="form-select form-select-sm bg-dark text-light border-secondary"></select>
             </div>
             <div class="col-md-3">
-                <label class="form-label small text-muted mb-1">Value</label>
+                <label for="exclValue" class="form-label small text-muted mb-1">Value</label>
                 <input type="text" id="exclValue" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. svc-backup">
             </div>
             <div class="col-md-3">
-                <label class="form-label small text-muted mb-1">Description (optional)</label>
+                <label for="exclDescription" class="form-label small text-muted mb-1">Description (optional)</label>
                 <input type="text" id="exclDescription" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Why this is excluded">
             </div>
             <div class="col-md-2">
