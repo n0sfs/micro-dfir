@@ -189,6 +189,7 @@
                 </div>
                 <div class="card-body">
                     <p class="text-muted small mb-3">The model compares today's event volume against this entity's historical <strong>same weekday</strong> (e.g. today's Friday count vs. its past Fridays), using median and MAD (median absolute deviation) instead of mean/stddev so a single past spike day doesn't drag the baseline up for weeks. An entity is flagged when today exceeds <code>baseline median + (multiplier &times; MAD-derived spread)</code>, and only once its baseline clears the minimum floor. Both entity types share these settings.</p>
+                    <div id="cfgLoadError" class="text-danger small mb-3" style="display:none;"></div>
                     <div class="row g-3">
                         <div class="col-md-3">
                             <label class="form-label">Baseline Lookback (days)</label>
@@ -365,6 +366,7 @@
                 </div>
                 <div class="card-body">
                     <p class="text-muted small mb-3">How composite risk scores are computed — see the Risk Scoring tab for results. The scoring window controls how far back contributing events are summed; point values control the flat per-indicator contribution (Sigma alert severity, IOC sweep hits, statistical anomalies). Sensitive-action and custom scoring now lives in the rules below instead of this JSON.</p>
+                    <div id="riskCfgLoadError" class="text-danger small mb-3" style="display:none;"></div>
                     <div class="row g-3 mb-4">
                         <div class="col-md-3">
                             <label class="form-label">Scoring Window (days) <i class="fa-solid fa-circle-info text-muted small" title="How many days of history are summed to compute an entity's current composite risk score. Contributing events older than this fall out of the total automatically as time passes -- it does not delete anything, it just stops counting toward the score."></i></label>
@@ -807,14 +809,17 @@ function loadTimeline() {
     }
     body.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">Loading…</td></tr>';
     fetch('/api/logs/search?' + params.toString())
-        .then(r => r.json())
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
         .then(data => {
             timelineData = data;
             timelineLoadedOnce = true;
             renderTimeline();
             updateSharedStats();
         })
-        .catch(err => { body.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-4">Error loading timeline: ${escHtml(String(err))}</td></tr>`; });
+        .catch(err => {
+            console.error('Error loading timeline:', err);
+            renderLoadError('timelineBody', 6, 'Failed to load timeline.');
+        });
 }
 
 function loadMoreTimeline() {
@@ -865,7 +870,7 @@ function setRiskSort(mode) {
 
 function loadRiskScores() {
     fetch('/api/ueba/risk-scores')
-        .then(r => r.json())
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
         .then(data => {
             riskScoresData = data.entities || [];
             riskScoresLoadedOnce = true;
@@ -873,7 +878,10 @@ function loadRiskScores() {
             document.getElementById('riskScoresWindowNote').innerText = `Scored over the trailing ${data.window_days} day(s). Recomputed hourly alongside the anomaly models.`;
             renderRiskScores();
         })
-        .catch(err => console.error('Error loading risk scores:', err));
+        .catch(err => {
+            console.error('Error loading risk scores:', err);
+            renderLoadError('riskScoresTableBody', 6, 'Failed to load risk scores.');
+        });
 }
 
 function renderRiskScores() {
@@ -914,7 +922,7 @@ function viewRiskScoreDetail(entityType, entityId) {
     new bootstrap.Modal(document.getElementById('riskDetailModal')).show();
 
     fetch(`/api/ueba/risk-scores/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`)
-        .then(r => r.json())
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
         .then(data => {
             // A single noisy detection cycle can fire the same indicator dozens of times
             // in the same second (e.g. a dev workstation with many one-off rare
@@ -971,7 +979,8 @@ function viewRiskScoreDetail(entityType, entityId) {
             `;
         })
         .catch(err => {
-            document.getElementById('riskDetailModalBody').innerHTML = `<p class="text-danger small">Error loading detail: ${escHtml(err)}</p>`;
+            console.error('Error loading risk score detail:', err);
+            document.getElementById('riskDetailModalBody').innerHTML = `<div class="text-center text-danger small py-3"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load risk breakdown. <a href="#" onclick="location.reload(); return false;">Reload</a></div>`;
         });
 }
 
@@ -1087,14 +1096,21 @@ function onDynamicScoringJsonChange() {
 
 function loadRiskConfig() {
     fetch('/api/ueba/risk-config')
-        .then(r => r.json())
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
         .then(cfg => {
             document.getElementById('riskCfgWindowDays').value = cfg.window_days;
             const shaped = {points: cfg.points, tiers: cfg.tiers};
             renderDynamicScoringForm(shaped);
             document.getElementById('riskCfgPointsJson').value = JSON.stringify(shaped, null, 2);
         })
-        .catch(err => console.error('Error loading risk scoring config:', err));
+        .catch(err => {
+            console.error('Error loading risk scoring config:', err);
+            const el = document.getElementById('riskCfgLoadError');
+            if (el) {
+                el.style.display = 'block';
+                el.innerHTML = '<i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load scoring config. <a href="#" onclick="location.reload(); return false;">Reload</a>';
+            }
+        });
 }
 
 function saveRiskConfig() {
@@ -1246,7 +1262,7 @@ function loadEntityInsights(entityType, entityId) {
     const results = document.getElementById('insightsResults');
     results.innerHTML = '<p class="text-muted small">Loading…</p>';
     fetch(`/api/ueba/insights/entity/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`)
-        .then(r => r.json())
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
         .then(data => {
             let html = renderTimeOfWeek(data.activity_pattern);
             html += renderTableHistogram('Risk Contributions', data.risk_contributions, {pointsMode: true});
@@ -1257,25 +1273,31 @@ function loadEntityInsights(entityType, entityId) {
             if (data.admin_activity) html += renderTableHistogram('Admin Activity', data.admin_activity);
             results.innerHTML = html;
         })
-        .catch(err => { results.innerHTML = `<p class="text-danger small">Error loading insights: ${escHtml(err)}</p>`; });
+        .catch(err => {
+            console.error('Error loading entity insights:', err);
+            results.innerHTML = `<div class="text-center text-danger small py-3"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load insights. <a href="#" onclick="location.reload(); return false;">Reload</a></div>`;
+        });
 }
 
 function loadModelInsights(indicator) {
     const results = document.getElementById('insightsResults');
     results.innerHTML = '<p class="text-muted small">Loading…</p>';
     fetch(`/api/ueba/insights/model/${encodeURIComponent(indicator)}`)
-        .then(r => r.json())
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
         .then(data => {
             const rows = (data.rows || []).map(r => ({...r, value: `${r.entity_type === 'host' ? '\u{1F5A5} ' : '\u{1F464} '}${r.value}`}));
             results.innerHTML = renderTableHistogram(`Top Entities — ${INSIGHTS_MODEL_LABELS[indicator] || indicator}`, {...data, rows}, {pointsMode: true});
         })
-        .catch(err => { results.innerHTML = `<p class="text-danger small">Error loading insights: ${escHtml(err)}</p>`; });
+        .catch(err => {
+            console.error('Error loading model insights:', err);
+            results.innerHTML = `<div class="text-center text-danger small py-3"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load insights. <a href="#" onclick="location.reload(); return false;">Reload</a></div>`;
+        });
 }
 
 // ---- Anomaly Tuning ----
 function loadUebaConfig() {
     fetch('/api/ueba/config')
-        .then(r => r.json())
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
         .then(cfg => {
             document.getElementById('cfgLookback').value = cfg.lookback_days;
             document.getElementById('cfgStddev').value = cfg.stddev_multiplier;
@@ -1301,7 +1323,14 @@ function loadUebaConfig() {
             document.getElementById('cfgAutocaseCooldownHours').value = cfg.autocase_cooldown_hours;
             loadCaseTemplatesForUeba(cfg.autocase_template_id);
         })
-        .catch(err => console.error('Error loading UEBA config:', err));
+        .catch(err => {
+            console.error('Error loading UEBA config:', err);
+            const el = document.getElementById('cfgLoadError');
+            if (el) {
+                el.style.display = 'block';
+                el.innerHTML = '<i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load tuning settings. <a href="#" onclick="location.reload(); return false;">Reload</a>';
+            }
+        });
 }
 
 let caseTemplatesForUebaCache = null;
@@ -1414,13 +1443,19 @@ function renderBaselines() {
 }
 
 function loadBaselines() {
-    fetch('/api/ueba/baselines').then(r => r.json()).then(data => {
+    fetch('/api/ueba/baselines').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(data => {
         allBaselines = data.baselines || [];
         baselinesLoadedOnce = true;
         document.getElementById('baselinesComputedAt').innerText = data.computed_at ? `Last computed: ${data.computed_at}` : '';
         renderBaselines();
         updateSharedStats();
-    }).catch(err => console.error('Error loading UEBA baselines:', err));
+    }).catch(err => {
+        console.error('Error loading UEBA baselines:', err);
+        renderLoadError('baselinesTableBody', 8, 'Failed to load baselines.');
+    });
 }
 
 function prefillExclusion(entityType, entityId) {
@@ -1430,7 +1465,10 @@ function prefillExclusion(entityType, entityId) {
 }
 
 function loadUebaExclusions() {
-    fetch('/api/ueba/exclusions').then(r => r.json()).then(rows => {
+    fetch('/api/ueba/exclusions').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(rows => {
         const tbody = document.getElementById('ueExclusionsTableBody');
         if (!rows.length) {
             tbody.innerHTML = '<tr><td colspan="5" class="text-muted small">No exclusions yet.</td></tr>';
@@ -1445,7 +1483,10 @@ function loadUebaExclusions() {
                 : (e.enabled ? '<span class="badge bg-success">On</span>' : '<span class="badge bg-secondary">Off</span>')}</td>
             <td>${IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" title="Delete exclusion" onclick="deleteUebaExclusion(${e.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
         </tr>`).join('');
-    }).catch(err => console.error('Error loading UEBA exclusions:', err));
+    }).catch(err => {
+        console.error('Error loading UEBA exclusions:', err);
+        renderLoadError('ueExclusionsTableBody', 5, 'Failed to load exclusions.');
+    });
 }
 
 const WELL_KNOWN_SERVICE_ACCOUNTS = ['SYSTEM', 'LOCAL SERVICE', 'NETWORK SERVICE'];
@@ -1670,12 +1711,18 @@ function arRenderTable(rows) {
 }
 
 function loadAnomalyRules() {
-    fetch('/api/ueba/anomaly-rules').then(r => r.json()).then(rows => {
+    fetch('/api/ueba/anomaly-rules').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(rows => {
         anomalyRulesData = rows || [];
         anomalyRulesLoadedOnce = true;
         arApplyFilters();
         updateSharedStats();
-    }).catch(err => console.error('Error loading anomaly rules:', err));
+    }).catch(err => {
+        console.error('Error loading anomaly rules:', err);
+        renderLoadError('anomalyRulesTableBody', 12, 'Failed to load anomaly rules.');
+    });
 }
 
 // Row edit buttons pass only a numeric id (openAnomalyRuleModalById), never the rule

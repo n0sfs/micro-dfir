@@ -517,6 +517,15 @@ function escHtml(str) {
     return d.innerHTML;
 }
 
+// A loader's initial "Loading..." table state has no failure counterpart today -- a
+// non-2xx response (still a resolved fetch()) leaves it stuck showing "Loading..."
+// forever with no visible sign anything went wrong. This renders an explicit, retriable
+// failure row in its place.
+function renderLoadError(tbodyId, colspan, message) {
+    const tbody = document.getElementById(tbodyId);
+    if (tbody) tbody.innerHTML = `<tr><td colspan="${colspan}" class="text-center text-danger small py-3"><i class="fa-solid fa-triangle-exclamation me-1"></i>${escHtml(message || 'Failed to load.')} <a href="#" onclick="location.reload(); return false;">Reload</a></td></tr>`;
+}
+
 // Upgrade/uninstall are admin-only (settings.system.manage, same permission the
 // Deployment tab and its backend routes are gated behind) -- distinct from the rest of
 // "agent management" (group assignment, etc), which stays available at edr.agent.manage.
@@ -671,7 +680,10 @@ function runGroupDispatch() {
 }
 
 function loadFimPaths() {
-    fetch('/api/fim/paths').then(r => r.json()).then(rows => {
+    fetch('/api/fim/paths').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(rows => {
         const tbody = document.getElementById('fimPathsTableBody');
         if (!rows.length) {
             tbody.innerHTML = '<tr><td colspan="4" class="text-muted small">No paths configured yet.</td></tr>';
@@ -685,7 +697,10 @@ function loadFimPaths() {
                 : (p.enabled ? '<span class="badge bg-success">On</span>' : '<span class="badge bg-secondary">Off</span>')}</td>
             <td>${FIM_IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" title="Delete path" onclick="deleteFimPath(${p.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
         </tr>`).join('');
-    }).catch(err => console.error('Error loading FIM paths:', err));
+    }).catch(err => {
+        console.error('Error loading FIM paths:', err);
+        renderLoadError('fimPathsTableBody', 4, 'Failed to load FIM paths.');
+    });
 }
 
 function addFimPath() {
@@ -998,7 +1013,10 @@ function openHostDetailModal(hostname) {
                 <div class="text-muted small fst-italic">No per-CVE-to-KB matching -- that mapping lives only in Microsoft's own Security Update Guide data, not any feed this app ingests.</div>
             `;
         })
-        .catch(() => {});
+        .catch(() => {
+            const el = document.getElementById('hostDetailPatches');
+            if (el) el.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load patch info.</div>';
+        });
 }
 
 // ---- Heartbeat History popup (sparkline click) ----
@@ -1040,7 +1058,10 @@ let selectedEndpoints = new Set();
 
 function loadUniqueEndpoints() {
     fetch('/api/agent/checkins')
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
         .then(data => {
             allEndpoints = Array.isArray(data) ? data : [];
             // "Online" specifically, not just "however many rows came back" — a dead agent
@@ -1054,6 +1075,10 @@ function loadUniqueEndpoints() {
             populateEndpointFilterMenus();
             renderEndpoints();
             populateConsoleHostSelect();
+        })
+        .catch(err => {
+            console.error('Error loading agent endpoints:', err);
+            renderLoadError('endpointsTableBody', 10, 'Failed to load agent endpoints.');
         });
 }
 
@@ -1927,7 +1952,10 @@ let cmdHistoryCache = [];
 
 function loadCommandHistory() {
     fetch('/api/agent/commands?limit=50')
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
         .then(rows => {
             cmdHistoryCache = rows;
             document.getElementById('statPendingActions').innerText = (rows || []).filter(c => c.status === 'pending' || c.status === 'sent').length;
@@ -1950,7 +1978,10 @@ function loadCommandHistory() {
             }
             reconcileConsoleSessions();
         })
-        .catch(err => console.error('Error loading command history:', err));
+        .catch(err => {
+            console.error('Error loading command history:', err);
+            renderLoadError('cmdHistoryBody', 6, 'Failed to load command history.');
+        });
 }
 
 // Returns {scanned, hits} if stdout parses as a real sweep-result shape, else null --

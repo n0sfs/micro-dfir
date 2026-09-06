@@ -1607,13 +1607,19 @@ function setSweepTarget(target) {
 
 function loadSweepAgents() {
     fetch('/api/agent/checkins')
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
         .then(data => {
             sweepAgents = Array.isArray(data) ? data : [];
             sweepAgentsLoaded = true;
             renderSweepHostPicker();
         })
-        .catch(err => console.error('Error loading agents for sweep:', err));
+        .catch(err => {
+            console.error('Error loading agents for sweep:', err);
+            document.getElementById('sweepHostPicker').innerHTML = '<div class="text-center text-danger small py-3">Failed to load agent endpoints. <a href="#" onclick="location.reload(); return false;">Reload</a></div>';
+        });
 }
 
 function renderSweepHostPicker() {
@@ -1642,8 +1648,14 @@ function toggleSweepHost(hostname, checked) {
 // filters on one label at a time) and merged by id, newest first.
 function loadSweepResults() {
     Promise.all([
-        fetch('/api/agent/commands?label=ioc_sweep&limit=50').then(r => r.json()),
-        fetch('/api/agent/commands?label=string_sweep&limit=50').then(r => r.json()),
+        fetch('/api/agent/commands?label=ioc_sweep&limit=50').then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        }),
+        fetch('/api/agent/commands?label=string_sweep&limit=50').then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        }),
     ]).then(([hashRows, stringRows]) => {
         const wasLoadedBefore = sweepResultsLoadedOnce;
         const merged = [...(Array.isArray(hashRows) ? hashRows : []), ...(Array.isArray(stringRows) ? stringRows : [])];
@@ -1652,7 +1664,10 @@ function loadSweepResults() {
         sweepResultsLoadedOnce = true;
         renderSweepResults();
         announceNewSweepHits(wasLoadedBefore);
-    }).catch(err => console.error('Error loading sweep results:', err));
+    }).catch(err => {
+        console.error('Error loading sweep results:', err);
+        renderLoadError('sweepResultsBody', 6, 'Failed to load sweep results.');
+    });
 }
 
 // Pops a toast the moment a sweep comes back with hits, instead of relying on the user
@@ -2332,11 +2347,17 @@ async function saveAnalyzerKey(analyzerKey) {
 function loadIocRetentionSettings() {
     const input = document.getElementById('iocRetentionDays');
     if (!input) return;  // non-admin: the section isn't rendered
-    fetch('/api/settings/ioc-retention').then(r => r.json()).then(data => {
+    fetch('/api/settings/ioc-retention').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(data => {
         input.value = data.days || 30;
         document.getElementById('iocRetentionAutoEnabled').checked = !!data.days;
         renderIocRetentionStatus(data);
-    }).catch(err => console.error('Error loading IOC retention settings:', err));
+    }).catch(err => {
+        console.error('Error loading IOC retention settings:', err);
+        document.getElementById('iocRetentionStatus').innerHTML = '<span class="text-danger">Failed to load retention settings. <a href="#" onclick="location.reload(); return false;">Reload</a></span>';
+    });
 }
 
 function renderIocRetentionStatus(data) {
@@ -2403,7 +2424,10 @@ function loadEnrichmentSettings() {
 let allAnalyzers = [];
 
 function loadAnalyzers() {
-    fetch('/api/ti/analyzers').then(r => r.json()).then(analyzers => {
+    fetch('/api/ti/analyzers').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(analyzers => {
         allAnalyzers = analyzers;
         const isAdmin = hasPermission('threatintel.manage');
         document.getElementById('analyzersTableBody').innerHTML = analyzers.map(a => `
@@ -2421,7 +2445,10 @@ function loadAnalyzers() {
         `).join('');
         loadEnrichmentSettings();
         populateIocSourceSelect();
-    }).catch(err => console.error('Error loading analyzers:', err));
+    }).catch(err => {
+        console.error('Error loading analyzers:', err);
+        renderLoadError('analyzersTableBody', 4, 'Failed to load enrichment sources.');
+    });
 }
 
 // Quick IOC Lookup's source picker draws on both allFeeds (loadFeeds) and allAnalyzers
@@ -2519,7 +2546,10 @@ let entityLastSeenById = {};
 
 function loadEntities() {
     Promise.all([
-        fetch('/api/ti/entities').then(r => r.json()),
+        fetch('/api/ti/entities').then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        }),
         fetch('/api/ti/actor-summary').then(r => r.json()).catch(() => ({actors: []})),
         // Same per-entity gap/inactive/active/validated technique-tier counts the old
         // Coverage > Intelligence tab computed -- merged in here instead of living on a
@@ -2536,7 +2566,10 @@ function loadEntities() {
         populateEntityFilterMenus();
         initEntityFilterDropdowns();
         filterEntities();
-    }).catch(err => console.error('Error loading entities:', err));
+    }).catch(err => {
+        console.error('Error loading entities:', err);
+        renderLoadError('entitiesTableBody', 9, 'Failed to load entities.');
+    });
 }
 
 // ---- Per-column filters on the Entities table (Name/Type/Aliases/Techniques/Source/
@@ -3005,7 +3038,10 @@ let allWarninglists = [];
 
 function loadWarninglists() {
     fetch('/api/ti/warninglists')
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
         .then(lists => {
             allWarninglists = lists;
             const tbody = document.getElementById('warninglistsTableBody');
@@ -3031,7 +3067,10 @@ function loadWarninglists() {
                 </tr>
             `).join('');
         })
-        .catch(err => console.error('Error loading warninglists:', err));
+        .catch(err => {
+            console.error('Error loading warninglists:', err);
+            renderLoadError('warninglistsTableBody', 5, 'Failed to load warninglists.');
+        });
 }
 
 async function openWarninglistEntries(id) {
@@ -3299,7 +3338,10 @@ function loadIocs() {
     if (iocFilters.status.length) params.set('status', iocFilters.status.join(','));
     if (iocFilters.sightings.length) params.set('sightings', iocFilters.sightings.join(','));
     fetch(`/api/ti/iocs?${params.toString()}`)
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
         .then(data => {
             iocTotal = data.total ?? 0;
             updateSharedStats();
@@ -3334,7 +3376,10 @@ function loadIocs() {
                 </tr>
             `).join('');
         })
-        .catch(err => console.error('Error loading IOCs:', err));
+        .catch(err => {
+            console.error('Error loading IOCs:', err);
+            renderLoadError('iocTableBody', 8, 'Failed to load indicators.');
+        });
 }
 
 // Reuses the Quick IOC Lookup card's existing enrich machinery rather than adding a
@@ -3380,7 +3425,10 @@ function loadCveRecords() {
     if (severity) params.set('severity', severity);
     if (minScore) params.set('min_score', minScore);
     if (kevOnly) params.set('kev_only', '1');
-    fetch('/api/cve/records?' + params.toString()).then(r => r.json()).then(d => {
+    fetch('/api/cve/records?' + params.toString()).then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(d => {
         document.getElementById('cveCountLabel').innerText = `${d.total} CVE${d.total === 1 ? '' : 's'}`;
         const tbody = document.getElementById('cveTableBody');
         if (!d.rows.length) {
@@ -3397,7 +3445,10 @@ function loadCveRecords() {
                 <td class="small text-muted" style="max-width:460px;">${escHtml((c.description || '').slice(0, 200))}${(c.description || '').length > 200 ? '…' : ''}</td>
                 <td class="small text-nowrap">${escHtml((c.published_date || '').slice(0, 10))}</td>
             </tr>`).join('');
-    }).catch(err => console.error('Error loading CVE records:', err));
+    }).catch(err => {
+        console.error('Error loading CVE records:', err);
+        renderLoadError('cveTableBody', 7, 'Failed to load CVE records.');
+    });
 }
 
 // Same table/badge idiom as the IOC tab's Feed Sources table (feedRowHtml/statusBadge)
@@ -3419,7 +3470,7 @@ function renderVulnFeedsTable() {
         return `<tr>
             <td class="ps-3"><strong>${escHtml(f.name)}</strong></td>
             <td class="text-muted small">${escHtml(f.source)}</td>
-            <td>${statusBadge(d.last_status)}</td>
+            <td>${d._loadFailed ? '<span class="badge bg-danger" title="Could not load this feed\'s status">Failed to load</span>' : statusBadge(d.last_status)}</td>
             <td class="text-nowrap small">${d.last_sync ? escHtml(d.last_sync) : '—'}</td>
             <td>${d.total_stored ?? 0} ${escHtml(f.unit)}</td>
             <td class="text-nowrap">
@@ -3431,10 +3482,20 @@ function renderVulnFeedsTable() {
 
 function loadVulnFeedStatus(key) {
     const meta = VULN_FEEDS_META.find(f => f.key === key);
-    return fetch(meta.statusUrl).then(r => r.json()).then(d => {
+    return fetch(meta.statusUrl).then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(d => {
         vulnFeedsState[key] = d;
         renderVulnFeedsTable();
-    }).catch(err => console.error(`Error loading ${key} sync status:`, err));
+    }).catch(err => {
+        console.error(`Error loading ${key} sync status:`, err);
+        // Without this, a total failure (fetch never resolves successfully) leaves the
+        // row stuck on the table's initial literal "Loading..." state forever, since
+        // renderVulnFeedsTable() above is otherwise only reached on success.
+        vulnFeedsState[key] = { _loadFailed: true };
+        renderVulnFeedsTable();
+    });
 }
 
 function loadAllVulnFeedStatuses() {

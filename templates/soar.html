@@ -792,6 +792,15 @@ function initActionsCatalogFilters() {
 function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
+
+// A loader's initial "Loading..." table state has no failure counterpart today -- a
+// non-2xx response (still a resolved fetch()) leaves it stuck showing "Loading..."
+// forever with no visible sign anything went wrong. This renders an explicit, retriable
+// failure row in its place.
+function renderLoadError(tbodyId, colspan, message) {
+    const tbody = document.getElementById(tbodyId);
+    if (tbody) tbody.innerHTML = `<tr><td colspan="${colspan}" class="text-center text-danger small py-3"><i class="fa-solid fa-triangle-exclamation me-1"></i>${escHtml(message || 'Failed to load.')} <a href="#" onclick="location.reload(); return false;">Reload</a></td></tr>`;
+}
 function escJs(s) {
     return String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
@@ -807,7 +816,13 @@ function loadQueuesForPlaybooks() {
 let allQueuesForSoar = [];
 
 function loadQueuesForSoar() {
-    const p = fetch('/api/case-queues').then(r => r.json()).then(qs => { allQueuesForSoar = qs || []; renderSoarQueuesTable(); }).catch(() => { allQueuesForSoar = []; renderSoarQueuesTable(); });
+    const p = fetch('/api/case-queues').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(qs => { allQueuesForSoar = qs || []; renderSoarQueuesTable(); }).catch(err => {
+        console.error('Error loading queues:', err);
+        renderLoadError('soarQueuesTableBody', 5, 'Failed to load queues.');
+    });
     if (CAN_MANAGE_QUEUES && !window.allUsersForQueues) {
         fetch('/api/settings/users').then(r => r.json()).then(data => {
             window.allUsersForQueues = (data.users || []).map(u => u.username);
@@ -895,8 +910,19 @@ function loadTemplatesForPlaybooks() {
     return fetch('/api/case-templates').then(r => r.json()).then(t => { caseTemplatesForPb = t || []; }).catch(() => { caseTemplatesForPb = []; });
 }
 
+// lastCustomActionsLoadOk mirrors lastSecretsLoadOk above -- other callers (playbook
+// editor's custom_webhook dropdown) just want a best-effort array, but
+// showCustomActionsModal needs to distinguish a genuinely empty catalog from a failed load.
+let lastCustomActionsLoadOk = true;
 function loadCustomActionsForPlaybooks() {
-    return fetch('/api/playbook-custom-actions').then(r => r.json()).then(c => { customActionsForPb = c || []; }).catch(() => { customActionsForPb = []; });
+    return fetch('/api/playbook-custom-actions').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(c => { customActionsForPb = c || []; lastCustomActionsLoadOk = true; }).catch(err => {
+        console.error('Error loading custom actions:', err);
+        customActionsForPb = [];
+        lastCustomActionsLoadOk = false;
+    });
 }
 
 // ---- Case Templates tab -- full CRUD + typed custom fields. Own fetch/array (not
@@ -908,7 +934,13 @@ let ctTaskSeq = 0, ctFieldSeq = 0;
 const CASE_TEMPLATE_FIELD_TYPE_LABELS = { text: 'Text', dropdown: 'Dropdown', date: 'Date', checkbox: 'Checkbox' };
 
 function loadCaseTemplatesForSoar() {
-    return fetch('/api/case-templates').then(r => r.json()).then(t => { allCaseTemplatesForSoar = t || []; renderCaseTemplatesTable(); }).catch(() => { allCaseTemplatesForSoar = []; renderCaseTemplatesTable(); });
+    return fetch('/api/case-templates').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(t => { allCaseTemplatesForSoar = t || []; renderCaseTemplatesTable(); }).catch(err => {
+        console.error('Error loading case templates:', err);
+        renderLoadError('caseTemplatesTableBody', 5, 'Failed to load case templates.');
+    });
 }
 
 function renderCaseTemplatesTable() {
@@ -1053,14 +1085,27 @@ async function deleteCaseTemplate(tid, name) {
 }
 
 // Names/descriptions only -- the API never returns a secret's value (see api_playbook_secrets()).
+// lastSecretsLoadOk tracks success separately from the always-resolving promise below --
+// other callers (playbook editor dropdowns, custom actions modal) just want a best-effort
+// array and are unaffected by a failed load, but showSecretsModal needs to know whether to
+// render the table as genuinely empty or as failed.
+let lastSecretsLoadOk = true;
 function loadPlaybookSecretsList() {
     if (!IS_ADMIN) return Promise.resolve(); // GET is admin-only; a non-admin never edits playbooks anyway
-    return fetch('/api/playbook-secrets').then(r => r.json()).then(s => { allPlaybookSecrets = Array.isArray(s) ? s : []; }).catch(() => { allPlaybookSecrets = []; });
+    return fetch('/api/playbook-secrets').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(s => { allPlaybookSecrets = Array.isArray(s) ? s : []; lastSecretsLoadOk = true; }).catch(err => {
+        console.error('Error loading playbook secrets:', err);
+        allPlaybookSecrets = [];
+        lastSecretsLoadOk = false;
+    });
 }
 
 async function showSecretsModal() {
     await loadPlaybookSecretsList();
-    renderSecretsTable();
+    if (lastSecretsLoadOk) renderSecretsTable();
+    else renderLoadError('secretsTableBody', 4, 'Failed to load secrets.');
     document.getElementById('newSecretName').value = '';
     document.getElementById('newSecretValue').value = '';
     document.getElementById('newSecretDescription').value = '';
@@ -1134,7 +1179,8 @@ function onCaUrlSourceChange() {
 async function showCustomActionsModal() {
     if (!allPlaybookSecrets.length) await loadPlaybookSecretsList();
     await loadCustomActionsForPlaybooks();
-    renderCustomActionsTable();
+    if (lastCustomActionsLoadOk) renderCustomActionsTable();
+    else renderLoadError('customActionsTableBody', 4, 'Failed to load custom actions.');
     cancelEditCustomAction();
     if (!customActionsModal) customActionsModal = new bootstrap.Modal(document.getElementById('customActionsModal'));
     customActionsModal.show();
@@ -1211,14 +1257,20 @@ async function deleteCustomAction(caid, name) {
 }
 
 function loadPlaybooks() {
-    fetch('/api/playbooks').then(r => r.json()).then(data => {
+    fetch('/api/playbooks').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(data => {
         allPlaybooks = data || [];
         buildPbFilterMenu('filterMenuTrigger', 'trigger',
             Object.entries(TRIGGER_LABELS).map(([k, v]) => ({value: k, label: v})));
         buildPbFilterMenu('filterMenuEnabled', 'enabled',
             [{value: '1', label: 'Enabled'}, {value: '0', label: 'Disabled'}]);
         renderPlaybooksTable();
-    }).catch(err => console.error('Error loading playbooks:', err));
+    }).catch(err => {
+        console.error('Error loading playbooks:', err);
+        renderLoadError('playbooksTableBody', 7, 'Failed to load playbooks.');
+    });
 }
 
 function conditionSummary(p) {
@@ -1585,7 +1637,10 @@ function showPlaybookRuns(pid, name) {
     document.getElementById('playbookRunsTableBody').innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">Loading&hellip;</td></tr>';
     if (!playbookRunsModal) playbookRunsModal = new bootstrap.Modal(document.getElementById('playbookRunsModal'));
     playbookRunsModal.show();
-    fetch(`/api/playbooks/${pid}/runs`).then(r => r.json()).then(runs => {
+    fetch(`/api/playbooks/${pid}/runs`).then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(runs => {
         const tbody = document.getElementById('playbookRunsTableBody');
         if (!runs.length) { tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">No runs yet.</td></tr>'; return; }
         tbody.innerHTML = runs.map(r => `
@@ -1598,7 +1653,10 @@ function showPlaybookRuns(pid, name) {
                 <td class="small">${escHtml(r.detail)}</td>
             </tr>
         `).join('');
-    }).catch(err => console.error('Error loading playbook runs:', err));
+    }).catch(err => {
+        console.error('Error loading playbook runs:', err);
+        renderLoadError('playbookRunsTableBody', 4, 'Failed to load runs.');
+    });
 }
 
 // Test Playbook (dry run) -- runs _dry_run_playbook() server-side against a real,
@@ -1680,7 +1738,10 @@ async function runPlaybookNow() {
 // logs it to the case timeline; reject just records the decision, nothing runs.
 function loadPendingApprovals() {
     if (!CAN_MANAGE_PLAYBOOKS) return;
-    fetch('/api/playbook-approvals?status=pending').then(r => r.json()).then(rows => {
+    fetch('/api/playbook-approvals?status=pending').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(rows => {
         const card = document.getElementById('pendingApprovalsCard');
         const tbody = document.getElementById('pendingApprovalsTableBody');
         document.getElementById('pendingApprovalsCount').innerText = rows.length;
@@ -1706,7 +1767,12 @@ function loadPendingApprovals() {
             </tr>
         `;
         }).join('');
-    }).catch(err => console.error('Error loading pending approvals:', err));
+    }).catch(err => {
+        console.error('Error loading pending approvals:', err);
+        const card = document.getElementById('pendingApprovalsCard');
+        if (card) card.style.display = '';
+        renderLoadError('pendingApprovalsTableBody', 5, 'Failed to load pending approvals.');
+    });
 }
 
 async function decideApproval(approvalId, decision) {

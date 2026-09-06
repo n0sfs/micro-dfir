@@ -549,13 +549,22 @@ document.addEventListener("DOMContentLoaded", function() {
 const REPORT_BRANDING_LOGO_URL = "{{ url_for('report_branding_logo') }}";
 function loadReportBranding() {
     fetch('/api/settings/report-branding')
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
         .then(cfg => {
             document.getElementById('brandCompanyName').value = cfg.company_name || '';
             document.getElementById('brandFooterText').value = cfg.footer_text || '';
             document.getElementById('brandAccentColor').value = cfg.accent_color || '#0d6efd';
         })
-        .catch(e => console.error('Error loading report branding:', e));
+        .catch(e => {
+            console.error('Error loading report branding:', e);
+            const msg = document.getElementById('brandingMsg');
+            msg.style.display = 'block';
+            msg.className = 'mt-3 small text-danger';
+            msg.innerHTML = 'Failed to load current branding settings -- saving now may overwrite them with blanks. <a href="#" onclick="location.reload(); return false;">Reload</a>';
+        });
 }
 
 function saveBranding() {
@@ -587,13 +596,22 @@ function saveBranding() {
 // Report Schedule Logic
 function loadReportSchedule() {
     fetch('/api/settings/report-schedule')
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
         .then(cfg => {
             document.querySelectorAll('[data-report-type]').forEach(sel => {
                 sel.value = cfg[sel.dataset.reportType] || 'off';
             });
         })
-        .catch(e => console.error('Error loading report schedule:', e));
+        .catch(e => {
+            console.error('Error loading report schedule:', e);
+            const msg = document.getElementById('scheduleMsg');
+            msg.style.display = 'block';
+            msg.className = 'mt-2 small text-danger';
+            msg.innerHTML = 'Failed to load the current schedule -- saving now may overwrite it. <a href="#" onclick="location.reload(); return false;">Reload</a>';
+        });
 }
 
 function saveReportSchedule() {
@@ -804,15 +822,18 @@ function renderRolesTable() {
 
 function loadRoles() {
     return Promise.all([
-        fetch('/api/settings/roles').then(r => r.json()),
-        fetch('/api/dashboards').then(r => r.json()),
+        fetch('/api/settings/roles').then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }),
+        fetch('/api/dashboards').then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }),
     ]).then(([data, dashboards]) => {
         ROLES_CACHE = data.roles || [];
         PERMISSION_REGISTRY_CACHE = data.registry || [];
         DASHBOARDS_CACHE = dashboards || [];
         renderRolesTable();
         populateManageRoleSelect();
-    }).catch(err => console.error('Error loading groups:', err));
+    }).catch(err => {
+        console.error('Error loading groups:', err);
+        renderLoadError('rolesTableBody', 4, 'Failed to load groups.');
+    });
 }
 
 // Groups the registry's flat permission list under its own `category` field so the
@@ -988,7 +1009,10 @@ const RETENTION_PRESETS = ['30', '90', '180', '365', '730'];
 
 function loadRetentionSettings() {
     fetch('/api/settings/retention')
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
         .then(data => {
             const sel = document.getElementById('retentionDays');
             const customWrap = document.getElementById('retentionCustomWrap');
@@ -1007,7 +1031,10 @@ function loadRetentionSettings() {
             document.getElementById('retentionAutoEnabled').checked = !!data.days;
             renderRetentionStatus(data);
         })
-        .catch(e => console.error('Retention settings load issue:', e));
+        .catch(e => {
+            console.error('Retention settings load issue:', e);
+            renderWidgetLoadError('retentionStatus', 'Failed to load retention settings.');
+        });
 }
 
 function renderRetentionStatus(data) {
@@ -1074,13 +1101,19 @@ function saveRetentionPolicy() {
 // ---- Log Archiving ----
 function loadArchiveSettings() {
     fetch('/api/settings/archive')
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
         .then(data => {
             document.getElementById('archiveDays').value = data.days || 90;
             document.getElementById('archiveAutoEnabled').checked = !!data.days;
             renderArchiveStatus(data);
         })
-        .catch(e => console.error('Archive settings load issue:', e));
+        .catch(e => {
+            console.error('Archive settings load issue:', e);
+            renderWidgetLoadError('archiveStatus', 'Failed to load archive settings.');
+        });
 }
 
 function renderArchiveStatus(data) {
@@ -1130,12 +1163,18 @@ function saveArchivePolicy() {
 // ---- Database Backups ----
 function loadDbBackupSettings() {
     fetch('/api/settings/db-backup')
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
         .then(data => {
             document.getElementById('dbBackupRetentionDays').value = data.retention_days || 7;
             renderDbBackupStatus(data);
         })
-        .catch(e => console.error('Database backup settings load issue:', e));
+        .catch(e => {
+            console.error('Database backup settings load issue:', e);
+            renderWidgetLoadError('dbBackupStatus', 'Failed to load database backup settings.');
+        });
 }
 
 function renderDbBackupStatus(data) {
@@ -1203,6 +1242,13 @@ function renderLoadError(tbodyId, colspan, message) {
     const tbody = document.getElementById(tbodyId);
     if (tbody) tbody.innerHTML = `<tr><td colspan="${colspan}" class="text-center text-danger small py-3"><i class="fa-solid fa-triangle-exclamation me-1"></i>${escHtml(message || 'Failed to load.')} <a href="#" onclick="location.reload(); return false;">Reload</a></td></tr>`;
 }
+// Same idea as renderLoadError() above, but for a non-table config/status widget (no
+// <tbody> to replace a row in) -- swaps its container's content for an explicit,
+// retriable failure message instead of leaving it blank/stale forever.
+function renderWidgetLoadError(containerId, message) {
+    const el = document.getElementById(containerId);
+    if (el) el.innerHTML = `<div class="text-center text-danger small py-3"><i class="fa-solid fa-triangle-exclamation me-1"></i>${escHtml(message || 'Failed to load.')} <a href="#" onclick="location.reload(); return false;">Reload</a></div>`;
+}
 function escJs(s) {
     return String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
@@ -1223,7 +1269,10 @@ function loadAuditLog() {
     if (to) params.set('date_to', to.replace('T', ' ') + ':59');
 
     fetch('/api/audit-log?' + params.toString())
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
         .then(data => {
             if (!auditActionsLoaded && Array.isArray(data.actions)) {
                 const sel = document.getElementById('auditFilterAction');
@@ -1237,7 +1286,8 @@ function loadAuditLog() {
             renderAuditLog(data.rows || [], data.total || 0);
         })
         .catch(err => {
-            document.getElementById('auditLogBody').innerHTML = `<tr><td colspan="6" class="text-center text-danger py-3">Error loading audit log: ${escHtml(err)}</td></tr>`;
+            console.error('Error loading audit log:', err);
+            renderLoadError('auditLogBody', 6, 'Failed to load audit log.');
         });
 }
 
