@@ -2986,11 +2986,21 @@ def api_log_pipeline_vector_status():
 # Log Pipeline's own stat tiles used to show config counts (active/total drop rules,
 # a hardcoded "6" for total channels) -- zero ingestion volume, zero source count, zero
 # "last event received". This answers the actual question that page exists to answer:
-# is anything actually flowing. Deliberately avoids a `timestamp >= now - Nh` filter for
-# the rate estimate (confirmed live on this app's own production instance: that shape of
-# query took 93 SECONDS on a 6.2M-row live_logs table -- see _parser_health_summary's own
-# comment) -- both queries here are rowid-bounded (ORDER BY id DESC LIMIT/OFFSET), which
-# only ever touches a fixed number of index entries regardless of table size.
+# is anything actually flowing.
+#
+# Two real performance findings from live-verifying this on production's actual 6.2M-row
+# live_logs table, in order:
+# 1. A `timestamp >= now - Nh` filter took 93 SECONDS (see _parser_health_summary's own
+#    comment) -- avoided here entirely.
+# 2. The rowid-bounded fix used elsewhere in this file (`ORDER BY id DESC LIMIT 1 OFFSET
+#    N`) is NOT actually cheap here either: OFFSET makes SQLite read and discard N full
+#    row records before returning the (N+1)th, and live_logs rows can carry large TEXT
+#    blobs (raw_xml/message, no length cap) -- reading 5000 of them measured at *20
+#    seconds* live. Fixed by computing the boundary row's id directly (`latest_id - N`)
+#    and looking it up with `WHERE id <= ?  ORDER BY id DESC LIMIT 1` -- a single B-tree
+#    seek to (or just past) that key, reading exactly one row regardless of N or how much
+#    of the table lies between it and the latest row. Confirmed live after the fix:
+#    milliseconds, not seconds.
 _INGESTION_RATE_SAMPLE_SIZE = 5000
 
 @app.route('/api/log-pipeline/ingestion-health', methods=['GET'])
@@ -2998,12 +3008,13 @@ _INGESTION_RATE_SAMPLE_SIZE = 5000
 def api_log_pipeline_ingestion_health():
     db = get_db()
     sources_count = len(_get_ingested_apps(db))
-    latest = db.execute("SELECT timestamp FROM live_logs ORDER BY id DESC LIMIT 1").fetchone()
+    latest = db.execute("SELECT id, timestamp FROM live_logs ORDER BY id DESC LIMIT 1").fetchone()
     if not latest:
         return jsonify({'sources_count': sources_count, 'last_event_at': None, 'events_per_hour': None})
+    boundary_id = latest['id'] - _INGESTION_RATE_SAMPLE_SIZE + 1
     boundary = db.execute(
-        "SELECT timestamp FROM live_logs ORDER BY id DESC LIMIT 1 OFFSET ?",
-        (_INGESTION_RATE_SAMPLE_SIZE - 1,)
+        "SELECT timestamp FROM live_logs WHERE id <= ? ORDER BY id DESC LIMIT 1",
+        (boundary_id,)
     ).fetchone()
     events_per_hour = None
     if boundary:
