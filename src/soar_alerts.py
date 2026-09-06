@@ -19,7 +19,12 @@ import json
 
 from notifications import get_alert_notification_config, _SEVERITY_ORDER
 
-PLAYBOOK_ALERT_ACTION_TYPES = ('send_email', 'send_webhook', 'send_slack', 'create_case')
+PLAYBOOK_ALERT_ACTION_TYPES = ('send_email', 'send_webhook', 'send_slack', 'create_case', 'set_alert_status', 'assign_alert')
+
+# Duplicated from app.py's own ALERT_STATUSES rather than imported -- this module never
+# imports app.py (see the module-docstring's DB-connection-agnostic contract), matching
+# this codebase's established small-catalog-duplication convention.
+ALERT_STATUSES = ('new', 'investigating', 'resolved', 'false_positive')
 
 
 def _fill_alert_template(text, alert):
@@ -78,6 +83,31 @@ def run_playbook_action_for_alert(db, alert, action_type, params, run_case_playb
             return f"would create a case from this alert on {alert.get('host') or 'unknown host'}"
         cid = _create_case_from_alert(db, alert, run_case_playbooks_fn)
         return f"created case #{cid} and linked this alert"
+
+    # The lightweight alternative to create_case for the common "suppress the
+    # known-benign, don't spin up a full case for it" pattern -- e.g. auto-resolving a
+    # low-value rule scoped to a specific host/rule via condition_rule_name. Also sets
+    # acknowledged=1 (same as a human explicitly triaging through the UI) so an
+    # auto-resolved alert doesn't sit stuck in "unacknowledged" counts forever.
+    if action_type == 'set_alert_status':
+        status = (params.get('status') or '').strip()
+        if status not in ALERT_STATUSES:
+            return f"invalid status '{status}', skipped"
+        if not alert.get('id'):
+            return "no alert id available, skipped"
+        if dry_run:
+            return f"would set alert status to '{status}'"
+        db.execute("UPDATE alerts SET status = ?, acknowledged = 1 WHERE id = ?", (status, alert['id']))
+        return f"set alert status to '{status}'"
+
+    if action_type == 'assign_alert':
+        assignee = (params.get('assignee') or '').strip() or None
+        if not alert.get('id'):
+            return "no alert id available, skipped"
+        if dry_run:
+            return f"would assign alert to {assignee or '(unassigned)'}"
+        db.execute("UPDATE alerts SET assignee = ? WHERE id = ?", (assignee, alert['id']))
+        return f"assigned alert to {assignee or '(unassigned)'}"
 
     if action_type == 'send_email':
         config = get_alert_notification_config(db)
