@@ -337,7 +337,11 @@ def reconcile_linux_audit_channels(channel_defs):
                 f.write('\n'.join(lines) + '\n')
         elif os.path.exists(LINUX_CHANNEL_RULES_PATH):
             os.remove(LINUX_CHANNEL_RULES_PATH)
-        subprocess.run(['augenrules', '--load'], capture_output=True, timeout=15)
+        # check=True matters here -- without it, a rejected rule file (bad syntax,
+        # permission error, immutable ruleset) makes augenrules exit non-zero but
+        # doesn't raise, so this fell through to the success path below and silently
+        # marked a failed reconcile as applied (no retry, no visible error, ever).
+        subprocess.run(['augenrules', '--load'], capture_output=True, timeout=15, check=True)
         _last_applied_linux_channels = desired_sig
         applied_keys = sorted(d.get('key') for d in channel_defs)
         print(f"[+] Reconciled Linux log channels: {applied_keys or 'none enabled'}", flush=True)

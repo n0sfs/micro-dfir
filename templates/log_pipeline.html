@@ -120,7 +120,11 @@
 <!-- ============================= SILENT LOG SOURCES PANE ============================= -->
 <div id="paneSilentsources" style="display: {{ 'block' if active_tab == 'silentsources' else 'none' }};">
 <!-- Log Source Silent Alert -- relocated from Settings since it's genuinely pipeline
-     health monitoring, not a general system setting. Same route/permission. -->
+     health monitoring, not a general system setting. Same route/permission (the whole
+     card, not just the inputs/Save button -- the fired-alert history table below stays
+     visible to every analyst regardless, only the sensitivity/threshold config is
+     admin-only, matching what settings.html's System pane always gated). -->
+{% if has_permission('settings.system.manage') %}
 <div class="row g-4 mb-4">
     <div class="col-lg-12">
         <div class="card bg-dark border-secondary">
@@ -151,6 +155,7 @@
         </div>
     </div>
 </div>
+{% endif %}
 
 <!-- Real fired alerts, so an analyst can see which log sources have actually gone
      silent -- distinct from the config card above, which only tunes the threshold. -->
@@ -379,10 +384,10 @@ function updateSharedStats() {
 // =====================================================================
 // TAB SWITCHING
 // =====================================================================
-// Unlike SIEM/Coverage's lazy-loaded tabs, all 3 panes here load eagerly on
+// Unlike SIEM/Coverage's lazy-loaded tabs, every pane here loads eagerly on
 // page load (see INIT below) -- the shared stat-tile row spans data from
 // both Drop Rules and Channels regardless of which pane is visible, and all
-// 3 underlying calls are cheap, so there's no lazy-load benefit worth the
+// the underlying calls are cheap, so there's no lazy-load benefit worth the
 // "which tiles are stale" bookkeeping it would add.
 const LOG_PIPELINE_TABS = ['droprules', 'dns', 'channels', 'linuxchannels', 'silentsources'];
 function logPipelineTabCap(t) { return t.charAt(0).toUpperCase() + t.slice(1); }
@@ -976,6 +981,7 @@ function loadDnsLoggingStatus() {
 
 // ---- Log Source Silent Alert (relocated from Settings, same route/permission) ----
 function loadLogSourceSilentConfig() {
+    if (!document.getElementById('logSourceSilentMultiplier')) return;
     fetch('/api/settings/log-source-silent-alert')
         .then(r => r.json())
         .then(data => {
@@ -1046,6 +1052,14 @@ function loadSilentSourceAlerts() {
 // =====================================================================
 document.addEventListener("DOMContentLoaded", function() {
     let startTab = {{ active_tab|tojson }};
+    // The tab-switch handler below already writes the active tab to localStorage on
+    // every switch (matching soar.html's identical pattern) but this page never read
+    // it back -- a visit with no ?tab= param always landed on Drop Rules regardless of
+    // which sub-tab was last open, unlike every other tabbed page in the app.
+    try {
+        const saved = localStorage.getItem('microdfir_log_pipeline_active_tab');
+        if (saved && LOG_PIPELINE_TABS.includes(saved)) startTab = saved;
+    } catch (e) {}
     const urlTab = new URLSearchParams(window.location.search).get('tab');
     if (urlTab && LOG_PIPELINE_TABS.includes(urlTab)) startTab = urlTab;
     if (!LOG_PIPELINE_TABS.includes(startTab)) startTab = 'droprules';

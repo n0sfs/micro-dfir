@@ -177,7 +177,12 @@
         </div>
 
         <!-- Agent Offline Alert -- relocated from Settings since it's genuinely EDR
-             fleet-health config, not a general system setting. Same route/permission. -->
+             fleet-health config, not a general system setting. Same route/permission --
+             including the block-level visibility settings.html's System pane always had
+             (previously implicit from that whole pane being permission-gated; the
+             individual disabled inputs/hidden Save button below aren't enough on their
+             own to keep a non-admin from seeing the configured thresholds). -->
+        {% if has_permission('settings.system.manage') %}
         <div class="card-body border-top border-secondary">
             <h6 class="text-info mb-2"><i class="fa-solid fa-triangle-exclamation me-2"></i>Agent Offline Alert</h6>
             <p class="text-muted small mb-2">When an EDR agent hasn't checked in for this long, an "Agent Offline" alert is created automatically (which can trigger an Alert-Created SOAR playbook). The cooldown prevents re-alerting the same host on every poll cycle while it stays offline.</p>
@@ -198,6 +203,7 @@
             </div>
             <div class="small text-muted" id="agentOfflineAlertStatus"></div>
         </div>
+        {% endif %}
     </div>
 
     <!-- Response Actions pane -->
@@ -581,6 +587,10 @@ function saveAgentPollInterval() {
 
 // ---- Agent Offline Alert (relocated from Settings, same route/permission) ----
 function loadAgentOfflineAlertConfig() {
+    // The whole block is now permission-gated server-side (settings.system.manage) --
+    // absent entirely from the DOM for a non-admin, so skip the fetch rather than
+    // throwing on the null elements below.
+    if (!document.getElementById('agentOfflineMinutes')) return;
     fetch('/api/settings/agent-offline-alert')
         .then(r => r.json())
         .then(data => {

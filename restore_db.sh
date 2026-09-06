@@ -18,6 +18,7 @@ set -e
 DB_PATH="/opt/micro-dfir/siem.db"
 BACKUP_DIR="/opt/micro-dfir/backups"
 BACKUP_FILE="$1"
+SERVICES="microsoc-web microsoc-sigma microsoc-soar"
 
 if [ "$EUID" -ne 0 ]; then
     echo "[-] This script must be run as root: sudo bash restore_db.sh <backup-file>"
@@ -32,6 +33,15 @@ if [ -z "$BACKUP_FILE" ] || [ ! -f "$BACKUP_FILE" ]; then
     exit 1
 fi
 
+# gzip -t verifies the archive's internal checksum without extracting it anywhere --
+# catches a truncated download, a non-gzip file, or disk corruption before this script
+# ever touches the live DB, instead of failing mid-restore with services already down.
+echo "[*] Verifying backup archive integrity..."
+if ! gzip -t "$BACKUP_FILE" 2>/dev/null; then
+    echo "[-] '$BACKUP_FILE' is not a valid gzip archive -- aborting before touching the live database."
+    exit 1
+fi
+
 echo "[*] About to restore siem.db from: $BACKUP_FILE"
 echo "[*] This will stop microsoc-web, microsoc-sigma, and microsoc-soar briefly."
 read -p "Continue? [y/N] " CONFIRM
@@ -41,12 +51,27 @@ if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
 fi
 
 echo "[*] Stopping Micro-DFIR services..."
-systemctl stop microsoc-web microsoc-sigma microsoc-soar
+systemctl stop $SERVICES
+
+# Restart the services on ANY exit from this point on -- success, an integrity-check
+# failure below, or set -e tripping on a mid-restore failure (disk full during gunzip,
+# a permission error, etc.). Without this trap, that last case left the whole appliance
+# down indefinitely with no automatic recovery.
+SERVICES_RESTARTED=0
+restart_services() {
+    if [ "$SERVICES_RESTARTED" -eq 0 ]; then
+        echo "[*] Restarting Micro-DFIR services..."
+        systemctl start $SERVICES
+        SERVICES_RESTARTED=1
+    fi
+}
+trap restart_services EXIT
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+PRE_RESTORE_PATH="${DB_PATH}.pre_restore_${TIMESTAMP}"
 if [ -f "$DB_PATH" ]; then
-    echo "[*] Preserving the current (pre-restore) database at ${DB_PATH}.pre_restore_${TIMESTAMP}..."
-    cp "$DB_PATH" "${DB_PATH}.pre_restore_${TIMESTAMP}"
+    echo "[*] Preserving the current (pre-restore) database at ${PRE_RESTORE_PATH}..."
+    cp "$DB_PATH" "$PRE_RESTORE_PATH"
 else
     echo "[!] No existing database found at $DB_PATH -- nothing to preserve."
 fi
@@ -58,13 +83,24 @@ chown root:root "$DB_PATH"
 chmod 664 "$DB_PATH"
 
 echo "[*] Verifying integrity of the restored database..."
-sqlite3 "$DB_PATH" "PRAGMA integrity_check;"
-
-echo "[*] Restarting Micro-DFIR services..."
-systemctl start microsoc-web microsoc-sigma microsoc-soar
+INTEGRITY_RESULT=$(sqlite3 "$DB_PATH" "PRAGMA integrity_check;")
+echo "$INTEGRITY_RESULT"
+if [ "$INTEGRITY_RESULT" != "ok" ]; then
+    echo "[-] Integrity check FAILED -- the restored database is corrupt."
+    if [ -f "$PRE_RESTORE_PATH" ]; then
+        echo "[-] Rolling back to the pre-restore database..."
+        cp "$PRE_RESTORE_PATH" "$DB_PATH"
+        chown root:root "$DB_PATH"
+        chmod 664 "$DB_PATH"
+        echo "[-] Rolled back -- the bad backup was NOT applied. Investigate $BACKUP_FILE before retrying."
+    else
+        echo "[-] No pre-restore copy existed to roll back to -- $DB_PATH is left in its corrupt, restored state. Restore a different backup immediately."
+    fi
+    exit 1
+fi
 
 echo "[+] Restore complete."
-if [ -f "${DB_PATH}.pre_restore_${TIMESTAMP}" ]; then
-    echo "[+] The pre-restore database is preserved at: ${DB_PATH}.pre_restore_${TIMESTAMP}"
+if [ -f "$PRE_RESTORE_PATH" ]; then
+    echo "[+] The pre-restore database is preserved at: $PRE_RESTORE_PATH"
     echo "    (delete it manually once you've confirmed the restore is good)"
 fi

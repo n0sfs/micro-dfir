@@ -8,6 +8,80 @@ a new feature, a real architectural decision, an incident and its fix. Routine p
 fixes don't need their own line; group them into the feature they support. Newest first.
 Full commit-level detail is always available via `git log`.
 
+## 2026-09-06
+
+### Second code review pass — the first half of 2026-09-05's work, 15 fixes
+
+Ran the same 10-angle + sweep review process against the half of yesterday's commits
+the prior review pass hadn't covered yet (Vector ingest-sink fix, Log Pipeline's move
+out of SIEM and split into sub-tabs, YARA rule tagging, nightly DB backup/restore, 4
+settings blocks relocated out of Settings, MITRE Coverage fixes, per-agent-group
+Windows Log Channel templates). Verified every candidate directly against source,
+including a real functional test of the fixed `restore_db.sh` against mocked
+`systemctl`/`sqlite3` (three scenarios: an invalid backup file rejected before touching
+anything, a corrupted restore rolling back to the pre-restore copy while still
+restarting services, and a clean successful restore). Fixed 15 findings:
+
+- `reconcile_linux_audit_channels()` (`micro_agent_linux.py`) called `augenrules --load`
+  without checking its exit code -- a rejected rule file (bad syntax, permission error)
+  exited non-zero but raised nothing, so the reconcile silently marked itself successful
+  and never retried. Added `check=True` so a real failure is now caught, logged, and
+  retried on the next poll instead of vanishing.
+- `agent_config()`'s new per-group channel lookup had no `ORDER BY`/non-empty filter on
+  `agent_tokens`, unlike the Agents-page listing that already documents and handles the
+  "stale leftover row from re-enrollment" hazard -- could silently resolve the wrong
+  group (and wrong channel template) for a re-enrolled host.
+- A Linux/Windows agent group literally named `__default__` or `custom_channels`
+  silently aliased onto (and could corrupt) the real fleet-wide default/custom-channel
+  catalog -- rejected at the one place group names actually get set
+  (`/api/agent/<hostname>/group`), plus a defensive re-check at both channel routes.
+- `get_linux_channels_all()` was missing the `file_existed` guard its Windows
+  counterpart has, writing `agent_linux_channels.json` to disk on every single GET
+  (even a fresh install's very first one) instead of only when something changed.
+- Settings > Network's `ingest_bind_ip`/`ui_bind_ip`/port fields used
+  `request.form.get(key, default)`, which only falls back on a genuinely *absent* field
+  -- clearing the text box and saving stored `''`, which broke Vector's ingest sink URI
+  (`https://:{port}/...`). Switched to `.get(key) or default` for all four fields.
+- `sigma_engine.py`'s internal scheduled-playbooks poll still hardcoded
+  `127.0.0.1:5001` -- the exact sibling bug the Vector ingest-sink fix addressed for
+  `ingest_bind_ip`, left unfixed for `ui_bind_ip`. Now resolves both from settings the
+  same way.
+- The 4 settings blocks relocated out of Settings earlier (Alert Escalation, Case
+  Stale Nudge, Agent Offline Alert, Log Source Silent Alert) lost the page-level
+  permission gate their old home always had -- visible read-only to any authenticated
+  user. Re-gated each at the block/pane level (not just the inputs), matching the
+  still-gated Case Templates tab precedent; added a matching JS guard so the settings
+  fetch itself doesn't fire for a non-admin either.
+- `restore_db.sh`: the `PRAGMA integrity_check` result was printed but never enforced: a
+  corrupted restore proceeded as if it succeeded. Now checks the result, automatically
+  rolls back to the pre-restore copy on failure, and adds a `trap` so services restart
+  on ANY exit path (not just success) plus a `gzip -t` check on the backup file before
+  touching anything.
+- `backup_db.py`: a compression failure left the full uncompressed VACUUM snapshot
+  (multiple GB) behind forever (the retention loop only ever matches `.db.gz`). Wrapped
+  in `try/finally`. Also wired up the `retention_override` parameter for real -- its own
+  comment already claimed "Backup Now" passed the unsaved retention field, but neither
+  the route nor the JS ever actually sent it.
+- The MITRE Coverage alert deep-link force-checked the Advanced Query box but never
+  called the visibility-update function, so the query box stayed hidden (Basic Filter
+  shown instead, with no query visible) for anyone whose saved search-mode preference
+  was Basic.
+- A YARA tag containing a comma broke the Tag filter dropdown (tags are comma-joined/
+  split with no escaping) -- rejected at the point of entry instead.
+- Log Pipeline wrote its active sub-tab to `localStorage` on every switch but never
+  read it back, unlike every other tabbed page in the app -- always reset to Drop Rules
+  on a fresh visit.
+- Two stale strings: SIEM's subtitle still said "manage ingestion pipelines" after Log
+  Pipeline moved out to its own page; a JS comment said "3 panes" when there are 5.
+
+Left two lower-confidence/larger-scope items unfixed and documented rather than rushed:
+YARA tag add/remove not refreshing the rule-list row or Tag filter dropdown until a full
+reload (real, but a moderate frontend change); and the substantial backend+frontend code
+duplication between the Windows and Linux per-group channel-template features (the
+*reason* the `file_existed`-guard divergence above happened) -- a genuine refactor
+opportunity, not a quick fix, and risky to rush inside a review-driven fix pass. 35 new
+tests added, all against the real fixed source.
+
 ## 2026-09-05
 
 ### Log Pipeline: move Log Source Silent Alert into its own tab, list real fired alerts

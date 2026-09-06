@@ -47,9 +47,16 @@ def run_backup(retention_override=None):
     # overlapping the next scheduled maintenance job when run from cron). Disk space is
     # not the constraint here (hundreds of GB free vs a few GB per backup even lightly
     # compressed) -- speed is what actually matters for a job that must reliably finish.
-    with open(snapshot_path, 'rb') as f_in, gzip.open(gz_path, 'wb', compresslevel=1) as f_out:
-        shutil.copyfileobj(f_in, f_out)
-    os.remove(snapshot_path)
+    try:
+        with open(snapshot_path, 'rb') as f_in, gzip.open(gz_path, 'wb', compresslevel=1) as f_out:
+            shutil.copyfileobj(f_in, f_out)
+    finally:
+        # Without `finally`, a failure during compression (disk full, killed process)
+        # left the full uncompressed VACUUM INTO snapshot (same size as the live DB --
+        # multiple GB) behind forever: the retention loop below only ever matches
+        # 'siem_*.db.gz', never a bare '.db' file, so nothing else would clean it up.
+        if os.path.exists(snapshot_path):
+            os.remove(snapshot_path)
     duration = time.time() - start
     size_bytes = os.path.getsize(gz_path)
 
