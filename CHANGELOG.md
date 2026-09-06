@@ -10,6 +10,38 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-06
 
+### Closed the standing gap-list: SLA tiers, password strength, agent recovery, revert cancel
+
+Worked through the 5 items flagged in an earlier gap-analysis pass but not yet built:
+
+- **Sigma/UEBA auto-case → SOAR playbook wiring** — turned out to already be fixed (the
+  `case_playbook_outbox` bridge table), no work needed. Verified directly against source
+  before crossing it off rather than trusting the stale gap list.
+- **Per-severity/per-queue SLA tiers** — `case_sla_hours` was one global threshold; a
+  queue can now set its own `sla_hours` override (wins if set), and a
+  `case_sla_hours_by_severity` JSON setting adds per-severity tiers, both falling back to
+  the existing global default. `_case_sla_hours_for(db, queue_id, severity)` is the one
+  place this resolves; the SLA-breach sweep and dashboard widget both switched from a
+  shared SQL threshold to resolving each case's own. Caught a real regression risk before
+  shipping: the dashboard widget's existing Save button only ever sends `{sla_hours}`
+  with no knowledge of tiers, so a naive "empty means clear" rule would have silently
+  wiped out tiers on every ordinary save — fixed by checking the *key's presence*, not
+  its truthiness, the same convention already used for TLP elsewhere in this app.
+- **Admin password-strength validation** — `api_settings_users()`'s create/reset routes
+  had zero validation; an empty or 1-character password silently became a working login.
+  Now enforces the same 8-char minimum the self-service `/change-password` route already
+  had, via a shared `MIN_PASSWORD_LENGTH` constant.
+- **Agent "back online" recovery notice** — `agent_offline_alerts` was append-only, so a
+  recovered host left no signal in the alert feed. Added a nullable `resolved_at` column;
+  when a previously-alerted host's check-in age drops back under the online threshold, an
+  "Agent Back Online" (INFO) alert fires and every outstanding unresolved row for that
+  host is resolved together.
+- **isolate_host auto-revert manual-cancel** — a scheduled network restore
+  (`playbook_pending_reverts`) had no visibility or cancel path until it came due; the
+  only existing cancel was rejecting the approval *after* the timer expired. Added a
+  "Scheduled Reverts" card on the SOAR page with a Cancel button, backed by a
+  TOCTOU-safe `WHERE status='pending'` compare-and-swap.
+
 ### Log Pipeline: Parsers tab (Vector reload safety + custom field extraction)
 
 Built out the Log Pipeline page with a parser manager, in the spirit of Exabeam's Parser
