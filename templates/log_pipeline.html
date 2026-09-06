@@ -39,7 +39,7 @@
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'dns' else '' }}" id="tabBtnDns" onclick="switchLogPipelineTab('dns')"><i class="fa-solid fa-globe me-1"></i>DNS Query Logging</button></li>
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'channels' else '' }}" id="tabBtnChannels" onclick="switchLogPipelineTab('channels')"><i class="fa-solid fa-sliders me-1"></i>Windows Log Channels</button></li>
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'linuxchannels' else '' }}" id="tabBtnLinuxchannels" onclick="switchLogPipelineTab('linuxchannels')"><i class="fa-brands fa-linux me-1"></i>Linux Log Channels</button></li>
-    <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'silentsources' else '' }}" id="tabBtnSilentsources" onclick="switchLogPipelineTab('silentsources')"><i class="fa-solid fa-volume-xmark me-1"></i>Silent Log Sources</button></li>
+    <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'silentsources' else '' }}" id="tabBtnSilentsources" onclick="switchLogPipelineTab('silentsources')"><i class="fa-solid fa-volume-xmark me-1"></i>Silent Hosts</button></li>
 </ul>
 
 <!-- ============================= DROP RULES PANE ============================= -->
@@ -119,7 +119,7 @@
 
 <!-- ============================= SILENT LOG SOURCES PANE ============================= -->
 <div id="paneSilentsources" style="display: {{ 'block' if active_tab == 'silentsources' else 'none' }};">
-<!-- Log Source Silent Alert -- relocated from Settings since it's genuinely pipeline
+<!-- Host Silent Alert -- relocated from Settings since it's genuinely pipeline
      health monitoring, not a general system setting. Same route/permission (the whole
      card, not just the inputs/Save button -- the fired-alert history table below stays
      visible to every analyst regardless, only the sensitivity/threshold config is
@@ -129,8 +129,8 @@
     <div class="col-lg-12">
         <div class="card bg-dark border-secondary">
             <div class="card-body">
-                <h5 class="card-title text-light mb-3"><i class="fa-solid fa-volume-xmark me-2"></i>Log Source Silent Alert</h5>
-                <p class="text-muted small mb-3">Distinct from a log source that has never ingested anything at all (see Coverage) -- this flags a source that WAS recently active and then stopped, the "pipeline broke" case. The threshold adapts per log source from its own recent history (multiples of its typical time between events), so a naturally continuous source and a naturally bursty one don't need separate hand-tuned thresholds.</p>
+                <h5 class="card-title text-light mb-3"><i class="fa-solid fa-volume-xmark me-2"></i>Host Silent Alert</h5>
+                <p class="text-muted small mb-3">Distinct from a log source that has never ingested anything at all (see Coverage) -- this flags a HOST that WAS recently sending logs and then stopped sending anything at all, the "this endpoint went dark" case. Grouped by host (not by individual log channel), since a host going quiet usually silences every source on it at once -- one alert per incident instead of one per channel. The threshold adapts per host from its own recent history (multiples of its typical time between events), so a naturally chatty host and a naturally quiet one don't need separate hand-tuned thresholds.</p>
                 <div class="row g-2 align-items-end mb-3">
                     <div class="col-auto">
                         <label class="form-label small text-muted mb-1">Sensitivity (&times; typical gap)</label>
@@ -157,14 +157,14 @@
 </div>
 {% endif %}
 
-<!-- Real fired alerts, so an analyst can see which log sources have actually gone
-     silent -- distinct from the config card above, which only tunes the threshold. -->
+<!-- Real fired alerts, so an analyst can see which hosts have actually gone silent --
+     distinct from the config card above, which only tunes the threshold. -->
 <div class="row g-4 mb-4">
     <div class="col-lg-12">
         <div class="card bg-dark border-secondary">
             <div class="card-body">
                 <div class="d-flex justify-content-between align-items-center mb-3">
-                    <h5 class="card-title text-light mb-0"><i class="fa-solid fa-triangle-exclamation me-2"></i>Silent Log Source Alerts</h5>
+                    <h5 class="card-title text-light mb-0"><i class="fa-solid fa-triangle-exclamation me-2"></i>Silent Host Alerts</h5>
                     <button class="btn btn-outline-secondary btn-sm" onclick="loadSilentSourceAlerts()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
                 </div>
                 <p class="text-muted small mb-3">Every time the check above actually fires, it lands here -- most recent first.</p>
@@ -173,12 +173,13 @@
                         <thead>
                             <tr>
                                 <th>Fired At</th>
+                                <th>Host</th>
                                 <th>Details</th>
                                 <th>Status</th>
                             </tr>
                         </thead>
                         <tbody id="silentSourceAlertsBody">
-                            <tr><td colspan="3" class="text-center text-muted py-3">Loading...</td></tr>
+                            <tr><td colspan="4" class="text-center text-muted py-3">Loading...</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -979,7 +980,7 @@ function loadDnsLoggingStatus() {
     });
 }
 
-// ---- Log Source Silent Alert (relocated from Settings, same route/permission) ----
+// ---- Host Silent Alert (relocated from Settings, same route/permission) ----
 function loadLogSourceSilentConfig() {
     if (!document.getElementById('logSourceSilentMultiplier')) return;
     fetch('/api/settings/log-source-silent-alert')
@@ -989,9 +990,9 @@ function loadLogSourceSilentConfig() {
             document.getElementById('logSourceSilentMinHours').value = data.min_hours;
             document.getElementById('logSourceSilentCooldown').value = data.cooldown_hours;
             document.getElementById('logSourceSilentStatus').innerText =
-                `Currently: a log source silent for ${data.multiplier}x its own typical gap (minimum ${data.min_hours}h) triggers a "Log Source Silent" alert, at most once every ${data.cooldown_hours}h per source.`;
+                `Currently: a host silent for ${data.multiplier}x its own typical gap (minimum ${data.min_hours}h) triggers a "Host Silent" alert, at most once every ${data.cooldown_hours}h per host.`;
         })
-        .catch(e => console.error('Log source silent alert settings load issue:', e));
+        .catch(e => console.error('Host silent alert settings load issue:', e));
 }
 
 function saveLogSourceSilentConfig() {
@@ -1009,15 +1010,15 @@ function saveLogSourceSilentConfig() {
     }).then(r => r.json()).then(res => {
         if (res.status === 'success') {
             loadLogSourceSilentConfig();
-            toast('Log source silent alert settings saved.', 'success');
+            toast('Host silent alert settings saved.', 'success');
         } else {
-            toast(res.error || 'Failed to save log source silent alert settings.', 'danger');
+            toast(res.error || 'Failed to save host silent alert settings.', 'danger');
         }
-    }).catch(err => toast('Error saving log source silent alert settings: ' + err, 'danger'));
+    }).catch(err => toast('Error saving host silent alert settings: ' + err, 'danger'));
 }
 
-// Real fired "Log Source Silent" alerts, shown at the bottom of the Silent Log Sources
-// tab so an analyst can see what's actually gone silent, not just the threshold config.
+// Real fired "Host Silent" alerts, shown at the bottom of the Silent Hosts tab so an
+// analyst can see which endpoints have actually gone silent, not just the threshold config.
 function silentSourceAlertStatusBadge(a) {
     if (a.acknowledged) return '<span class="badge bg-secondary">Acknowledged</span>';
     const map = {new: 'bg-danger', investigating: 'bg-warning text-dark', resolved: 'bg-success', false_positive: 'bg-secondary'};
@@ -1030,20 +1031,21 @@ function loadSilentSourceAlerts() {
         .then(r => r.json())
         .then(rows => {
             if (!Array.isArray(rows) || rows.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="3" class="text-center text-muted py-3">No log source has triggered this alert yet.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">No host has triggered this alert yet.</td></tr>';
                 return;
             }
             tbody.innerHTML = rows.map(a => `
                 <tr>
                     <td class="text-nowrap small">${escHtml(a.timestamp || '')}</td>
+                    <td class="small">${escHtml(a.host || '—')}</td>
                     <td class="small">${escHtml(a.message || '')}${a.occurrence_count > 1 ? ` <span class="badge bg-secondary" title="Last seen ${escHtml(a.last_seen || '')}">&times;${a.occurrence_count}</span>` : ''}</td>
                     <td>${silentSourceAlertStatusBadge(a)}</td>
                 </tr>
             `).join('');
         })
         .catch(err => {
-            tbody.innerHTML = '<tr><td colspan="3" class="text-center text-danger py-3">Failed to load. <a href="#" onclick="loadSilentSourceAlerts(); return false;">Retry</a></td></tr>';
-            console.error('Error loading silent source alerts:', err);
+            tbody.innerHTML = '<tr><td colspan="4" class="text-center text-danger py-3">Failed to load. <a href="#" onclick="loadSilentSourceAlerts(); return false;">Retry</a></td></tr>';
+            console.error('Error loading silent host alerts:', err);
         });
 }
 
