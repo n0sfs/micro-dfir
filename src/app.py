@@ -6890,13 +6890,21 @@ def _run_due_log_source_silent_alerts(db):
     # log volume across every source it sends, so a chatty host and a quiet one each get
     # a cadence-appropriate threshold without hand-tuning.
     cfg = _log_source_silent_config(db)
+    # A source that never reports its own hostname (a raw syslog sender, a misconfigured
+    # device) falls back to the literal string 'UNKNOWN' at ingest -- grouping every such
+    # source together under that one bucket would let one still-alive UNKNOWN-host sender
+    # mask another one going dark entirely, since the bucket as a whole never looks
+    # silent as long as ANY of them keeps sending. Sub-grouping by app ONLY for that one
+    # fallback value (real hostnames still group purely by host, undisturbed) restores
+    # per-source granularity exactly where host identity isn't actually known.
     rows = db.execute(
-        "SELECT host, COUNT(*) as baseline_count, "
+        "SELECT host, CASE WHEN host = 'UNKNOWN' THEN app ELSE NULL END as app_disambiguator, "
+        "COUNT(*) as baseline_count, "
         "(julianday(MAX(timestamp)) - julianday(MIN(timestamp))) * 24 as observed_span_hours, "
         "(julianday('now') - julianday(MAX(timestamp))) * 24 as silence_hours, "
         "MAX(timestamp) as last_seen "
         "FROM live_logs WHERE host IS NOT NULL AND host != '' AND timestamp >= datetime('now', ?) "
-        "GROUP BY host HAVING baseline_count >= ?",
+        "GROUP BY host, app_disambiguator HAVING baseline_count >= ?",
         (f'-{LOG_SOURCE_SILENT_BASELINE_DAYS} days', LOG_SOURCE_SILENT_MIN_BASELINE_EVENTS)
     ).fetchall()
     for r in rows:
@@ -6904,13 +6912,18 @@ def _run_due_log_source_silent_alerts(db):
         threshold_hours = max(avg_gap_hours * cfg['multiplier'], cfg['min_hours'])
         if r['silence_hours'] <= threshold_hours:
             continue
+        # Cooldown tracking uses the same disambiguated identity as the grouping above --
+        # a plain 'UNKNOWN' key here would let one app's alert silently suppress every
+        # other UNKNOWN-host app's alert for the rest of the cooldown window.
+        group_key = f"UNKNOWN:{r['app_disambiguator']}" if r['app_disambiguator'] else r['host']
         already = db.execute(
             "SELECT 1 FROM log_source_silent_alerts WHERE host = ? AND alerted_at >= datetime('now', ?)",
-            (r['host'], f"-{cfg['cooldown_hours']} hours")
+            (group_key, f"-{cfg['cooldown_hours']} hours")
         ).fetchone()
         if already:
             continue
-        msg = (f"Host '{r['host']}' has not sent any logs for {round(r['silence_hours'], 1)}h "
+        source_desc = f"Host '{r['host']}'" if not r['app_disambiguator'] else f"Log source '{r['app_disambiguator']}' (host unknown)"
+        msg = (f"{source_desc} has not sent any logs for {round(r['silence_hours'], 1)}h "
                f"(expected roughly every {round(avg_gap_hours, 1)}h based on its own recent history; last event at {r['last_seen']}).")
         ins_cur = db.execute(
             "INSERT INTO alerts (timestamp, rule_name, severity, host, message, occurrence_count, last_seen) "
@@ -6918,7 +6931,7 @@ def _run_due_log_source_silent_alerts(db):
             (r['host'], msg)
         )
         new_alert_id = ins_cur.lastrowid
-        db.execute("INSERT INTO log_source_silent_alerts (app, host, alerted_at) VALUES (?, ?, datetime('now'))", (r['host'], r['host']))
+        db.execute("INSERT INTO log_source_silent_alerts (app, host, alerted_at) VALUES (?, ?, datetime('now'))", (group_key, group_key))
         soar_alerts.run_playbooks_for_alert(db, {
             'id': new_alert_id, 'rule_title': 'Host Silent', 'severity': 'MEDIUM', 'host': r['host'],
             'username': None, 'source_ip': None, 'message': msg, 'timestamp': None,
@@ -13919,21 +13932,19 @@ def get_agent_channels_for_group(group_name):
 @login_required
 def api_agent_channels():
     from flask import request, jsonify
+    # Same permission for all three methods, including GET -- this is fleet-wide
+    # detection/collection configuration (CLAUDE.md's "detection/hardening definitions"
+    # category), not something every logged-in user should be able to read. Checked
+    # once here rather than per-method now that GET needs it too.
+    err = require_permission('edr.agent.manage')
+    if err: return err
     group_key, err_resp = _resolve_channel_group_key()
     if err_resp: return err_resp
 
     if request.method == 'DELETE':
-        err = require_permission('edr.agent.manage')
-        if err: return err
         return _delete_channel_group(group_key, get_agent_channels_all, save_agent_channels_all)
 
     if request.method == 'POST':
-        # Ingestion filters/collection config, same "backend data" bucket as the
-        # Sigma drop-rules pipeline -- this was previously ungated (any logged-in
-        # user could change what gets collected), inconsistent with every
-        # neighboring settings route.
-        err = require_permission('edr.agent.manage')
-        if err: return err
         posted = request.json or {}
         channels = {}
         for name, value in posted.items():
@@ -14170,17 +14181,18 @@ def _linux_channel_defs_for_enabled(enabled_channel_keys, custom_channels):
 @login_required
 def api_agent_linux_channels():
     from flask import request, jsonify
+    # Same permission for all three methods, including GET -- matches the Windows
+    # channels route's identical fix (fleet-wide detection/collection config, not
+    # something every logged-in user should be able to read).
+    err = require_permission('edr.agent.manage')
+    if err: return err
     group_key, err_resp = _resolve_channel_group_key(_RESERVED_LINUX_CHANNEL_GROUP_KEYS)
     if err_resp: return err_resp
 
     if request.method == 'DELETE':
-        err = require_permission('edr.agent.manage')
-        if err: return err
         return _delete_channel_group(group_key, get_linux_channels_all, save_linux_channels_all)
 
     if request.method == 'POST':
-        err = require_permission('edr.agent.manage')
-        if err: return err
         posted = request.json or {}
         all_templates = get_linux_channels_all()
         valid_keys = set(LINUX_LOG_CHANNELS) | set(all_templates.get('custom_channels', {}))
