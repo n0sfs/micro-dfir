@@ -2632,7 +2632,7 @@ async function ld(){
         // No static "Loading..." row exists here (tbody starts empty) -- without this the
         // table would just stay blank forever with nothing telling the analyst detection
         // rules failed to load at all.
-        renderLoadError('rt', 12, 'Failed to load detection rules.');
+        renderLoadError('rt', 11, 'Failed to load detection rules.');
         return;
     }
 
@@ -2659,7 +2659,7 @@ async function ld(){
 
 function renderTable(rules) {
     if (!rules.length) {
-        document.getElementById('rt').innerHTML = '<tr><td colspan="12" class="text-center text-muted py-4">No rules match the current filters. Clear filters above, or use "Import SigmaHQ Rules" / "New Rule" to add detection coverage.</td></tr>';
+        document.getElementById('rt').innerHTML = '<tr><td colspan="11" class="text-center text-muted py-4">No rules match the current filters. Clear filters above, or use "Import SigmaHQ Rules" / "New Rule" to add detection coverage.</td></tr>';
         selectedIds.clear();
         refreshSelectionUI();
         return;

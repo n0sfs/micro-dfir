@@ -1225,12 +1225,17 @@ function viewYaraRule(relpath) {
     bodyEl.innerHTML = '<div class="text-muted small">Loading...</div>';
     copyBtn.style.display = 'none';
     if (deleteBtn) deleteBtn.style.display = 'none';
+    // Resolves `true`/`false` (never rejects) -- a plain row click ignores the return
+    // value entirely, but addYaraRuleTag/removeYaraRuleTag check it before running
+    // syncYaraTagFilterDropdown(), so a network blip on this refetch (right after a
+    // successful add/remove) doesn't leave the dropdown rebuilt from stale row data
+    // that syncYaraRuleRowDisplay() below never actually got to refresh.
     return fetch('/api/yara/rule-content?path=' + encodeURIComponent(relpath))
         .then(res => res.json().then(d => ({ ok: res.ok, d })))
         .then(({ ok, d }) => {
             if (!ok) {
                 bodyEl.innerHTML = `<div class="text-danger small">${escHtml(d.error || 'Failed to load rule.')}</div>`;
-                return;
+                return false;
             }
             yaraViewerContent = d.content || '';
             const tags = d.tags || [];
@@ -1239,8 +1244,12 @@ function viewYaraRule(relpath) {
             copyBtn.style.display = '';
             if (deleteBtn) deleteBtn.style.display = '';
             syncYaraRuleRowDisplay(relpath, tags);
+            return true;
         })
-        .catch(() => { bodyEl.innerHTML = '<div class="text-danger small">Network error loading rule.</div>'; });
+        .catch(() => {
+            bodyEl.innerHTML = '<div class="text-danger small">Network error loading rule.</div>';
+            return false;
+        });
 }
 
 // Keeps the rule-list row's inline tag badges and its data-tags/data-search attributes
@@ -1340,7 +1349,7 @@ function addYaraRuleTag(relpath) {
         body: JSON.stringify({path: relpath, tag})
     }).then(res => res.json().then(d => ({ ok: res.ok, d }))).then(({ ok, d }) => {
         if (!ok) { toast(d.error || 'Failed to add tag.', 'danger'); return; }
-        viewYaraRule(relpath).then(() => syncYaraTagFilterDropdown());
+        viewYaraRule(relpath).then(success => { if (success) syncYaraTagFilterDropdown(); });
     }).catch(() => toast('Network error adding tag.', 'danger'));
 }
 
@@ -1349,7 +1358,7 @@ function removeYaraRuleTag(relpath, tag) {
         method: 'DELETE'
     }).then(res => res.json().then(d => ({ ok: res.ok, d }))).then(({ ok, d }) => {
         if (!ok) { toast(d.error || 'Failed to remove tag.', 'danger'); return; }
-        viewYaraRule(relpath).then(() => syncYaraTagFilterDropdown());
+        viewYaraRule(relpath).then(success => { if (success) syncYaraTagFilterDropdown(); });
     }).catch(() => toast('Network error removing tag.', 'danger'));
 }
 

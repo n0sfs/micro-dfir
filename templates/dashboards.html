@@ -219,6 +219,14 @@ function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// Shared failure state for widgets whose render function replaces the WHOLE container
+// on success (so replacing it again on failure is safe -- unlike loadCaseStatsInto or
+// the setInterval-repolled widgets below, none of which call this). Adds the "Reload"
+// retry link every sibling template's equivalent helper already has.
+function renderWidgetLoadError(container, message) {
+    container.innerHTML = `<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>${escHtml(message || 'Failed to load.')} <a href="#" onclick="location.reload(); return false;">Reload</a></div>`;
+}
+
 function titleCase(s) {
     return (s || 'Unknown').replace(/\w\S*/g, t => t.charAt(0).toUpperCase() + t.slice(1).toLowerCase());
 }
@@ -332,7 +340,7 @@ function renderAlertTrendWidget(container, widgetId, config) {
         });
     }).catch(err => {
         console.error('Error loading alert trend:', err);
-        container.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load.</div>';
+        renderWidgetLoadError(container, 'Failed to load.');
     });
 }
 
@@ -360,7 +368,7 @@ function renderFimActivityWidget(container, widgetId, config) {
             : 'No file changes in this window.';
     }).catch(err => {
         console.error('Error loading FIM activity:', err);
-        container.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load.</div>';
+        renderWidgetLoadError(container, 'Failed to load.');
     });
 }
 
@@ -391,7 +399,7 @@ function renderAgentHealthTrendWidget(container, widgetId, config) {
             : 'No agent check-ins yet.';
     }).catch(err => {
         console.error('Error loading agent health trend:', err);
-        container.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load.</div>';
+        renderWidgetLoadError(container, 'Failed to load.');
     });
 }
 
@@ -422,7 +430,7 @@ function renderSeverityWidget(container, widgetId, config) {
         });
     }).catch(err => {
         console.error('Error loading severity breakdown:', err);
-        container.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load.</div>';
+        renderWidgetLoadError(container, 'Failed to load.');
     });
 }
 
@@ -447,7 +455,7 @@ function renderRiskTrendWidget(container, widgetId, config) {
         });
     }).catch(err => {
         console.error('Error loading risk trend:', err);
-        container.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load.</div>';
+        renderWidgetLoadError(container, 'Failed to load.');
     });
 }
 
@@ -526,7 +534,7 @@ function renderWatchlistWidget(container, widgetId, config) {
         }).join('');
     }).catch(err => {
         console.error('Error loading watchlist:', err);
-        container.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load.</div>';
+        renderWidgetLoadError(container, 'Failed to load.');
     });
 }
 
@@ -546,7 +554,7 @@ function renderAnomalyRulesWidget(container, widgetId, config) {
         });
     }).catch(err => {
         console.error('Error loading top anomaly rules:', err);
-        container.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load.</div>';
+        renderWidgetLoadError(container, 'Failed to load.');
     });
 }
 
@@ -566,7 +574,7 @@ function renderCountriesWidget(container, widgetId, config) {
         });
     }).catch(err => {
         console.error('Error loading top countries:', err);
-        container.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load.</div>';
+        renderWidgetLoadError(container, 'Failed to load.');
     });
 }
 
@@ -597,7 +605,7 @@ function renderAgentStatusWidget(container, widgetId, config) {
         });
     }).catch(err => {
         console.error('Error loading agent status:', err);
-        container.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load.</div>';
+        renderWidgetLoadError(container, 'Failed to load.');
     });
 }
 
@@ -732,7 +740,7 @@ function renderMitreCoverageWidget(container, widgetId, config) {
         }
     }).catch(err => {
         console.error('Error loading MITRE coverage:', err);
-        container.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load.</div>';
+        renderWidgetLoadError(container, 'Failed to load.');
     });
 }
 
@@ -784,7 +792,7 @@ function renderActorSummaryWidget(container, widgetId, config) {
             </div>`).join('');
     }).catch(err => {
         console.error('Error loading actor summary:', err);
-        container.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load.</div>';
+        renderWidgetLoadError(container, 'Failed to load.');
     });
 }
 
@@ -1008,6 +1016,7 @@ function renderVulnerabilitySummaryWidget(container, widgetId, config) {
 
 function renderCaseStatsWidget(container, widgetId, config) {
     container.innerHTML = `
+        <div class="widget-stats-error text-danger small mb-2" style="display:none;"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load.</div>
         <div class="d-flex justify-content-end small text-muted mb-2">
             SLA target: <span class="widget-sla-display ms-1">&hellip;</span>h
             <a href="#" class="widget-sla-edit-link ms-1" onclick="startEditCaseSla(${widgetId}); return false;" style="display:none;">Edit</a>
@@ -1032,6 +1041,8 @@ function loadCaseStatsInto(container, config) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
     }).then(d => {
+        const errEl = container.querySelector('.widget-stats-error');
+        if (errEl) errEl.style.display = 'none';
         container.querySelector('.widget-open').innerText = d.open_count;
         container.querySelector('.widget-breached').innerText = d.sla_breached_count;
         container.querySelector('.widget-avg-close').innerText = hoursLabel(d.avg_close_hours);
@@ -1042,7 +1053,13 @@ function loadCaseStatsInto(container, config) {
         if (hasPermission('settings.case_sla.manage')) container.querySelector('.widget-sla-edit-link').style.display = '';
     }).catch(err => {
         console.error('Error loading case stats:', err);
-        container.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load.</div>';
+        // Writes into the already-in-DOM .widget-stats-error slot rather than replacing
+        // container.innerHTML -- cancelEditCaseSla()/saveCaseSla() call this function
+        // directly against an already-rendered widget (not through renderCaseStatsWidget,
+        // which rebuilds the whole scaffold), so wiping the container here would destroy
+        // the SLA edit link/input/buttons those two callers depend on still being present.
+        const errEl = container.querySelector('.widget-stats-error');
+        if (errEl) errEl.style.display = '';
     });
 }
 
@@ -1104,7 +1121,7 @@ function renderCaseAgingWidget(container, widgetId, config) {
         });
     }).catch(err => {
         console.error('Error loading case aging:', err);
-        container.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load.</div>';
+        renderWidgetLoadError(container, 'Failed to load.');
     });
 }
 
@@ -1124,7 +1141,7 @@ function renderCaseQueueBacklogWidget(container, widgetId, config) {
         });
     }).catch(err => {
         console.error('Error loading case queue backlog:', err);
-        container.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load.</div>';
+        renderWidgetLoadError(container, 'Failed to load.');
     });
 }
 
@@ -1144,7 +1161,7 @@ function renderCaseWorkloadWidget(container, widgetId, config) {
         });
     }).catch(err => {
         console.error('Error loading case workload:', err);
-        container.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load.</div>';
+        renderWidgetLoadError(container, 'Failed to load.');
     });
 }
 
@@ -1168,7 +1185,7 @@ function renderCaseCloseTrendWidget(container, widgetId, config) {
         });
     }).catch(err => {
         console.error('Error loading case close trend:', err);
-        container.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load.</div>';
+        renderWidgetLoadError(container, 'Failed to load.');
     });
 }
 
@@ -1261,7 +1278,7 @@ function renderStatTilesWidget(container, widgetId, config) {
         container.querySelector('.widget-anomalies').innerText = d.anomalies_today;
     }).catch(err => {
         console.error('Error loading stat tiles widget:', err);
-        container.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load.</div>';
+        renderWidgetLoadError(container, 'Failed to load.');
     });
 }
 

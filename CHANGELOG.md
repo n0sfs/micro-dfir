@@ -10,6 +10,32 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-06
 
+### Third code review pass — 6 fixes from reviewing today's own sweeps
+
+Ran the same 8-angle review process against everything shipped today since the second
+review pass (the YARA/channel-template/macOS fixes, the Silent Host rework, and the two
+sweeps). Caught a second instance of the exact widget-recovery regression fixed earlier
+today (`loadCaseStatsInto` in Dashboards' Case Metrics widget was replacing its whole
+container on failure, destroying the SLA-edit controls) — same root cause, same fix
+pattern, missed by manual review the first time because it's called from three sites,
+not obviously all vulnerable to a naive glance. Also fixed: a colspan mismatch on the
+Detection Rules table's new error row (12 vs. the table's real 11 columns); the one
+loader in the Silent Hosts sweep that got missed (`loadSilentSourceAlerts` had no `r.ok`
+check); a subtle edge case where a network blip during the YARA tag-sync fix's own
+refetch could let the Tag filter dropdown rebuild itself from stale row data; a missing
+null-guard in Coverage's history-load error handler; and extracted Dashboards' 20
+inline-duplicated widget-failure messages into one shared `renderWidgetLoadError()`
+helper (restoring the "Reload" retry link every sibling template's equivalent helper
+already had). Two findings flagged but not auto-fixed, left for the user's judgment: a
+pre-existing (not introduced today) missing permission gate on the Windows/Linux channel
+GET routes — the Log Pipeline UI itself has no client-side view-gating on these tabs
+either, so this may be an intentional "read is open, write is gated" design rather than
+an oversight; and an edge case where multiple hostless log sources collapse into one
+shared "UNKNOWN" bucket for silent-host detection, carried forward from an analogous
+pre-existing weakness in the old per-app grouping. Verified via Jinja + `node --check`
+on every touched file, 10 new/updated frontend tests, and a direct script confirming the
+colspan fix against the table's real header count.
+
 ### Accessibility sweep: label/`for=` associations across every static form
 
 The last deferred item from the Business Readiness pass: ~190 `<label>` elements across
