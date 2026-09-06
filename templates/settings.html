@@ -106,11 +106,11 @@
                     <h6 class="text-info mb-3">Upload New Certificates</h6>
                     <form id="certUploadForm">
                         <div class="mb-2">
-                            <label class="form-label text-light small mb-1">Public Certificate (.pem / .crt)</label>
+                            <label class="form-label text-light small mb-1" for="certFile">Public Certificate (.pem / .crt)</label>
                             <input class="form-control bg-dark text-light border-secondary form-control-sm" type="file" id="certFile" required>
                         </div>
                         <div class="mb-3">
-                            <label class="form-label text-light small mb-1">Private Key (.pem / .key)</label>
+                            <label class="form-label text-light small mb-1" for="keyFile">Private Key (.pem / .key)</label>
                             <input class="form-control bg-dark text-light border-secondary form-control-sm" type="file" id="keyFile" required>
                         </div>
                         <button type="submit" class="btn btn-outline-success btn-sm w-100"><i class="fa-solid fa-shield-halved me-2"></i>Upload & Apply Certificates</button>
@@ -126,22 +126,22 @@
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <div class="row">
                     <div class="col-md-6 mb-3">
-                        <label class="form-label text-info">UI Bind IP (Gunicorn)</label>
-                        <input type="text" class="form-control bg-dark text-white border-secondary" name="ui_bind_ip" value="{{ all_settings.get('ui_bind_ip', '0.0.0.0') }}" placeholder="e.g. 192.168.86.100 (Wi-Fi)">
+                        <label class="form-label text-info" for="uiBindIp">UI Bind IP (Gunicorn)</label>
+                        <input type="text" class="form-control bg-dark text-white border-secondary" name="ui_bind_ip" id="uiBindIp" value="{{ all_settings.get('ui_bind_ip', '0.0.0.0') }}" placeholder="e.g. 192.168.86.100 (Wi-Fi)">
                     </div>
                     <div class="col-md-6 mb-3">
-                        <label class="form-label text-info">UI Port</label>
-                        <input type="text" class="form-control bg-dark text-white border-secondary" name="ui_port" value="{{ all_settings.get('ui_port', '5001') }}">
+                        <label class="form-label text-info" for="uiPort">UI Port</label>
+                        <input type="text" class="form-control bg-dark text-white border-secondary" name="ui_port" id="uiPort" value="{{ all_settings.get('ui_port', '5001') }}">
                     </div>
                 </div>
                 <div class="row">
                     <div class="col-md-6 mb-3">
-                        <label class="form-label text-warning">Ingestion Bind IP (Vector)</label>
-                        <input type="text" class="form-control bg-dark text-white border-secondary" name="ingest_bind_ip" value="{{ all_settings.get('ingest_bind_ip', '0.0.0.0') }}" placeholder="e.g. 192.168.1.50 (Ethernet)">
+                        <label class="form-label text-warning" for="ingestBindIp">Ingestion Bind IP (Vector)</label>
+                        <input type="text" class="form-control bg-dark text-white border-secondary" name="ingest_bind_ip" id="ingestBindIp" value="{{ all_settings.get('ingest_bind_ip', '0.0.0.0') }}" placeholder="e.g. 192.168.1.50 (Ethernet)">
                     </div>
                     <div class="col-md-6 mb-3">
-                        <label class="form-label text-warning">Ingestion Port</label>
-                        <input type="text" class="form-control bg-dark text-white border-secondary" name="ingest_port" value="{{ all_settings.get('ingest_port', '5000') }}">
+                        <label class="form-label text-warning" for="ingestPort">Ingestion Port</label>
+                        <input type="text" class="form-control bg-dark text-white border-secondary" name="ingest_port" id="ingestPort" value="{{ all_settings.get('ingest_port', '5000') }}">
                     </div>
                 </div>
                 <div class="form-check form-switch mb-3">
@@ -196,7 +196,7 @@
             <p class="text-muted small mb-3">Choose how long ingested logs are kept. Retention needs vary by policy, industry, and jurisdiction — pick the period that matches your own compliance requirements; these are common reference points, not a recommendation.</p>
             <div class="row g-2 align-items-end mb-3">
                 <div class="col-auto">
-                    <label class="form-label small text-muted mb-1">Retention period</label>
+                    <label class="form-label small text-muted mb-1" for="retentionDays">Retention period</label>
                     <select id="retentionDays" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onRetentionSelectChange()" style="min-width:220px;">
                         <option value="30">30 days</option>
                         <option value="90">90 days</option>
@@ -207,7 +207,7 @@
                     </select>
                 </div>
                 <div class="col-auto" id="retentionCustomWrap" style="display:none;">
-                    <label class="form-label small text-muted mb-1">Days</label>
+                    <label class="form-label small text-muted mb-1" for="retentionCustomDays">Days</label>
                     <input type="number" min="1" id="retentionCustomDays" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;">
                 </div>
                 <div class="col-auto">
@@ -228,7 +228,7 @@
             <p class="text-muted small mb-3">Move logs older than the archive window out of the live search index into cold storage in the same database, so Log Search stays fast without losing older data outright. Independent of Log Retention above -- if both are enabled, keep the retention period longer than the archive window, or retention will purge logs before they get a chance to be archived.</p>
             <div class="row g-2 align-items-end mb-3">
                 <div class="col-auto">
-                    <label class="form-label small text-muted mb-1">Archive window (days)</label>
+                    <label class="form-label small text-muted mb-1" for="archiveDays">Archive window (days)</label>
                     <input type="number" min="1" id="archiveDays" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;">
                 </div>
                 <div class="col-auto">
@@ -249,7 +249,7 @@
             <p class="text-muted small mb-3">Nightly consistent snapshots of the full database (SQLite's own safe-copy mechanism, not a plain file copy, so it can run against a live, actively-written database without risk of a torn/corrupted copy). Restoring from a backup needs SSH access to the server and stops services briefly to swap the database file -- see <code>restore_db.sh</code> in the repo root for the documented procedure; it isn't offered as a button here for that reason.</p>
             <div class="row g-2 align-items-end mb-3">
                 <div class="col-auto">
-                    <label class="form-label small text-muted mb-1">Keep backups for (days)</label>
+                    <label class="form-label small text-muted mb-1" for="dbBackupRetentionDays">Keep backups for (days)</label>
                     <input type="number" min="1" id="dbBackupRetentionDays" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;">
                 </div>
                 <div class="col-auto">
@@ -273,20 +273,20 @@
                 <div class="col-md-7">
                     <form id="brandingForm" enctype="multipart/form-data">
                         <div class="mb-2">
-                            <label class="form-label small text-muted mb-1">Company Name</label>
+                            <label class="form-label small text-muted mb-1" for="brandCompanyName">Company Name</label>
                             <input type="text" name="company_name" id="brandCompanyName" class="form-control form-control-sm bg-dark text-light border-secondary" maxlength="120" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
                         </div>
                         <div class="mb-2">
-                            <label class="form-label small text-muted mb-1">Footer Text</label>
+                            <label class="form-label small text-muted mb-1" for="brandFooterText">Footer Text</label>
                             <input type="text" name="footer_text" id="brandFooterText" class="form-control form-control-sm bg-dark text-light border-secondary" maxlength="200" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
                         </div>
                         <div class="mb-2">
-                            <label class="form-label small text-muted mb-1">Accent Color</label>
+                            <label class="form-label small text-muted mb-1" for="brandAccentColor">Accent Color</label>
                             <input type="color" name="accent_color" id="brandAccentColor" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:80px;" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
                         </div>
                         <div class="mb-3">
-                            <label class="form-label small text-muted mb-1">Logo (PNG/JPG, optional)</label>
-                            <input type="file" name="logo" accept=".png,.jpg,.jpeg" class="form-control form-control-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
+                            <label class="form-label small text-muted mb-1" for="brandLogoFile">Logo (PNG/JPG, optional)</label>
+                            <input type="file" name="logo" id="brandLogoFile" accept=".png,.jpg,.jpeg" class="form-control form-control-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
                         </div>
                         {% if has_permission('settings.reports.manage') %}
                         <button type="submit" class="btn btn-outline-primary btn-sm"><i class="fa-solid fa-save me-1"></i> Save Branding</button>
@@ -310,23 +310,23 @@
             <h6 class="text-info mb-3">Report Schedule</h6>
             <p class="text-muted small mb-3">Automatically generate each report type on a recurring cadence, in addition to generating on demand from the SIEM tab's Reports pane.</p>
             <div class="row g-2 align-items-end mb-2" style="max-width:520px;">
-                <div class="col-6"><label class="form-label small text-muted mb-1">Security Summary</label>
-                    <select data-report-type="security" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
+                <div class="col-6"><label class="form-label small text-muted mb-1" for="reportScheduleSecurity">Security Summary</label>
+                    <select data-report-type="security" id="reportScheduleSecurity" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
                         <option value="off">Off</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
                     </select>
                 </div>
-                <div class="col-6"><label class="form-label small text-muted mb-1">Compliance Report</label>
-                    <select data-report-type="compliance" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
+                <div class="col-6"><label class="form-label small text-muted mb-1" for="reportScheduleCompliance">Compliance Report</label>
+                    <select data-report-type="compliance" id="reportScheduleCompliance" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
                         <option value="off">Off</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
                     </select>
                 </div>
-                <div class="col-6"><label class="form-label small text-muted mb-1">Audit Trail Report</label>
-                    <select data-report-type="audit" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
+                <div class="col-6"><label class="form-label small text-muted mb-1" for="reportScheduleAudit">Audit Trail Report</label>
+                    <select data-report-type="audit" id="reportScheduleAudit" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
                         <option value="off">Off</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
                     </select>
                 </div>
-                <div class="col-6"><label class="form-label small text-muted mb-1">Vulnerability Report</label>
-                    <select data-report-type="vulnerability" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
+                <div class="col-6"><label class="form-label small text-muted mb-1" for="reportScheduleVulnerability">Vulnerability Report</label>
+                    <select data-report-type="vulnerability" id="reportScheduleVulnerability" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
                         <option value="off">Off</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
                     </select>
                 </div>
@@ -348,21 +348,21 @@
             <p class="text-muted small mb-3">Who did what, when — logins, user management, rule changes, threat-intel feed changes, and settings changes. Never automatically purged.</p>
             <div class="row g-2 align-items-end mb-3">
                 <div class="col-auto">
-                    <label class="form-label small text-muted mb-1">Action</label>
+                    <label class="form-label small text-muted mb-1" for="auditFilterAction">Action</label>
                     <select id="auditFilterAction" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="applyAuditFilters()" style="min-width:200px;">
                         <option value="">All actions</option>
                     </select>
                 </div>
                 <div class="col-auto">
-                    <label class="form-label small text-muted mb-1">Username</label>
+                    <label class="form-label small text-muted mb-1" for="auditFilterUsername">Username</label>
                     <input type="text" id="auditFilterUsername" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:160px;" placeholder="Any user" onchange="applyAuditFilters()">
                 </div>
                 <div class="col-auto">
-                    <label class="form-label small text-muted mb-1">From</label>
+                    <label class="form-label small text-muted mb-1" for="auditFilterFrom">From</label>
                     <input type="datetime-local" id="auditFilterFrom" class="form-control form-control-sm bg-dark text-light border-secondary" onchange="applyAuditFilters()">
                 </div>
                 <div class="col-auto">
-                    <label class="form-label small text-muted mb-1">To</label>
+                    <label class="form-label small text-muted mb-1" for="auditFilterTo">To</label>
                     <input type="datetime-local" id="auditFilterTo" class="form-control form-control-sm bg-dark text-light border-secondary" onchange="applyAuditFilters()">
                 </div>
                 <div class="col-auto">
@@ -411,17 +411,17 @@
         <input type="hidden" id="manageUserAction">
 
         <div class="mb-3" id="groupUsername">
-            <label class="form-label small">Username</label>
+            <label class="form-label small" for="manageUsername">Username</label>
             <input type="text" class="form-control bg-dark text-light border-secondary" id="manageUsername">
         </div>
         <div class="mb-3" id="groupRole">
-            <label class="form-label small">Role / Group</label>
+            <label class="form-label small" for="manageRole">Role / Group</label>
             <select class="form-select bg-dark text-light border-secondary" id="manageRole">
                 <option value="">Loading groups...</option>
             </select>
         </div>
         <div class="mb-3">
-            <label class="form-label small" id="lblPassword">Password</label>
+            <label class="form-label small" id="lblPassword" for="managePassword">Password</label>
             <input type="password" class="form-control bg-dark text-light border-secondary" id="managePassword">
         </div>
         <div class="form-check">
@@ -449,20 +449,20 @@
         <input type="hidden" id="roleId">
         <div class="row g-2 mb-2">
             <div class="col-md-5" id="groupRoleSlug">
-                <label class="form-label small">Slug <span class="text-muted">(lowercase, no spaces -- can't be changed later)</span></label>
+                <label class="form-label small" for="roleSlug">Slug <span class="text-muted">(lowercase, no spaces -- can't be changed later)</span></label>
                 <input type="text" class="form-control bg-dark text-light border-secondary" id="roleSlug" placeholder="e.g. threat_intel_analyst">
             </div>
             <div class="col-md-7">
-                <label class="form-label small">Display Name</label>
+                <label class="form-label small" for="roleLabel">Display Name</label>
                 <input type="text" class="form-control bg-dark text-light border-secondary" id="roleLabel" placeholder="e.g. Threat Intel Analyst">
             </div>
         </div>
         <div class="mb-3">
-            <label class="form-label small">Description <span class="text-muted">(optional)</span></label>
+            <label class="form-label small" for="roleDescription">Description <span class="text-muted">(optional)</span></label>
             <input type="text" class="form-control bg-dark text-light border-secondary" id="roleDescription">
         </div>
         <div class="mb-3">
-            <label class="form-label small">Default Dashboard <span class="text-muted">(optional)</span></label>
+            <label class="form-label small" for="roleDefaultDashboard">Default Dashboard <span class="text-muted">(optional)</span></label>
             <select id="roleDefaultDashboard" class="form-select bg-dark text-light border-secondary">
                 <option value="">— none (falls back to Overview) —</option>
             </select>

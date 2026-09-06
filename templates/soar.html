@@ -142,11 +142,11 @@
             {% if has_permission('cases.queues.manage') %}
             <div class="row g-2 align-items-end bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
                 <div class="col-md-4">
-                    <label class="form-label small text-muted mb-1">New Queue Name</label>
+                    <label class="form-label small text-muted mb-1" for="newSoarQueueName">New Queue Name</label>
                     <input type="text" id="newSoarQueueName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Fraud Investigations">
                 </div>
                 <div class="col-md-6">
-                    <label class="form-label small text-muted mb-1">Description (optional)</label>
+                    <label class="form-label small text-muted mb-1" for="newSoarQueueDescription">Description (optional)</label>
                     <input type="text" id="newSoarQueueDescription" class="form-control form-control-sm bg-dark text-light border-secondary">
                 </div>
                 <div class="col-md-2">
@@ -198,9 +198,9 @@
                         <label class="form-check-label fw-bold" for="notifSmtpEnabled">Email (SMTP)</label>
                     </div>
                     <div class="row g-2">
-                        <div class="col-8"><label class="form-label small text-muted mb-1">SMTP Host</label>
+                        <div class="col-8"><label class="form-label small text-muted mb-1" for="notifSmtpHost">SMTP Host</label>
                             <input type="text" id="notifSmtpHost" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="smtp.example.com" {{ '' if has_permission('settings.notifications.manage') else 'disabled' }}></div>
-                        <div class="col-4"><label class="form-label small text-muted mb-1">Port</label>
+                        <div class="col-4"><label class="form-label small text-muted mb-1" for="notifSmtpPort">Port</label>
                             <input type="number" id="notifSmtpPort" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="587" {{ '' if has_permission('settings.notifications.manage') else 'disabled' }}></div>
                         <div class="col-12">
                             <div class="form-check form-check-inline">
@@ -208,13 +208,13 @@
                                 <label class="form-check-label small" for="notifSmtpTls">Use STARTTLS</label>
                             </div>
                         </div>
-                        <div class="col-6"><label class="form-label small text-muted mb-1">Username</label>
+                        <div class="col-6"><label class="form-label small text-muted mb-1" for="notifSmtpUser">Username</label>
                             <input type="text" id="notifSmtpUser" class="form-control form-control-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.notifications.manage') else 'disabled' }}></div>
-                        <div class="col-6"><label class="form-label small text-muted mb-1">Password</label>
+                        <div class="col-6"><label class="form-label small text-muted mb-1" for="notifSmtpPass">Password</label>
                             <input type="password" id="notifSmtpPass" class="form-control form-control-sm bg-dark text-light border-secondary" autocomplete="new-password" {{ '' if has_permission('settings.notifications.manage') else 'disabled' }}></div>
-                        <div class="col-6"><label class="form-label small text-muted mb-1">From Address</label>
+                        <div class="col-6"><label class="form-label small text-muted mb-1" for="notifSmtpFrom">From Address</label>
                             <input type="text" id="notifSmtpFrom" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="micro-dfir@example.com" {{ '' if has_permission('settings.notifications.manage') else 'disabled' }}></div>
-                        <div class="col-6"><label class="form-label small text-muted mb-1">Default To (comma-separated)</label>
+                        <div class="col-6"><label class="form-label small text-muted mb-1" for="notifSmtpTo">Default To (comma-separated)</label>
                             <input type="text" id="notifSmtpTo" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="soc@example.com" {{ '' if has_permission('settings.notifications.manage') else 'disabled' }}></div>
                     </div>
                 </div>
@@ -223,13 +223,13 @@
                         <input class="form-check-input" type="checkbox" id="notifWebhookEnabled" {{ '' if has_permission('settings.notifications.manage') else 'disabled' }}>
                         <label class="form-check-label fw-bold" for="notifWebhookEnabled">Generic Webhook</label>
                     </div>
-                    <label class="form-label small text-muted mb-1">Webhook URL</label>
+                    <label class="form-label small text-muted mb-1" for="notifWebhookUrl">Webhook URL</label>
                     <input type="text" id="notifWebhookUrl" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="https://hooks.example.com/..." {{ '' if has_permission('settings.notifications.manage') else 'disabled' }}>
                     <p class="text-muted small mt-1 mb-0">Used by the seeded Legacy Alert Notifications playbook's webhook action -- works as-is with Slack/Discord/Teams incoming-webhook URLs or any endpoint that accepts a JSON POST.</p>
 
                     <hr class="border-secondary my-3">
 
-                    <label class="form-label small text-muted mb-1">Legacy Notification Severity Threshold</label>
+                    <label class="form-label small text-muted mb-1" for="notifMinSeverity">Legacy Notification Severity Threshold</label>
                     <select id="notifMinSeverity" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;" {{ '' if has_permission('settings.notifications.manage') else 'disabled' }}>
                         <option value="Low">Low and above</option>
                         <option value="Medium">Medium and above</option>
@@ -267,11 +267,11 @@
             <p class="text-muted small mb-3">Single-rule dedup already collapses repeats of the same rule on a host. This is the separate, cross-rule signal: when this many <em>distinct</em> rules fire on one host within the window, a case is created automatically (or an existing open case for that host gets a note) — surfacing a correlation an analyst would otherwise have to notice by hand.</p>
             <div class="row g-2 align-items-end mb-3">
                 <div class="col-auto">
-                    <label class="form-label small text-muted mb-1">Distinct rules</label>
+                    <label class="form-label small text-muted mb-1" for="escalationThreshold">Distinct rules</label>
                     <input type="number" min="2" id="escalationThreshold" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:100px;" {{ '' if has_permission('settings.system.manage') else 'disabled' }}>
                 </div>
                 <div class="col-auto">
-                    <label class="form-label small text-muted mb-1">Window (minutes)</label>
+                    <label class="form-label small text-muted mb-1" for="escalationWindow">Window (minutes)</label>
                     <input type="number" min="1" id="escalationWindow" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;" {{ '' if has_permission('settings.system.manage') else 'disabled' }}>
                 </div>
                 {% if has_permission('settings.system.manage') %}
@@ -288,7 +288,7 @@
             <p class="text-muted small mb-3">When an open case has had no activity (no status/assignee/queue/severity/workflow change logged to its timeline) for this long, a "Case gone stale" playbook trigger fires — a proactive nudge distinct from SLA breach, which only tracks the case's age, not whether anyone has actually touched it since. Fires again after a fresh period of silence following any new activity.</p>
             <div class="row g-2 align-items-end mb-3">
                 <div class="col-auto">
-                    <label class="form-label small text-muted mb-1">Stale after (hours)</label>
+                    <label class="form-label small text-muted mb-1" for="caseStaleHours">Stale after (hours)</label>
                     <input type="number" min="1" id="caseStaleHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:130px;" {{ '' if has_permission('settings.system.manage') else 'disabled' }}>
                 </div>
                 {% if has_permission('settings.system.manage') %}
@@ -314,11 +314,11 @@
             <div class="modal-body">
                 <input type="hidden" id="ctId">
                 <div class="mb-2">
-                    <label class="form-label small text-muted mb-1">Name</label>
+                    <label class="form-label small text-muted mb-1" for="ctName">Name</label>
                     <input type="text" id="ctName" class="form-control form-control-sm bg-dark text-light border-secondary">
                 </div>
                 <div class="mb-3">
-                    <label class="form-label small text-muted mb-1">Description</label>
+                    <label class="form-label small text-muted mb-1" for="ctDescription">Description</label>
                     <input type="text" id="ctDescription" class="form-control form-control-sm bg-dark text-light border-secondary">
                 </div>
 
@@ -352,11 +352,11 @@
                 <input type="hidden" id="pbId">
                 <div class="row g-2 mb-2">
                     <div class="col-md-6">
-                        <label class="form-label small text-muted mb-1">Name</label>
+                        <label class="form-label small text-muted mb-1" for="pbName">Name</label>
                         <input type="text" id="pbName" class="form-control bg-dark text-light border-secondary">
                     </div>
                     <div class="col-md-6">
-                        <label class="form-label small text-muted mb-1">Trigger Event</label>
+                        <label class="form-label small text-muted mb-1" for="pbTrigger">Trigger Event</label>
                         <select id="pbTrigger" class="form-select bg-dark text-light border-secondary" onchange="onPlaybookTriggerChange()">
                             <option value="case_created">Case created</option>
                             <option value="status_changed">Status changed</option>
@@ -372,34 +372,34 @@
                     </div>
                 </div>
                 <div class="mb-2">
-                    <label class="form-label small text-muted mb-1">Description (optional)</label>
+                    <label class="form-label small text-muted mb-1" for="pbDescription">Description (optional)</label>
                     <input type="text" id="pbDescription" class="form-control bg-dark text-light border-secondary">
                 </div>
                 <div class="row g-2 mb-2" id="pbScheduleRow" style="display:none;">
                     <div class="col-md-6">
-                        <label class="form-label small text-muted mb-1">Run every&hellip; (minutes)</label>
+                        <label class="form-label small text-muted mb-1" for="pbScheduleInterval">Run every&hellip; (minutes)</label>
                         <input type="number" id="pbScheduleInterval" min="1" class="form-control bg-dark text-light border-secondary" placeholder="e.g. 60 for hourly">
                         <div class="form-text text-muted">Conditions below select WHICH open cases get swept each time, instead of checking one case at fire time.</div>
                     </div>
                 </div>
                 <div class="row g-2 mb-2">
                     <div class="col-md-6">
-                        <label class="form-label small text-muted mb-1">Max runs / hour (optional)</label>
+                        <label class="form-label small text-muted mb-1" for="pbMaxRunsPerHour">Max runs / hour (optional)</label>
                         <input type="number" id="pbMaxRunsPerHour" min="1" class="form-control bg-dark text-light border-secondary" placeholder="No limit">
                         <div class="form-text text-muted">Auto-disables the playbook if it's tripped -- a runaway-automation guardrail, not a normal throttle.</div>
                     </div>
                 </div>
                 <div class="row g-2 mb-3">
                     <div class="col-md-3 pb-case-only-cond">
-                        <label class="form-label small text-muted mb-1">Only if Queue is&hellip;</label>
+                        <label class="form-label small text-muted mb-1" for="pbCondQueue">Only if Queue is&hellip;</label>
                         <select id="pbCondQueue" class="form-select bg-dark text-light border-secondary"><option value="">Any queue</option></select>
                     </div>
                     <div class="col-md-3 pb-case-only-cond">
-                        <label class="form-label small text-muted mb-1">Only if TLP is&hellip;</label>
+                        <label class="form-label small text-muted mb-1" for="pbCondTlp">Only if TLP is&hellip;</label>
                         <select id="pbCondTlp" class="form-select bg-dark text-light border-secondary"><option value="">Any TLP</option></select>
                     </div>
                     <div class="col-md-3 pb-case-only-cond">
-                        <label class="form-label small text-muted mb-1">Only if Status is&hellip;</label>
+                        <label class="form-label small text-muted mb-1" for="pbCondStatus">Only if Status is&hellip;</label>
                         <select id="pbCondStatus" class="form-select bg-dark text-light border-secondary">
                             <option value="">Any status</option>
                             <option value="open">Open</option>
@@ -407,7 +407,7 @@
                         </select>
                     </div>
                     <div class="col-md-3">
-                        <label class="form-label small text-muted mb-1" id="pbCondSeverityLabel">Only if Severity is&hellip;</label>
+                        <label class="form-label small text-muted mb-1" id="pbCondSeverityLabel" for="pbCondSeverity">Only if Severity is&hellip;</label>
                         <select id="pbCondSeverity" class="form-select bg-dark text-light border-secondary">
                             <option value="">Any severity</option>
                             <option value="critical">Critical</option>
@@ -497,15 +497,15 @@
                 </div>
                 <div class="row g-2 align-items-end bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
                     <div class="col-md-3">
-                        <label class="form-label small text-muted mb-1">Name</label>
+                        <label class="form-label small text-muted mb-1" for="newSecretName">Name</label>
                         <input type="text" id="newSecretName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. slack_soc_channel">
                     </div>
                     <div class="col-md-4">
-                        <label class="form-label small text-muted mb-1">Value (URL)</label>
+                        <label class="form-label small text-muted mb-1" for="newSecretValue">Value (URL)</label>
                         <input type="password" id="newSecretValue" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="https://…" autocomplete="new-password">
                     </div>
                     <div class="col-md-3">
-                        <label class="form-label small text-muted mb-1">Description (optional)</label>
+                        <label class="form-label small text-muted mb-1" for="newSecretDescription">Description (optional)</label>
                         <input type="text" id="newSecretDescription" class="form-control form-control-sm bg-dark text-light border-secondary">
                     </div>
                     <div class="col-md-2">
@@ -538,19 +538,19 @@
                 </div>
                 <div class="row g-2 align-items-start bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
                     <div class="col-md-4">
-                        <label class="form-label small text-muted mb-1">Name</label>
+                        <label class="form-label small text-muted mb-1" for="caName">Name</label>
                         <input type="text" id="caName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Notify PagerDuty">
                     </div>
                     <div class="col-md-8">
-                        <label class="form-label small text-muted mb-1">Description (optional)</label>
+                        <label class="form-label small text-muted mb-1" for="caDescription">Description (optional)</label>
                         <input type="text" id="caDescription" class="form-control form-control-sm bg-dark text-light border-secondary">
                     </div>
                     <div class="col-md-12">
-                        <label class="form-label small text-muted mb-1">URL source</label>
+                        <label class="form-label small text-muted mb-1" for="caUrlSource">URL source</label>
                         <div id="caUrlSourceWrap"></div>
                     </div>
                     <div class="col-md-9">
-                        <label class="form-label small text-muted mb-1">Body (optional -- case_id/case_title/status/tlp placeholders supported)</label>
+                        <label class="form-label small text-muted mb-1" for="caBody">Body (optional -- case_id/case_title/status/tlp placeholders supported)</label>
                         <input type="text" id="caBody" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder='{"case_id": "{{case_id}}", "title": "{{case_title}}", "status": "{{status}}"}'>
                     </div>
                     <div class="col-md-3 d-flex gap-2 align-items-end">

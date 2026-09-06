@@ -96,29 +96,29 @@
             </div>
             <div class="modal-body">
                 <div class="mb-2">
-                    <label class="form-label small text-muted mb-1">Title</label>
+                    <label class="form-label small text-muted mb-1" for="newCaseTitle">Title</label>
                     <input type="text" id="newCaseTitle" class="form-control bg-dark text-light border-secondary" placeholder="e.g. Suspicious activity on WIN-DC01">
                 </div>
                 <div class="mb-2">
-                    <label class="form-label small text-muted mb-1">Template (optional)</label>
+                    <label class="form-label small text-muted mb-1" for="newCaseTemplate">Template (optional)</label>
                     <select id="newCaseTemplate" class="form-select bg-dark text-light border-secondary">
                         <option value="">None — start with an empty task list</option>
                     </select>
                     <div class="form-text text-muted">Applies that template's task checklist to the new case.</div>
                 </div>
                 <div class="mb-2">
-                    <label class="form-label small text-muted mb-1">Queue (optional)</label>
+                    <label class="form-label small text-muted mb-1" for="newCaseQueue">Queue (optional)</label>
                     <select id="newCaseQueue" class="form-select bg-dark text-light border-secondary">
                         <option value="">Unassigned</option>
                     </select>
                 </div>
                 <div class="row g-2 mb-2">
                     <div class="col-md-3">
-                        <label class="form-label small text-muted mb-1">Assignee (optional)</label>
+                        <label class="form-label small text-muted mb-1" for="newCaseAssignee">Assignee (optional)</label>
                         <input type="text" id="newCaseAssignee" class="form-control bg-dark text-light border-secondary">
                     </div>
                     <div class="col-md-3">
-                        <label class="form-label small text-muted mb-1">Severity</label>
+                        <label class="form-label small text-muted mb-1" for="newCaseSeverity">Severity</label>
                         <select id="newCaseSeverity" class="form-select bg-dark text-light border-secondary">
                             <option value="critical">Critical</option>
                             <option value="high">High</option>
@@ -127,12 +127,12 @@
                         </select>
                     </div>
                     <div class="col-md-3">
-                        <label class="form-label small text-muted mb-1">TLP</label>
+                        <label class="form-label small text-muted mb-1" for="newCaseTlp">TLP</label>
                         <select id="newCaseTlp" class="form-select bg-dark text-light border-secondary"></select>
                     </div>
                 </div>
                 <div class="mb-2">
-                    <label class="form-label small text-muted mb-1">Description (optional)</label>
+                    <label class="form-label small text-muted mb-1" for="newCaseDescription">Description (optional)</label>
                     <textarea id="newCaseDescription" class="form-control bg-dark text-light border-secondary" rows="3"></textarea>
                 </div>
                 <div id="newCaseError" class="text-danger small" style="display:none;"></div>

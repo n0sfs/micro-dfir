@@ -131,7 +131,7 @@
             <p class="text-muted small mb-2">Individual file paths to watch for changes (not directories, and not recursive). A new, changed, or removed file shows up in Log Search as an <code>app: "FIM"</code> entry. Applies to both Windows and Linux endpoints -- an agent silently skips any path that doesn't exist on its own OS.</p>
             <div class="row g-2 align-items-end mb-3">
                 <div class="col-auto">
-                    <label class="form-label small text-muted mb-1">Check interval (seconds)</label>
+                    <label for="fimIntervalSeconds" class="form-label small text-muted mb-1">Check interval (seconds)</label>
                     <input type="number" min="60" max="86400" id="fimIntervalSeconds" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;" {{ '' if has_permission('edr.fim.manage') else 'disabled' }}>
                 </div>
                 {% if has_permission('edr.fim.manage') %}
@@ -162,11 +162,11 @@
             <p class="text-muted small mb-2">Independently tune how often agents check in for new commands/config vs. how often they ship logs. A large fleet typically wants command check-ins backed off (fewer "anything new for me?" requests) while log shipping stays frequent. Takes effect on each agent's next check-in.</p>
             <div class="row g-2 align-items-end mb-2">
                 <div class="col-auto">
-                    <label class="form-label small text-muted mb-1">Command/config check-in (seconds)</label>
+                    <label for="agentConfigIntervalSeconds" class="form-label small text-muted mb-1">Command/config check-in (seconds)</label>
                     <input type="number" min="5" max="3600" id="agentConfigIntervalSeconds" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;" {{ '' if has_permission('edr.fim.manage') else 'disabled' }}>
                 </div>
                 <div class="col-auto">
-                    <label class="form-label small text-muted mb-1">Log shipping (seconds)</label>
+                    <label for="agentLogIntervalSeconds" class="form-label small text-muted mb-1">Log shipping (seconds)</label>
                     <input type="number" min="5" max="300" id="agentLogIntervalSeconds" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;" {{ '' if has_permission('edr.fim.manage') else 'disabled' }}>
                 </div>
                 {% if has_permission('edr.fim.manage') %}
@@ -188,11 +188,11 @@
             <p class="text-muted small mb-2">When an EDR agent hasn't checked in for this long, an "Agent Offline" alert is created automatically (which can trigger an Alert-Created SOAR playbook). The cooldown prevents re-alerting the same host on every poll cycle while it stays offline.</p>
             <div class="row g-2 align-items-end mb-2">
                 <div class="col-auto">
-                    <label class="form-label small text-muted mb-1">Offline after (minutes)</label>
+                    <label for="agentOfflineMinutes" class="form-label small text-muted mb-1">Offline after (minutes)</label>
                     <input type="number" min="1" id="agentOfflineMinutes" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:130px;" {{ '' if has_permission('settings.system.manage') else 'disabled' }}>
                 </div>
                 <div class="col-auto">
-                    <label class="form-label small text-muted mb-1">Cooldown (minutes)</label>
+                    <label for="agentOfflineCooldown" class="form-label small text-muted mb-1">Cooldown (minutes)</label>
                     <input type="number" min="1" id="agentOfflineCooldown" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:130px;" {{ '' if has_permission('settings.system.manage') else 'disabled' }}>
                 </div>
                 {% if has_permission('settings.system.manage') %}
@@ -219,7 +219,7 @@
                     </select>
 
                     <div id="consoleActionsWrap" class="disabled">
-                        <label class="form-label small text-muted mb-1 fw-bold">Response Actions</label>
+                        <label for="consoleActionSelect" class="form-label small text-muted mb-1 fw-bold">Response Actions</label>
                         <div class="mb-2">
                             <div class="input-group input-group-sm">
                                 <select id="consoleActionSelect" class="form-select form-select-sm bg-dark text-light border-secondary"></select>

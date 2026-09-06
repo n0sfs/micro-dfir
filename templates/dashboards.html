@@ -60,7 +60,7 @@
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
-                <label class="form-label small text-muted">Name</label>
+                <label class="form-label small text-muted" for="newDashboardName">Name</label>
                 <input type="text" id="newDashboardName" class="form-control bg-dark text-light border-secondary" placeholder="e.g. Tier 3 Triage" onkeyup="if(event.key === 'Enter') createDashboard()">
                 <div id="newDashboardError" class="text-danger small mt-2" style="display:none;"></div>
             </div>
@@ -81,7 +81,7 @@
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
-                <label class="form-label small text-muted">Name</label>
+                <label class="form-label small text-muted" for="renameDashboardName">Name</label>
                 <input type="text" id="renameDashboardName" class="form-control bg-dark text-light border-secondary" onkeyup="if(event.key === 'Enter') renameDashboard()">
                 <div id="renameDashboardError" class="text-danger small mt-2" style="display:none;"></div>
             </div>
@@ -118,11 +118,11 @@
                 <p class="small text-muted">Builds a chart against your raw log data (the same filters Log Search uses) -- pick what to filter, how to group it, and how to draw it.</p>
                 <div class="row g-2 mb-2">
                     <div class="col-md-6">
-                        <label class="form-label small text-muted mb-1">Title</label>
+                        <label class="form-label small text-muted mb-1" for="ccwTitle">Title</label>
                         <input type="text" id="ccwTitle" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Failed Logons by Host">
                     </div>
                     <div class="col-md-3">
-                        <label class="form-label small text-muted mb-1">Chart Type</label>
+                        <label class="form-label small text-muted mb-1" for="ccwChartType">Chart Type</label>
                         <select id="ccwChartType" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onCustomWidgetChartTypeChange()">
                             <option value="trend">Trend over time</option>
                             <option value="breakdown">Breakdown (donut)</option>
@@ -131,31 +131,31 @@
                         </select>
                     </div>
                     <div class="col-md-3" id="ccwGroupByWrap">
-                        <label class="form-label small text-muted mb-1">Group By</label>
+                        <label class="form-label small text-muted mb-1" for="ccwGroupBy">Group By</label>
                         <select id="ccwGroupBy" class="form-select form-select-sm bg-dark text-light border-secondary"></select>
                     </div>
                 </div>
                 <div class="row g-2 mb-2">
                     <div class="col-md-4">
-                        <label class="form-label small text-muted mb-1">Time Range</label>
+                        <label class="form-label small text-muted mb-1" for="ccwRange">Time Range</label>
                         <select id="ccwRange" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onCustomWidgetRangeChange()"></select>
                     </div>
                     <div class="col-md-4" id="ccwStartWrap" style="display:none;">
-                        <label class="form-label small text-muted mb-1">Start</label>
+                        <label class="form-label small text-muted mb-1" for="ccwStart">Start</label>
                         <input type="datetime-local" id="ccwStart" class="form-control form-control-sm bg-dark text-light border-secondary">
                     </div>
                     <div class="col-md-4" id="ccwEndWrap" style="display:none;">
-                        <label class="form-label small text-muted mb-1">End</label>
+                        <label class="form-label small text-muted mb-1" for="ccwEnd">End</label>
                         <input type="datetime-local" id="ccwEnd" class="form-control form-control-sm bg-dark text-light border-secondary">
                     </div>
                 </div>
                 <div class="row g-2 mb-2">
                     <div class="col-md-6">
-                        <label class="form-label small text-muted mb-1">App <span class="text-muted">(comma-separated, optional)</span></label>
+                        <label class="form-label small text-muted mb-1" for="ccwApp">App <span class="text-muted">(comma-separated, optional)</span></label>
                         <input type="text" id="ccwApp" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Sysmon, FIM">
                     </div>
                     <div class="col-md-6">
-                        <label class="form-label small text-muted mb-1">Severity <span class="text-muted">(comma-separated, optional)</span></label>
+                        <label class="form-label small text-muted mb-1" for="ccwSeverity">Severity <span class="text-muted">(comma-separated, optional)</span></label>
                         <input type="text" id="ccwSeverity" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. High, Critical">
                     </div>
                 </div>
@@ -176,7 +176,7 @@
                     <input type="text" id="ccwFieldVal" class="form-control bg-dark text-light border-secondary" placeholder="Value&hellip;">
                 </div>
                 <div class="mb-2" id="ccwLimitWrap">
-                    <label class="form-label small text-muted mb-1">Show top</label>
+                    <label class="form-label small text-muted mb-1" for="ccwLimit">Show top</label>
                     <input type="number" id="ccwLimit" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:100px;" min="1" max="25" value="8">
                 </div>
                 <div id="ccwError" class="text-danger small mt-2" style="display:none;"></div>

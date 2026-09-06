@@ -10,6 +10,26 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-06
 
+### Accessibility sweep: label/`for=` associations across every static form
+
+The last deferred item from the Business Readiness pass: ~190 `<label>` elements across
+the app had no programmatic association with their form control (missing `for=`), a real
+WCAG gap and screen-reader usability issue — only the login page got this fix at the time.
+Swept the remaining 9 templates (`agents.html`, `cases.html`, `dashboard.html`,
+`dashboards.html`, `log_pipeline.html`, `settings.html`, `soar.html`,
+`threat_intel.html`, `ueba.html`; `change_password.html` was already fully covered), 158
+labels fixed total. Every fix reused a control's already-existing `id` (this app's JS is
+full of `getElementById` calls, so nearly every control already had one) — a small number
+of genuinely id-less controls (Settings' Network IP/port fields, report-schedule
+selects, the branding logo file input) got a new id, each verified unique before use.
+Deliberately left alone: labels nested around their control (already valid, no `for=`
+needed), labels with no single associated control (section headings over checkbox groups
+or dynamic lists), and labels inside JS template literals (dynamically-stamped rows,
+often already using a per-instance dynamic id scheme of their own). Verified via Jinja +
+`node --check` on every touched file and a repo-wide scan confirming zero duplicate `id=`
+attributes were introduced — a real risk given how much of this app's JS resolves
+elements by id.
+
 ### Loading-state sweep: the rest of the "stuck on Loading forever" fetch sites
 
 From the earlier Business Readiness pass: only 5 representative `fetch()` call sites got
