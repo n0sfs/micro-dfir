@@ -2824,14 +2824,28 @@ def api_custom_parsers_preview():
 _PARSER_CATALOG_BUILTINS = (
     {
         'key': 'windows_xml', 'name': 'Windows Event XML', 'kind': 'built-in',
-        'apps': ('sysmon', 'security', 'system', 'windowsdefender', 'powershell'),
+        # live_logs.app stores the agent's display-name casing, not the lowercase config
+        # keys used elsewhere (_CHANNEL_LOG_NAMES/_DEFAULT_CHANNEL_ENABLED) -- confirmed
+        # live against production traffic (app values are literally "Sysmon"/"PowerShell",
+        # not "sysmon"/"powershell"), so this must match that casing exactly or every
+        # query below silently matches zero rows. A custom (admin-added) channel's app
+        # value is whatever LogName the admin typed, so this list is inherently a curated
+        # approximation, not exhaustive -- same accepted tradeoff as SIGMA_LOGSOURCE_INGESTED_APPS.
+        'apps': ('Sysmon', 'Security', 'System', 'Application', 'PowerShell', 'Windows Defender'),
         'target_fields': ('process_image', 'command_line', 'parent_image', 'parent_command_line', 'original_file_name', 'query_name', 'destination_ip'),
         'extra_where': "raw_xml IS NOT NULL",
         'description': 'Parses process/network fields from raw Windows Event XML (channels with "Capture XML" enabled) -- see _extract_process_fields_from_xml.',
     },
     {
         'key': 'windows_regex', 'name': 'Windows Message Regex', 'kind': 'built-in',
-        'apps': ('sysmon', 'security', 'system', 'windowsdefender', 'powershell'),
+        # live_logs.app stores the agent's display-name casing, not the lowercase config
+        # keys used elsewhere (_CHANNEL_LOG_NAMES/_DEFAULT_CHANNEL_ENABLED) -- confirmed
+        # live against production traffic (app values are literally "Sysmon"/"PowerShell",
+        # not "sysmon"/"powershell"), so this must match that casing exactly or every
+        # query below silently matches zero rows. A custom (admin-added) channel's app
+        # value is whatever LogName the admin typed, so this list is inherently a curated
+        # approximation, not exhaustive -- same accepted tradeoff as SIGMA_LOGSOURCE_INGESTED_APPS.
+        'apps': ('Sysmon', 'Security', 'System', 'Application', 'PowerShell', 'Windows Defender'),
         'target_fields': ('process_image', 'command_line', 'parent_image', 'parent_command_line', 'original_file_name', 'query_name', 'destination_ip'),
         'extra_where': "raw_xml IS NULL",
         'description': 'Falls back to regex extraction of the rendered Message text when XML capture is off -- see _extract_process_fields.',
