@@ -151,8 +151,8 @@
         <div class="card-body">
             <div class="table-responsive mb-3">
                 <table class="table table-dark table-sm align-middle mb-0">
-                    <thead><tr><th class="ps-3">Name</th><th>Description</th><th>Members</th><th>Cases</th><th class="text-end pe-3"></th></tr></thead>
-                    <tbody id="soarQueuesTableBody"><tr><td colspan="5" class="text-center text-muted small py-3">Loading&hellip;</td></tr></tbody>
+                    <thead><tr><th class="ps-3">Name</th><th>Description</th><th>Members</th><th>Cases</th><th>SLA Override</th><th class="text-end pe-3"></th></tr></thead>
+                    <tbody id="soarQueuesTableBody"><tr><td colspan="6" class="text-center text-muted small py-3">Loading&hellip;</td></tr></tbody>
                 </table>
             </div>
             {% if has_permission('cases.queues.manage') %}
@@ -165,7 +165,11 @@
                     <label class="form-label small text-muted mb-1" for="newSoarQueueDescription">Description (optional)</label>
                     <input type="text" id="newSoarQueueDescription" class="form-control form-control-sm bg-dark text-light border-secondary">
                 </div>
-                <div class="col-md-2">
+                <div class="col-md-1">
+                    <label class="form-label small text-muted mb-1" for="newSoarQueueSla" title="Leave blank to follow the global/per-severity default">SLA (h)</label>
+                    <input type="number" min="1" max="8760" id="newSoarQueueSla" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="default">
+                </div>
+                <div class="col-md-1">
                     <button type="button" class="btn btn-sm btn-outline-primary w-100" onclick="addSoarQueue()"><i class="fa-solid fa-plus me-1"></i>Add</button>
                 </div>
             </div>
@@ -837,7 +841,7 @@ function loadQueuesForSoar() {
         return r.json();
     }).then(qs => { allQueuesForSoar = qs || []; renderSoarQueuesTable(); }).catch(err => {
         console.error('Error loading queues:', err);
-        renderLoadError('soarQueuesTableBody', 5, 'Failed to load queues.');
+        renderLoadError('soarQueuesTableBody', 6, 'Failed to load queues.');
     });
     if (CAN_MANAGE_QUEUES && !window.allUsersForQueues) {
         fetch('/api/settings/users').then(r => r.json()).then(data => {
@@ -852,7 +856,7 @@ function renderSoarQueuesTable() {
     const tbody = document.getElementById('soarQueuesTableBody');
     if (!tbody) return;
     if (!allQueuesForSoar.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted small py-3">No queues yet.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted small py-3">No queues yet.</td></tr>';
         return;
     }
     const userOptions = (window.allUsersForQueues || []).map(u => `<option value="${escHtml(u)}">${escHtml(u)}</option>`).join('');
@@ -872,6 +876,13 @@ function renderSoarQueuesTable() {
                 </div>` : ''}
             </td>
             <td class="text-muted small text-nowrap">${q.open_case_count}/${q.total_case_count}</td>
+            <td class="text-nowrap" style="width:130px;">
+                ${CAN_MANAGE_QUEUES ? `
+                <div class="d-flex gap-1 align-items-center">
+                    <input type="number" min="1" max="8760" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" placeholder="default" value="${q.sla_hours || ''}" id="queueSla${q.id}">
+                    <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" title="Save SLA override" onclick="saveSoarQueueSla(${q.id})"><i class="fa-solid fa-save"></i></button>
+                </div>` : (q.sla_hours ? `${q.sla_hours}h` : '<span class="text-muted small">default</span>')}
+            </td>
             <td class="text-end pe-3">${CAN_MANAGE_QUEUES ? `<button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete queue" onclick="deleteSoarQueue(${q.id}, '${escJs(q.name)}')"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
         </tr>
     `).join('');
@@ -880,22 +891,42 @@ function renderSoarQueuesTable() {
 async function addSoarQueue() {
     const nameEl = document.getElementById('newSoarQueueName');
     const descEl = document.getElementById('newSoarQueueDescription');
+    const slaEl = document.getElementById('newSoarQueueSla');
     const errBox = document.getElementById('newSoarQueueError');
     errBox.style.display = 'none';
     const name = nameEl.value.trim();
     if (!name) { errBox.innerText = 'Name is required.'; errBox.style.display = 'block'; return; }
     const res = await fetch('/api/case-queues', {
-        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name, description: descEl.value.trim()})
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name, description: descEl.value.trim(), sla_hours: slaEl.value.trim() || null})
     });
     const data = await res.json();
     if (!res.ok) { errBox.innerText = data.error || 'Failed to create queue.'; errBox.style.display = 'block'; return; }
-    nameEl.value = ''; descEl.value = '';
+    nameEl.value = ''; descEl.value = ''; slaEl.value = '';
     await loadQueuesForSoar();
 }
 
 async function deleteSoarQueue(qid, name) {
     if (!(await confirmDialog(`Delete the "${name}" queue? Cases in it will be unassigned, not deleted.`, {title: 'Delete queue', danger: true, confirmLabel: 'Delete'}))) return;
     await fetch(`/api/case-queues/${qid}`, {method: 'DELETE'});
+    await loadQueuesForSoar();
+}
+
+// SLA override is the only field this inline control edits -- name/description are
+// re-sent unchanged (this table has no rename UI at all today) since the PUT route
+// updates all three together.
+async function saveSoarQueueSla(qid) {
+    const q = allQueuesForSoar.find(x => x.id === qid);
+    if (!q) return;
+    const input = document.getElementById(`queueSla${qid}`);
+    const raw = input.value.trim();
+    const res = await fetch(`/api/case-queues/${qid}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: q.name, description: q.description || '', sla_hours: raw === '' ? null : raw})
+    });
+    const data = await res.json();
+    if (!res.ok) { toast(data.error || 'Failed to update SLA override.', 'danger'); return; }
+    toast('Queue SLA override updated.', 'success');
     await loadQueuesForSoar();
 }
 
