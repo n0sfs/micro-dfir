@@ -1296,6 +1296,12 @@ function saveTriage(aid) {
     const payload = {
         status: document.getElementById('triageStatus').value,
         assignee: document.getElementById('triageAssignee').value.trim(),
+        // The primary triage surface never sent this, unlike the Home widget's
+        // quick-acknowledge button -- an alert an analyst explicitly reviewed and saved
+        // triage on here stayed forever in the "unacknowledged" count (and kept
+        // reappearing in the dashboard's "unacknowledged alerts" widget) no matter what
+        // status they set. Opening this form and clicking Save IS the acknowledgement.
+        acknowledged: true,
     };
     fetch(`/api/alerts/${aid}`, {
         method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
@@ -1307,7 +1313,7 @@ function saveTriage(aid) {
             // Keep the in-memory currentLogs entry consistent so the table's status badge
             // reflects the change immediately without a full refetch.
             const log = currentLogs.find(l => l.type === 'alert' && String(l.id) === String(aid));
-            if (log) { log.status = payload.status; log.assignee = payload.assignee || null; }
+            if (log) { log.status = payload.status; log.assignee = payload.assignee || null; log.acknowledged = 1; }
             renderLogsTableRows(currentLogs);
             const suggestWrap = document.getElementById('fpExclusionSuggest');
             if (suggestWrap) {

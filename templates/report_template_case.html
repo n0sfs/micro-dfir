@@ -49,22 +49,38 @@
     </table>
     {% else %}<p>No tasks recorded.</p>{% endif %}
 
-    <h2 class="section-title">Linked Items ({{ items|length }})</h2>
-    {% if items %}
+    <h2 class="section-title">Implicated Assets ({{ assets|length }})</h2>
+    {% if assets %}
     <table>
-        <thead><tr><th style="width:60px;">Severity</th><th>Item</th><th>Host / User</th><th style="width:140px;">Time</th></tr></thead>
+        <thead><tr><th>Host</th><th style="width:110px;">Status</th><th style="width:90px;">Criticality</th><th>Indicator / Notes</th></tr></thead>
         <tbody>
-        {% for it in items %}
+        {% for a in assets %}
             <tr>
-                <td><span class="badge" style="background:{{ severity_colors.get((it.severity or 'INFO')|upper, '#6c757d') }};">{{ (it.severity or 'INFO')|upper }}</span></td>
-                <td><strong>{{ it.label }}</strong><br><span style="color:#666; font-size:8.5pt;">{{ (it.message or '')[:200] }}</span></td>
-                <td>{{ it.host or '' }}{% if it.username %} / {{ it.username }}{% endif %}</td>
-                <td>{{ it.timestamp }}</td>
+                <td>{{ a.host }}</td>
+                <td><span class="badge" style="background:{{ '#dc3545' if a.compromise_status == 'confirmed' else ('#fd7e14' if a.compromise_status == 'suspected' else '#198754') }};">{{ a.compromise_status|upper }}</span></td>
+                <td>{{ (a.criticality or 'standard')|upper }}</td>
+                <td>{% if a.related_indicator %}{{ a.related_indicator }}<br>{% endif %}<span style="color:#666; font-size:8.5pt;">{{ a.notes or '' }}</span></td>
             </tr>
         {% endfor %}
         </tbody>
     </table>
-    {% else %}<p>No alerts, anomalies, or response actions linked to this case.</p>{% endif %}
+    {% else %}<p>No hosts have been marked as implicated in this case.</p>{% endif %}
+
+    <h2 class="section-title">Indicators of Compromise ({{ iocs|length }})</h2>
+    {% if iocs %}
+    <table>
+        <thead><tr><th style="width:90px;">Type</th><th>Value</th><th>Notes</th></tr></thead>
+        <tbody>
+        {% for i in iocs %}
+            <tr>
+                <td>{{ i.ioc_type|upper }}</td>
+                <td><code>{{ i.value }}</code></td>
+                <td style="color:#666; font-size:8.5pt;">{{ i.notes or '' }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<p>No indicators of compromise recorded for this case.</p>{% endif %}
 
     {% if analyses %}
     <h2 class="section-title">Host / User Analysis</h2>
@@ -74,13 +90,23 @@
     {% endfor %}
     {% endif %}
 
-    <h2 class="section-title">Timeline</h2>
+    <h2 class="section-title">Incident Timeline ({{ timeline|length }})</h2>
+    <p style="font-size:9pt; color:#666;">Evidence (alerts, anomalies, EDR events -- ordered by when it actually happened) merged with analyst actions (notes, status changes, playbook runs -- ordered by when they were done), together in one chronological sequence.</p>
     {% if timeline %}
     {% for e in timeline %}
+        {% if e.kind == 'item' %}
+        <div class="timeline-item">
+            <span class="timeline-ts">{{ e.ts }}</span>
+            <span class="badge" style="background:{{ severity_colors.get((e.severity or 'INFO')|upper, '#6c757d') }};">{{ (e.severity or 'INFO')|upper }}</span><br>
+            <strong>{{ e.label }}</strong>{% if e.host %} — {{ e.host }}{% endif %}{% if e.username %} / {{ e.username }}{% endif %}<br>
+            <span style="color:#666; font-size:8.5pt;">{{ e.detail }}</span>
+        </div>
+        {% else %}
         <div class="timeline-item">
             <span class="timeline-ts">{{ e.ts }}{% if e.actor %} · {{ e.actor }}{% endif %}</span><br>
             {{ e.label }}
         </div>
+        {% endif %}
     {% endfor %}
     {% else %}<p>No timeline events recorded.</p>{% endif %}
 
