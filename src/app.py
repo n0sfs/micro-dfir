@@ -7637,6 +7637,57 @@ def _run_auto_revert_restore(db, case_id, params):
     db.execute("UPDATE playbook_pending_reverts SET status = 'reverted' WHERE id = ?", (params['pending_revert_id'],))
     return f"auto-reverted restore_network for {hostname}"
 
+# Visibility + manual-cancel for a pending auto-revert BEFORE its revert_at arrives --
+# today's only cancel path is rejecting the follow-up restore_network approval once
+# revert_at has already passed (see the 'cancelled' UPDATE below in
+# api_playbook_approval_decide), so an analyst who decides mid-investigation "actually,
+# keep this host isolated longer" had no way to stop the clock. Same permission as the
+# approve/reject route -- cancelling here is the same "prevent restore_network from ever
+# being queued" outcome as rejecting the later approval, not a new gated capability.
+@app.route('/api/playbook-pending-reverts', methods=['GET'])
+@login_required
+def api_playbook_pending_reverts():
+    err = require_permission('soar.playbooks.manage')
+    if err: return err
+    db = get_db()
+    status = request.args.get('status') or 'pending'
+    rows = db.execute(
+        "SELECT r.id, r.playbook_id, p.name as playbook_name, r.case_id, c.title as case_title, "
+        "r.hostname, r.isolated_at, r.revert_at, r.status "
+        "FROM playbook_pending_reverts r "
+        "LEFT JOIN playbooks p ON p.id = r.playbook_id "
+        "LEFT JOIN cases c ON c.id = r.case_id "
+        "WHERE r.status = ? ORDER BY r.revert_at ASC",
+        (status,)
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+@app.route('/api/playbook-pending-reverts/<int:revert_id>', methods=['PUT'])
+@login_required
+def api_playbook_pending_revert_cancel(revert_id):
+    err = require_permission('soar.playbooks.manage')
+    if err: return err
+    if (request.json or {}).get('action') != 'cancel':
+        return jsonify({'error': "action must be 'cancel'"}), 400
+    db = get_db()
+    # Same compare-and-swap shape as api_playbook_approval_decide's claim -- only a row
+    # still 'pending' can be cancelled; one that's already crossed revert_at and moved to
+    # 'queued_for_approval' (or beyond) must go through the approval queue's reject path
+    # instead, since by then a playbook_approvals row already exists referencing it.
+    claim = db.execute(
+        "UPDATE playbook_pending_reverts SET status = 'cancelled' WHERE id = ? AND status = 'pending'",
+        (revert_id,)
+    )
+    if claim.rowcount == 0:
+        db.commit()
+        return jsonify({'error': 'This revert is no longer pending (it may have already come due).'}), 400
+    row = db.execute("SELECT case_id, hostname FROM playbook_pending_reverts WHERE id = ?", (revert_id,)).fetchone()
+    if row:
+        _log_case_event(db, row['case_id'], 'auto_revert_cancelled', f"Scheduled network restore for {row['hostname']} was cancelled by {current_user.username} -- host stays isolated.")
+    db.commit()
+    log_audit('auto_revert_cancel', 'playbook_pending_revert', revert_id)
+    return jsonify({'status': 'success'})
+
 # Approve executes the ONE gated action for real (through the same _run_playbook_action
 # every other action in this app runs through) and logs it to the case timeline;
 # reject just records the decision and never executes anything. Neither path re-checks

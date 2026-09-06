@@ -73,6 +73,22 @@
                     </table>
                 </div>
             </div>
+
+            <div class="card bg-dark border-secondary mb-3" id="scheduledRevertsCard" style="display:none;">
+                <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+                    <span><i class="fa-solid fa-clock-rotate-left me-2"></i>Scheduled Reverts</span>
+                    <span class="badge bg-info text-dark" id="scheduledRevertsCount">0</span>
+                </div>
+                <p class="text-muted small mb-0 px-3 pt-2">Hosts an <code>isolate_host</code> action isolated with an auto-restore timer -- cancel here to keep a host isolated past its scheduled restore time. Once a timer comes due it moves to Pending Approvals above for the actual restore decision.</p>
+                <div class="table-responsive">
+                    <table class="table table-dark table-sm align-middle mb-0">
+                        <thead><tr>
+                            <th class="ps-3">Host</th><th>Case</th><th>Isolated At</th><th>Restores At</th><th class="text-end pe-3"></th>
+                        </tr></thead>
+                        <tbody id="scheduledRevertsTableBody"></tbody>
+                    </table>
+                </div>
+            </div>
             {% endif %}
 
             <div class="card bg-dark border-secondary">
@@ -1784,6 +1800,51 @@ async function decideApproval(approvalId, decision) {
         if (!ok) { toast(data.error || 'Failed to decide.', 'danger'); return; }
         toast(decision === 'approve' ? 'Action approved and run.' : 'Action rejected.', 'success');
         loadPendingApprovals();
+        loadScheduledReverts();
+    }).catch(err => toast('Error: ' + err, 'danger'));
+}
+
+// Scheduled Reverts -- the still-pending (not yet due) window of an isolate_host
+// action's optional auto-restore timer (playbook_pending_reverts, status='pending').
+// Once revert_at arrives it moves into Pending Approvals above instead (as a
+// restore_network approval) -- this list only ever shows what hasn't come due yet.
+function loadScheduledReverts() {
+    if (!CAN_MANAGE_PLAYBOOKS) return;
+    fetch('/api/playbook-pending-reverts?status=pending').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(rows => {
+        const card = document.getElementById('scheduledRevertsCard');
+        const tbody = document.getElementById('scheduledRevertsTableBody');
+        document.getElementById('scheduledRevertsCount').innerText = rows.length;
+        card.style.display = rows.length ? '' : 'none';
+        tbody.innerHTML = rows.map(r => `
+            <tr>
+                <td class="ps-3 small">${escHtml(r.hostname)}</td>
+                <td class="small">${r.case_title ? `<a href="/cases?case=${r.case_id}">${escHtml(r.case_title)}</a>` : '<span class="text-muted">(deleted)</span>'}</td>
+                <td class="text-nowrap small">${escHtml(r.isolated_at)}</td>
+                <td class="text-nowrap small">${escHtml(r.revert_at)}</td>
+                <td class="text-end pe-3">
+                    <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Cancel -- keep this host isolated" onclick="cancelScheduledRevert(${r.id})"><i class="fa-solid fa-ban"></i> Cancel</button>
+                </td>
+            </tr>
+        `).join('');
+    }).catch(err => {
+        console.error('Error loading scheduled reverts:', err);
+        const card = document.getElementById('scheduledRevertsCard');
+        if (card) card.style.display = '';
+        renderLoadError('scheduledRevertsTableBody', 5, 'Failed to load scheduled reverts.');
+    });
+}
+
+async function cancelScheduledRevert(revertId) {
+    if (!(await confirmDialog('Cancel this scheduled restore? The host will stay isolated until manually restored.', {title: 'Cancel scheduled revert', danger: true, confirmLabel: 'Cancel Revert'}))) return;
+    fetch(`/api/playbook-pending-reverts/${revertId}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'cancel'})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (!ok) { toast(data.error || 'Failed to cancel.', 'danger'); return; }
+        toast('Scheduled revert cancelled -- host stays isolated.', 'success');
+        loadScheduledReverts();
     }).catch(err => toast('Error: ' + err, 'danger'));
 }
 
@@ -1978,6 +2039,7 @@ document.addEventListener('DOMContentLoaded', () => {
     switchSoarTab(savedTab);
     loadPlaybooks();
     loadPendingApprovals();
+    loadScheduledReverts();
     loadAlertNotifications();
     loadEscalationConfig();
     loadCaseStaleConfig();
