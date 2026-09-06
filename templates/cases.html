@@ -306,7 +306,7 @@ function caseAssetRow(a, isClosed) {
             <td class="small">${escHtml(a.related_indicator || '')}</td>
             <td class="small text-muted">${escHtml(a.notes || '')}</td>
             <td class="text-nowrap">
-                <a href="/ueba?tab=timeline&host=${encodeURIComponent(a.host)}" class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="View this host's activity on the UEBA Timeline"><i class="fa-solid fa-timeline"></i></a>
+                <a href="/ueba?tab=timeline&host=${encodeURIComponent('host:' + a.host)}" class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="View this host's activity on the UEBA Timeline"><i class="fa-solid fa-timeline"></i></a>
                 ${caseAssetEdrActions(a)}
             </td>
             <td class="text-end"><button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove asset" onclick="removeCaseAsset(${a.id})" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-xmark"></i></button></td>
@@ -328,7 +328,7 @@ function caseIocRow(i, isClosed) {
             </td>
             <td class="text-end text-nowrap">
                 <button type="button" class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="Check against the local Threat Intel set" onclick="checkCaseIoc(${i.id}, '${escJs(i.value)}')"><i class="fa-solid fa-magnifying-glass"></i></button>
-                <button type="button" class="btn btn-sm btn-outline-warning py-0 px-2 me-1" title="Check against external enrichment sources (VirusTotal, AbuseIPDB, URLhaus, etc.)" onclick="checkCaseIocExternal(${i.id}, '${escJs(i.value)}', '${i.ioc_type}')"><i class="fa-solid fa-globe"></i></button>
+                <button type="button" class="btn btn-sm btn-outline-warning py-0 px-2 me-1" title="Check against external enrichment sources (VirusTotal, AbuseIPDB, URLhaus, etc.)" onclick="checkCaseIocExternal(${i.id}, '${escJs(i.value)}', '${escJs(i.ioc_type)}')"><i class="fa-solid fa-globe"></i></button>
                 <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove indicator" onclick="removeCaseIoc(${i.id})" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-xmark"></i></button>
             </td>
         </tr>`;

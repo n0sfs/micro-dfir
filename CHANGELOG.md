@@ -10,6 +10,59 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-05
 
+### Multi-angle code review of this session's work — 12 fixes, 2 of them live production bugs
+
+Ran a 10-angle + sweep-pass review over everything shipped this session (`git diff` since
+session start), then personally verified every candidate against the live source (plus one
+live production test that disproved a well-reasoned but incorrect finding about URLhaus
+feed sync). Fixed all 12 confirmed findings:
+
+- **Two were live, active production bugs** at review time: a custom Linux channel whose
+  slugified label collided at exactly 40 characters made the id-uniquifying loop
+  regenerate the same string forever, hanging the Flask worker (any two channels with the
+  same 40+ char label, or a double-submit, triggered it); and the Sysmon config-hash
+  compare stored the agent's own *full* 64-char hash against the server's *truncated*
+  16-char one, so they could never match — every enrolled Windows endpoint re-downloaded
+  and reloaded its Sysmon config on every single poll (~8s) since that feature shipped
+  earlier this session, not only when the config actually changed.
+- A Linux agent group literally named `custom_channels` (the exact label of that feature's
+  own UI section) silently corrupted or wiped the fleet-wide custom-channel catalog and
+  could 500 `agent_config()` for every other group with a now-corrupted channel enabled —
+  fixed with an explicit reserved-key guard, not a schema change.
+- Two new GET routes (`/api/settings/sysmon-config`, `/api/agent/linux-channels/custom`)
+  shipped with only `@login_required`, letting any authenticated user of any role read
+  fleet-wide Sysmon config / custom auditd definitions their write counterparts already
+  gated behind `edr.agent.manage` — added the matching permission check to both.
+- The aggregated enrichment verdict badge (added earlier this session) excluded Shodan
+  InternetDB's legitimate `'info'` verdict from its rank table, so a real "open ports, no
+  CVEs" finding displayed as "Unknown" instead — added `'info'` to the rank table.
+- The new custom-channel path/id validators used `$` instead of `\Z`, so a value ending in
+  one trailing newline bypassed validation built specifically to block rule-injection into
+  the auditd rules file.
+- The Timeline `?host=` deep-link (added earlier this session) fired two racing fetches on
+  first load — one unfiltered (before the host param was applied), one filtered — with no
+  ordering guard; reordered the init so the filter is set before either fetch fires, and
+  switched the three link-emission sites to the query DSL's `host:` field syntax instead of
+  a bare hostname, narrowing a 5-column substring search down to one precise field.
+- The curated Security channel's Event ID filter advertised 4698/4702 (scheduled task
+  created/updated) without the "Other Object Access Events" audit subcategory that
+  actually generates them — added it to the enabled-subcategory list.
+- A stale "Checking external sources..." message on the IOC catalog's enrich button was
+  never cleared (it wrote into the wrong element); an inconsistent escaping gap on a case
+  Indicator's onclick handler; and duplicated custom-channel validation logic between the
+  create/update routes, refactored into one shared helper matching this codebase's
+  existing `_validate_X()` convention.
+
+Left two lower-confidence findings unfixed and documented: whether `/api/settings/
+enrichment`'s audit-log entry should be unconditional or only-on-change is a judgment
+call, not a clear regression; and detecting live Windows Advanced Audit Policy drift
+against a domain GPO refresh would need a new live-policy-read capability, out of scope
+for a review-driven fix pass. 37 new fixture/vm-context tests added, all against the real
+fixed source (not reimplementations). `CLAUDE.md` gained 4 new lessons from this review:
+permission-gate parity as a required check, the reserved-key/free-text-namespace
+collision pattern, Python's `$`-before-trailing-newline regex gotcha, and hash-truncation
+consistency across the server/agent boundary.
+
 ### EDR: fix collect_file truncation bug, add Linux live forensics, deep-link into the UEBA Timeline
 
 Research comparing against Heimdall-DFIR (a real, active offline-artifact/timeline DFIR

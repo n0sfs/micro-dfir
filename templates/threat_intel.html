@@ -3301,7 +3301,10 @@ function enrichCatalogIoc(idx) {
     if (!ioc) return;
     document.getElementById('iocLookupInput').value = ioc.pattern;
     document.getElementById('iocLookupSource').value = '';
-    document.getElementById('iocLookupResult').innerHTML = `<span class="text-muted">Checking external sources for ${escHtml(ioc.pattern)} below&hellip;</span>`;
+    // No separate placeholder needed here -- runIocEnrich() already shows its own
+    // "Enriching..." spinner in #iocEnrichResults (the element that actually gets the
+    // results), right where the scroll below lands.
+    document.getElementById('iocLookupResult').innerHTML = '';
     document.getElementById('iocEnrichBtn').style.display = 'inline-block';
     lastLookupValue = ioc.pattern;
     lastLookupIocType = ioc.ioc_type || '';

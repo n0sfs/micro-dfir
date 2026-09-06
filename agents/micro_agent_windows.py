@@ -4,7 +4,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, tem
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.09.05.1"
+AGENT_VERSION = "2026.09.05.2"
 
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
@@ -217,10 +217,13 @@ def _read_applied_sysmon_hash():
         return None
 
 def _write_applied_sysmon_hash(h):
+    # Truncated to match _get_sysmon_config_hash()'s own 16-char convention (app.py) --
+    # writing the full hash here made the stored value permanently unable to equal the
+    # server's, so every poll saw a "mismatch" and re-applied the config indefinitely.
     try:
         os.makedirs(INSTALL_DIR, exist_ok=True)
         with open(SYSMON_CONFIG_HASH_PATH, 'w') as f:
-            f.write(h or '')
+            f.write((h or '')[:16])
     except Exception:
         pass
 
@@ -335,6 +338,9 @@ _WINDOWS_AUDIT_POLICY_SUBCATEGORIES = [
     "Process Creation",
     "Audit Policy Change",
     "Security State Change",
+    # Generates 4698/4702 (scheduled task created/updated) -- curated in the Security
+    # channel's Event ID filter (app.py) but the events won't fire without this.
+    "Other Object Access Events",
 ]
 _last_applied_windows_audit_policy = None
 

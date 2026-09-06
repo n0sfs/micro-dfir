@@ -1101,7 +1101,10 @@ def api_ti_enrich():
 # (they're about this appliance's own setup), so they're excluded from the decision --
 # an indicator with zero configured analyzers should read as 'unknown', not silently as
 # "clean" because the one unconfigured source technically didn't say "malicious".
-_ENRICHMENT_VERDICT_RANK = {'malicious': 3, 'suspicious': 2, 'clean': 1}
+# 'info' (e.g. Shodan InternetDB: open ports found, no known CVEs) is a real signal, not
+# a "nothing to report" state -- must rank above 'clean' or a genuine finding from the
+# only configured analyzer gets excluded from `real` below and reads as 'unknown'.
+_ENRICHMENT_VERDICT_RANK = {'malicious': 4, 'suspicious': 3, 'info': 2, 'clean': 1}
 
 def _overall_enrichment_verdict(results):
     real = [r['verdict'] for r in results if r['verdict'] in _ENRICHMENT_VERDICT_RANK]
@@ -12856,6 +12859,8 @@ def api_settings_sysmon_config():
         log_audit('sysmon_config_update', 'settings', None, f'{len(xml_content)} bytes')
         return jsonify({'status': 'success'})
 
+    err = require_permission('edr.agent.manage')
+    if err: return err
     path = _get_active_sysmon_config_path()
     try:
         with open(path, 'r', encoding='utf-8') as f:
@@ -13977,8 +13982,16 @@ LINUX_LOG_CHANNELS = {
     },
 }
 LINUX_CHANNELS_CONFIG_PATH = '/opt/micro-dfir/agent_linux_channels.json'
-_CUSTOM_CHANNEL_ID_RE = re.compile(r'^[a-z0-9_]{1,40}$')
-_CUSTOM_CHANNEL_PATH_RE = re.compile(r'^/[\w\-./]*$')
+# \Z (not $) -- $ matches just before a trailing newline as well as true end-of-string,
+# so a value ending in one \n would otherwise pass and later split a single auditd rule
+# line into two when written to the rules file.
+_CUSTOM_CHANNEL_ID_RE = re.compile(r'^[a-z0-9_]{1,40}\Z')
+_CUSTOM_CHANNEL_PATH_RE = re.compile(r'^/[\w\-./]*\Z')
+# The Linux channels group-storage dict keys every per-group override by admin-typed
+# group name in the SAME flat namespace as this reserved catalog key -- a group literally
+# named "custom_channels" (lifted straight from this feature's own UI section header)
+# would otherwise silently read/overwrite/wipe the catalog instead of a real group.
+_RESERVED_LINUX_CHANNEL_GROUP_KEYS = {'custom_channels'}
 _CUSTOM_CHANNEL_VALID_PERM_CHARS = set('rwxa')
 
 def _custom_channel_audit_key(custom_id):
@@ -14037,7 +14050,7 @@ def save_linux_channels_all(data):
 def get_linux_channels_for_group(group_name):
     all_templates = get_linux_channels_all()
     group_key = (group_name or '').strip()
-    if group_key and group_key in all_templates:
+    if group_key and group_key not in _RESERVED_LINUX_CHANNEL_GROUP_KEYS and group_key in all_templates:
         return all_templates[group_key], True
     return all_templates['__default__'], False
 
@@ -14062,6 +14075,8 @@ def _linux_channel_defs_for_enabled(enabled_channel_keys, custom_channels):
 def api_agent_linux_channels():
     from flask import request, jsonify
     group_key = (request.args.get('group') or '').strip() or '__default__'
+    if group_key in _RESERVED_LINUX_CHANNEL_GROUP_KEYS:
+        return jsonify({'status': 'error', 'message': f'"{group_key}" is a reserved name and cannot be used as an agent group.'}), 400
 
     if request.method == 'DELETE':
         err = require_permission('edr.agent.manage')
@@ -14096,29 +14111,39 @@ def api_agent_linux_channels():
 # toggled on per group just like a fixed catalog entry.
 @app.route('/api/agent/linux-channels/custom', methods=['GET', 'POST'])
 @login_required
-def api_agent_linux_custom_channels():
-    from flask import request, jsonify
-    if request.method == 'GET':
-        return jsonify(get_linux_custom_channels())
-
-    err = require_permission('edr.agent.manage')
-    if err: return err
-    d = request.json or {}
+def _validate_custom_channel_input(d):
+    """Shared by create (POST) and update (PUT) -- returns (label, path, perms, None)
+    on success or (None, None, None, error_response) on failure, matching this
+    codebase's established _validate_X() helper convention (e.g. _validate_anomaly_rule)
+    instead of hand-duplicating the same three checks in both routes."""
     label = (d.get('label') or '').strip()[:100]
     path = (d.get('path') or '').strip()
     perms = ''.join(sorted(set((d.get('perms') or '').lower()) & _CUSTOM_CHANNEL_VALID_PERM_CHARS))
     if not label:
-        return jsonify({'error': 'A label is required'}), 400
+        return None, None, None, (jsonify({'error': 'A label is required'}), 400)
     if not _CUSTOM_CHANNEL_PATH_RE.match(path):
-        return jsonify({'error': 'Path must be an absolute path with no spaces or special characters'}), 400
+        return None, None, None, (jsonify({'error': 'Path must be an absolute path with no spaces or special characters'}), 400)
     if not perms:
-        return jsonify({'error': 'Select at least one of read/write/execute/attribute-change'}), 400
+        return None, None, None, (jsonify({'error': 'Select at least one of read/write/execute/attribute-change'}), 400)
+    return label, path, perms, None
+
+def api_agent_linux_custom_channels():
+    from flask import request, jsonify
+    err = require_permission('edr.agent.manage')
+    if err: return err
+    if request.method == 'GET':
+        return jsonify(get_linux_custom_channels())
+
+    d = request.json or {}
+    label, path, perms, err_resp = _validate_custom_channel_input(d)
+    if err_resp: return err_resp
     custom_id = re.sub(r'[^a-z0-9_]', '_', label.lower())[:40].strip('_') or 'custom'
     all_templates = get_linux_channels_all()
     custom_channels = all_templates.get('custom_channels', {})
     base_id, n = custom_id, 2
     while custom_id in custom_channels or custom_id in LINUX_LOG_CHANNELS:
-        custom_id = f'{base_id}_{n}'[:40]
+        suffix = f'_{n}'
+        custom_id = base_id[:40 - len(suffix)] + suffix
         n += 1
     custom_channels[custom_id] = {'label': label, 'path': path, 'perms': perms}
     all_templates['custom_channels'] = custom_channels
@@ -14153,15 +14178,8 @@ def api_agent_linux_custom_channel_detail(custom_id):
         return jsonify({'status': 'success'})
 
     d = request.json or {}
-    label = (d.get('label') or '').strip()[:100]
-    path = (d.get('path') or '').strip()
-    perms = ''.join(sorted(set((d.get('perms') or '').lower()) & _CUSTOM_CHANNEL_VALID_PERM_CHARS))
-    if not label:
-        return jsonify({'error': 'A label is required'}), 400
-    if not _CUSTOM_CHANNEL_PATH_RE.match(path):
-        return jsonify({'error': 'Path must be an absolute path with no spaces or special characters'}), 400
-    if not perms:
-        return jsonify({'error': 'Select at least one of read/write/execute/attribute-change'}), 400
+    label, path, perms, err_resp = _validate_custom_channel_input(d)
+    if err_resp: return err_resp
     custom_channels[custom_id] = {'label': label, 'path': path, 'perms': perms}
     all_templates['custom_channels'] = custom_channels
     save_linux_channels_all(all_templates)
