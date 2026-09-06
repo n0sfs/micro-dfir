@@ -1492,7 +1492,8 @@ const TEXT_MATCH_OPS = ['contains', 'equals', 'starts_with', 'ends_with'];
 // their own dedicated filter UI, so they're deliberately not pivotable here).
 const SORTABLE_LOG_COLUMNS = {time: 'timestamp', type: 'log_type', severity: 'severity', host: 'host',
                                app: 'app', event_id: 'event_id', username: 'username',
-                               source_ip: 'source_ip', destination_ip: 'destination_ip'};
+                               source_ip: 'source_ip', destination_ip: 'destination_ip',
+                               status: 'status', assignee: 'assignee'};
 const PIVOT_COLUMNS = new Set(['host', 'username', 'event_id', 'source_ip', 'destination_ip', 'process_image']);
 let logSortState = {col: 'timestamp', dir: 'desc'};
 
@@ -1719,6 +1720,13 @@ const LOG_TABLE_COLUMNS = [
     {key: 'parent_image', label: 'Parent Image', default: false},
     {key: 'parent_command_line', label: 'Parent Command Line', default: false},
     {key: 'original_file_name', label: 'Original File Name', default: false},
+    // Off by default -- only meaningful for alert-type rows (NULL for log/anomaly/
+    // command rows), and status already gets a badge inline in the Type column for the
+    // common case. These exist as opt-in columns for when an analyst actually wants to
+    // sort/scan by triage state or ownership across a filtered result set (e.g. after a
+    // `status:new` or `assignee:alice` query) rather than reading a per-row badge.
+    {key: 'status', label: 'Status', default: false},
+    {key: 'assignee', label: 'Assignee', default: false},
 ];
 
 // Only shown once an alert has moved off the 'new' default -- a badge on every single
@@ -1741,6 +1749,12 @@ function renderCell(col, log, idx) {
         case 'type': rendered = typeBadge(log.type) + atomicTestBadge(log) + (log.occurrence_count > 1 ? ` <span class="badge bg-secondary" title="Same alert recurred ${log.occurrence_count} times since ${escHtml(log.time)}">&times;${log.occurrence_count}</span>` : '') + (log.type === 'alert' ? alertStatusBadge(log.status) : ''); break;
         case 'severity': rendered = `<span class="badge ${severityBadgeClass(log.severity)}">${escHtml((log.severity || '').toUpperCase())}</span>`; break;
         case 'source_ip': rendered = highlightText(log[col], termsFor(col)) + (log.country_name ? ` <span class="badge bg-secondary" title="${escHtml(log.country_code || '')}">${escHtml(log.country_name)}</span>` : ''); break;
+        // Dedicated Status/Assignee columns are opt-in (see LOG_TABLE_COLUMNS) and, unlike
+        // the Type column's alertStatusBadge(), deliberately show 'New' explicitly rather
+        // than hiding it -- an analyst who turned this column on wants to see triage state
+        // for every row, not just the ones that have moved off the default.
+        case 'status': rendered = log.type === 'alert' ? escHtml((log.status || 'new').replace('_', ' ')) : '<span class="text-muted">—</span>'; break;
+        case 'assignee': rendered = log.assignee ? escHtml(log.assignee) : '<span class="text-muted">—</span>'; break;
         default: rendered = highlightText(log[col], termsFor(col));
     }
     if (PIVOT_COLUMNS.has(col) && log[col]) {
