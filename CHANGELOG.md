@@ -10,6 +10,25 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-06
 
+### Silent Log Source alert reworked to per-host (was per-app)
+
+The Log Pipeline > Silent Hosts tab (built earlier this session as "Silent Log Sources")
+alerted per individual log channel — a single host going dark (agent crash, network
+drop, ingestion break) fired several redundant "silent" alerts at once (Sysmon,
+Security, PowerShell, ...) for one real incident, and none of them said which endpoint
+was actually the problem. Reworked to group by `live_logs.host` instead of `app`: the
+baseline/threshold is still computed adaptively from each host's own combined recent
+history (across every log source it sends), but now produces one alert per host, with
+a real `alerts.host` value set (not just mentioned in the message text) so it
+participates in host-scoped features (Related Items, Agents page, etc.) like every
+other host-keyed alert. Renamed the alert to "Host Silent" (the fired-alert history
+route still matches the old "Log Source Silent" name too, so pre-rework alerts stay
+visible). Added a `host` column to `log_source_silent_alerts` (cooldown is now
+per-host) and to the tab's fired-alerts table. Verified with 10 new fixture tests
+(including a same-host-multiple-sources case proving one alert fires, not three, and
+an independent-hosts case proving a chatty host and a quiet host each get their own
+correctly-scoped threshold) and 6 frontend vm-context tests.
+
 ### Deferred round-2 review items + macOS remote-upgrade bug
 
 Closed out the two items deliberately deferred from the second review pass, plus a

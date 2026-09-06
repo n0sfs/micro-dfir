@@ -6816,21 +6816,25 @@ def _run_due_offline_agent_alerts(db):
     db.commit()
 
 # Distinct from _log_source_gap_summary (which only flags an app category that has NEVER
-# ingested anything -- a permanent, structural gap) -- this flags a source that WAS
-# recently active and then stopped, the "pipeline broke" case that gap summary can't see.
-# Threshold is adaptive PER APP rather than one fixed number: a naturally continuous
-# source (sysmon, every few seconds) and a naturally bursty one (cron, once a day) need
-# wildly different "this is now overdue" cutoffs, and a single global threshold would
-# either spam constantly on bursty sources or miss real outages on continuous ones. The
-# 7-day baseline window is itself the mechanism that keeps this scoped to "recently
-# active" -- a source silent for the whole window simply won't appear in the query at all.
-DEFAULT_LOG_SOURCE_SILENT_MULTIPLIER = 10  # how many multiples of an app's own average
+# ingested anything -- a permanent, structural gap) -- this flags a HOST that WAS
+# recently active and then stopped sending logs at all, the "pipeline broke" case that
+# gap summary can't see. Grouped by host rather than by individual log source/app: the
+# common real-world cause (agent crashed, network dropped, ingestion broke for that
+# endpoint) silences every source on that host at once, so a per-app version of this
+# alert just produced several redundant "silent" alerts for one real incident. Threshold
+# is adaptive PER HOST rather than one fixed number: a chatty host (Sysmon firing every
+# few seconds) and a quiet one (a syslog device that reports once an hour) need wildly
+# different "this is now overdue" cutoffs, and a single global threshold would either
+# spam constantly on quiet hosts or miss real outages on chatty ones. The 7-day baseline
+# window is itself the mechanism that keeps this scoped to "recently active" -- a host
+# silent for the whole window simply won't appear in the query at all.
+DEFAULT_LOG_SOURCE_SILENT_MULTIPLIER = 10  # how many multiples of a host's own average
 # inter-event gap it must be overdue by before alarming
 DEFAULT_LOG_SOURCE_SILENT_MIN_HOURS = 2  # absolute floor regardless of multiplier, so a
-# very high-frequency app doesn't fire after a few seconds of normal jitter
+# very high-frequency host doesn't fire after a few seconds of normal jitter
 DEFAULT_LOG_SOURCE_SILENT_COOLDOWN_HOURS = 24
 LOG_SOURCE_SILENT_BASELINE_DAYS = 7  # not exposed as a setting -- changing the
-# observation window changes what "this app's own history" even means, closer to a code
+# observation window changes what "this host's own history" even means, closer to a code
 # constant than an operational knob an admin would tune day to day
 LOG_SOURCE_SILENT_MIN_BASELINE_EVENTS = 20  # too few historical events in the baseline
 # window to establish a meaningful cadence at all -- skip rather than guess
@@ -6878,14 +6882,21 @@ def api_settings_log_source_silent_alert():
     return jsonify({'status': 'success', 'multiplier': multiplier, 'min_hours': min_hours, 'cooldown_hours': cooldown_hours})
 
 def _run_due_log_source_silent_alerts(db):
+    # Grouped by HOST, not by individual log source/app -- a host that goes dark
+    # usually stops sending everything at once (agent crashed, network dropped,
+    # ingestion broke), and alerting per-app for the same root cause produced several
+    # redundant "silent" alerts (Sysmon, Security, PowerShell, ...) for one real
+    # incident. The baseline/threshold is still computed from that host's OWN combined
+    # log volume across every source it sends, so a chatty host and a quiet one each get
+    # a cadence-appropriate threshold without hand-tuning.
     cfg = _log_source_silent_config(db)
     rows = db.execute(
-        "SELECT app, COUNT(*) as baseline_count, "
+        "SELECT host, COUNT(*) as baseline_count, "
         "(julianday(MAX(timestamp)) - julianday(MIN(timestamp))) * 24 as observed_span_hours, "
         "(julianday('now') - julianday(MAX(timestamp))) * 24 as silence_hours, "
         "MAX(timestamp) as last_seen "
-        "FROM live_logs WHERE app IS NOT NULL AND app != '' AND timestamp >= datetime('now', ?) "
-        "GROUP BY app HAVING baseline_count >= ?",
+        "FROM live_logs WHERE host IS NOT NULL AND host != '' AND timestamp >= datetime('now', ?) "
+        "GROUP BY host HAVING baseline_count >= ?",
         (f'-{LOG_SOURCE_SILENT_BASELINE_DAYS} days', LOG_SOURCE_SILENT_MIN_BASELINE_EVENTS)
     ).fetchall()
     for r in rows:
@@ -6894,22 +6905,22 @@ def _run_due_log_source_silent_alerts(db):
         if r['silence_hours'] <= threshold_hours:
             continue
         already = db.execute(
-            "SELECT 1 FROM log_source_silent_alerts WHERE app = ? AND alerted_at >= datetime('now', ?)",
-            (r['app'], f"-{cfg['cooldown_hours']} hours")
+            "SELECT 1 FROM log_source_silent_alerts WHERE host = ? AND alerted_at >= datetime('now', ?)",
+            (r['host'], f"-{cfg['cooldown_hours']} hours")
         ).fetchone()
         if already:
             continue
-        msg = (f"Log source '{r['app']}' has not ingested any new events for {round(r['silence_hours'], 1)}h "
+        msg = (f"Host '{r['host']}' has not sent any logs for {round(r['silence_hours'], 1)}h "
                f"(expected roughly every {round(avg_gap_hours, 1)}h based on its own recent history; last event at {r['last_seen']}).")
         ins_cur = db.execute(
-            "INSERT INTO alerts (timestamp, rule_name, severity, message, occurrence_count, last_seen) "
-            "VALUES (datetime('now'), 'Log Source Silent', 'MEDIUM', ?, 1, datetime('now'))",
-            (msg,)
+            "INSERT INTO alerts (timestamp, rule_name, severity, host, message, occurrence_count, last_seen) "
+            "VALUES (datetime('now'), 'Host Silent', 'MEDIUM', ?, ?, 1, datetime('now'))",
+            (r['host'], msg)
         )
         new_alert_id = ins_cur.lastrowid
-        db.execute("INSERT INTO log_source_silent_alerts (app, alerted_at) VALUES (?, datetime('now'))", (r['app'],))
+        db.execute("INSERT INTO log_source_silent_alerts (app, host, alerted_at) VALUES (?, ?, datetime('now'))", (r['host'], r['host']))
         soar_alerts.run_playbooks_for_alert(db, {
-            'id': new_alert_id, 'rule_title': 'Log Source Silent', 'severity': 'MEDIUM', 'host': None,
+            'id': new_alert_id, 'rule_title': 'Host Silent', 'severity': 'MEDIUM', 'host': r['host'],
             'username': None, 'source_ip': None, 'message': msg, 'timestamp': None,
         }, run_case_playbooks_fn=lambda cid, qid, tlp, st, sev: _run_playbooks_for_case(db, cid, 'case_created', qid, tlp, st, sev))
     db.commit()
@@ -6917,14 +6928,16 @@ def _run_due_log_source_silent_alerts(db):
 # Real fired history for the Silent Log Sources tab (Log Pipeline) -- a dedicated, scoped
 # query rather than reusing GET /api/alerts (which defaults to the 30 most recent alerts
 # of ANY type and would let a busy Sigma/UEBA alert stream silently push these out of view).
+# Matches both the current 'Host Silent' rule_name and the pre-rework 'Log Source Silent'
+# name so alerts fired before the per-host rework still show up in this history.
 @app.route('/api/log-pipeline/silent-source-alerts', methods=['GET'])
 @login_required
 def api_log_pipeline_silent_source_alerts():
     db = get_db()
     limit = min(request.args.get('limit', 50, type=int) or 50, 200)
     rows = db.execute(
-        "SELECT id, timestamp, message, acknowledged, status, occurrence_count, last_seen "
-        "FROM alerts WHERE rule_name = 'Log Source Silent' ORDER BY id DESC LIMIT ?",
+        "SELECT id, timestamp, host, message, acknowledged, status, occurrence_count, last_seen "
+        "FROM alerts WHERE rule_name IN ('Host Silent', 'Log Source Silent') ORDER BY id DESC LIMIT ?",
         (limit,)
     ).fetchall()
     return jsonify([dict(r) for r in rows])
@@ -9129,6 +9142,16 @@ def migrate_log_source_silent_alerts():
             alerted_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )''')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_log_source_silent_alerts_app ON log_source_silent_alerts(app, alerted_at)')
+        # Reworked from per-app (log source) to per-host cooldown tracking -- knowing
+        # "PowerShell went quiet on this one host" is far less actionable than "this
+        # host stopped sending logs at all", and the old per-app grouping fired one
+        # alert per log channel for what's usually a single root cause (the host itself
+        # going dark). `app` (NOT NULL) is kept and still populated with the host value
+        # for schema compatibility with the original column -- only `host` is read now.
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(log_source_silent_alerts)").fetchall()}
+        if 'host' not in cols:
+            conn.execute("ALTER TABLE log_source_silent_alerts ADD COLUMN host TEXT")
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_log_source_silent_alerts_host ON log_source_silent_alerts(host, alerted_at)')
         conn.commit()
         conn.close()
     except Exception:
