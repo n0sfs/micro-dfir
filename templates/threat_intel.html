@@ -459,7 +459,7 @@
                                             <input class="form-check-input rule-checkbox" type="checkbox" name="selected_rules" value="{{ rf }}" id="rule-{{ loop.index0 }}-{{ category }}" checked onchange="updateHuntStats()">
                                             <label class="form-check-label text-light small yara-rule-viewlabel flex-grow-1" data-relpath="{{ rf }}" style="cursor:pointer;" onclick="viewYaraRule(this.dataset.relpath)"{% if yara_file_descriptions.get(rf) %} title="{{ yara_file_descriptions[rf] }}"{% endif %}>
                                                 {{ rf.split('/')[-1] }}{% if yara_file_descriptions.get(rf) %}<span class="text-muted"> — {{ yara_file_descriptions[rf] | truncate(70) }}</span>{% endif %}
-                                                {% if yara_file_tags.get(rf) %}<span class="ms-1">{% for tag in yara_file_tags[rf] %}<span class="badge bg-secondary bg-opacity-50 fw-normal me-1" style="font-size:0.65rem;">{{ tag }}</span>{% endfor %}</span>{% endif %}
+                                                <span class="ms-1 yara-row-tags-inline">{% for tag in yara_file_tags.get(rf, []) %}<span class="badge bg-secondary bg-opacity-50 fw-normal me-1" style="font-size:0.65rem;">{{ tag }}</span>{% endfor %}</span>
                                             </label>
                                             {% if has_permission('rules.manage') %}
                                             <input type="checkbox" class="ms-2 mt-1 yara-delete-select" data-relpath="{{ rf }}" title="Select for bulk delete" onchange="updateYaraBulkDeleteButton()">
@@ -1225,7 +1225,7 @@ function viewYaraRule(relpath) {
     bodyEl.innerHTML = '<div class="text-muted small">Loading...</div>';
     copyBtn.style.display = 'none';
     if (deleteBtn) deleteBtn.style.display = 'none';
-    fetch('/api/yara/rule-content?path=' + encodeURIComponent(relpath))
+    return fetch('/api/yara/rule-content?path=' + encodeURIComponent(relpath))
         .then(res => res.json().then(d => ({ ok: res.ok, d })))
         .then(({ ok, d }) => {
             if (!ok) {
@@ -1233,12 +1233,57 @@ function viewYaraRule(relpath) {
                 return;
             }
             yaraViewerContent = d.content || '';
-            bodyEl.innerHTML = renderYaraViewerTags(relpath, d.tags || [], d.manual_tags || []) +
+            const tags = d.tags || [];
+            bodyEl.innerHTML = renderYaraViewerTags(relpath, tags, d.manual_tags || []) +
                 `<pre class="text-light small mb-0" style="white-space:pre-wrap; word-break:break-word;">${escHtml(yaraViewerContent)}</pre>`;
             copyBtn.style.display = '';
             if (deleteBtn) deleteBtn.style.display = '';
+            syncYaraRuleRowDisplay(relpath, tags);
         })
         .catch(() => { bodyEl.innerHTML = '<div class="text-danger small">Network error loading rule.</div>'; });
+}
+
+// Keeps the rule-list row's inline tag badges and its data-tags/data-search attributes
+// (both rendered server-side once, at page load) in sync with the viewer's own
+// authoritative tag list -- without this, a tag added/removed via the viewer only ever
+// showed up there, leaving the row's badges and the Tag filter's matching stale until a
+// full page reload.
+function syncYaraRuleRowDisplay(relpath, tags) {
+    const label = document.querySelector(`.yara-rule-viewlabel[data-relpath="${CSS.escape(relpath)}"]`);
+    if (!label) return;
+    const row = label.closest('.yara-rule-row');
+    if (row) {
+        row.dataset.tags = tags.map(t => t.toLowerCase()).join(',');
+        const filename = relpath.split('/').pop();
+        row.dataset.search = (filename + ' ' + (label.title || '') + ' ' + tags.join(' ')).toLowerCase();
+    }
+    const tagsSpan = label.querySelector('.yara-row-tags-inline');
+    if (tagsSpan) {
+        tagsSpan.innerHTML = tags.map(t => `<span class="badge bg-secondary bg-opacity-50 fw-normal me-1" style="font-size:0.65rem;">${escHtml(t)}</span>`).join('');
+    }
+}
+
+// Rebuilds the Tag filter dropdown from what's actually tagged across every rendered
+// row -- adds a brand-new tag, drops one no rule uses anymore (e.g. after a manual tag
+// removal). Only called after an actual add/remove (not on every plain rule view) since
+// it's a full scan of the rule list, not worth paying on every click.
+function syncYaraTagFilterDropdown() {
+    const select = document.getElementById('yaraTagFilter');
+    if (!select) return;
+    const used = new Map(); // lowercase value -> a display label
+    document.querySelectorAll('.yara-row-tags-inline .badge').forEach(b => {
+        const label = b.textContent.trim();
+        if (label) used.set(label.toLowerCase(), label);
+    });
+    const currentValue = select.value;
+    Array.from(select.options).forEach(opt => { if (opt.value) opt.remove(); });
+    Array.from(used.keys()).sort().forEach(v => {
+        const opt = document.createElement('option');
+        opt.value = v;
+        opt.textContent = used.get(v);
+        select.appendChild(opt);
+    });
+    select.value = used.has(currentValue) ? currentValue : '';
 }
 
 function renderYaraViewerTags(relpath, tags, manualTags) {
@@ -1295,7 +1340,7 @@ function addYaraRuleTag(relpath) {
         body: JSON.stringify({path: relpath, tag})
     }).then(res => res.json().then(d => ({ ok: res.ok, d }))).then(({ ok, d }) => {
         if (!ok) { toast(d.error || 'Failed to add tag.', 'danger'); return; }
-        viewYaraRule(relpath);
+        viewYaraRule(relpath).then(() => syncYaraTagFilterDropdown());
     }).catch(() => toast('Network error adding tag.', 'danger'));
 }
 
@@ -1304,7 +1349,7 @@ function removeYaraRuleTag(relpath, tag) {
         method: 'DELETE'
     }).then(res => res.json().then(d => ({ ok: res.ok, d }))).then(({ ok, d }) => {
         if (!ok) { toast(d.error || 'Failed to remove tag.', 'danger'); return; }
-        viewYaraRule(relpath);
+        viewYaraRule(relpath).then(() => syncYaraTagFilterDropdown());
     }).catch(() => toast('Network error removing tag.', 'danger'));
 }
 
