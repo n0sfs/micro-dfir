@@ -1020,11 +1020,20 @@ function renderCaseStatsWidget(container, widgetId, config) {
         <div class="d-flex justify-content-end small text-muted mb-2">
             SLA target: <span class="widget-sla-display ms-1">&hellip;</span>h
             <a href="#" class="widget-sla-edit-link ms-1" onclick="startEditCaseSla(${widgetId}); return false;" style="display:none;">Edit</a>
-            <span class="widget-sla-edit-wrap ms-1" style="display:none;">
-                <input type="number" class="widget-sla-input form-control form-control-sm bg-dark text-light border-secondary d-inline-block" min="1" max="8760" style="width:70px;">
+        </div>
+        <div class="widget-sla-edit-wrap mb-2" style="display:none;">
+            <div class="d-flex align-items-center justify-content-end gap-1 mb-1 flex-wrap">
+                <span class="text-muted small">Global default:</span>
+                <input type="number" class="widget-sla-input form-control form-control-sm bg-dark text-light border-secondary d-inline-block" min="1" max="8760" style="width:60px;">
+                <span class="text-muted small">h</span>
+            </div>
+            <div class="d-flex align-items-center justify-content-end gap-1 mb-1 flex-wrap" title="Overrides the global default for cases of this severity. A queue's own SLA override (set on the Queues tab in SOAR) takes precedence over both.">
+                ${['critical', 'high', 'medium', 'low'].map(sev => `<span class="text-muted small text-capitalize">${sev}</span><input type="number" class="widget-sla-tier-input form-control form-control-sm bg-dark text-light border-secondary d-inline-block" data-severity="${sev}" min="1" max="8760" style="width:50px;" placeholder="default">`).join(' ')}
+            </div>
+            <div class="d-flex justify-content-end gap-1">
                 <button type="button" class="btn btn-sm btn-outline-primary py-0 px-2" onclick="saveCaseSla(${widgetId})">Save</button>
                 <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="cancelEditCaseSla(${widgetId})">Cancel</button>
-            </span>
+            </div>
         </div>
         <div class="row g-2 text-center">
             <div class="col"><div class="fs-4 fw-bold widget-open">&mdash;</div><div class="small text-muted">Open Cases</div></div>
@@ -1050,6 +1059,10 @@ function loadCaseStatsInto(container, config) {
         container.querySelector('.widget-closed-range').innerText = d.closed_in_range_count;
         container.querySelector('.widget-sla-display').innerText = d.sla_target_hours;
         container.querySelector('.widget-sla-input').value = d.sla_target_hours;
+        const tiers = d.sla_hours_by_severity || {};
+        container.querySelectorAll('.widget-sla-tier-input').forEach(inp => {
+            inp.value = tiers[inp.dataset.severity] || '';
+        });
         if (hasPermission('settings.case_sla.manage')) container.querySelector('.widget-sla-edit-link').style.display = '';
     }).catch(err => {
         console.error('Error loading case stats:', err);
@@ -1080,7 +1093,16 @@ function saveCaseSla(widgetId) {
     const container = document.getElementById(`widgetBody_${widgetId}`);
     const hours = parseInt(container.querySelector('.widget-sla-input').value, 10);
     if (!hours || hours < 1) { toast('Enter a whole number of hours (1 or more).', 'danger'); return; }
-    fetch('/api/settings/case-sla', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sla_hours: hours }) })
+    // sla_hours_by_severity is ALWAYS included here (even when every tier input is
+    // blank, sending {}) -- the backend only touches tiers when this key is present at
+    // all, so omitting it would mean "don't touch tiers" instead of "clear the blanked
+    // ones", and a blanked input would then never actually clear.
+    const bySeverity = {};
+    container.querySelectorAll('.widget-sla-tier-input').forEach(inp => {
+        const v = inp.value.trim();
+        if (v) bySeverity[inp.dataset.severity] = parseInt(v, 10);
+    });
+    fetch('/api/settings/case-sla', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sla_hours: hours, sla_hours_by_severity: bySeverity }) })
         .then(r => r.json().then(data => ({ ok: r.ok, data })))
         .then(({ ok, data }) => {
             if (!ok) { toast(data.error || 'Failed to save.', 'danger'); return; }

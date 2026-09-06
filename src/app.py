@@ -5435,13 +5435,27 @@ def _require_open_case(db, cid):
         return jsonify({"error": "This case is closed. Reopen it (change Status) to make changes."}), 403
     return None
 
+# Shared by case-queue create/update and (indirectly, same range) the case-sla config
+# route -- None/blank means "no override, follow the global/per-severity default",
+# distinct from 0 (which would mean "always immediately breached").
+def _parse_optional_sla_hours(raw):
+    if raw is None or raw == '':
+        return None, None
+    try:
+        hours = int(raw)
+    except (TypeError, ValueError):
+        return None, (jsonify({'error': 'sla_hours must be a whole number'}), 400)
+    if hours < 1 or hours > 8760:
+        return None, (jsonify({'error': 'sla_hours must be between 1 and 8760 (1 year)'}), 400)
+    return hours, None
+
 @app.route('/api/case-queues', methods=['GET', 'POST'])
 @login_required
 def api_case_queues():
     db = get_db()
     if request.method == 'GET':
         rows = db.execute(
-            "SELECT q.id, q.name, q.description, q.created_by, q.created_at, "
+            "SELECT q.id, q.name, q.description, q.created_by, q.created_at, q.sla_hours, "
             "(SELECT COUNT(*) FROM cases WHERE queue_id = q.id AND status = 'open') as open_case_count, "
             "(SELECT COUNT(*) FROM cases WHERE queue_id = q.id) as total_case_count "
             "FROM case_queues q ORDER BY q.name"
@@ -5460,7 +5474,9 @@ def api_case_queues():
         return jsonify({'error': 'name is required'}), 400
     if db.execute("SELECT 1 FROM case_queues WHERE name = ?", (name,)).fetchone():
         return jsonify({'error': f'A queue named "{name}" already exists'}), 400
-    db.execute("INSERT INTO case_queues (name, description, created_by) VALUES (?, ?, ?)", (name, (d.get('description') or '').strip(), current_user.username))
+    sla_hours, err_resp = _parse_optional_sla_hours(d.get('sla_hours'))
+    if err_resp: return err_resp
+    db.execute("INSERT INTO case_queues (name, description, created_by, sla_hours) VALUES (?, ?, ?, ?)", (name, (d.get('description') or '').strip(), current_user.username, sla_hours))
     db.commit()
     log_audit('queue_create', 'case_queue', name)
     return jsonify({'status': 'success'})
@@ -5489,7 +5505,9 @@ def api_case_queue_detail(qid):
         return jsonify({'error': 'name is required'}), 400
     if db.execute("SELECT 1 FROM case_queues WHERE name = ? AND id != ?", (name, qid)).fetchone():
         return jsonify({'error': f'A queue named "{name}" already exists'}), 400
-    db.execute("UPDATE case_queues SET name = ?, description = ? WHERE id = ?", (name, (d.get('description') or '').strip(), qid))
+    sla_hours, err_resp = _parse_optional_sla_hours(d.get('sla_hours'))
+    if err_resp: return err_resp
+    db.execute("UPDATE case_queues SET name = ?, description = ?, sla_hours = ? WHERE id = ?", (name, (d.get('description') or '').strip(), sla_hours, qid))
     db.commit()
     log_audit('queue_update', 'case_queue', name)
     return jsonify({'status': 'success'})
@@ -7062,15 +7080,18 @@ def _run_due_auto_reverts(db):
 
 # Same "cheap no-op unless due" shape as _run_due_auto_reverts -- sla_breach_notified_at
 # IS NULL is the one-time-fire guard (reset on reopen in api_case_detail's PUT handler),
-# so a still-breached case is never re-notified on every 30s poll cycle.
+# so a still-breached case is never re-notified on every 30s poll cycle. Per-queue/
+# per-severity SLA tiers mean the threshold can no longer be one bound SQL param shared
+# by every case -- age_hours is computed in SQL (cheap either way), then each candidate's
+# OWN threshold is resolved and compared in Python. Case-table volume is always small in
+# this single-appliance app (nothing like live_logs' scale), so this is cheap regardless.
 def _run_due_sla_breach_playbooks(db):
-    sla_hours = _case_sla_hours(db)
-    due_cases = db.execute(
-        "SELECT id, queue_id, tlp, status, severity FROM cases WHERE status = 'open' "
-        "AND sla_breach_notified_at IS NULL "
-        "AND (julianday('now') - julianday(created_at)) * 24 > ?",
-        (sla_hours,)
+    candidates = db.execute(
+        "SELECT id, queue_id, tlp, status, severity, "
+        "(julianday('now') - julianday(created_at)) * 24 as age_hours "
+        "FROM cases WHERE status = 'open' AND sla_breach_notified_at IS NULL"
     ).fetchall()
+    due_cases = [c for c in candidates if c['age_hours'] > _case_sla_hours_for(db, c['queue_id'], c['severity'])]
     if not due_cases:
         return
     for c in due_cases:
@@ -8842,6 +8863,7 @@ def api_dashboard_agent_health_trend():
 # the fix in api_case_detail()'s PUT handler) -- created_at already is, via SQLite's
 # own CURRENT_TIMESTAMP default.
 DEFAULT_CASE_SLA_HOURS = 24
+CASE_SLA_SEVERITIES = ('critical', 'high', 'medium', 'low')
 
 def _case_sla_hours(db):
     row = db.execute("SELECT value FROM settings WHERE key = 'case_sla_hours'").fetchone()
@@ -8849,6 +8871,30 @@ def _case_sla_hours(db):
         return int(row['value']) if row and row['value'] else DEFAULT_CASE_SLA_HOURS
     except (ValueError, TypeError):
         return DEFAULT_CASE_SLA_HOURS
+
+def _case_sla_hours_by_severity(db):
+    row = db.execute("SELECT value FROM settings WHERE key = 'case_sla_hours_by_severity'").fetchone()
+    try:
+        data = json.loads(row['value']) if row and row['value'] else {}
+        return {k: int(v) for k, v in data.items() if k in CASE_SLA_SEVERITIES}
+    except (ValueError, TypeError):
+        return {}
+
+# Resolves the SLA threshold that actually applies to ONE case. Precedence, most to
+# least specific: a queue's own sla_hours override (an admin's deliberate exception for
+# that team) wins if set; otherwise a per-severity tier if one exists for this case's
+# severity; otherwise the plain global default. A case with no queue and no matching
+# severity tier gets exactly the pre-tiers behavior (_case_sla_hours(db)) unchanged.
+def _case_sla_hours_for(db, queue_id, severity):
+    if queue_id:
+        row = db.execute("SELECT sla_hours FROM case_queues WHERE id = ?", (queue_id,)).fetchone()
+        if row and row['sla_hours']:
+            return row['sla_hours']
+    tiers = _case_sla_hours_by_severity(db)
+    sev_key = (severity or '').strip().lower()
+    if sev_key in tiers:
+        return tiers[sev_key]
+    return _case_sla_hours(db)
 
 @app.route('/api/dashboards/case-stats', methods=['GET'])
 @login_required
@@ -8870,15 +8916,20 @@ def api_dashboard_case_stats():
         "SELECT AVG((julianday(acknowledged_at) - julianday(created_at)) * 24) FROM cases "
         "WHERE acknowledged_at IS NOT NULL AND acknowledged_at >= datetime('now', ?)", (f'-{days} days',)
     ).fetchone()[0]
-    sla_breached = db.execute(
-        "SELECT COUNT(*) FROM cases WHERE status = 'open' AND (julianday('now') - julianday(created_at)) * 24 > ?", (sla_hours,)
-    ).fetchone()[0]
+    # Per-queue/per-severity SLA tiers mean "breached" is no longer one shared threshold
+    # -- resolve each open case's own threshold and compare (see _case_sla_hours_for).
+    open_cases_for_sla = db.execute(
+        "SELECT queue_id, severity, (julianday('now') - julianday(created_at)) * 24 as age_hours "
+        "FROM cases WHERE status = 'open'"
+    ).fetchall()
+    sla_breached = sum(1 for c in open_cases_for_sla if c['age_hours'] > _case_sla_hours_for(db, c['queue_id'], c['severity']))
     return jsonify({
         'open_count': open_count,
         'closed_in_range_count': closed_in_range,
         'avg_close_hours': round(avg_close_hours, 1) if avg_close_hours is not None else None,
         'avg_tta_hours': round(avg_tta_hours, 1) if avg_tta_hours is not None else None,
         'sla_target_hours': sla_hours,
+        'sla_hours_by_severity': _case_sla_hours_by_severity(db),
         'sla_breached_count': sla_breached,
     })
 
@@ -8965,19 +9016,48 @@ def api_dashboard_vulnerability_summary():
 def api_case_sla_config():
     db = get_db()
     if request.method == 'GET':
-        return jsonify({'sla_hours': _case_sla_hours(db)})
+        return jsonify({'sla_hours': _case_sla_hours(db), 'sla_hours_by_severity': _case_sla_hours_by_severity(db)})
     err = require_permission('settings.case_sla.manage')
     if err: return err
+    data = request.json or {}
     try:
-        hours = int((request.json or {}).get('sla_hours'))
+        hours = int(data.get('sla_hours'))
     except (TypeError, ValueError):
         return jsonify({'error': 'sla_hours must be a whole number'}), 400
     if hours < 1 or hours > 8760:
         return jsonify({'error': 'sla_hours must be between 1 and 8760 (1 year)'}), 400
+    # Per-severity tiers are optional and additive -- an omitted severity just falls
+    # through to the global default above (see _case_sla_hours_for), it isn't required
+    # to cover all 4. Crucially, the KEY's presence (not its truthiness) decides whether
+    # tiers are touched at all: the existing dashboard widget's Save button only ever
+    # sends {sla_hours}, with no knowledge of tiers -- if an empty/missing key were
+    # treated as "clear all tiers", every plain global-SLA save from that widget would
+    # silently wipe out any tiers configured elsewhere. Only an EXPLICIT
+    # sla_hours_by_severity key (any value, including {}) touches them, matching this
+    # app's established 'tlp' in data convention for the same reason.
+    if 'sla_hours_by_severity' in data:
+        by_severity_raw = data.get('sla_hours_by_severity') or {}
+        if not isinstance(by_severity_raw, dict):
+            return jsonify({'error': 'sla_hours_by_severity must be an object'}), 400
+        by_severity = {}
+        for k, v in by_severity_raw.items():
+            sev_key = str(k).strip().lower()
+            if sev_key not in CASE_SLA_SEVERITIES:
+                return jsonify({'error': f"'{k}' is not a valid severity (must be one of {', '.join(CASE_SLA_SEVERITIES)})"}), 400
+            try:
+                v_int = int(v)
+            except (TypeError, ValueError):
+                return jsonify({'error': f"SLA hours for '{sev_key}' must be a whole number"}), 400
+            if v_int < 1 or v_int > 8760:
+                return jsonify({'error': f"SLA hours for '{sev_key}' must be between 1 and 8760"}), 400
+            by_severity[sev_key] = v_int
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('case_sla_hours_by_severity', ?)", (json.dumps(by_severity),))
+    else:
+        by_severity = _case_sla_hours_by_severity(db)
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('case_sla_hours', ?)", (str(hours),))
     db.commit()
-    log_audit('case_sla_update', 'settings', 'case_sla_hours', str(hours))
-    return jsonify({'status': 'success', 'sla_hours': hours})
+    log_audit('case_sla_update', 'settings', 'case_sla_hours', f'global={hours}h, by_severity={by_severity}')
+    return jsonify({'status': 'success', 'sla_hours': hours, 'sla_hours_by_severity': by_severity})
 
 @app.route('/api/dashboards', methods=['GET', 'POST'])
 @login_required
@@ -10004,6 +10084,11 @@ def migrate_case_queues():
         cols = {row[1] for row in conn.execute("PRAGMA table_info(cases)").fetchall()}
         if 'queue_id' not in cols:
             conn.execute("ALTER TABLE cases ADD COLUMN queue_id INTEGER")
+        # A per-queue SLA override -- NULL means "this queue follows the global/
+        # per-severity default", not "0 hours". See _case_sla_hours_for().
+        queue_cols = {row[1] for row in conn.execute("PRAGMA table_info(case_queues)").fetchall()}
+        if 'sla_hours' not in queue_cols:
+            conn.execute("ALTER TABLE case_queues ADD COLUMN sla_hours INTEGER")
         for name, desc in QUEUE_SEED:
             conn.execute("INSERT OR IGNORE INTO case_queues (name, description, created_by) VALUES (?, ?, 'system')", (name, desc))
         conn.commit()
