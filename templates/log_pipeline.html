@@ -243,7 +243,7 @@
                     <h5 class="card-title text-light mb-0"><i class="fa-solid fa-table-list me-2"></i>Parser Catalog</h5>
                     <button class="btn btn-outline-secondary btn-sm" onclick="loadParserHealth()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
                 </div>
-                <p class="text-muted small mb-3">Every field extractor that runs at ingest time -- the 4 built-ins (always on) plus any custom parsers below -- and how often it actually populates a field, over the last 24 hours.</p>
+                <p class="text-muted small mb-3">Every field extractor that runs at ingest time -- the 4 built-ins (always on) plus any custom parsers below -- and how often it actually populates a field, sampled from the most recently ingested logs (a fixed row-count window, not a time window -- cheap to compute regardless of how large this appliance's log table has grown).</p>
                 <div class="table-responsive">
                     <table class="table table-dark table-hover table-sm align-middle mb-0">
                         <thead>
@@ -251,7 +251,7 @@
                                 <th>Parser</th>
                                 <th>Kind</th>
                                 <th>Scope</th>
-                                <th>Volume (24h)</th>
+                                <th>Volume (recent sample)</th>
                                 <th>Extraction Rate</th>
                             </tr>
                         </thead>
@@ -1292,7 +1292,7 @@ function loadParserHealth() {
                     <td>${escHtml(p.name)}${p.description ? ` <i class="fa-solid fa-circle-info text-muted" title="${escHtml(p.description)}"></i>` : ''}</td>
                     <td><span class="badge ${p.kind === 'custom' ? 'bg-info text-dark' : 'bg-secondary'}">${escHtml(p.kind)}</span></td>
                     <td>${p.apps && p.apps.length ? escHtml(p.apps.join(', ')) : '<span class="text-muted">any</span>'}</td>
-                    <td>${p.volume_24h}</td>
+                    <td>${p.volume_recent}</td>
                     <td>${p.extraction_rate_pct === null || p.extraction_rate_pct === undefined ? '<span class="text-muted">—</span>' : p.extraction_rate_pct + '%'}</td>
                 </tr>`).join('');
         })
