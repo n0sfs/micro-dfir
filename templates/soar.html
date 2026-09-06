@@ -694,7 +694,8 @@ const CASE_ACTION_LABELS = {
 };
 const ALERT_ACTION_LABELS = {
     send_email: 'Send email', send_webhook: 'Send webhook', send_slack: 'Send Slack message',
-    create_case: 'Create a case from this alert'
+    create_case: 'Create a case from this alert',
+    set_alert_status: 'Set alert status', assign_alert: 'Assign alert'
 };
 function actionLabelsForTrigger(triggerEvent) {
     return triggerEvent === 'alert_created' ? ALERT_ACTION_LABELS : CASE_ACTION_LABELS;
@@ -727,6 +728,8 @@ const ACTION_DESCRIPTIONS = {
     kill_scheduled_task: 'Removes an admin-typed Windows scheduled task on every Case Asset marked Confirmed compromised (Windows hosts only -- others are skipped).',
     kill_process_by_name: 'Kills every process whose name or full path/command line contains an admin-typed pattern, on every Case Asset marked Confirmed compromised.',
     create_case: 'Creates a case from the triggering alert (title/severity carried over) and links it, cascading into any matching "Case created" playbooks.',
+    set_alert_status: 'Sets the triggering alert\'s triage status directly (also marks it acknowledged) -- the lightweight alternative to create_case for auto-suppressing known-benign patterns without spinning up a full case.',
+    assign_alert: 'Assigns the triggering alert to a specific analyst (or clears the assignee).',
 };
 
 // ---- Per-column filters on the Actions catalog table -- second independent filterable
@@ -1468,6 +1471,16 @@ function actionParamsFieldsHtml(seq, actionType, params) {
                 <div class="small text-muted mt-1">Kills every process whose name or full path/command line contains this text (case-insensitive) on every Case Asset marked <strong>Confirmed</strong> compromised. Broader blast radius than a single PID -- always requires approval.</div>`;
         case 'create_case':
             return `<div class="small text-muted">No params -- creates a new case from the triggering alert (title/severity carried over) and links it, then runs any matching "Case created" playbooks against it.</div>`;
+        case 'set_alert_status':
+            return `<select class="form-select form-select-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_status">
+                <option value="new" ${!params.status || params.status === 'new' ? 'selected' : ''}>New</option>
+                <option value="investigating" ${params.status === 'investigating' ? 'selected' : ''}>Investigating</option>
+                <option value="resolved" ${params.status === 'resolved' ? 'selected' : ''}>Resolved</option>
+                <option value="false_positive" ${params.status === 'false_positive' ? 'selected' : ''}>False Positive</option>
+            </select>
+            <div class="small text-muted mt-1">Also marks the alert acknowledged, same as an analyst explicitly triaging it.</div>`;
+        case 'assign_alert':
+            return `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_assignee" placeholder="Username to assign to (blank clears the assignee)" value="${escHtml(params.assignee || '')}">`;
         default:
             return '';
     }
@@ -1560,6 +1573,8 @@ function collectActionRow(row) {
             if (hrs > 0) params.auto_revert_hours = hrs;
             break;
         }
+        case 'set_alert_status': params.status = getVal('status'); break;
+        case 'assign_alert': params.assignee = getVal('assignee'); break;
     }
     return { action_type: actionType, params, requires_approval: requiresApproval };
 }
