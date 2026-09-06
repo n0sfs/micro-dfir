@@ -2868,6 +2868,17 @@ _PARSER_CATALOG_BUILTINS = (
 
 _PARSER_HEALTH_CACHE = {'data': None, 'time': 0}
 _PARSER_HEALTH_CACHE_TTL = 30
+# A `timestamp >= datetime('now', '-24 hours')` scan looks cheap but is NOT -- confirmed
+# live against this app's own production instance (6.2M-row live_logs): a single such
+# COUNT(*) took 93 SECONDS, because neither idx_live_logs_timestamp nor idx_live_logs_app
+# alone lets SQLite avoid a large scan once both are combined with an IN() list, and this
+# function used to run up to ~9 of those per request. `id` (the INTEGER PRIMARY KEY /
+# rowid) needs no such join -- bounding every query to `id > (MAX(id) - N)` first caps
+# the total rows touched to N regardless of table size (measured: same shape of query
+# went from 93s to 1.5s). This trades an exact "last 24 hours" window for "last N
+# ingested rows" -- a fine tradeoff for a health-visibility widget, not correctness-
+# critical logic.
+_PARSER_HEALTH_RECENT_ROW_LIMIT = 50000
 
 def _parser_health_summary(db):
     import time
@@ -2875,10 +2886,14 @@ def _parser_health_summary(db):
     if _PARSER_HEALTH_CACHE['data'] is not None and (now - _PARSER_HEALTH_CACHE['time']) < _PARSER_HEALTH_CACHE_TTL:
         return _PARSER_HEALTH_CACHE['data']
 
+    max_id_row = db.execute("SELECT MAX(id) FROM live_logs").fetchone()
+    max_id = max_id_row[0] if max_id_row and max_id_row[0] is not None else 0
+    floor_id = max(0, max_id - _PARSER_HEALTH_RECENT_ROW_LIMIT)
+
     def _rate_for(apps, target_fields, extra_where=None):
         placeholders = ','.join('?' for _ in apps)
-        where = f"app IN ({placeholders}) AND timestamp >= datetime('now', '-24 hours')"
-        params = list(apps)
+        where = f"id > ? AND app IN ({placeholders})"
+        params = [floor_id] + list(apps)
         if extra_where:
             where += f" AND {extra_where}"
         total = db.execute(f"SELECT COUNT(*) FROM live_logs WHERE {where}", params).fetchone()[0]
@@ -2894,7 +2909,7 @@ def _parser_health_summary(db):
         parsers.append({
             'key': b['key'], 'name': b['name'], 'kind': b['kind'], 'apps': list(b['apps']),
             'target_fields': list(b['target_fields']), 'description': b['description'],
-            'volume_24h': total, 'extraction_rate_pct': rate,
+            'volume_recent': total, 'extraction_rate_pct': rate,
         })
     for r in db.execute("SELECT id, name, description, app_match, enabled, priority FROM custom_parsers ORDER BY priority ASC, id ASC").fetchall():
         if r['app_match']:
@@ -2903,17 +2918,17 @@ def _parser_health_summary(db):
         else:
             # No app scope on this parser -- can't cheaply attribute a rate to it alone
             # (it might be one of several parsers touching the same rows), so this only
-            # reports overall 24h volume, not an extraction percentage.
-            total = db.execute("SELECT COUNT(*) FROM live_logs WHERE timestamp >= datetime('now', '-24 hours')").fetchone()[0]
+            # reports overall recent volume, not an extraction percentage.
+            total = db.execute("SELECT COUNT(*) FROM live_logs WHERE id > ?", (floor_id,)).fetchone()[0]
             rate = None
             apps = []
         parsers.append({
             'key': f'custom_{r["id"]}', 'id': r['id'], 'name': r['name'], 'kind': 'custom',
             'enabled': bool(r['enabled']), 'apps': apps, 'description': r['description'],
-            'volume_24h': total, 'extraction_rate_pct': rate,
+            'volume_recent': total, 'extraction_rate_pct': rate,
         })
 
-    result = {'parsers': parsers}
+    result = {'parsers': parsers, 'sample_size': min(_PARSER_HEALTH_RECENT_ROW_LIMIT, max_id)}
     _PARSER_HEALTH_CACHE['data'] = result
     _PARSER_HEALTH_CACHE['time'] = now
     return result
