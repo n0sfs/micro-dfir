@@ -14106,11 +14106,6 @@ def api_agent_linux_channels():
                          'is_override': group_key != '__default__'})
     return jsonify({'channels': all_templates['__default__'], 'group': group_key, 'is_override': False})
 
-# Custom Linux channel DEFINITIONS (label/path/perms) -- separate from the per-group
-# enable/disable route above, matching how a custom channel is defined once and then
-# toggled on per group just like a fixed catalog entry.
-@app.route('/api/agent/linux-channels/custom', methods=['GET', 'POST'])
-@login_required
 def _validate_custom_channel_input(d):
     """Shared by create (POST) and update (PUT) -- returns (label, path, perms, None)
     on success or (None, None, None, error_response) on failure, matching this
@@ -14127,6 +14122,11 @@ def _validate_custom_channel_input(d):
         return None, None, None, (jsonify({'error': 'Select at least one of read/write/execute/attribute-change'}), 400)
     return label, path, perms, None
 
+# Custom Linux channel DEFINITIONS (label/path/perms) -- separate from the per-group
+# enable/disable route above, matching how a custom channel is defined once and then
+# toggled on per group just like a fixed catalog entry.
+@app.route('/api/agent/linux-channels/custom', methods=['GET', 'POST'])
+@login_required
 def api_agent_linux_custom_channels():
     from flask import request, jsonify
     err = require_permission('edr.agent.manage')
