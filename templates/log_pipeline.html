@@ -368,6 +368,23 @@ function escAttr(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// A loader's initial "Loading..." table state has no failure counterpart today -- a
+// non-2xx response (still a resolved fetch()) leaves it stuck showing "Loading..."
+// forever with no visible sign anything went wrong. This renders an explicit, retriable
+// failure row in its place (see templates/cases.html's identical helper).
+function renderLoadError(tbodyId, colspan, message) {
+    const tbody = document.getElementById(tbodyId);
+    if (tbody) tbody.innerHTML = `<tr><td colspan="${colspan}" class="text-center text-danger small py-3"><i class="fa-solid fa-triangle-exclamation me-1"></i>${escHtml(message || 'Failed to load.')} <a href="#" onclick="location.reload(); return false;">Reload</a></td></tr>`;
+}
+
+// Same idea as renderLoadError, for the non-table config panels on this page (channel
+// lists, status text, selector dropdowns) that otherwise sit blank/stuck with no sign
+// anything failed.
+function renderPanelError(containerId, message) {
+    const el = document.getElementById(containerId);
+    if (el) el.innerHTML = `<div class="text-center text-danger small py-3"><i class="fa-solid fa-triangle-exclamation me-1"></i>${escHtml(message || 'Failed to load.')} <a href="#" onclick="location.reload(); return false;">Reload</a></div>`;
+}
+
 function setStatTile(i, label, value, isText) {
     document.getElementById('statLabel' + i).textContent = label;
     document.getElementById('statValue' + i).textContent = value;
@@ -403,7 +420,10 @@ function switchLogPipelineTab(tab) {
 
 function loadDropRules() {
     fetch('/api/droprules')
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
         .then(data => {
             pipelineStats.activeDropRules = Array.isArray(data) ? data.filter(r => r.enabled).length : 0;
             pipelineStats.totalDropRules = Array.isArray(data) ? data.length : 0;
@@ -426,7 +446,10 @@ function loadDropRules() {
                     <td><button class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete drop rule" onclick="deleteDropRule(${r.id})"><i class="fa-solid fa-trash"></i></button></td>
                 </tr>
             `).join('');
-        }).catch(err => console.error("Error loading drop rules:", err));
+        }).catch(err => {
+            console.error("Error loading drop rules:", err);
+            renderLoadError('dropRulesTableBody', 5, 'Failed to load drop rules.');
+        });
 }
 
 function addDropRule() {
@@ -554,13 +577,19 @@ let currentChannelGroup = '';
 // is whatever the fleet has actually been organized into (e.g. Servers/Workstations/
 // Laptops), not a hardcoded set.
 function loadChannelGroupsDropdown() {
-    fetch('/api/agent/groups').then(r => r.json()).then(groups => {
+    fetch('/api/agent/groups').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(groups => {
         const sel = document.getElementById('channelGroupSelect');
         if (!sel) return;
         const extra = (groups || []).map(g => `<option value="${escAttr(g)}">${escHtml(g)}</option>`).join('');
         sel.innerHTML = `<option value="">Default (fleet-wide)</option>${extra}`;
         sel.value = currentChannelGroup;
-    }).catch(err => console.error('Error loading agent groups:', err));
+    }).catch(err => {
+        console.error('Error loading agent groups:', err);
+        renderPanelError('channelGroupStatus', 'Failed to load agent groups for the template selector.');
+    });
 }
 
 function onChannelGroupChange() {
@@ -570,7 +599,10 @@ function onChannelGroupChange() {
 
 function loadChannelSettings() {
     fetch('/api/agent/channels?group=' + encodeURIComponent(currentChannelGroup))
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
         .then(res => {
             const data = res.channels || {};
             let container = document.getElementById('channelsContainer');
@@ -607,7 +639,10 @@ function loadChannelSettings() {
                 pipelineStats.channelsActive = Object.values(data).filter(v => v && v.enabled).length;
                 updateSharedStats();
             }
-        }).catch(err => console.error("Error loading channels:", err));
+        }).catch(err => {
+            console.error("Error loading channels:", err);
+            renderPanelError('channelsContainer', 'Failed to load Windows log channels.');
+        });
 }
 
 function addCustomChannel() {
@@ -686,12 +721,18 @@ document.getElementById('sysmonConfigDetails').addEventListener('toggle', functi
 });
 
 function loadSysmonConfig() {
-    fetch('/api/settings/sysmon-config').then(r => r.json()).then(res => {
+    fetch('/api/settings/sysmon-config').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(res => {
         document.getElementById('sysmonConfigXml').value = res.xml || '';
         document.getElementById('sysmonConfigStatus').innerText = res.is_custom
             ? 'Using a saved custom override.'
             : 'Using the repo-shipped default (no custom override saved yet).';
-    }).catch(err => console.error('Error loading Sysmon config:', err));
+    }).catch(err => {
+        console.error('Error loading Sysmon config:', err);
+        renderPanelError('sysmonConfigStatus', 'Failed to load Sysmon config.');
+    });
 }
 
 // Loads a .xml file straight into the textarea for review/editing -- client-side only,
@@ -773,13 +814,19 @@ let linuxCustomChannels = {};
 let editingCustomChannelId = null;
 
 function loadLinuxChannelGroupsDropdown() {
-    fetch('/api/agent/groups').then(r => r.json()).then(groups => {
+    fetch('/api/agent/groups').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(groups => {
         const sel = document.getElementById('linuxChannelGroupSelect');
         if (!sel) return;
         const extra = (groups || []).map(g => `<option value="${escAttr(g)}">${escHtml(g)}</option>`).join('');
         sel.innerHTML = `<option value="">Default (fleet-wide)</option>${extra}`;
         sel.value = currentLinuxChannelGroup;
-    }).catch(err => console.error('Error loading agent groups:', err));
+    }).catch(err => {
+        console.error('Error loading agent groups:', err);
+        renderPanelError('linuxChannelGroupStatus', 'Failed to load agent groups for the template selector.');
+    });
 }
 
 function onLinuxChannelGroupChange() {
@@ -813,8 +860,14 @@ function renderLinuxChannelRow(key, meta, setting, isCustom) {
 
 function loadLinuxChannels() {
     Promise.all([
-        fetch('/api/agent/linux-channels?group=' + encodeURIComponent(currentLinuxChannelGroup)).then(r => r.json()),
-        fetch('/api/agent/linux-channels/custom').then(r => r.json()),
+        fetch('/api/agent/linux-channels?group=' + encodeURIComponent(currentLinuxChannelGroup)).then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        }),
+        fetch('/api/agent/linux-channels/custom').then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        }),
     ]).then(([res, custom]) => {
         linuxCustomChannels = custom || {};
         const data = res.channels || {};
@@ -842,7 +895,10 @@ function loadLinuxChannels() {
             if (statusEl) statusEl.innerText = `"${currentLinuxChannelGroup}" has no template of its own yet -- showing the default below. Save to create one just for this group.`;
             if (removeBtn) removeBtn.style.display = 'none';
         }
-    }).catch(err => console.error('Error loading Linux channels:', err));
+    }).catch(err => {
+        console.error('Error loading Linux channels:', err);
+        renderPanelError('linuxChannelsContainer', 'Failed to load Linux log channels.');
+    });
 }
 
 function collectCustomChanPerms() {
@@ -967,7 +1023,10 @@ async function removeLinuxChannelOverride() {
 // Read-only status/parser view for the opt-in DNS query logging feature (dnsmasq) --
 // no create/edit/save here by design, see /api/dns-logging/status's own comment.
 function loadDnsLoggingStatus() {
-    fetch('/api/dns-logging/status').then(r => r.json()).then(d => {
+    fetch('/api/dns-logging/status').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(d => {
         const activeEl = document.getElementById('dnsLoggingActive');
         activeEl.innerText = d.active ? 'Active' : 'Inactive';
         activeEl.className = 'fs-4 fw-bold ' + (d.active ? 'text-success' : 'text-muted');
@@ -976,7 +1035,7 @@ function loadDnsLoggingStatus() {
         document.getElementById('dnsLoggingParser').innerText = `${d.parser_pattern}\n\nSource: ${d.parser_source}`;
     }).catch(err => {
         console.error('Error loading DNS logging status:', err);
-        document.getElementById('dnsLoggingParser').innerText = 'Error loading parser info.';
+        renderPanelError('dnsLoggingParser', 'Failed to load DNS logging status.');
     });
 }
 
@@ -984,7 +1043,10 @@ function loadDnsLoggingStatus() {
 function loadLogSourceSilentConfig() {
     if (!document.getElementById('logSourceSilentMultiplier')) return;
     fetch('/api/settings/log-source-silent-alert')
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
         .then(data => {
             document.getElementById('logSourceSilentMultiplier').value = data.multiplier;
             document.getElementById('logSourceSilentMinHours').value = data.min_hours;
@@ -992,7 +1054,10 @@ function loadLogSourceSilentConfig() {
             document.getElementById('logSourceSilentStatus').innerText =
                 `Currently: a host silent for ${data.multiplier}x its own typical gap (minimum ${data.min_hours}h) triggers a "Host Silent" alert, at most once every ${data.cooldown_hours}h per host.`;
         })
-        .catch(e => console.error('Host silent alert settings load issue:', e));
+        .catch(e => {
+            console.error('Host silent alert settings load issue:', e);
+            renderPanelError('logSourceSilentStatus', 'Failed to load host silent alert settings.');
+        });
 }
 
 function saveLogSourceSilentConfig() {

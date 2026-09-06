@@ -10,6 +10,31 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-06
 
+### Loading-state sweep: the rest of the "stuck on Loading forever" fetch sites
+
+From the earlier Business Readiness pass: only 5 representative `fetch()` call sites got
+a real "failed to load, click to retry" treatment at the time; the other ~65+ sites
+across every remaining template were deliberately deferred as a follow-up sweep. Did
+that sweep now, file by file (`agents.html`, `cases.html`, `coverage.html`,
+`dashboard.html`, `dashboards.html`, `log_pipeline.html`, `settings.html`, `soar.html`,
+`threat_intel.html`, `ueba.html`) — every loader that populates a visible table/widget
+now gets a `res.ok` check and an explicit, retriable failure message (a `renderLoadError`
+table row or an equivalent widget-level failure `<div>`) instead of either an unhandled
+rejection or a silent `console.error` that leaves "Loading…" on screen forever. A few
+real, previously-uncaught bugs turned up along the way: `loadUniqueEndpoints()` (Agents
+page fleet table) and `ld()` (Detection Rules table) had **no error handling at all** —
+a failure there threw unhandled and left the table permanently blank/stuck; `loadExclusions()`
+(Tune modal) could silently leave a *different* rule's stale exclusions displayed as if
+they belonged to whichever rule's modal was currently open. Caught and fixed one
+regression the sweep itself introduced during review: `renderVulnerabilitySummaryWidget`
+(Dashboards) re-polls every 60s, but its first-draft failure handler replaced the whole
+widget container — destroying the `canvas`/list/note elements a later successful poll's
+closure still referenced, which would have left the widget stuck on the error message
+forever even after the API recovered. Fixed to write into the already-captured
+sub-elements instead, matching the other three auto-refreshing widgets' (already-correct)
+pattern. Verified via compile checks (Jinja + `node --check`) on every touched file plus
+targeted regression tests for the widget-recovery fix and colspan correctness.
+
 ### Silent Log Source alert reworked to per-host (was per-app)
 
 The Log Pipeline > Silent Hosts tab (built earlier this session as "Silent Log Sources")

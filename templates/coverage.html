@@ -245,6 +245,15 @@
 function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
+
+// A loader's initial "Loading..." table state has no failure counterpart today -- a
+// non-2xx response (still a resolved fetch()) leaves it stuck showing "Loading..."
+// forever with no visible sign anything went wrong. This renders an explicit, retriable
+// failure row in its place.
+function renderLoadError(tbodyId, colspan, message) {
+    const tbody = document.getElementById(tbodyId);
+    if (tbody) tbody.innerHTML = `<tr><td colspan="${colspan}" class="text-center text-danger small py-3"><i class="fa-solid fa-triangle-exclamation me-1"></i>${escHtml(message || 'Failed to load.')} <a href="#" onclick="location.reload(); return false;">Reload</a></td></tr>`;
+}
 const LEVEL_BADGE = {
     critical: 'bg-danger', high: 'bg-danger', medium: 'bg-warning text-dark',
     low: 'bg-info text-dark', informational: 'bg-secondary'
@@ -300,11 +309,21 @@ function initCoverageTab() {
 }
 
 function loadCoverageHistory() {
-    fetch('/api/mitre/coverage/history?days=90').then(r => r.json()).then(d => {
+    fetch('/api/mitre/coverage/history?days=90').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(d => {
         coverageHistorySnapshots = d.snapshots || [];
         renderCoverageHistoryChart(coverageHistorySnapshots);
         renderCoverageHero();
-    }).catch(err => console.error('Error loading coverage history:', err));
+    }).catch(err => {
+        console.error('Error loading coverage history:', err);
+        const emptyEl = document.getElementById('coverageHistoryEmpty');
+        document.getElementById('coverageHistoryChart').style.display = 'none';
+        emptyEl.className = 'text-danger small text-center py-4';
+        emptyEl.innerHTML = '<i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load coverage history. <a href="#" onclick="location.reload(); return false;">Reload</a>';
+        emptyEl.style.display = 'block';
+    });
 }
 
 function renderCoverageHistoryChart(snapshots) {
@@ -514,13 +533,16 @@ document.addEventListener('click', (e) => {
 function loadCoverageTab() {
     const range = document.getElementById('coverageRange').value;
     document.getElementById('coverageGrid').innerHTML = '<div class="text-center text-muted py-4 w-100">Loading…</div>';
-    fetch(`/api/mitre/coverage?range=${range}`).then(r => r.json()).then(d => {
+    fetch(`/api/mitre/coverage?range=${range}`).then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(d => {
         coverageData = d;
         renderCoverageGrid(d);
         renderCoverageGaps(d);
         renderCoverageHero();
     }).catch(err => {
-        document.getElementById('coverageGrid').innerHTML = '<div class="text-center text-danger py-4 w-100">Error loading coverage data.</div>';
+        document.getElementById('coverageGrid').innerHTML = '<div class="text-center text-danger py-4 w-100"><i class="fa-solid fa-triangle-exclamation me-1"></i>Error loading coverage data. <a href="#" onclick="location.reload(); return false;">Reload</a></div>';
         console.error('Error loading MITRE coverage:', err);
     });
 }
@@ -707,14 +729,18 @@ function openCoverageDrilldown(tactic, techId) {
 // =====================================================================
 function loadComplianceTab() {
     Promise.all([
-        fetch('/api/compliance/coverage').then(r => r.json()),
+        fetch('/api/compliance/coverage').then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        }),
         fetch('/api/compliance/audit-trail').then(r => r.ok ? r.json() : []).catch(() => []),
     ]).then(([d, trail]) => {
         renderComplianceHeadline(d);
         renderComplianceFrameworks(d);
         renderComplianceAuditTrail(trail);
     }).catch(err => {
-        document.getElementById('complianceFrameworks').innerHTML = '<div class="text-center text-danger py-4">Error loading compliance coverage.</div>';
+        document.getElementById('complianceHeadline').textContent = 'Failed to load.';
+        document.getElementById('complianceFrameworks').innerHTML = '<div class="text-center text-danger small py-3"><i class="fa-solid fa-triangle-exclamation me-1"></i>Error loading compliance coverage. <a href="#" onclick="location.reload(); return false;">Reload</a></div>';
         console.error('Error loading compliance coverage:', err);
     });
 }
@@ -790,7 +816,10 @@ function toggleNist80053Detail() {
     el.style.display = 'block';
     if (el.dataset.loaded) return;
     el.innerHTML = '<div class="text-muted small">Loading&hellip;</div>';
-    fetch('/api/compliance/nist-800-53-controls').then(r => r.json()).then(d => {
+    fetch('/api/compliance/nist-800-53-controls').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(d => {
         const families = Object.entries(d.families).sort((a, b) => a[0].localeCompare(b[0]));
         el.innerHTML = `
             <div class="small text-muted mb-1">${d.covered_controls} / ${d.total_controls} in-scope controls covered</div>
@@ -810,7 +839,7 @@ function toggleNist80053Detail() {
             </div>`;
         el.dataset.loaded = '1';
     }).catch(err => {
-        el.innerHTML = '<div class="text-danger small">Error loading control coverage.</div>';
+        el.innerHTML = '<div class="text-danger small"><i class="fa-solid fa-triangle-exclamation me-1"></i>Error loading control coverage. <a href="#" onclick="location.reload(); return false;">Reload</a></div>';
         console.error('Error loading NIST 800-53 control coverage:', err);
     });
 }
@@ -842,11 +871,14 @@ function renderComplianceAuditTrail(trail) {
 // =====================================================================
 function loadVulnerabilityTab() {
     document.getElementById('vulnFindingsBody').innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">Loading…</td></tr>';
-    fetch('/api/vulnerabilities/coverage').then(r => r.json()).then(d => {
+    fetch('/api/vulnerabilities/coverage').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(d => {
         renderVulnerabilityHero(d);
         renderVulnerabilityFindings(d.findings);
     }).catch(err => {
-        document.getElementById('vulnFindingsBody').innerHTML = '<tr><td colspan="6" class="text-center text-danger py-4">Error loading vulnerability data.</td></tr>';
+        renderLoadError('vulnFindingsBody', 6, 'Error loading vulnerability data.');
         console.error('Error loading vulnerability coverage:', err);
     });
 }

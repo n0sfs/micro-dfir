@@ -248,8 +248,9 @@
             <span class="text-muted small fw-bold"><i class="fa-solid fa-chart-line me-1 text-primary"></i> Log Volume Over Time</span>
             <span id="logCountBadge" class="badge bg-secondary">Loading log count...</span>
         </div>
-        <div style="height: 110px; width: 100%;">
+        <div style="height: 110px; width: 100%; position: relative;">
             <canvas id="logTimelineChart"></canvas>
+            <div id="timelineChartError" class="text-center text-danger small py-3" style="display:none; position:absolute; inset:0; background:inherit;"></div>
         </div>
     </div>
 </div>
@@ -290,7 +291,7 @@
                 <thead>
                     <tr id="logsTableHeadRow"></tr>
                 </thead>
-                <tbody>
+                <tbody id="logsTableBody">
                     <tr><td class="text-center text-muted py-4">Loading logs...</td></tr>
                 </tbody>
             </table>
@@ -1100,6 +1101,15 @@ function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// A loader's initial "Loading..." table state has no failure counterpart today -- a
+// non-2xx response (still a resolved fetch()) leaves it stuck showing "Loading..."
+// forever with no visible sign anything went wrong. This renders an explicit, retriable
+// failure row in its place.
+function renderLoadError(tbodyId, colspan, message) {
+    const tbody = document.getElementById(tbodyId);
+    if (tbody) tbody.innerHTML = `<tr><td colspan="${colspan}" class="text-center text-danger small py-3"><i class="fa-solid fa-triangle-exclamation me-1"></i>${escHtml(message || 'Failed to load.')} <a href="#" onclick="location.reload(); return false;">Reload</a></td></tr>`;
+}
+
 function escRegex(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -1625,7 +1635,10 @@ window.loadLogs = function(opts) {
     };
 
     fetch(`/api/logs/search?${buildLogQueryParams(opts)}`)
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
         .then(data => {
             currentLogs = data.logs || [];
             logsTotalMatchesCache = data.total_matches !== undefined ? data.total_matches : data.count;
@@ -1634,7 +1647,16 @@ window.loadLogs = function(opts) {
             renderLogsTableRows(currentLogs);
             updateLoadMoreVisibility();
         })
-        .catch(err => console.error("Error fetching logs:", err));
+        .catch(err => {
+            console.error("Error fetching logs:", err);
+            // Don't blow away already-visible rows on a transient failure of a background
+            // streaming poll (opts.auto, every 5s via autoStreamLogs) -- only replace the
+            // table with an explicit error when this is a real user-initiated/initial load,
+            // which is the case that would otherwise be stuck on "Loading logs..." forever.
+            if (!opts || !opts.auto) {
+                renderLoadError('logsTableBody', activeColumnDefs().length || 1, 'Failed to load logs.');
+            }
+        });
 };
 
 // Fetches the NEXT page via a cursor keyed on the last row currently shown (not a bigger
@@ -1654,7 +1676,10 @@ function loadMoreLogs() {
     const btn = document.querySelector('#logsLoadMoreWrap button');
     if (btn) btn.disabled = true;
     fetch(`/api/logs/search?${params}`)
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
         .then(data => {
             currentLogs = currentLogs.concat(data.logs || []);
             updateLogCountBadge();
@@ -1662,7 +1687,10 @@ function loadMoreLogs() {
             renderLogsTableRows(currentLogs);
             updateLoadMoreVisibility();
         })
-        .catch(err => console.error("Error loading more logs:", err))
+        .catch(err => {
+            console.error("Error loading more logs:", err);
+            toast('Failed to load more logs: ' + err, 'danger');
+        })
         .finally(() => { if (btn) btn.disabled = false; });
 }
 
@@ -1793,7 +1821,10 @@ function loadTimeline() {
     // Mirror loadLogs()'s exact filter set so the chart never shows volume for logs the
     // search table itself excludes -- both hit the same _build_log_filters() server-side.
     fetch(`/api/logs/timeline?${buildLogQueryParams()}`)
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
         .then(data => {
             if (!timelineChart || !data.timeline) return;
             let labels = data.timeline.map(item => item.time);
@@ -1802,8 +1833,19 @@ function loadTimeline() {
             timelineChart.data.labels = labels;
             timelineChart.data.datasets[0].data = counts;
             timelineChart.update();
+            const errEl = document.getElementById('timelineChartError');
+            if (errEl) errEl.style.display = 'none';
         })
-        .catch(err => console.error("Error fetching timeline:", err));
+        .catch(err => {
+            console.error("Error fetching timeline:", err);
+            const errEl = document.getElementById('timelineChartError');
+            if (errEl) {
+                errEl.innerHTML = '<i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load timeline.';
+                errEl.style.display = 'flex';
+                errEl.style.alignItems = 'center';
+                errEl.style.justifyContent = 'center';
+            }
+        });
 }
 
 window.exportCSV = function() {
@@ -2581,7 +2623,18 @@ function restoreColWidths() {
 }
 
 async function ld(){
-    allRules = await(await fetch('/api/rules')).json();
+    try {
+        const res = await fetch('/api/rules');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        allRules = await res.json();
+    } catch (err) {
+        console.error('Error loading rules:', err);
+        // No static "Loading..." row exists here (tbody starts empty) -- without this the
+        // table would just stay blank forever with nothing telling the analyst detection
+        // rules failed to load at all.
+        renderLoadError('rt', 12, 'Failed to load detection rules.');
+        return;
+    }
 
     const platforms = new Set();
     const statuses = new Set();
@@ -3375,11 +3428,17 @@ function tuneRenderTable(rows) {
 }
 
 function tuneLoad() {
-    fetch('/api/rules/tuning').then(r => r.json()).then(data => {
+    fetch('/api/rules/tuning').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(data => {
         allTuning = data;
         updateSharedStats('tuning');
         tuneApplyFilters();
-    }).catch(err => console.error('Error loading tuning data:', err));
+    }).catch(err => {
+        console.error('Error loading tuning data:', err);
+        renderLoadError('tuningTableBody', 10, 'Failed to load detection tuning data.');
+    });
 }
 
 function tuneRuleById(id) { return allTuning.find(r => r.id === id); }
@@ -3423,7 +3482,10 @@ function openTuneModal(id) {
 }
 
 function loadExclusions(id) {
-    fetch(`/api/rules/${id}/exclusions`).then(r => r.json()).then(rows => {
+    fetch(`/api/rules/${id}/exclusions`).then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(rows => {
         const tbody = document.getElementById('exclusionsTableBody');
         if (!rows.length) {
             tbody.innerHTML = '<tr><td colspan="6" class="text-muted small">No exclusions yet.</td></tr>';
@@ -3439,7 +3501,13 @@ function loadExclusions(id) {
                 : (e.enabled ? '<span class="badge bg-success">On</span>' : '<span class="badge bg-secondary">Off</span>')}</td>
             <td>${IS_ADMIN ? `<button type="button" class="btn btn-sm btn-outline-danger" title="Delete exclusion" onclick="deleteExclusion(${e.id})"><i class="fa-solid fa-trash"></i></button>` : ''}</td>
         </tr>`).join('');
-    }).catch(err => console.error('Error loading exclusions:', err));
+    }).catch(err => {
+        console.error('Error loading exclusions:', err);
+        // Otherwise this silently leaves whatever the PREVIOUS rule's exclusions were
+        // showing (this modal is reused across rules) -- worse than a blank table, since
+        // it looks like valid data for the rule currently open.
+        renderLoadError('exclusionsTableBody', 6, 'Failed to load exclusions.');
+    });
 }
 
 function saveSeverity() {
@@ -3551,11 +3619,17 @@ function initTuningTab() {
 // REPORTS TAB
 // =====================================================================
 function initReportsTab() {
-    fetch('/api/reports/history').then(r => r.json()).then(d => {
+    fetch('/api/reports/history').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(d => {
         reportHistoryData = d.history || [];
         renderReportHistory();
         updateSharedStats('reports');
-    }).catch(err => console.error('Error loading report history:', err));
+    }).catch(err => {
+        console.error('Error loading report history:', err);
+        renderLoadError('reportHistoryBody', 6, 'Failed to load report history.');
+    });
 }
 
 function formatReportSize(bytes) {
