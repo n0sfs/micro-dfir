@@ -1093,7 +1093,10 @@ function silentSourceAlertStatusBadge(a) {
 function loadSilentSourceAlerts() {
     const tbody = document.getElementById('silentSourceAlertsBody');
     fetch('/api/log-pipeline/silent-source-alerts')
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
         .then(rows => {
             if (!Array.isArray(rows) || rows.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">No host has triggered this alert yet.</td></tr>';

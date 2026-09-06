@@ -319,10 +319,13 @@ function loadCoverageHistory() {
     }).catch(err => {
         console.error('Error loading coverage history:', err);
         const emptyEl = document.getElementById('coverageHistoryEmpty');
-        document.getElementById('coverageHistoryChart').style.display = 'none';
-        emptyEl.className = 'text-danger small text-center py-4';
-        emptyEl.innerHTML = '<i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load coverage history. <a href="#" onclick="location.reload(); return false;">Reload</a>';
-        emptyEl.style.display = 'block';
+        const chartEl = document.getElementById('coverageHistoryChart');
+        if (chartEl) chartEl.style.display = 'none';
+        if (emptyEl) {
+            emptyEl.className = 'text-danger small text-center py-4';
+            emptyEl.innerHTML = '<i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load coverage history. <a href="#" onclick="location.reload(); return false;">Reload</a>';
+            emptyEl.style.display = 'block';
+        }
     });
 }
 
