@@ -416,6 +416,11 @@ def login():
         flash('Invalid username or password', 'danger')
     return render_template('login.html')
 
+# The one password-strength rule this app enforces anywhere -- length only, no
+# complexity requirement. Shared between the self-service change-password form and the
+# admin-facing create/reset routes (api_settings_users) so the two can't silently drift.
+MIN_PASSWORD_LENGTH = 8
+
 @app.route('/change-password', methods=['GET', 'POST'])
 @login_required
 def change_password():
@@ -429,8 +434,8 @@ def change_password():
         confirm_pw = request.form.get('confirm_password', '')
         if not check_password_hash(row['password_hash'], current_pw):
             flash('Current password is incorrect.', 'danger')
-        elif len(new_pw) < 8:
-            flash('New password must be at least 8 characters.', 'danger')
+        elif len(new_pw) < MIN_PASSWORD_LENGTH:
+            flash(f'New password must be at least {MIN_PASSWORD_LENGTH} characters.', 'danger')
         elif new_pw != confirm_pw:
             flash("New password and confirmation don't match.", 'danger')
         elif new_pw == current_pw:
@@ -7149,6 +7154,28 @@ def _run_due_offline_agent_alerts(db):
             continue
         age_minutes = (now - last_seen).total_seconds() / 60
         if age_minutes < threshold_min:
+            # Back within the online threshold -- if this host had an unresolved
+            # "Agent Offline" alert (resolved_at still NULL), close it out with a
+            # recovery notice. A host may have accumulated several unresolved rows if
+            # it stayed offline across multiple cooldown-gated re-fires -- resolve all
+            # of them together so this doesn't fire one recovery alert per row.
+            unresolved = db.execute(
+                "SELECT id FROM agent_offline_alerts WHERE hostname = ? AND resolved_at IS NULL",
+                (r['hostname'],)
+            ).fetchall()
+            if unresolved:
+                msg = f"Agent on {r['hostname']} is back online (last seen {r['last_seen']})."
+                ins_cur = db.execute(
+                    "INSERT INTO alerts (timestamp, rule_name, severity, host, message, occurrence_count, last_seen) "
+                    "VALUES (datetime('now'), 'Agent Back Online', 'INFO', ?, ?, 1, datetime('now'))",
+                    (r['hostname'], msg)
+                )
+                new_alert_id = ins_cur.lastrowid
+                db.execute("UPDATE agent_offline_alerts SET resolved_at = datetime('now') WHERE hostname = ? AND resolved_at IS NULL", (r['hostname'],))
+                soar_alerts.run_playbooks_for_alert(db, {
+                    'id': new_alert_id, 'rule_title': 'Agent Back Online', 'severity': 'INFO', 'host': r['hostname'],
+                    'username': None, 'source_ip': None, 'message': msg, 'timestamp': None,
+                }, run_case_playbooks_fn=lambda cid, qid, tlp, st, sev: _run_playbooks_for_case(db, cid, 'case_created', qid, tlp, st, sev))
             continue
         already = db.execute(
             "SELECT 1 FROM agent_offline_alerts WHERE hostname = ? AND alerted_at >= datetime('now', ?)",
@@ -9367,6 +9394,13 @@ def migrate_agent_offline_alerts():
             alerted_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )''')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_offline_alerts_host ON agent_offline_alerts(hostname, alerted_at)')
+        # NULL = still offline (no recovery notice fired yet for this offline period);
+        # set once _run_due_offline_agent_alerts sees the host come back within the
+        # online threshold -- same flip-once nullable-timestamp shape as
+        # sla_breach_notified_at.
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(agent_offline_alerts)").fetchall()}
+        if 'resolved_at' not in cols:
+            conn.execute("ALTER TABLE agent_offline_alerts ADD COLUMN resolved_at DATETIME")
         conn.commit()
         conn.close()
     except Exception:
@@ -14772,7 +14806,10 @@ def api_settings_users():
 
         if action == 'create':
             username = data.get('username')
-            password = generate_password_hash(data.get('password'))
+            raw_password = data.get('password') or ''
+            if len(raw_password) < MIN_PASSWORD_LENGTH:
+                return jsonify({'error': f'Password must be at least {MIN_PASSWORD_LENGTH} characters.'}), 400
+            password = generate_password_hash(raw_password)
             role = data.get('role', 'analyst')
             valid_roles = {r['slug'] for r in db.execute("SELECT slug FROM roles").fetchall()}
             if role not in valid_roles:
@@ -14788,7 +14825,10 @@ def api_settings_users():
 
         elif action == 'reset':
             user_id = data.get('id')
-            new_password = generate_password_hash(data.get('password'))
+            raw_password = data.get('password') or ''
+            if len(raw_password) < MIN_PASSWORD_LENGTH:
+                return jsonify({'error': f'Password must be at least {MIN_PASSWORD_LENGTH} characters.'}), 400
+            new_password = generate_password_hash(raw_password)
             must_change = 1 if data.get('force_change') else 0
             target_user = db.execute("SELECT username FROM users WHERE id = ?", (user_id,)).fetchone()
             db.execute("UPDATE users SET password_hash = ?, must_change_password = ? WHERE id = ?", (new_password, must_change, user_id))
