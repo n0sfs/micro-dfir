@@ -6907,6 +6907,21 @@ def _run_due_log_source_silent_alerts(db):
         }, run_case_playbooks_fn=lambda cid, qid, tlp, st, sev: _run_playbooks_for_case(db, cid, 'case_created', qid, tlp, st, sev))
     db.commit()
 
+# Real fired history for the Silent Log Sources tab (Log Pipeline) -- a dedicated, scoped
+# query rather than reusing GET /api/alerts (which defaults to the 30 most recent alerts
+# of ANY type and would let a busy Sigma/UEBA alert stream silently push these out of view).
+@app.route('/api/log-pipeline/silent-source-alerts', methods=['GET'])
+@login_required
+def api_log_pipeline_silent_source_alerts():
+    db = get_db()
+    limit = min(request.args.get('limit', 50, type=int) or 50, 200)
+    rows = db.execute(
+        "SELECT id, timestamp, message, acknowledged, status, occurrence_count, last_seen "
+        "FROM alerts WHERE rule_name = 'Log Source Silent' ORDER BY id DESC LIMIT ?",
+        (limit,)
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
 @app.route('/api/playbooks', methods=['GET', 'POST'])
 @login_required
 def api_playbooks():

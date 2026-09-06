@@ -39,6 +39,7 @@
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'dns' else '' }}" id="tabBtnDns" onclick="switchLogPipelineTab('dns')"><i class="fa-solid fa-globe me-1"></i>DNS Query Logging</button></li>
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'channels' else '' }}" id="tabBtnChannels" onclick="switchLogPipelineTab('channels')"><i class="fa-solid fa-sliders me-1"></i>Windows Log Channels</button></li>
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'linuxchannels' else '' }}" id="tabBtnLinuxchannels" onclick="switchLogPipelineTab('linuxchannels')"><i class="fa-brands fa-linux me-1"></i>Linux Log Channels</button></li>
+    <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'silentsources' else '' }}" id="tabBtnSilentsources" onclick="switchLogPipelineTab('silentsources')"><i class="fa-solid fa-volume-xmark me-1"></i>Silent Log Sources</button></li>
 </ul>
 
 <!-- ============================= DROP RULES PANE ============================= -->
@@ -113,6 +114,11 @@
     </div>
 </div>
 
+</div>
+<!-- =========================== END DROP RULES PANE =========================== -->
+
+<!-- ============================= SILENT LOG SOURCES PANE ============================= -->
+<div id="paneSilentsources" style="display: {{ 'block' if active_tab == 'silentsources' else 'none' }};">
 <!-- Log Source Silent Alert -- relocated from Settings since it's genuinely pipeline
      health monitoring, not a general system setting. Same route/permission. -->
 <div class="row g-4 mb-4">
@@ -145,8 +151,38 @@
         </div>
     </div>
 </div>
+
+<!-- Real fired alerts, so an analyst can see which log sources have actually gone
+     silent -- distinct from the config card above, which only tunes the threshold. -->
+<div class="row g-4 mb-4">
+    <div class="col-lg-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="card-title text-light mb-0"><i class="fa-solid fa-triangle-exclamation me-2"></i>Silent Log Source Alerts</h5>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="loadSilentSourceAlerts()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
+                </div>
+                <p class="text-muted small mb-3">Every time the check above actually fires, it lands here -- most recent first.</p>
+                <div class="table-responsive">
+                    <table class="table table-dark table-hover table-sm align-middle mb-0">
+                        <thead>
+                            <tr>
+                                <th>Fired At</th>
+                                <th>Details</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="silentSourceAlertsBody">
+                            <tr><td colspan="3" class="text-center text-muted py-3">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
-<!-- =========================== END DROP RULES PANE =========================== -->
+</div>
+<!-- =========================== END SILENT LOG SOURCES PANE =========================== -->
 
 <!-- ============================= DNS LOGGING PANE ============================= -->
 <div id="paneDns" style="display: {{ 'block' if active_tab == 'dns' else 'none' }};">
@@ -348,7 +384,7 @@ function updateSharedStats() {
 // both Drop Rules and Channels regardless of which pane is visible, and all
 // 3 underlying calls are cheap, so there's no lazy-load benefit worth the
 // "which tiles are stale" bookkeeping it would add.
-const LOG_PIPELINE_TABS = ['droprules', 'dns', 'channels', 'linuxchannels'];
+const LOG_PIPELINE_TABS = ['droprules', 'dns', 'channels', 'linuxchannels', 'silentsources'];
 function logPipelineTabCap(t) { return t.charAt(0).toUpperCase() + t.slice(1); }
 function switchLogPipelineTab(tab) {
     if (!LOG_PIPELINE_TABS.includes(tab)) return;
@@ -974,6 +1010,37 @@ function saveLogSourceSilentConfig() {
     }).catch(err => toast('Error saving log source silent alert settings: ' + err, 'danger'));
 }
 
+// Real fired "Log Source Silent" alerts, shown at the bottom of the Silent Log Sources
+// tab so an analyst can see what's actually gone silent, not just the threshold config.
+function silentSourceAlertStatusBadge(a) {
+    if (a.acknowledged) return '<span class="badge bg-secondary">Acknowledged</span>';
+    const map = {new: 'bg-danger', investigating: 'bg-warning text-dark', resolved: 'bg-success', false_positive: 'bg-secondary'};
+    return `<span class="badge ${map[a.status] || 'bg-danger'}">${escHtml(a.status || 'new')}</span>`;
+}
+
+function loadSilentSourceAlerts() {
+    const tbody = document.getElementById('silentSourceAlertsBody');
+    fetch('/api/log-pipeline/silent-source-alerts')
+        .then(r => r.json())
+        .then(rows => {
+            if (!Array.isArray(rows) || rows.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="3" class="text-center text-muted py-3">No log source has triggered this alert yet.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = rows.map(a => `
+                <tr>
+                    <td class="text-nowrap small">${escHtml(a.timestamp || '')}</td>
+                    <td class="small">${escHtml(a.message || '')}${a.occurrence_count > 1 ? ` <span class="badge bg-secondary" title="Last seen ${escHtml(a.last_seen || '')}">&times;${a.occurrence_count}</span>` : ''}</td>
+                    <td>${silentSourceAlertStatusBadge(a)}</td>
+                </tr>
+            `).join('');
+        })
+        .catch(err => {
+            tbody.innerHTML = '<tr><td colspan="3" class="text-center text-danger py-3">Failed to load. <a href="#" onclick="loadSilentSourceAlerts(); return false;">Retry</a></td></tr>';
+            console.error('Error loading silent source alerts:', err);
+        });
+}
+
 // =====================================================================
 // INIT
 // =====================================================================
@@ -988,6 +1055,7 @@ document.addEventListener("DOMContentLoaded", function() {
     loadChannelSettings();
     loadDnsLoggingStatus();
     loadLogSourceSilentConfig();
+    loadSilentSourceAlerts();
     loadLinuxChannelGroupsDropdown();
     loadLinuxChannels();
 });

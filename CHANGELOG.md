@@ -10,6 +10,17 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-05
 
+### Log Pipeline: move Log Source Silent Alert into its own tab, list real fired alerts
+
+The "Log Source Silent Alert" settings card lived inside the Drop Rules tab, and had no
+way to see whether it had actually fired for any log source short of digging through the
+general Alerts view. Moved it into a new "Silent Log Sources" tab and added a real fired-
+alert history at the bottom (`GET /api/log-pipeline/silent-source-alerts`, scoped to
+`rule_name = 'Log Source Silent'` rather than reusing the general alerts list, which
+defaults to the 30 most recent alerts of any type and could silently push these out of
+view on a busy instance) -- most recent first, with occurrence count and
+acknowledged/status shown per row.
+
 ### Multi-angle code review of this session's work — 12 fixes, 2 of them live production bugs
 
 Ran a 10-angle + sweep-pass review over everything shipped this session (`git diff` since
