@@ -1357,6 +1357,13 @@ def api_yara_rule_tags():
         return jsonify({'error': 'path and tag are required'}), 400
     if len(tag) > 40:
         return jsonify({'error': 'Tag must be 40 characters or fewer'}), 400
+    if ',' in tag:
+        # The rule-list view joins/splits a rule's tags on a bare comma (data-tags
+        # attribute, templates/threat_intel.html) to build the Tag filter dropdown --
+        # a tag containing one would corrupt that list and could never match the
+        # filter option built from the same value. Rejected here, at the point of
+        # entry, rather than trying to pick a "safer" delimiter that could collide too.
+        return jsonify({'error': 'Tag cannot contain a comma'}), 400
     if not _yara_resolve_path(relpath):
         return jsonify({'error': 'Rule file not found'}), 404
     try:
@@ -12432,8 +12439,18 @@ def api_settings_db_backup_run():
     err = require_permission('settings.system.manage')
     if err: return err
     import backup_db
+    # Same "use whatever's currently typed, even if unsaved" pattern as Archive Now
+    # (api_settings_archive_run) -- run_backup()'s own retention_override param existed
+    # but nothing ever actually passed it, so Backup Now always silently used the last
+    # *saved* retention value regardless of an edited-but-unsaved field.
+    retention_override = (request.json or {}).get('retention_days') if request.is_json else None
+    if retention_override is not None:
+        try:
+            retention_override = int(retention_override)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'retention_days must be a positive integer'}), 400
     try:
-        result = backup_db.run_backup()
+        result = backup_db.run_backup(retention_override)
     except Exception as e:
         return jsonify({'error': f'Backup failed: {e}'}), 500
     log_audit('manual_db_backup', 'settings', None, f"file={result['filename']}, size_bytes={result['size_bytes']}")
@@ -12533,10 +12550,14 @@ def settings_network():
     if "settings.network.manage" not in _current_user_permissions(): return redirect(url_for("home"))
     if not validate_csrf(): return redirect(url_for("settings"))
 
-    ui_ip = request.form.get("ui_bind_ip", "0.0.0.0")
-    ui_port = request.form.get("ui_port", "5001")
-    ingest_ip = request.form.get("ingest_bind_ip", "0.0.0.0")
-    ingest_port = request.form.get("ingest_port", "5000")
+    # `.get(key) or default` (not `.get(key, default)`) -- a cleared text field still
+    # submits the form field name with an empty value, so `.get(key, default)` would
+    # store '' rather than falling back; found live via vector_sink_ip (app.py:233)
+    # building an invalid "https://:{port}/..." sink URI when ingest_bind_ip was ''.
+    ui_ip = request.form.get("ui_bind_ip") or "0.0.0.0"
+    ui_port = request.form.get("ui_port") or "5001"
+    ingest_ip = request.form.get("ingest_bind_ip") or "0.0.0.0"
+    ingest_port = request.form.get("ingest_port") or "5000"
     # Checkboxes send no field at all when unchecked, so absence means "off" -- stored
     # as the same '1'/(absent -> default 'off') string-flag convention already used
     # elsewhere in settings rather than introducing a real boolean column.
@@ -12699,7 +12720,14 @@ def agent_config():
     # else the fleet-wide default (see get_agent_channels_for_group). group_name is ''
     # (no lookup needed beyond the row existing) for the majority of hosts that have
     # never been assigned a group at all.
-    group_row = db.execute("SELECT group_name FROM agent_tokens WHERE hostname = ?", (ua,)).fetchone()
+    # A host re-enrolled onto a new per-download token leaves its OLD agent_tokens row
+    # behind (still hostname-matched, just stale) -- same hazard the Agents-page listing
+    # already documents/handles (app.py's group_rows query); without ORDER BY + a
+    # non-empty filter here, a stale leftover row could silently resolve the wrong group.
+    group_row = db.execute(
+        "SELECT group_name FROM agent_tokens WHERE hostname = ? AND group_name != '' ORDER BY bound_at DESC LIMIT 1",
+        (ua,)
+    ).fetchone()
     agent_group_name = group_row['group_name'] if group_row else ''
     all_channels, _ = get_agent_channels_for_group(agent_group_name)
     enabled_channels = {name: v for name, v in all_channels.items() if v.get('enabled')}
@@ -13820,7 +13848,14 @@ def get_agent_channels_for_group(group_name):
 @login_required
 def api_agent_channels():
     from flask import request, jsonify
-    group_key = (request.args.get('group') or '').strip() or '__default__'
+    requested_group = (request.args.get('group') or '').strip()
+    # A real group explicitly named '__default__' (possible if it was set before the
+    # reserved-word check existed, or via direct DB access) is indistinguishable here
+    # from "no group requested" -- reject it outright rather than letting it silently
+    # alias onto (and, via POST, overwrite) the real fleet-wide default template.
+    if requested_group == '__default__':
+        return jsonify({'status': 'error', 'message': '"__default__" is a reserved name and cannot be used as an agent group.'}), 400
+    group_key = requested_group or '__default__'
 
     if request.method == 'DELETE':
         err = require_permission('edr.agent.manage')
@@ -14052,9 +14087,11 @@ def get_linux_channels_all():
         groups_raw = {'__default__': groups_raw} if groups_raw else {'__default__': {}}
     result_groups = {group: _normalize_linux_channel_dict(channels, valid_keys) for group, channels in groups_raw.items()}
     result = {'custom_channels': custom_channels, **result_groups}
+    # Only persist when an EXISTING file actually needed normalizing/upgrading --
+    # matches get_agent_channels_all()'s (Windows) exact guard. Without the
+    # `file_existed` condition, a fresh install with no agent_linux_channels.json yet
+    # wrote the file to disk on the very first GET, before any admin ever saved anything.
     if file_existed and result != raw:
-        save_linux_channels_all(result)
-    elif not file_existed:
         save_linux_channels_all(result)
     return result
 
@@ -14089,9 +14126,13 @@ def _linux_channel_defs_for_enabled(enabled_channel_keys, custom_channels):
 @login_required
 def api_agent_linux_channels():
     from flask import request, jsonify
-    group_key = (request.args.get('group') or '').strip() or '__default__'
-    if group_key in _RESERVED_LINUX_CHANNEL_GROUP_KEYS:
-        return jsonify({'status': 'error', 'message': f'"{group_key}" is a reserved name and cannot be used as an agent group.'}), 400
+    requested_group = (request.args.get('group') or '').strip()
+    # An explicit request for '__default__' is indistinguishable from "no group
+    # requested" once the fallback below applies -- reject it before that happens,
+    # same reasoning as the Windows channels route's identical guard.
+    if requested_group == '__default__' or requested_group in _RESERVED_LINUX_CHANNEL_GROUP_KEYS:
+        return jsonify({'status': 'error', 'message': f'"{requested_group}" is a reserved name and cannot be used as an agent group.'}), 400
+    group_key = requested_group or '__default__'
 
     if request.method == 'DELETE':
         err = require_permission('edr.agent.manage')
@@ -15365,6 +15406,14 @@ def api_agent_set_group(hostname):
     if err: return err
     db = get_db()
     group_name = ((request.json or {}).get('group_name') or '').strip()
+    # '__default__' and 'custom_channels' are reserved sentinel keys in the flat
+    # per-group channel-template dicts (Windows and Linux respectively) -- a real group
+    # literally named one of these would silently alias onto / corrupt that reserved
+    # entry the moment its channel template gets saved. Validated here, at the single
+    # point group names actually get written, rather than only defensively re-checked
+    # at every route that later reads group_name back out.
+    if group_name in ('__default__', 'custom_channels'):
+        return jsonify({'error': f'"{group_name}" is a reserved name and cannot be used as an agent group.'}), 400
     # Requires an already-bound agent_tokens row (the common case -- see
     # _validate_agent_auth, which binds one on a host's first check-in with a real
     # per-download token). A host still running the legacy *shared* secret never gets a

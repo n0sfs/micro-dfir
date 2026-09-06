@@ -1149,7 +1149,12 @@ function runDbBackupNow() {
     const btn = document.getElementById('dbBackupNowBtn');
     btn.disabled = true;
     btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i> Backing up...';
-    fetch('/api/settings/db-backup/run', { method: 'POST' })
+    // Same "use whatever's currently typed, even if unsaved" pattern as Archive Now
+    // (archiveNow() above) -- previously sent no body at all, so an edited-but-unsaved
+    // retention value was silently ignored in favor of the last saved one.
+    const retentionDays = parseInt(document.getElementById('dbBackupRetentionDays').value, 10);
+    const payload = retentionDays >= 1 ? {retention_days: retentionDays} : {};
+    fetch('/api/settings/db-backup/run', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) })
         .then(r => r.json().then(d => ({ ok: r.ok, d })))
         .then(({ ok, d }) => {
             if (ok) {

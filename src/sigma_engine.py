@@ -903,7 +903,18 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"[-] Automatic IOC purge check failed: {e}")
         try:
-            requests.post("https://127.0.0.1:5001/api/internal/run-scheduled-playbooks", timeout=15, verify=False)
+            # 127.0.0.1 only works when gunicorn binds 0.0.0.0; Settings > Network's
+            # dual-bind flow can bind ui_bind_ip to one specific IP instead (the exact
+            # same class of bug the Vector ingest-sink fix addressed for ingest_bind_ip
+            # -- fixed here too rather than leaving this sibling call hardcoded).
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            row = conn.execute("SELECT value FROM settings WHERE key = 'ui_bind_ip'").fetchone()
+            ui_ip = (row[0] if row else None) or '0.0.0.0'
+            row = conn.execute("SELECT value FROM settings WHERE key = 'ui_port'").fetchone()
+            ui_port = (row[0] if row else None) or '5001'
+            conn.close()
+            ui_ip = '127.0.0.1' if ui_ip == '0.0.0.0' else ui_ip
+            requests.post(f"https://{ui_ip}:{ui_port}/api/internal/run-scheduled-playbooks", timeout=15, verify=False)
         except Exception as e:
             print(f"[-] Scheduled playbook check failed: {e}")
         time.sleep(30)

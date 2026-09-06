@@ -26,7 +26,9 @@
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnQueues" onclick="switchSoarTab('queues')"><i class="fa-solid fa-inbox me-2"></i>Queues</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnActions" onclick="switchSoarTab('actions')"><i class="fa-solid fa-list me-2"></i>Actions</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnNotifications" onclick="switchSoarTab('notifications')"><i class="fa-solid fa-tower-broadcast me-2"></i>Notifications</button></li>
+            {% if has_permission('settings.system.manage') %}
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnAutomation" onclick="switchSoarTab('automation')"><i class="fa-solid fa-gears me-2"></i>Automation</button></li>
+            {% endif %}
         </ul>
     </div>
 
@@ -250,10 +252,15 @@
         </div>
     </div>
 
+    {% if has_permission('settings.system.manage') %}
     <!-- Automation pane -- case-lifecycle automation config relocated from Settings
          since both are genuinely SOAR concerns (one creates cases, one fires a
          playbook trigger event), not general system settings. Same routes/
-         permission as before. -->
+         permission as before -- including the whole-pane visibility gate
+         settings.html's System pane always had (matches the Case Templates pane's
+         own {% raw %}{% if has_permission(...) %}{% endraw %} wrapping above; the tab
+         button alone isn't enough, since the pane's inputs would otherwise still be
+         present (if hidden) in the DOM for a non-admin to read via devtools). -->
     <div id="paneAutomation" style="display:none;">
         <div class="card-body">
             <h6 class="text-info mb-3">Alert Escalation</h6>
@@ -293,6 +300,7 @@
             <div class="small text-muted" id="caseStaleStatus"></div>
         </div>
     </div>
+    {% endif %}
 </div>
 
 <!-- New/Edit Case Template modal -->
@@ -1740,6 +1748,10 @@ function switchSoarTab(tab) {
 
 // ---- Alert Escalation (relocated from Settings, same route/permission) ----
 function loadEscalationConfig() {
+    // The Automation tab (and this whole pane's inputs) is now permission-gated
+    // server-side (settings.system.manage) -- skip for a non-admin rather than
+    // fetching/populating hidden, absent-from-nav elements.
+    if (!document.getElementById('escalationThreshold')) return;
     fetch('/api/settings/alert-escalation')
         .then(r => r.json())
         .then(data => {
@@ -1774,6 +1786,7 @@ function saveEscalationConfig() {
 
 // ---- Case Stale Nudge (relocated from Settings, same route/permission) ----
 function loadCaseStaleConfig() {
+    if (!document.getElementById('caseStaleHours')) return;
     fetch('/api/settings/case-stale-nudge')
         .then(r => r.json())
         .then(data => {
