@@ -2983,6 +2983,44 @@ def api_log_pipeline_vector_status():
         'error': rows.get('vector_config_status_error') or None,
     })
 
+# Log Pipeline's own stat tiles used to show config counts (active/total drop rules,
+# a hardcoded "6" for total channels) -- zero ingestion volume, zero source count, zero
+# "last event received". This answers the actual question that page exists to answer:
+# is anything actually flowing. Deliberately avoids a `timestamp >= now - Nh` filter for
+# the rate estimate (confirmed live on this app's own production instance: that shape of
+# query took 93 SECONDS on a 6.2M-row live_logs table -- see _parser_health_summary's own
+# comment) -- both queries here are rowid-bounded (ORDER BY id DESC LIMIT/OFFSET), which
+# only ever touches a fixed number of index entries regardless of table size.
+_INGESTION_RATE_SAMPLE_SIZE = 5000
+
+@app.route('/api/log-pipeline/ingestion-health', methods=['GET'])
+@login_required
+def api_log_pipeline_ingestion_health():
+    db = get_db()
+    sources_count = len(_get_ingested_apps(db))
+    latest = db.execute("SELECT timestamp FROM live_logs ORDER BY id DESC LIMIT 1").fetchone()
+    if not latest:
+        return jsonify({'sources_count': sources_count, 'last_event_at': None, 'events_per_hour': None})
+    boundary = db.execute(
+        "SELECT timestamp FROM live_logs ORDER BY id DESC LIMIT 1 OFFSET ?",
+        (_INGESTION_RATE_SAMPLE_SIZE - 1,)
+    ).fetchone()
+    events_per_hour = None
+    if boundary:
+        try:
+            t1 = datetime.strptime(latest['timestamp'][:19], '%Y-%m-%d %H:%M:%S')
+            t0 = datetime.strptime(boundary['timestamp'][:19], '%Y-%m-%d %H:%M:%S')
+            span_hours = (t1 - t0).total_seconds() / 3600
+            if span_hours > 0:
+                events_per_hour = round(_INGESTION_RATE_SAMPLE_SIZE / span_hours)
+        except (ValueError, TypeError):
+            pass
+    return jsonify({
+        'sources_count': sources_count,
+        'last_event_at': latest['timestamp'],
+        'events_per_hour': events_per_hour,
+    })
+
 # ==========================================
 # SIGMA RULES ENGINE
 # ==========================================

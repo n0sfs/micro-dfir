@@ -520,9 +520,26 @@ let pipelineStats = {};
 
 function updateSharedStats() {
     setStatTile(0, 'Active Drop Rules', pipelineStats.activeDropRules ?? '—');
-    setStatTile(1, 'Total Drop Rules', pipelineStats.totalDropRules ?? '—');
-    setStatTile(2, 'Log Channels Active', pipelineStats.channelsActive ?? '—');
-    setStatTile(3, 'Total Channels', 6);
+    setStatTile(1, 'Sources Ingesting', pipelineStats.sourcesCount ?? '—');
+    setStatTile(2, 'Events / Hour (recent)', pipelineStats.eventsPerHour != null ? pipelineStats.eventsPerHour.toLocaleString() : '—');
+    setStatTile(3, 'Last Event Received', pipelineStats.lastEventAt ?? '—');
+}
+
+// The page's own "is anything actually flowing" answer -- these 4 tiles used to show
+// config counts (active/total drop rules, a hardcoded "6" for channels), never actual
+// ingestion volume or recency. events_per_hour is estimated from a fixed recent sample
+// (see _INGESTION_RATE_SAMPLE_SIZE server-side), not a time-windowed count -- deliberately
+// cheap regardless of how large live_logs has grown.
+function loadIngestionHealth() {
+    fetch('/api/log-pipeline/ingestion-health')
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(d => {
+            pipelineStats.sourcesCount = d.sources_count;
+            pipelineStats.eventsPerHour = d.events_per_hour;
+            pipelineStats.lastEventAt = d.last_event_at;
+            updateSharedStats();
+        })
+        .catch(err => console.error('Error loading ingestion health:', err));
 }
 
 // =====================================================================
@@ -1427,6 +1444,7 @@ document.addEventListener("DOMContentLoaded", function() {
     loadVectorStatus();
     loadParserHealth();
     loadCustomParsers();
+    loadIngestionHealth();
 });
 </script>
 {% endblock %}
