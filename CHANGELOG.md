@@ -10,6 +10,36 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-06
 
+### Deferred round-2 review items + macOS remote-upgrade bug
+
+Closed out the two items deliberately deferred from the second review pass, plus a
+third small real bug spotted during Phase 4 research and flagged for later:
+
+- **YARA tag UI desync** (`templates/threat_intel.html`): adding/removing a manual tag
+  via the rule viewer only ever refreshed the viewer panel — the rule-list row's inline
+  tag badges, its `data-tags`/`data-search` attributes (used by the Tag filter), and the
+  Tag filter dropdown's own option list all stayed stale until a full page reload. Added
+  `syncYaraRuleRowDisplay()` (always runs after any rule-content fetch, keeps one row's
+  badges/attributes current) and `syncYaraTagFilterDropdown()` (runs after an actual
+  add/remove, rebuilds the dropdown from what's really tagged across the rendered list —
+  adds a brand-new tag, drops one nothing uses anymore).
+- **Windows/Linux channel-template duplication** (`src/app.py`): the per-group
+  JSON-file storage pattern (read file, treat a legacy flat dict as `'__default__'`,
+  normalize each group, persist only if an existing file actually changed) plus the
+  group-key-resolution/reserved-name-rejection and GET/DELETE route logic were
+  hand-duplicated between the Windows Event Log channel routes and the Linux auditd
+  channel routes. Extracted into shared `_load_grouped_channel_config()`,
+  `_resolve_channel_group_key()`, `_channel_group_get_response()`, and
+  `_delete_channel_group()` — the genuinely different per-channel value shapes (Windows:
+  rich enabled/capture_xml/filter_mode dict; Linux: plain on/off) stay in each side's own
+  normalize function, only the plumbing around them is shared now. Behavior-preserving:
+  verified via 21 fixture tests porting the exact old vs. new logic side by side.
+- **Remote agent upgrade silently sent Windows source to macOS hosts** (`src/app.py`,
+  `agent_config()`): the `agent_filename` picker only branched on `'linux'` vs.
+  everything-else, even though `agent_os` can genuinely be `'macos'` (a real, reported
+  value going back to when OS-detail reporting shipped). A macOS host clicking "upgrade"
+  would have received `micro_agent_windows.py`. Fixed to map all three OSes explicitly.
+
 ### Second code review pass — the first half of 2026-09-05's work, 15 fixes
 
 Ran the same 10-angle + sweep review process against the half of yesterday's commits

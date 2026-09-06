@@ -12709,7 +12709,7 @@ def agent_config():
             s = {r[0]: r[1] for r in cursor.fetchall()}
             ui_port = s.get("ui_port", "5001")
             ingest_port = _resolve_ingest_port(ui_port)
-            agent_filename = 'micro_agent_linux.py' if agent_os == 'linux' else 'micro_agent_windows.py'
+            agent_filename = {'linux': 'micro_agent_linux.py', 'macos': 'micro_agent_macos.py'}.get(agent_os, 'micro_agent_windows.py')
             source = _build_agent_source(agent_filename, server_ip, ui_port, ingest_port, request.headers.get('X-Agent-Token') or '')
             if source:
                 return jsonify({'command': 'upgrade', 'source': source})
@@ -13744,6 +13744,69 @@ def api_saved_search_delete(sid):
 import json, os
 AGENT_CONFIG_PATH = '/opt/micro-dfir/agent_config.json'
 
+# Shared plumbing for every per-group channel-template store (Windows Event Log
+# channels below, Linux auditd channels further down) -- same on-disk "one JSON file
+# holding {'__default__': {...}, group: {...}}" shape and the same group-resolution/
+# reserved-name/CRUD flow for both, even though the per-channel VALUE shape itself is
+# genuinely different (Windows: rich enabled/capture_xml/filter_mode/filter_value dict,
+# admin-typed channel names, event-ID-range validation; Linux: plain on/off against a
+# curated rule catalog plus separately-defined custom watch-path channels) -- that part
+# stays in each side's own normalize_group_fn/POST handler, not generalized here.
+
+def _load_grouped_channel_config(path, normalize_group_fn, reserved_toplevel_keys=None):
+    """Reads path, treats a pre-per-group flat dict (no '__default__' key) as an
+    implicit '__default__' for backward compatibility, normalizes each group's channels
+    via normalize_group_fn(channels, reserved_data), and persists the normalized result
+    back to disk ONLY when an existing file actually needed upgrading (never on a fresh
+    install with no file yet, never when nothing changed). reserved_toplevel_keys is an
+    optional {key: default_value} map for non-group data stored in the same file (e.g.
+    Linux's 'custom_channels' catalog) -- carried through unmodified rather than treated
+    as a group."""
+    reserved_toplevel_keys = reserved_toplevel_keys or {}
+    file_existed = os.path.exists(path)
+    raw = {}
+    if file_existed:
+        try:
+            with open(path, 'r') as f:
+                raw = json.load(f)
+        except Exception:
+            raw = {}
+    reserved_data = {k: raw.get(k, default) for k, default in reserved_toplevel_keys.items()}
+    groups_raw = {k: v for k, v in raw.items() if k not in reserved_toplevel_keys}
+    if '__default__' not in groups_raw:
+        groups_raw = {'__default__': groups_raw}
+    result = {**reserved_data, **{group: normalize_group_fn(channels, reserved_data) for group, channels in groups_raw.items()}}
+    if file_existed and result != raw:
+        with open(path, 'w') as f:
+            json.dump(result, f)
+    return result
+
+def _resolve_channel_group_key(reserved_keys=frozenset()):
+    """Shared by every per-group channel-template route: an explicit request for
+    '__default__' (or another reserved catalog key) is indistinguishable from "no group
+    requested" once the fallback below applies -- reject it outright rather than letting
+    it silently alias onto (and, via POST, overwrite) the real fleet-wide default
+    template or a reserved catalog entry. Returns (group_key, error_response_or_None)."""
+    requested_group = (request.args.get('group') or '').strip()
+    if requested_group == '__default__' or requested_group in reserved_keys:
+        return None, (jsonify({'status': 'error', 'message': f'"{requested_group}" is a reserved name and cannot be used as an agent group.'}), 400)
+    return requested_group or '__default__', None
+
+def _channel_group_get_response(all_templates, group_key):
+    if group_key in all_templates:
+        return jsonify({'channels': all_templates[group_key], 'group': group_key,
+                         'is_override': group_key != '__default__'})
+    return jsonify({'channels': all_templates['__default__'], 'group': group_key, 'is_override': False})
+
+def _delete_channel_group(group_key, get_all_fn, save_fn):
+    if group_key == '__default__':
+        return jsonify({'status': 'error', 'message': 'The default template cannot be removed.'}), 400
+    all_templates = get_all_fn()
+    if group_key in all_templates:
+        del all_templates[group_key]
+        save_fn(all_templates)
+    return jsonify({'status': 'success'})
+
 _DEFAULT_CHANNEL_ENABLED = {
     'Security': True,
     'System': True,
@@ -13813,22 +13876,7 @@ def get_agent_channels_all():
     dict at the top level (no '__default__' key) -- wrapped once, non-
     destructively, into {'__default__': <that dict>} so every existing agent's
     behavior is unchanged until an admin explicitly creates a group override."""
-    file_existed = os.path.exists(AGENT_CONFIG_PATH)
-    raw = {}
-    if file_existed:
-        try:
-            with open(AGENT_CONFIG_PATH, 'r') as f:
-                raw = json.load(f)
-        except Exception:
-            raw = {}
-    if '__default__' not in raw:
-        raw = {'__default__': raw}
-    result = {group: _normalize_channel_dict(channels) for group, channels in raw.items()}
-    if '__default__' not in result:
-        result['__default__'] = _normalize_channel_dict({})
-    if file_existed and result != raw:
-        save_agent_channels_all(result)
-    return result
+    return _load_grouped_channel_config(AGENT_CONFIG_PATH, lambda channels, _reserved: _normalize_channel_dict(channels))
 
 def save_agent_channels_all(data):
     with open(AGENT_CONFIG_PATH, 'w') as f:
@@ -13848,25 +13896,13 @@ def get_agent_channels_for_group(group_name):
 @login_required
 def api_agent_channels():
     from flask import request, jsonify
-    requested_group = (request.args.get('group') or '').strip()
-    # A real group explicitly named '__default__' (possible if it was set before the
-    # reserved-word check existed, or via direct DB access) is indistinguishable here
-    # from "no group requested" -- reject it outright rather than letting it silently
-    # alias onto (and, via POST, overwrite) the real fleet-wide default template.
-    if requested_group == '__default__':
-        return jsonify({'status': 'error', 'message': '"__default__" is a reserved name and cannot be used as an agent group.'}), 400
-    group_key = requested_group or '__default__'
+    group_key, err_resp = _resolve_channel_group_key()
+    if err_resp: return err_resp
 
     if request.method == 'DELETE':
         err = require_permission('edr.agent.manage')
         if err: return err
-        if group_key == '__default__':
-            return jsonify({'status': 'error', 'message': 'The default template cannot be removed.'}), 400
-        all_templates = get_agent_channels_all()
-        if group_key in all_templates:
-            del all_templates[group_key]
-            save_agent_channels_all(all_templates)
-        return jsonify({'status': 'success'})
+        return _delete_channel_group(group_key, get_agent_channels_all, save_agent_channels_all)
 
     if request.method == 'POST':
         # Ingestion filters/collection config, same "backend data" bucket as the
@@ -13910,10 +13946,7 @@ def api_agent_channels():
         return jsonify({'status': 'success', 'channels': channels, 'group': group_key})
 
     all_templates = get_agent_channels_all()
-    if group_key in all_templates:
-        return jsonify({'channels': all_templates[group_key], 'group': group_key,
-                         'is_override': group_key != '__default__'})
-    return jsonify({'channels': all_templates['__default__'], 'group': group_key, 'is_override': False})
+    return _channel_group_get_response(all_templates, group_key)
 
 
 # --- LINUX LOG CHANNELS (auditd-rule-based, per-agent-group) ---
@@ -14078,22 +14111,10 @@ def _normalize_linux_channel_dict(data, valid_keys):
     return {key: {'enabled': bool((data or {}).get(key, {}).get('enabled'))} for key in valid_keys}
 
 def get_linux_channels_all():
-    raw = _read_linux_channels_file()
-    file_existed = bool(raw) or os.path.exists(LINUX_CHANNELS_CONFIG_PATH)
-    custom_channels = raw.get('custom_channels', {})
-    valid_keys = set(LINUX_LOG_CHANNELS) | set(custom_channels)
-    groups_raw = {k: v for k, v in raw.items() if k != 'custom_channels'}
-    if '__default__' not in groups_raw:
-        groups_raw = {'__default__': groups_raw} if groups_raw else {'__default__': {}}
-    result_groups = {group: _normalize_linux_channel_dict(channels, valid_keys) for group, channels in groups_raw.items()}
-    result = {'custom_channels': custom_channels, **result_groups}
-    # Only persist when an EXISTING file actually needed normalizing/upgrading --
-    # matches get_agent_channels_all()'s (Windows) exact guard. Without the
-    # `file_existed` condition, a fresh install with no agent_linux_channels.json yet
-    # wrote the file to disk on the very first GET, before any admin ever saved anything.
-    if file_existed and result != raw:
-        save_linux_channels_all(result)
-    return result
+    def _normalize(channels, reserved):
+        valid_keys = set(LINUX_LOG_CHANNELS) | set(reserved.get('custom_channels', {}))
+        return _normalize_linux_channel_dict(channels, valid_keys)
+    return _load_grouped_channel_config(LINUX_CHANNELS_CONFIG_PATH, _normalize, reserved_toplevel_keys={'custom_channels': {}})
 
 def save_linux_channels_all(data):
     with open(LINUX_CHANNELS_CONFIG_PATH, 'w') as f:
@@ -14126,24 +14147,13 @@ def _linux_channel_defs_for_enabled(enabled_channel_keys, custom_channels):
 @login_required
 def api_agent_linux_channels():
     from flask import request, jsonify
-    requested_group = (request.args.get('group') or '').strip()
-    # An explicit request for '__default__' is indistinguishable from "no group
-    # requested" once the fallback below applies -- reject it before that happens,
-    # same reasoning as the Windows channels route's identical guard.
-    if requested_group == '__default__' or requested_group in _RESERVED_LINUX_CHANNEL_GROUP_KEYS:
-        return jsonify({'status': 'error', 'message': f'"{requested_group}" is a reserved name and cannot be used as an agent group.'}), 400
-    group_key = requested_group or '__default__'
+    group_key, err_resp = _resolve_channel_group_key(_RESERVED_LINUX_CHANNEL_GROUP_KEYS)
+    if err_resp: return err_resp
 
     if request.method == 'DELETE':
         err = require_permission('edr.agent.manage')
         if err: return err
-        if group_key == '__default__':
-            return jsonify({'status': 'error', 'message': 'The default template cannot be removed.'}), 400
-        all_templates = get_linux_channels_all()
-        if group_key in all_templates:
-            del all_templates[group_key]
-            save_linux_channels_all(all_templates)
-        return jsonify({'status': 'success'})
+        return _delete_channel_group(group_key, get_linux_channels_all, save_linux_channels_all)
 
     if request.method == 'POST':
         err = require_permission('edr.agent.manage')
@@ -14157,10 +14167,7 @@ def api_agent_linux_channels():
         return jsonify({'status': 'success', 'channels': channels, 'group': group_key})
 
     all_templates = get_linux_channels_all()
-    if group_key in all_templates:
-        return jsonify({'channels': all_templates[group_key], 'group': group_key,
-                         'is_override': group_key != '__default__'})
-    return jsonify({'channels': all_templates['__default__'], 'group': group_key, 'is_override': False})
+    return _channel_group_get_response(all_templates, group_key)
 
 def _validate_custom_channel_input(d):
     """Shared by create (POST) and update (PUT) -- returns (label, path, perms, None)
