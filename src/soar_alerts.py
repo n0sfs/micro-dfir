@@ -185,6 +185,13 @@ def run_playbooks_for_alert(db, alert, run_case_playbooks_fn=None):
                 threshold = _SEVERITY_ORDER.get(pb['condition_severity'].upper(), 0)
                 if _SEVERITY_ORDER.get(severity, 0) < threshold:
                     continue
+            # Exact match against the same rule_name string both a heuristic-engine
+            # alert (no rule_id) and a real Sigma rule alert carry -- lets a playbook
+            # target one specific rule (e.g. "Slack on Impossible Travel") instead of
+            # every alert at or above a severity, which also pulls in pipeline-health
+            # noise like Host Silent/Agent Offline (both MEDIUM) for any MEDIUM+ playbook.
+            if pb['condition_rule_name'] and pb['condition_rule_name'] != (alert.get('rule_title') or ''):
+                continue
             if not _check_alert_playbook_rate_limit(db, pb, alert):
                 continue
             actions = db.execute(

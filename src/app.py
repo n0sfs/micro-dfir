@@ -7358,6 +7358,19 @@ def api_log_pipeline_silent_source_alerts():
     ).fetchall()
     return jsonify([dict(r) for r in rows])
 
+# Ground-truth list for the alert_created playbook editor's "Only if Rule is..."
+# condition -- every distinct rule_name that has EVER actually fired in this
+# deployment, covering both real Sigma rule titles and the inline heuristic engine's
+# fixed strings (Credential Dumping Activity, Agent Offline, etc.) uniformly, since
+# both are stored in the same alerts.rule_name column. Deliberately not a static catalog
+# of every possible rule name -- an admin picks from what has actually happened here.
+@app.route('/api/alerts/rule-names', methods=['GET'])
+@login_required
+def api_alert_rule_names():
+    db = get_db()
+    rows = db.execute("SELECT DISTINCT rule_name FROM alerts WHERE rule_name IS NOT NULL AND rule_name != '' ORDER BY rule_name").fetchall()
+    return jsonify([r['rule_name'] for r in rows])
+
 @app.route('/api/playbooks', methods=['GET', 'POST'])
 @login_required
 def api_playbooks():
@@ -7404,21 +7417,23 @@ def api_playbooks():
     # than silently stored-but-ignored.
     if trigger_event == 'alert_created':
         condition_queue_id = condition_tlp = condition_status = None
+        condition_rule_name = (d.get('condition_rule_name') or '').strip() or None
     else:
         condition_queue_id = d.get('condition_queue_id') or None
         if condition_queue_id and not db.execute("SELECT 1 FROM case_queues WHERE id = ?", (condition_queue_id,)).fetchone():
             return jsonify({'error': 'Condition queue not found'}), 400
         condition_tlp = (d.get('condition_tlp') or '').strip() or None
         condition_status = (d.get('condition_status') or '').strip() or None
+        condition_rule_name = None  # a rule name only means something for alert_created
     condition_severity = (d.get('condition_severity') or '').strip() or None
     max_runs_per_hour = _parse_max_runs_per_hour(d)
     schedule_interval_minutes = _parse_schedule_interval(d)
     if trigger_event == 'scheduled' and not schedule_interval_minutes:
         return jsonify({'error': 'Scheduled playbooks require a schedule interval (in minutes)'}), 400
     cur = db.execute(
-        "INSERT INTO playbooks (name, description, trigger_event, enabled, condition_queue_id, condition_tlp, condition_status, condition_severity, max_runs_per_hour, schedule_interval_minutes, created_by) "
-        "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
-        (name, (d.get('description') or '').strip(), trigger_event, condition_queue_id, condition_tlp, condition_status, condition_severity, max_runs_per_hour, schedule_interval_minutes, current_user.username)
+        "INSERT INTO playbooks (name, description, trigger_event, enabled, condition_queue_id, condition_tlp, condition_status, condition_severity, condition_rule_name, max_runs_per_hour, schedule_interval_minutes, created_by) "
+        "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (name, (d.get('description') or '').strip(), trigger_event, condition_queue_id, condition_tlp, condition_status, condition_severity, condition_rule_name, max_runs_per_hour, schedule_interval_minutes, current_user.username)
     )
     pid = cur.lastrowid
     for i, a in enumerate(actions):
@@ -7468,20 +7483,22 @@ def api_playbook_detail(pid):
         return jsonify({'error': f'A playbook named "{name}" already exists'}), 400
     if trigger_event == 'alert_created':
         condition_queue_id = condition_tlp = condition_status = None
+        condition_rule_name = (d.get('condition_rule_name') or '').strip() or None
     else:
         condition_queue_id = d.get('condition_queue_id') or None
         if condition_queue_id and not db.execute("SELECT 1 FROM case_queues WHERE id = ?", (condition_queue_id,)).fetchone():
             return jsonify({'error': 'Condition queue not found'}), 400
         condition_tlp = (d.get('condition_tlp') or '').strip() or None
         condition_status = (d.get('condition_status') or '').strip() or None
+        condition_rule_name = None  # a rule name only means something for alert_created
     condition_severity = (d.get('condition_severity') or '').strip() or None
     max_runs_per_hour = _parse_max_runs_per_hour(d)
     schedule_interval_minutes = _parse_schedule_interval(d)
     if trigger_event == 'scheduled' and not schedule_interval_minutes:
         return jsonify({'error': 'Scheduled playbooks require a schedule interval (in minutes)'}), 400
     db.execute(
-        "UPDATE playbooks SET name = ?, description = ?, trigger_event = ?, condition_queue_id = ?, condition_tlp = ?, condition_status = ?, condition_severity = ?, max_runs_per_hour = ?, schedule_interval_minutes = ? WHERE id = ?",
-        (name, (d.get('description') or '').strip(), trigger_event, condition_queue_id, condition_tlp, condition_status, condition_severity, max_runs_per_hour, schedule_interval_minutes, pid)
+        "UPDATE playbooks SET name = ?, description = ?, trigger_event = ?, condition_queue_id = ?, condition_tlp = ?, condition_status = ?, condition_severity = ?, condition_rule_name = ?, max_runs_per_hour = ?, schedule_interval_minutes = ? WHERE id = ?",
+        (name, (d.get('description') or '').strip(), trigger_event, condition_queue_id, condition_tlp, condition_status, condition_severity, condition_rule_name, max_runs_per_hour, schedule_interval_minutes, pid)
     )
     db.execute("DELETE FROM playbook_actions WHERE playbook_id = ?", (pid,))
     for i, a in enumerate(actions):
@@ -10735,6 +10752,14 @@ def migrate_playbook_approvals():
             conn.execute("ALTER TABLE playbooks ADD COLUMN schedule_interval_minutes INTEGER")
         if 'last_scheduled_run' not in pb_cols:
             conn.execute("ALTER TABLE playbooks ADD COLUMN last_scheduled_run DATETIME")
+        # Lets an alert_created playbook fire only for a specific rule (e.g. "Slack the
+        # team when Impossible Travel fires") instead of every alert at or above a
+        # severity threshold -- exact-match against alerts.rule_name, the same string a
+        # heuristic-engine alert (no rule_id) and a real Sigma rule alert both carry, so
+        # this works uniformly for both. NULL = no rule filter, matching every other
+        # condition_* column's "unset means don't filter on this" convention.
+        if 'condition_rule_name' not in pb_cols:
+            conn.execute("ALTER TABLE playbooks ADD COLUMN condition_rule_name TEXT")
         conn.execute('''CREATE TABLE IF NOT EXISTS playbook_approvals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             playbook_id INTEGER NOT NULL,

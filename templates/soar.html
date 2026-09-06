@@ -436,6 +436,11 @@
                             <option value="low">Low</option>
                         </select>
                     </div>
+                    <div class="col-md-3 pb-alert-only-cond" style="display:none;">
+                        <label class="form-label small text-muted mb-1" for="pbCondRuleName">Only if Rule is&hellip;</label>
+                        <select id="pbCondRuleName" class="form-select bg-dark text-light border-secondary"><option value="">Any rule</option></select>
+                        <div class="form-text text-muted">Narrows to one specific rule instead of every alert at this severity -- avoids catching pipeline-health noise (Host Silent, Agent Offline) too.</div>
+                    </div>
                 </div>
                 <hr class="border-secondary">
                 <div class="d-flex justify-content-between align-items-center mb-2">
@@ -827,6 +832,11 @@ function escJs(s) {
 
 function loadQueuesForPlaybooks() {
     return fetch('/api/case-queues').then(r => r.json()).then(qs => { allQueuesForPb = qs || []; }).catch(() => { allQueuesForPb = []; });
+}
+
+let pbRuleNames = [];
+function loadRuleNamesForPlaybooks() {
+    return fetch('/api/alerts/rule-names').then(r => r.json()).then(names => { pbRuleNames = names || []; }).catch(() => { pbRuleNames = []; });
 }
 
 // ---- Queues tab -- relocated from cases.html's "Manage Queues" modal (see comment on
@@ -1326,6 +1336,7 @@ function conditionSummary(p) {
     if (p.condition_tlp) parts.push(`TLP: ${escHtml(p.condition_tlp.toUpperCase())}`);
     if (p.condition_status) parts.push(`Status: ${escHtml(p.condition_status)}`);
     if (p.condition_severity) parts.push(`Severity: ${escHtml(p.condition_severity.toUpperCase())}${p.trigger_event === 'alert_created' ? '+' : ''}`);
+    if (p.condition_rule_name) parts.push(`Rule: ${escHtml(p.condition_rule_name)}`);
     return parts.length ? parts.map(x => `<span class="badge bg-secondary me-1">${x}</span>`).join('') : '<span class="text-muted">any</span>';
 }
 
@@ -1374,6 +1385,9 @@ function populatePbConditionSelects(current) {
     tlpSel.value = current.condition_tlp || '';
     document.getElementById('pbCondStatus').value = current.condition_status || '';
     document.getElementById('pbCondSeverity').value = current.condition_severity || '';
+    const ruleSel = document.getElementById('pbCondRuleName');
+    ruleSel.innerHTML = '<option value="">Any rule</option>' + pbRuleNames.map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('');
+    ruleSel.value = current.condition_rule_name || '';
 }
 
 // Lets a webhook/Slack action reference a stored secret by name instead of a literal
@@ -1560,6 +1574,7 @@ function onPlaybookTriggerChange() {
     // the exact match every other trigger uses.
     const isAlert = trigger === 'alert_created';
     document.querySelectorAll('.pb-case-only-cond').forEach(el => { el.style.display = isAlert ? 'none' : ''; });
+    document.querySelectorAll('.pb-alert-only-cond').forEach(el => { el.style.display = isAlert ? '' : 'none'; });
     document.getElementById('pbCondSeverityLabel').textContent = isAlert ? 'Only if Severity is at least…' : 'Only if Severity is…';
     refreshActionRowsForTrigger(trigger);
 }
@@ -1603,6 +1618,7 @@ async function showPlaybookModal() {
     if (!caseTemplatesForPb.length) await loadTemplatesForPlaybooks();
     if (!allPlaybookSecrets.length) await loadPlaybookSecretsList();
     if (!customActionsForPb.length) await loadCustomActionsForPlaybooks();
+    if (!pbRuleNames.length) await loadRuleNamesForPlaybooks();
     populatePbConditionSelects({});
     addPlaybookActionRow('add_note', {});
     if (!playbookModal) playbookModal = new bootstrap.Modal(document.getElementById('playbookModal'));
@@ -1626,6 +1642,7 @@ async function editPlaybook(pid) {
     if (!caseTemplatesForPb.length) await loadTemplatesForPlaybooks();
     if (!allPlaybookSecrets.length) await loadPlaybookSecretsList();
     if (!customActionsForPb.length) await loadCustomActionsForPlaybooks();
+    if (!pbRuleNames.length) await loadRuleNamesForPlaybooks();
     populatePbConditionSelects(p);
     (p.actions.length ? p.actions : [{ action_type: 'add_note', params: {} }]).forEach(a => addPlaybookActionRow(a.action_type, a.params, a.requires_approval));
     if (!playbookModal) playbookModal = new bootstrap.Modal(document.getElementById('playbookModal'));
@@ -1646,6 +1663,7 @@ function savePlaybook() {
         condition_tlp: document.getElementById('pbCondTlp').value || null,
         condition_status: document.getElementById('pbCondStatus').value || null,
         condition_severity: document.getElementById('pbCondSeverity').value || null,
+        condition_rule_name: document.getElementById('pbCondRuleName').value || null,
         max_runs_per_hour: document.getElementById('pbMaxRunsPerHour').value || null,
         schedule_interval_minutes: document.getElementById('pbScheduleInterval').value || null,
         actions
