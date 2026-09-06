@@ -10,6 +10,47 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-06
 
+### Log Pipeline: Parsers tab (Vector reload safety + custom field extraction)
+
+Built out the Log Pipeline page with a parser manager, in the spirit of Exabeam's Parser
+Manager / Cribl-style enrichment, after research established that Vector does almost no
+parsing (a near-pure syslog/dnsmasq pass-through) while Python's `api_ingest()` does
+nearly all real field extraction, and that EDR agents bypass Vector entirely — so new
+custom parsing belongs server-side in Python, not in Vector/VRL.
+
+- **`generate_vector_config()` now validates before applying** (`vector validate` against
+  a candidate file, only writes/reloads the live config on success, verifies
+  `systemctl is-active` afterward, records status to `settings`) instead of writing
+  straight to `/etc/vector/vector.toml` and reloading blind — closes a real incident
+  class where a bad config left Vector silently serving its stale previous config.
+- **New `custom_parsers` table + CRUD/dry-run routes**: admin-defined Python regex field
+  extraction, scoped by app, tested against real recent logs before saving.
+- **New "Parsers" tab**: Parser Catalog (4 built-ins + custom parsers, with a
+  recent-sample extraction rate each), Custom Parsers CRUD, Pipeline Health (Vector
+  config status).
+- **`destination_ip` finally populated** — the column existed since an earlier migration
+  but nothing ever wrote to it; Sysmon Event ID 3's `DestinationIp:` label is now parsed
+  the same way `Image:`/`CommandLine:` already were.
+- **Two real bugs caught live, in production, before this was called done**:
+  1. The Parser Catalog's health query filtered on `timestamp >= now() - 24h`, which took
+     **93 seconds** on this instance's real 6.2M-row `live_logs` table (confirmed via
+     direct timing) — neither the app nor timestamp index alone avoids a large scan once
+     combined. Fixed by bounding every query to `id > (MAX(id) - 50000)` instead (a cheap
+     rowid range) — the same query dropped to 1.5s, independent of table size.
+  2. A custom parser targeting `username`/`severity`/`event_id`/`source_ip` was silently
+     inert — `api_ingest()`'s INSERT never read those 4 keys back out of the gap-filled
+     extraction dict, only the process/XML fields. A first fix attempt (gap-fill only
+     when the built-in value was a placeholder) was *also* wrong: Windows Security 4688
+     events always resolve their top-level username to a real-but-generic value
+     ("SYSTEM"), never the placeholder, even though the actual acting user is in the
+     message body (`Creator Subject: Account Name: ...`). Since these 4 fields have no
+     genuine built-in *extractor* to protect (unlike `process_image`/`command_line`,
+     which Sysmon/auditd parsing actually derives from content), a matching custom parser
+     now unconditionally overrides them — verified live: a real "Security 4688 acting
+     user" parser now correctly overrides "SYSTEM" with the real actor ("noslo") while
+     correctly leaving distinct machine-account/local-service events alone. Kept in
+     production as a genuinely useful parser, not deleted as test data.
+
 ### Fixed the two review findings flagged for judgment
 
 Closed out the two items the third review pass surfaced but didn't auto-fix:
