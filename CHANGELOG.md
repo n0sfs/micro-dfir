@@ -44,6 +44,19 @@ the highest-value findings:
   heavyweight `create_case`. Added `set_alert_status` (also marks the alert
   acknowledged) and `assign_alert` as alert-scoped actions, composing with
   the new rule-name condition above.
+- **Log Pipeline's stat tiles showed config counts, not ingestion health** —
+  "Active/Total Drop Rules" and a hardcoded "6" for total channels, zero
+  volume/source-count/last-event-received. An admin landing here to answer
+  "is ingestion actually working" got a different question answered. New
+  `/api/log-pipeline/ingestion-health` gives real Sources Ingesting /
+  Events-per-Hour / Last Event Received tiles. Caught and fixed a real
+  performance bug before it shipped for good: the first rowid-bounded design
+  (`ORDER BY id DESC LIMIT 1 OFFSET N`) measured **20 seconds** live on this
+  app's real 6.2M-row table — OFFSET reads and discards N full rows (some
+  carrying large uncapped TEXT blobs) before returning the target one. Fixed
+  by computing the boundary row's id directly and looking it up with
+  `WHERE id <= ?` (a single B-tree seek reading exactly one row regardless of
+  N) — confirmed live afterward at ~400ms on cache-hit.
 
 ### Closed the standing gap-list: SLA tiers, password strength, agent recovery, revert cancel
 
