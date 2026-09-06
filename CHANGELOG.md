@@ -10,6 +10,32 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-06
 
+### Fixed the two review findings flagged for judgment
+
+Closed out the two items the third review pass surfaced but didn't auto-fix:
+
+- **Channel-template GET routes now require `edr.agent.manage`** (`src/app.py`,
+  `/api/agent/channels` and `/api/agent/linux-channels`) — previously gated on
+  POST/DELETE only, leaving GET readable by any authenticated user despite the label on
+  this exact permission being "Manage agents (upgrade/uninstall/enroll/channels)" and
+  `edr.agent.manage` being a Tier 3+/Admin-only permission, not granted to the base
+  Tier 1/2 analyst role. Also hid the Windows/Linux Log Channels tabs in Log Pipeline
+  behind the same permission (`{% if has_permission(...) %}`, matching the existing SOAR
+  Automation tab precedent) rather than leaving a now-broken-looking tab visible, and
+  hardened `switchLogPipelineTab()` with the same missing-element fallback
+  `switchSoarTab()` already uses, so a hidden tab can't throw when the shared
+  `LOG_PIPELINE_TABS` list still names it.
+- **Silent-host detection no longer collapses every hostless log source into one shared
+  "UNKNOWN" bucket** (`_run_due_log_source_silent_alerts`) — a source that never reports
+  its own hostname (a raw syslog sender, a misconfigured device) previously landed in a
+  single group that never looked silent as long as *any* such source kept sending,
+  masking a real individual outage among them. Now sub-groups by `app` for that one
+  fallback value only; real hostnames are unaffected and still group purely by host.
+
+Verified with 25 new fixture/vm tests (permission-check ordering, tab-fallback
+behavior, and three UNKNOWN-host grouping/cooldown scenarios) plus the full existing
+regression suite (89 tests total across today's work), all passing.
+
 ### Third code review pass — 6 fixes from reviewing today's own sweeps
 
 Ran the same 8-angle review process against everything shipped today since the second

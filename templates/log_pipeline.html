@@ -37,8 +37,10 @@
 <ul class="nav nav-tabs border-secondary mb-3" id="logPipelineTabs">
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'droprules' else '' }}" id="tabBtnDroprules" onclick="switchLogPipelineTab('droprules')"><i class="fa-solid fa-filter me-1"></i>Drop Rules</button></li>
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'dns' else '' }}" id="tabBtnDns" onclick="switchLogPipelineTab('dns')"><i class="fa-solid fa-globe me-1"></i>DNS Query Logging</button></li>
+    {% if has_permission('edr.agent.manage') %}
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'channels' else '' }}" id="tabBtnChannels" onclick="switchLogPipelineTab('channels')"><i class="fa-solid fa-sliders me-1"></i>Windows Log Channels</button></li>
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'linuxchannels' else '' }}" id="tabBtnLinuxchannels" onclick="switchLogPipelineTab('linuxchannels')"><i class="fa-brands fa-linux me-1"></i>Linux Log Channels</button></li>
+    {% endif %}
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'silentsources' else '' }}" id="tabBtnSilentsources" onclick="switchLogPipelineTab('silentsources')"><i class="fa-solid fa-volume-xmark me-1"></i>Silent Hosts</button></li>
 </ul>
 
@@ -213,6 +215,7 @@
 <!-- =========================== END DNS LOGGING PANE =========================== -->
 
 <!-- ============================= CHANNELS PANE ============================= -->
+{% if has_permission('edr.agent.manage') %}
 <div id="paneChannels" style="display: {{ 'block' if active_tab == 'channels' else 'none' }};">
 <div class="row g-4 mb-4">
     <div class="col-lg-12">
@@ -285,8 +288,10 @@
 </div>
 </div>
 <!-- =========================== END CHANNELS PANE =========================== -->
+{% endif %}
 
 <!-- ============================= LINUX CHANNELS PANE ============================= -->
+{% if has_permission('edr.agent.manage') %}
 <div id="paneLinuxchannels" style="display: {{ 'block' if active_tab == 'linuxchannels' else 'none' }};">
 <div class="row g-4 mb-4">
     <div class="col-lg-12">
@@ -359,6 +364,7 @@
 </div>
 </div>
 <!-- =========================== END LINUX CHANNELS PANE =========================== -->
+{% endif %}
 
 <script>
 function escHtml(s) {
@@ -410,11 +416,22 @@ function updateSharedStats() {
 const LOG_PIPELINE_TABS = ['droprules', 'dns', 'channels', 'linuxchannels', 'silentsources'];
 function logPipelineTabCap(t) { return t.charAt(0).toUpperCase() + t.slice(1); }
 function switchLogPipelineTab(tab) {
-    if (!LOG_PIPELINE_TABS.includes(tab)) return;
+    if (!LOG_PIPELINE_TABS.includes(tab)) tab = 'droprules';
+    // Windows/Linux Log Channels are permission-gated (edr.agent.manage) and may not
+    // exist in the DOM at all for a user without it -- LOG_PIPELINE_TABS itself is a
+    // static JS list with no notion of that, so a missing btn/pane is expected here,
+    // not a bug. Falls back to Drop Rules if the tab being switched TO is the missing
+    // one (matching soar.html's identical switchSoarTab() pattern for its own
+    // permission-gated Automation tab).
+    let resolvedTab = tab;
     LOG_PIPELINE_TABS.forEach(t => {
-        document.getElementById('tabBtn' + logPipelineTabCap(t)).classList.toggle('active', t === tab);
-        document.getElementById('pane' + logPipelineTabCap(t)).style.display = (t === tab) ? 'block' : 'none';
+        const btn = document.getElementById('tabBtn' + logPipelineTabCap(t));
+        const pane = document.getElementById('pane' + logPipelineTabCap(t));
+        if (!btn || !pane) { if (t === tab) resolvedTab = 'droprules'; return; }
+        btn.classList.toggle('active', t === tab);
+        pane.style.display = (t === tab) ? 'block' : 'none';
     });
+    if (resolvedTab !== tab) { switchLogPipelineTab(resolvedTab); return; }
     try { localStorage.setItem('microdfir_log_pipeline_active_tab', tab); } catch (e) {}
 }
 
