@@ -10,6 +10,41 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-06
 
+### Full-lifecycle DFIR audit: triage, case reports, and SOAR automation gaps
+
+Audited the actual analyst workflow end to end (ingest → analyze → investigate
+→ automate → report) for real friction, not speculative features, then fixed
+the highest-value findings:
+
+- **Triage didn't acknowledge** — the primary alert-triage form (`saveTriage`)
+  never sent `acknowledged`, unlike the Home widget's quick-ack button. Every
+  alert an analyst properly triaged through the actual triage UI stayed stuck
+  in the "unacknowledged" count forever and kept resurfacing on the dashboard's
+  unacknowledged-alerts widget. Now any explicit triage save acknowledges.
+- **No way to search/sort/see alert status or assignee** — both were selected
+  in every Log Search branch but absent from the query-language field list and
+  the results table entirely. Added `status`/`assignee` to the searchable
+  field allowlist (`status:new`, `assignee:alice` now work) and as real,
+  opt-in, sortable columns in the results table.
+- **Case reports were missing Assets and IOCs, and had two disconnected
+  timelines** — `generate_case_report()` never queried `case_assets`/
+  `case_iocs` (the two most actionable deliverables in a DFIR handoff,
+  despite both being fully queryable already), and "Linked Items" (ordered by
+  when added to the case) and "Timeline" (analyst actions only) never told
+  the actual story of what happened, in order. Added both missing sections
+  and merged items+events into one real chronological Incident Timeline.
+- **`alert_created` playbooks could only condition on severity** — made
+  "notify the team when Impossible Travel fires" impossible without also
+  catching every other same-severity alert, including pipeline-health noise
+  (Host Silent, Agent Offline). Added an exact-match rule-name condition,
+  composable with the existing severity threshold, backed by a real
+  ground-truth dropdown of rules that have actually fired.
+- **No lightweight way to auto-suppress or auto-assign an alert** — the only
+  path to touching an alert's status/assignee from a playbook was the
+  heavyweight `create_case`. Added `set_alert_status` (also marks the alert
+  acknowledged) and `assign_alert` as alert-scoped actions, composing with
+  the new rule-name condition above.
+
 ### Closed the standing gap-list: SLA tiers, password strength, agent recovery, revert cancel
 
 Worked through the 5 items flagged in an earlier gap-analysis pass but not yet built:
