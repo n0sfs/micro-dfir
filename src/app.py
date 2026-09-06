@@ -13609,6 +13609,8 @@ def _parse_datetime_local(s):
 # no indication anything was wrong -- this list is what closes that gap.
 LOG_SEARCH_ALLOWED_FIELDS = [
     {'key': 'item_id', 'label': 'ID'},
+    {'key': 'status', 'label': 'Triage Status'},
+    {'key': 'assignee', 'label': 'Assignee'},
     {'key': 'username', 'label': 'User'},
     {'key': 'host', 'label': 'Host'},
     {'key': 'event_id', 'label': 'Event ID'},
@@ -13631,7 +13633,7 @@ LOG_SEARCH_ALLOWED_FIELDS = [
 # (unlike e.g. `message`, sorting alphabetically on a free-text column has little value
 # and isn't worth exposing as a header click target).
 _SORTABLE_LOG_COLUMNS = {'timestamp', 'severity', 'host', 'app', 'event_id', 'username',
-                          'source_ip', 'destination_ip', 'log_type'}
+                          'source_ip', 'destination_ip', 'log_type', 'status', 'assignee'}
 
 def _resolve_sort_column(args):
     col = args.get('sort', 'timestamp')

@@ -665,11 +665,42 @@ def generate_case_report(case_id):
     events_rows = [dict(e) for e in conn.execute(
         "SELECT ts, actor, event_type, detail FROM case_events WHERE case_id = ? ORDER BY ts, id", (case_id,)
     ).fetchall()]
-    timeline, analyses = [], []
+    analyses = [{'ts': e['ts'], 'actor': e['actor'], 'text': e['detail'] or ''}
+                for e in events_rows if e['event_type'] == 'analysis']
+
+    # Assets ("which hosts are implicated, at what confidence") and IOCs ("what to
+    # block") -- the two most actionable deliverables in a DFIR handoff, previously
+    # dropped entirely from this report despite both already being fully queryable (the
+    # criticality join mirrors api_case_detail's own case_assets query exactly).
+    assets = [dict(a) for a in conn.execute(
+        "SELECT ca.host, ca.compromise_status, ca.related_indicator, ca.notes, ca.added_at, asset.criticality "
+        "FROM case_assets ca LEFT JOIN assets asset ON asset.host = ca.host WHERE ca.case_id = ? ORDER BY ca.added_at", (case_id,)
+    ).fetchall()]
+    iocs = [dict(i) for i in conn.execute(
+        "SELECT ioc_type, value, notes, added_at FROM case_iocs WHERE case_id = ? ORDER BY added_at", (case_id,)
+    ).fetchall()]
+
+    # A single chronological incident timeline, not two separately-ordered lists --
+    # `items` (real evidence: alerts/anomalies/EDR events, each already carrying its own
+    # true event timestamp) merged with `events_rows` (analyst actions: notes, status
+    # changes, playbook runs) and sorted together. Previously "Linked Items" was ordered
+    # by when it was ADDED to the case (added_at) and "Timeline" only ever showed analyst
+    # actions -- neither told the story of what actually happened, in order. `kind`
+    # distinguishes an evidence row from an analyst-action row for the template's badge.
+    timeline = []
+    for it in items:
+        timeline.append({
+            'ts': it.get('timestamp') or '', 'kind': 'item', 'severity': it.get('severity'),
+            'label': it.get('label') or it.get('item_type', 'Item'), 'detail': (it.get('message') or '')[:200],
+            'host': it.get('host'), 'username': it.get('username'), 'actor': None,
+        })
     for e in events_rows:
-        if e['event_type'] == 'analysis':
-            analyses.append({'ts': e['ts'], 'actor': e['actor'], 'text': e['detail'] or ''})
-        timeline.append({'ts': e['ts'], 'actor': e['actor'] or '', 'label': _case_event_label(e['event_type'], e['detail'])})
+        timeline.append({
+            'ts': e['ts'] or '', 'kind': 'event', 'severity': None,
+            'label': _case_event_label(e['event_type'], e['detail']), 'detail': None,
+            'host': None, 'username': None, 'actor': e['actor'] or '',
+        })
+    timeline.sort(key=lambda row: row['ts'])
 
     context = {
         "date_generated": datetime.now().strftime("%B %d, %Y"),
@@ -681,7 +712,8 @@ def generate_case_report(case_id):
         "severity_colors": CASE_SEVERITY_COLORS,
         "tasks": tasks,
         "tasks_done": sum(1 for t in tasks if t['status'] == 'done'),
-        "items": items,
+        "assets": assets,
+        "iocs": iocs,
         "timeline": timeline,
         "analyses": analyses,
     }
