@@ -212,7 +212,14 @@ def init_db():
 # the preview's whole job is to faithfully predict what the real Vector config would drop.
 DROP_RULE_FIELDS = ('app', 'host', 'event_id', 'message')
 
+def _record_vector_config_status(db, ok, error=None):
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('vector_config_status', ?)", ('ok' if ok else 'error',))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('vector_config_status_at', datetime('now'))")
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('vector_config_status_error', ?)", (error or '',))
+    db.commit()
+
 def generate_vector_config():
+    import shutil, time
     db = get_db()
     rules = db.execute("SELECT * FROM drop_rules WHERE enabled = 1").fetchall()
 
@@ -340,8 +347,28 @@ tls.verify_certificate = false
 auth.strategy = "bearer"
 auth.token = "{soc_token}"
 """
-    with open("/etc/vector/vector.toml", "w") as f: f.write(toml)
-    subprocess.run(["systemctl", "reload", "vector"], check=False)
+    candidate_path = "/etc/vector/vector.toml.candidate"
+    with open(candidate_path, "w") as f:
+        f.write(toml)
+    try:
+        validate = subprocess.run(
+            ["vector", "validate", "--config-toml", candidate_path],
+            capture_output=True, text=True, timeout=15
+        )
+    except Exception as e:
+        _record_vector_config_status(db, ok=False, error=f"vector validate failed to run: {e}")
+        return False
+    if validate.returncode != 0:
+        _record_vector_config_status(db, ok=False, error=(validate.stderr or validate.stdout or 'validation failed')[:2000])
+        return False
+    shutil.move(candidate_path, "/etc/vector/vector.toml")
+    subprocess.run(["systemctl", "reload", "vector"], capture_output=True, timeout=15)
+    time.sleep(1)  # reload is async -- give systemd a moment before checking is-active
+    is_active = subprocess.run(
+        ["systemctl", "is-active", "vector"], capture_output=True, text=True, timeout=10
+    ).stdout.strip() == 'active'
+    _record_vector_config_status(db, ok=is_active, error=None if is_active else "Vector is not active after reload")
+    return is_active
 
 # Displayed read-only on SIEM > Log Pipeline (see api_dns_logging_status) so an admin can
 # see exactly what's matching/dropping without SSHing in to read vector.toml -- kept as a
@@ -506,6 +533,10 @@ _PROCESS_FIELD_PATTERNS = {
     'hashes_raw': re.compile(r'^[ \t]*Hashes:\s*(.+)$', re.MULTILINE),
     # Sysmon Event ID 22 (DNS query) -- a bare hostname, not a full URL.
     'query_name': re.compile(r'^[ \t]*QueryName:\s*(.+)$', re.MULTILINE),
+    # Sysmon Event ID 3 (Network Connection) renders this label exactly like Image:/
+    # CommandLine: above -- destination_ip has a schema column (migrate_live_logs_ip_columns)
+    # but was never actually populated by anything until this extractor was added.
+    'destination_ip': re.compile(r'^[ \t]*DestinationIp:\s*(.+)$', re.MULTILINE),
 }
 
 # "-" and "." both show up as real Sysmon/Windows Event placeholder-for-empty values
@@ -581,6 +612,7 @@ _XML_PROCESS_FIELD_MAP = {
     'OriginalFileName': 'original_file_name',
     'Hashes': 'hashes_raw',
     'QueryName': 'query_name',
+    'DestinationIp': 'destination_ip',
 }
 
 # Sysmon's Hashes field lists every configured algorithm as "ALGO=hex,ALGO=hex,..." --
@@ -624,6 +656,53 @@ def _extract_process_fields_from_xml(xml_text):
         val = (elem.text or '').strip()
         if val and val not in _PROCESS_FIELD_PLACEHOLDER_VALUES:
             out[col] = val
+    return out
+
+# The columns a custom parser's named capture groups are allowed to populate --
+# deliberately excludes host/app/message/timestamp/id (those come from the log's own
+# top-level fields, not something a field-extraction regex should override).
+CUSTOM_PARSER_TARGET_FIELDS = (
+    'severity', 'event_id', 'username', 'source_ip', 'destination_ip', 'process_image',
+    'command_line', 'parent_image', 'parent_command_line', 'original_file_name',
+    'query_name', 'file_hash',
+)
+
+_CUSTOM_PARSERS_CACHE = {'data': None, 'time': 0}
+_CUSTOM_PARSERS_CACHE_TTL = 30
+
+def _get_custom_parsers_compiled(db):
+    import time as _time
+    now = _time.time()
+    if _CUSTOM_PARSERS_CACHE['data'] is not None and (now - _CUSTOM_PARSERS_CACHE['time']) < _CUSTOM_PARSERS_CACHE_TTL:
+        return _CUSTOM_PARSERS_CACHE['data']
+    rows = db.execute("SELECT id, app_match, pattern FROM custom_parsers WHERE enabled = 1 ORDER BY priority ASC, id ASC").fetchall()
+    compiled = []
+    for r in rows:
+        try:
+            compiled.append((r['id'], (r['app_match'] or '').strip() or None, re.compile(r['pattern'])))
+        except re.error:
+            continue  # invalid regex skipped, not crashed -- surfaced via the parser catalog's health view instead
+    _CUSTOM_PARSERS_CACHE['data'] = compiled
+    _CUSTOM_PARSERS_CACHE['time'] = now
+    return compiled
+
+def invalidate_custom_parsers_cache():
+    _CUSTOM_PARSERS_CACHE['data'] = None
+    _CUSTOM_PARSERS_CACHE['time'] = 0
+
+def _run_custom_parsers(db, app_n, message):
+    if not message:
+        return {}
+    out = {}
+    for _pid, app_match, pattern in _get_custom_parsers_compiled(db):
+        if app_match and app_match != app_n:
+            continue
+        m = pattern.search(message)
+        if not m:
+            continue
+        for k, v in m.groupdict().items():
+            if k in CUSTOM_PARSER_TARGET_FIELDS and v:
+                out.setdefault(k, v.strip())
     return out
 
 @app.route('/api/ingest', methods=['POST'])
@@ -692,19 +771,24 @@ def api_ingest():
                 proc = _extract_process_fields_from_xml(raw_xml) if raw_xml else {}
                 if not proc:
                     proc = _extract_process_fields(msg)
+            # Admin-defined custom parsers fill GAPS left by the built-in extractors above --
+            # never override an already-populated field (setdefault), so a custom parser can
+            # never fight a built-in extraction. See CUSTOM_PARSER_TARGET_FIELDS.
+            for k, v in _run_custom_parsers(db, app_n, msg).items():
+                proc.setdefault(k, v)
             # FIM sends its own computed sha256 as a dedicated field (not embedded in the
             # free-text message, which just reads "File changed: <path>") -- see
             # run_fim_check() in both agent scripts. Falls back to it only when the
             # generic process-hash extraction found nothing, since a real Sysmon-style
             # hash is the more specific signal when both happen to be present.
             fim_sha256 = (log.get('sha256') or '').strip().lower() if app_n == 'FIM' else ''
-            file_hash = _canonical_hash(proc.get('hashes_raw')) or (fim_sha256 or None)
+            file_hash = _canonical_hash(proc.get('hashes_raw')) or (fim_sha256 or None) or proc.get('file_hash')
             db.execute(
-                "INSERT INTO live_logs (timestamp, host, app, severity, event_id, username, source_ip, message, "
+                "INSERT INTO live_logs (timestamp, host, app, severity, event_id, username, source_ip, destination_ip, message, "
                 "process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml, "
                 "file_hash, query_name) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (ts, hst, app_n, sev, eid, usr, sip, msg,
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (ts, hst, app_n, sev, eid, usr, sip, proc.get('destination_ip'), msg,
                  proc.get('process_image'), proc.get('command_line'), proc.get('parent_image'),
                  proc.get('parent_command_line'), proc.get('original_file_name'), raw_xml,
                  file_hash, proc.get('query_name'))
@@ -2621,6 +2705,224 @@ def api_droprules_preview():
         'count': count,
         'sample': [dict(r) for r in rows],
         'window_days': DROP_RULE_PREVIEW_WINDOW_DAYS,
+    })
+
+# Admin-defined, Python-side field extraction that gap-fills api_ingest()'s built-in
+# extractors for log shapes those don't cover -- see CUSTOM_PARSER_TARGET_FIELDS and
+# _run_custom_parsers() above. Reuses the 'logsearch.droprules.manage' permission (same
+# "ingestion pipeline configuration" bucket drop rules already use) rather than a new key.
+@app.route('/api/custom-parsers', methods=['GET', 'POST'])
+@login_required
+def api_custom_parsers():
+    db = get_db()
+    if request.method == 'GET':
+        return jsonify([dict(r) for r in db.execute("SELECT * FROM custom_parsers ORDER BY priority ASC, id ASC").fetchall()])
+    err = require_permission('logsearch.droprules.manage')
+    if err: return err
+    d = request.get_json() or {}
+    name = (d.get('name') or '').strip()
+    pattern = d.get('pattern') or ''
+    if not name:
+        return jsonify({'error': 'A name is required.'}), 400
+    if not pattern:
+        return jsonify({'error': 'A pattern is required.'}), 400
+    try:
+        re.compile(pattern)
+    except re.error as e:
+        return jsonify({'error': f'Invalid regex: {e}'}), 400
+    try:
+        priority = int(d.get('priority', 100))
+    except (TypeError, ValueError):
+        priority = 100
+    app_match = (d.get('app_match') or '').strip() or None
+    db.execute(
+        "INSERT INTO custom_parsers (name, description, app_match, pattern, enabled, priority, created_by) VALUES (?, ?, ?, ?, 1, ?, ?)",
+        (name, (d.get('description') or '').strip(), app_match, pattern, priority, current_user.username)
+    )
+    db.commit()
+    invalidate_custom_parsers_cache()
+    log_audit('custom_parser_create', 'custom_parser', None, f"{name} ({pattern})")
+    return jsonify({"status": "success"}), 201
+
+@app.route('/api/custom-parsers/<int:pid>/toggle', methods=['PUT'])
+@login_required
+def api_custom_parser_toggle(pid):
+    err = require_permission('logsearch.droprules.manage')
+    if err: return err
+    db = get_db()
+    db.execute("UPDATE custom_parsers SET enabled = CASE WHEN enabled = 1 THEN 0 ELSE 1 END, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (pid,))
+    db.commit()
+    invalidate_custom_parsers_cache()
+    log_audit('custom_parser_toggle', 'custom_parser', pid)
+    return jsonify({"ok": 1})
+
+@app.route('/api/custom-parsers/<int:pid>', methods=['DELETE'])
+@login_required
+def api_custom_parser_delete(pid):
+    err = require_permission('logsearch.droprules.manage')
+    if err: return err
+    db = get_db()
+    db.execute("DELETE FROM custom_parsers WHERE id = ?", (pid,))
+    db.commit()
+    invalidate_custom_parsers_cache()
+    log_audit('custom_parser_delete', 'custom_parser', pid)
+    return jsonify({"ok": 1})
+
+# Dry-run: given a NOT-YET-SAVED {app_match, pattern}, run it against the most recent
+# real logs (same window/sample-size constants api_droprules_preview already defines --
+# reused, not duplicated, and deliberately small since this is a Python-side regex
+# search with no SQL index to lean on, unlike drop rules' SQL-native COUNT/INSTR).
+@app.route('/api/custom-parsers/preview', methods=['POST'])
+@login_required
+def api_custom_parsers_preview():
+    d = request.get_json() or {}
+    pattern_str = d.get('pattern') or ''
+    app_match = (d.get('app_match') or '').strip() or None
+    if not pattern_str:
+        return jsonify({'error': 'A pattern is required to preview.'}), 400
+    try:
+        pattern = re.compile(pattern_str)
+    except re.error as e:
+        return jsonify({'error': f'Invalid regex: {e}'}), 400
+
+    db = get_db()
+    where = "timestamp >= datetime('now', ?)"
+    params = [f'-{DROP_RULE_PREVIEW_WINDOW_DAYS} days']
+    if app_match:
+        where += " AND app = ?"
+        params.append(app_match)
+    rows = db.execute(
+        f"SELECT timestamp, host, app, message FROM live_logs WHERE {where} "
+        f"ORDER BY timestamp DESC LIMIT {DROP_RULE_PREVIEW_SAMPLE_LIMIT}",
+        params
+    ).fetchall()
+
+    samples = []
+    match_count = 0
+    for r in rows:
+        m = pattern.search(r['message'] or '')
+        extracted = {}
+        if m:
+            match_count += 1
+            extracted = {k: v.strip() for k, v in m.groupdict().items() if k in CUSTOM_PARSER_TARGET_FIELDS and v}
+        samples.append({'timestamp': r['timestamp'], 'host': r['host'], 'app': r['app'],
+                         'message': r['message'], 'matched': bool(m), 'extracted': extracted})
+
+    return jsonify({
+        'scanned': len(rows),
+        'match_count': match_count,
+        'sample': samples,
+        'window_days': DROP_RULE_PREVIEW_WINDOW_DAYS,
+    })
+
+# Small, hand-curated catalog of the built-in extractors api_ingest() always runs --
+# NOT derived dynamically, matching this file's own "duplicate a small catalog rather
+# than build a generic mechanism" convention (see SIGMA_LOGSOURCE_INGESTED_APPS above).
+# dnsmasq's parser runs at the Vector/VRL layer BEFORE a log ever reaches live_logs --
+# a non-matching event is dropped (abort), not recorded here as a failed extraction, so
+# it gets no target_fields/rate, just a volume count (mirrors api_dns_logging_status).
+_PARSER_CATALOG_BUILTINS = (
+    {
+        'key': 'windows_xml', 'name': 'Windows Event XML', 'kind': 'built-in',
+        'apps': ('sysmon', 'security', 'system', 'windowsdefender', 'powershell'),
+        'target_fields': ('process_image', 'command_line', 'parent_image', 'parent_command_line', 'original_file_name', 'query_name', 'destination_ip'),
+        'extra_where': "raw_xml IS NOT NULL",
+        'description': 'Parses process/network fields from raw Windows Event XML (channels with "Capture XML" enabled) -- see _extract_process_fields_from_xml.',
+    },
+    {
+        'key': 'windows_regex', 'name': 'Windows Message Regex', 'kind': 'built-in',
+        'apps': ('sysmon', 'security', 'system', 'windowsdefender', 'powershell'),
+        'target_fields': ('process_image', 'command_line', 'parent_image', 'parent_command_line', 'original_file_name', 'query_name', 'destination_ip'),
+        'extra_where': "raw_xml IS NULL",
+        'description': 'Falls back to regex extraction of the rendered Message text when XML capture is off -- see _extract_process_fields.',
+    },
+    {
+        'key': 'auditd_exec', 'name': 'Linux auditd exec', 'kind': 'built-in',
+        'apps': ('auditd',),
+        'target_fields': ('process_image', 'command_line'),
+        'extra_where': None,
+        'description': 'Parses the Linux agent\'s flattened "exec: <exe> <args>" auditd message shape -- see _extract_auditd_exec_fields.',
+    },
+    {
+        'key': 'dnsmasq_vrl', 'name': 'DNS Query (Vector VRL)', 'kind': 'built-in',
+        'apps': ('dnsmasq',),
+        'target_fields': (),
+        'extra_where': None,
+        'description': 'Vector-side VRL regex (config/vector.toml, dnsmasq_parse transform) -- runs before ingestion.',
+    },
+)
+
+_PARSER_HEALTH_CACHE = {'data': None, 'time': 0}
+_PARSER_HEALTH_CACHE_TTL = 30
+
+def _parser_health_summary(db):
+    import time
+    now = time.time()
+    if _PARSER_HEALTH_CACHE['data'] is not None and (now - _PARSER_HEALTH_CACHE['time']) < _PARSER_HEALTH_CACHE_TTL:
+        return _PARSER_HEALTH_CACHE['data']
+
+    def _rate_for(apps, target_fields, extra_where=None):
+        placeholders = ','.join('?' for _ in apps)
+        where = f"app IN ({placeholders}) AND timestamp >= datetime('now', '-24 hours')"
+        params = list(apps)
+        if extra_where:
+            where += f" AND {extra_where}"
+        total = db.execute(f"SELECT COUNT(*) FROM live_logs WHERE {where}", params).fetchone()[0]
+        if not target_fields or total == 0:
+            return total, None
+        field_or = ' OR '.join(f"{f} IS NOT NULL" for f in target_fields)
+        extracted = db.execute(f"SELECT COUNT(*) FROM live_logs WHERE {where} AND ({field_or})", params).fetchone()[0]
+        return total, round(extracted / total * 100, 1)
+
+    parsers = []
+    for b in _PARSER_CATALOG_BUILTINS:
+        total, rate = _rate_for(b['apps'], b['target_fields'], b['extra_where'])
+        parsers.append({
+            'key': b['key'], 'name': b['name'], 'kind': b['kind'], 'apps': list(b['apps']),
+            'target_fields': list(b['target_fields']), 'description': b['description'],
+            'volume_24h': total, 'extraction_rate_pct': rate,
+        })
+    for r in db.execute("SELECT id, name, description, app_match, enabled, priority FROM custom_parsers ORDER BY priority ASC, id ASC").fetchall():
+        if r['app_match']:
+            total, rate = _rate_for((r['app_match'],), CUSTOM_PARSER_TARGET_FIELDS)
+            apps = [r['app_match']]
+        else:
+            # No app scope on this parser -- can't cheaply attribute a rate to it alone
+            # (it might be one of several parsers touching the same rows), so this only
+            # reports overall 24h volume, not an extraction percentage.
+            total = db.execute("SELECT COUNT(*) FROM live_logs WHERE timestamp >= datetime('now', '-24 hours')").fetchone()[0]
+            rate = None
+            apps = []
+        parsers.append({
+            'key': f'custom_{r["id"]}', 'id': r['id'], 'name': r['name'], 'kind': 'custom',
+            'enabled': bool(r['enabled']), 'apps': apps, 'description': r['description'],
+            'volume_24h': total, 'extraction_rate_pct': rate,
+        })
+
+    result = {'parsers': parsers}
+    _PARSER_HEALTH_CACHE['data'] = result
+    _PARSER_HEALTH_CACHE['time'] = now
+    return result
+
+@app.route('/api/log-pipeline/parser-health', methods=['GET'])
+@login_required
+def api_log_pipeline_parser_health():
+    return jsonify(_parser_health_summary(get_db()))
+
+# Reads what Part 1's validate-then-apply generate_vector_config() last recorded --
+# the single highest-value "pipeline troubleshooter" check: whether the last config
+# regeneration actually succeeded, and if not, why.
+@app.route('/api/log-pipeline/vector-status', methods=['GET'])
+@login_required
+def api_log_pipeline_vector_status():
+    db = get_db()
+    rows = {r['key']: r['value'] for r in db.execute(
+        "SELECT key, value FROM settings WHERE key IN ('vector_config_status', 'vector_config_status_at', 'vector_config_status_error')"
+    ).fetchall()}
+    return jsonify({
+        'status': rows.get('vector_config_status'),
+        'checked_at': rows.get('vector_config_status_at'),
+        'error': rows.get('vector_config_status_error') or None,
     })
 
 # ==========================================
@@ -10502,6 +10804,26 @@ def migrate_yara_rule_tags():
     except Exception:
         pass
 
+def migrate_custom_parsers():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS custom_parsers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT,
+            app_match TEXT,
+            pattern TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            priority INTEGER NOT NULL DEFAULT 100,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME
+        )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_ioc_sightings_alert_id():
     # log_ref was always a free-text "alert_id=N, host=..." string (sigma_engine.py's
     # _record_ioc_sightings) -- fine for a human reading it, useless for a query. This
@@ -15592,6 +15914,7 @@ migrate_ti_entities()
 migrate_ti_entities_confidence()
 migrate_ti_entities_references()
 migrate_yara_rule_tags()
+migrate_custom_parsers()
 
 try:
     # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every

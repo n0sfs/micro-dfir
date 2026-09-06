@@ -42,6 +42,7 @@
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'linuxchannels' else '' }}" id="tabBtnLinuxchannels" onclick="switchLogPipelineTab('linuxchannels')"><i class="fa-brands fa-linux me-1"></i>Linux Log Channels</button></li>
     {% endif %}
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'silentsources' else '' }}" id="tabBtnSilentsources" onclick="switchLogPipelineTab('silentsources')"><i class="fa-solid fa-volume-xmark me-1"></i>Silent Hosts</button></li>
+    <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'parsers' else '' }}" id="tabBtnParsers" onclick="switchLogPipelineTab('parsers')"><i class="fa-solid fa-diagram-project me-1"></i>Parsers</button></li>
 </ul>
 
 <!-- ============================= DROP RULES PANE ============================= -->
@@ -213,6 +214,125 @@
 </div>
 </div>
 <!-- =========================== END DNS LOGGING PANE =========================== -->
+
+<!-- ============================= PARSERS PANE ============================= -->
+<div id="paneParsers" style="display: {{ 'block' if active_tab == 'parsers' else 'none' }};">
+
+<!-- Pipeline Health -->
+<div class="row g-4 mb-4">
+    <div class="col-lg-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="card-title text-light mb-0"><i class="fa-solid fa-heart-pulse me-2"></i>Pipeline Health</h5>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="loadVectorStatus()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
+                </div>
+                <p class="text-muted small mb-3">Whether the last Vector config regeneration (drop rules, network settings) actually validated and reloaded successfully -- a bad config used to fail silently, with Vector quietly still running its previous config and no signal anywhere that a change didn't take effect.</p>
+                <div id="vectorStatusCard" class="small text-muted">Loading&hellip;</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Parser Catalog -->
+<div class="row g-4 mb-4">
+    <div class="col-lg-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="card-title text-light mb-0"><i class="fa-solid fa-table-list me-2"></i>Parser Catalog</h5>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="loadParserHealth()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
+                </div>
+                <p class="text-muted small mb-3">Every field extractor that runs at ingest time -- the 4 built-ins (always on) plus any custom parsers below -- and how often it actually populates a field, over the last 24 hours.</p>
+                <div class="table-responsive">
+                    <table class="table table-dark table-hover table-sm align-middle mb-0">
+                        <thead>
+                            <tr>
+                                <th>Parser</th>
+                                <th>Kind</th>
+                                <th>Scope</th>
+                                <th>Volume (24h)</th>
+                                <th>Extraction Rate</th>
+                            </tr>
+                        </thead>
+                        <tbody id="parserCatalogBody">
+                            <tr><td colspan="5" class="text-center text-muted py-3">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Custom Parsers -->
+<div class="row g-4 mb-4">
+    <div class="col-lg-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-body">
+                <h5 class="card-title text-light mb-3"><i class="fa-solid fa-wand-magic-sparkles me-2"></i>Custom Parsers</h5>
+                <p class="text-muted small mb-3">Admin-defined regex field extraction (Python named capture groups) for log shapes the built-in extractors don't cover. Runs server-side against every ingested log's message, gap-filling only -- it never overrides a field a built-in extractor already populated. Test against real recent logs before saving.</p>
+
+                <div class="row g-2 mb-2">
+                    <div class="col-md-3">
+                        <label class="form-label text-muted small mb-1" for="cpName">Name</label>
+                        <input type="text" id="cpName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Cisco ASA source user">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label text-muted small mb-1" for="cpAppMatch">App (blank = any)</label>
+                        <input type="text" id="cpAppMatch" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. cisco_asa">
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label text-muted small mb-1" for="cpPriority">Priority</label>
+                        <input type="number" id="cpPriority" class="form-control form-control-sm bg-dark text-light border-secondary" value="100">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label text-muted small mb-1" for="cpDescription">Description</label>
+                        <input type="text" id="cpDescription" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="optional">
+                    </div>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label text-muted small mb-1" for="cpPattern">Pattern (Python regex, named capture groups e.g. <code>(?P&lt;username&gt;\w+)</code>)</label>
+                    <textarea id="cpPattern" class="form-control form-control-sm bg-black text-light border-secondary font-monospace" rows="2" spellcheck="false" placeholder="user=(?P<username>\w+)"></textarea>
+                </div>
+                <div class="d-flex gap-2 mb-3">
+                    <button type="button" class="btn btn-outline-info btn-sm" onclick="previewCustomParser()"><i class="fa-solid fa-magnifying-glass me-1"></i>Test against recent logs</button>
+                    <button type="button" class="btn btn-primary btn-sm" onclick="addCustomParser()"><i class="fa-solid fa-plus me-1"></i>Add Parser</button>
+                </div>
+                <div id="cpPreviewPanel" style="display:none;" class="mb-3">
+                    <div id="cpPreviewSummary" class="small text-muted mb-2"></div>
+                    <div class="table-responsive">
+                        <table class="table table-dark table-sm align-middle mb-0">
+                            <thead><tr><th>Timestamp</th><th>Host</th><th>App</th><th>Matched</th><th>Extracted Fields</th></tr></thead>
+                            <tbody id="cpPreviewBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div id="cpFormError" class="text-danger small mb-2" style="display:none;"></div>
+
+                <div class="table-responsive">
+                    <table class="table table-dark table-hover table-sm align-middle mb-0">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>App</th>
+                                <th>Pattern</th>
+                                <th>Priority</th>
+                                <th>Enabled</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="customParsersBody">
+                            <tr><td colspan="6" class="text-center text-muted py-3">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+</div>
+<!-- =========================== END PARSERS PANE =========================== -->
 
 <!-- ============================= CHANNELS PANE ============================= -->
 {% if has_permission('edr.agent.manage') %}
@@ -413,7 +533,7 @@ function updateSharedStats() {
 // both Drop Rules and Channels regardless of which pane is visible, and all
 // the underlying calls are cheap, so there's no lazy-load benefit worth the
 // "which tiles are stale" bookkeeping it would add.
-const LOG_PIPELINE_TABS = ['droprules', 'dns', 'channels', 'linuxchannels', 'silentsources'];
+const LOG_PIPELINE_TABS = ['droprules', 'dns', 'channels', 'linuxchannels', 'silentsources', 'parsers'];
 function logPipelineTabCap(t) { return t.charAt(0).toUpperCase() + t.slice(1); }
 function switchLogPipelineTab(tab) {
     if (!LOG_PIPELINE_TABS.includes(tab)) tab = 'droprules';
@@ -1135,6 +1255,151 @@ function loadSilentSourceAlerts() {
 }
 
 // =====================================================================
+// PARSERS
+// =====================================================================
+function vectorStatusBadge(status) {
+    if (status === 'ok') return '<span class="badge bg-success">OK</span>';
+    if (status === 'error') return '<span class="badge bg-danger">Error</span>';
+    return '<span class="badge bg-secondary">Unknown</span>';
+}
+
+function loadVectorStatus() {
+    const card = document.getElementById('vectorStatusCard');
+    fetch('/api/log-pipeline/vector-status')
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(d => {
+            let html = `${vectorStatusBadge(d.status)} <span class="ms-2">Last checked: ${d.checked_at ? escHtml(d.checked_at) : 'never'}</span>`;
+            if (d.status === 'error' && d.error) {
+                html += `<pre class="bg-black border border-secondary rounded p-2 mt-2 mb-0 text-danger" style="white-space:pre-wrap;">${escHtml(d.error)}</pre>`;
+            }
+            card.innerHTML = html;
+        })
+        .catch(err => { card.innerHTML = `<span class="text-danger">Failed to load. <a href="#" onclick="loadVectorStatus(); return false;">Retry</a></span>`; console.error('Error loading Vector status:', err); });
+}
+
+function loadParserHealth() {
+    const tbody = document.getElementById('parserCatalogBody');
+    fetch('/api/log-pipeline/parser-health')
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(d => {
+            const parsers = d.parsers || [];
+            if (!parsers.length) {
+                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">No parsers found.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = parsers.map(p => `
+                <tr>
+                    <td>${escHtml(p.name)}${p.description ? ` <i class="fa-solid fa-circle-info text-muted" title="${escHtml(p.description)}"></i>` : ''}</td>
+                    <td><span class="badge ${p.kind === 'custom' ? 'bg-info text-dark' : 'bg-secondary'}">${escHtml(p.kind)}</span></td>
+                    <td>${p.apps && p.apps.length ? escHtml(p.apps.join(', ')) : '<span class="text-muted">any</span>'}</td>
+                    <td>${p.volume_24h}</td>
+                    <td>${p.extraction_rate_pct === null || p.extraction_rate_pct === undefined ? '<span class="text-muted">—</span>' : p.extraction_rate_pct + '%'}</td>
+                </tr>`).join('');
+        })
+        .catch(err => {
+            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger py-3">Failed to load. <a href="#" onclick="loadParserHealth(); return false;">Retry</a></td></tr>';
+            console.error('Error loading parser health:', err);
+        });
+}
+
+function loadCustomParsers() {
+    const tbody = document.getElementById('customParsersBody');
+    fetch('/api/custom-parsers')
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(data => {
+            if (!Array.isArray(data) || data.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">No custom parsers configured yet.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = data.map(p => `
+                <tr>
+                    <td>${escHtml(p.name)}</td>
+                    <td>${p.app_match ? escHtml(p.app_match) : '<span class="text-muted">any</span>'}</td>
+                    <td><code class="small">${escHtml(p.pattern)}</code></td>
+                    <td>${p.priority}</td>
+                    <td>
+                        <div class="form-check form-switch mb-0">
+                            <input class="form-check-input" type="checkbox" ${p.enabled ? 'checked' : ''} onchange="toggleCustomParser(${p.id})">
+                        </div>
+                    </td>
+                    <td><button class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete custom parser" onclick="deleteCustomParser(${p.id})"><i class="fa-solid fa-trash"></i></button></td>
+                </tr>`).join('');
+        })
+        .catch(err => {
+            tbody.innerHTML = '<tr><td colspan="6" class="text-center text-danger py-3">Failed to load. <a href="#" onclick="loadCustomParsers(); return false;">Retry</a></td></tr>';
+            console.error('Error loading custom parsers:', err);
+        });
+}
+
+function previewCustomParser() {
+    const pattern = document.getElementById('cpPattern').value.trim();
+    const appMatch = document.getElementById('cpAppMatch').value.trim();
+    if (!pattern) { toast('Enter a pattern to test.', 'warning'); return; }
+
+    const panel = document.getElementById('cpPreviewPanel');
+    const summary = document.getElementById('cpPreviewSummary');
+    const body = document.getElementById('cpPreviewBody');
+    panel.style.display = 'block';
+    summary.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i>Checking recent logs...';
+    body.innerHTML = '';
+
+    fetch('/api/custom-parsers/preview', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({pattern, app_match: appMatch})
+    }).then(r => r.json().then(d => ({ok: r.ok, d}))).then(({ok, d}) => {
+        if (!ok) { summary.innerHTML = `<span class="text-danger">${escHtml(d.error || 'Preview failed.')}</span>`; body.innerHTML = ''; return; }
+        summary.innerHTML = `Matched <strong>${d.match_count}</strong> of the last ${d.scanned} log(s) in the last ${d.window_days} days${appMatch ? ` for app "${escHtml(appMatch)}"` : ''}.`;
+        body.innerHTML = d.sample.map(r => `
+            <tr>
+                <td class="text-muted text-nowrap">${escHtml(r.timestamp)}</td>
+                <td>${escHtml(r.host || '')}</td>
+                <td>${escHtml(r.app || '')}</td>
+                <td>${r.matched ? '<i class="fa-solid fa-check text-success"></i>' : '<i class="fa-solid fa-xmark text-muted"></i>'}</td>
+                <td class="small">${Object.keys(r.extracted).length ? Object.entries(r.extracted).map(([k, v]) => `${escHtml(k)}=${escHtml(v)}`).join(', ') : ''}</td>
+            </tr>`).join('');
+    }).catch(err => { summary.innerHTML = `<span class="text-danger">Error: ${escHtml(err)}</span>`; body.innerHTML = ''; });
+}
+
+function addCustomParser() {
+    const errBox = document.getElementById('cpFormError');
+    errBox.style.display = 'none';
+    const payload = {
+        name: document.getElementById('cpName').value.trim(),
+        app_match: document.getElementById('cpAppMatch').value.trim(),
+        pattern: document.getElementById('cpPattern').value.trim(),
+        priority: parseInt(document.getElementById('cpPriority').value, 10) || 100,
+        description: document.getElementById('cpDescription').value.trim(),
+    };
+    fetch('/api/custom-parsers', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+    }).then(r => r.json().then(d => ({ok: r.ok, d}))).then(({ok, d}) => {
+        if (!ok) { errBox.textContent = d.error || 'Failed to create custom parser.'; errBox.style.display = 'block'; return; }
+        toast('Custom parser added.', 'success');
+        document.getElementById('cpName').value = '';
+        document.getElementById('cpAppMatch').value = '';
+        document.getElementById('cpPattern').value = '';
+        document.getElementById('cpPriority').value = '100';
+        document.getElementById('cpDescription').value = '';
+        document.getElementById('cpPreviewPanel').style.display = 'none';
+        loadCustomParsers();
+        loadParserHealth();
+    }).catch(err => { errBox.textContent = 'Error: ' + err; errBox.style.display = 'block'; });
+}
+
+function toggleCustomParser(id) {
+    fetch(`/api/custom-parsers/${id}/toggle`, { method: 'PUT' }).then(() => { loadCustomParsers(); loadParserHealth(); });
+}
+
+async function deleteCustomParser(id) {
+    if (await confirmDialog('Delete this custom parser?', {title: 'Delete custom parser', danger: true, confirmLabel: 'Delete'})) {
+        fetch(`/api/custom-parsers/${id}`, { method: 'DELETE' }).then(() => { loadCustomParsers(); loadParserHealth(); });
+    }
+}
+
+// =====================================================================
 // INIT
 // =====================================================================
 document.addEventListener("DOMContentLoaded", function() {
@@ -1159,6 +1424,9 @@ document.addEventListener("DOMContentLoaded", function() {
     loadSilentSourceAlerts();
     loadLinuxChannelGroupsDropdown();
     loadLinuxChannels();
+    loadVectorStatus();
+    loadParserHealth();
+    loadCustomParsers();
 });
 </script>
 {% endblock %}
