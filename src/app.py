@@ -776,6 +776,20 @@ def api_ingest():
             # never fight a built-in extraction. See CUSTOM_PARSER_TARGET_FIELDS.
             for k, v in _run_custom_parsers(db, app_n, msg).items():
                 proc.setdefault(k, v)
+            # username/event_id/severity/source_ip are real CUSTOM_PARSER_TARGET_FIELDS
+            # entries but aren't part of `proc`'s own INSERT columns below (they come from
+            # the log's own top-level fields, usr/eid/sev/sip) -- apply a custom parser's
+            # extraction here, gap-filling only when the built-in value is still its unset
+            # placeholder ('-'/'INFO'/falsy, matching this file's existing placeholder
+            # conventions), so a real value is never overridden.
+            if usr in ('-', '') and proc.get('username'):
+                usr = proc['username']
+            if eid in ('-', '') and proc.get('event_id'):
+                eid = proc['event_id']
+            if sev == 'INFO' and proc.get('severity'):
+                sev = proc['severity']
+            if not sip and proc.get('source_ip'):
+                sip = proc['source_ip']
             # FIM sends its own computed sha256 as a dedicated field (not embedded in the
             # free-text message, which just reads "File changed: <path>") -- see
             # run_fim_check() in both agent scripts. Falls back to it only when the
