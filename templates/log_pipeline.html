@@ -271,7 +271,7 @@
         <div class="card bg-dark border-secondary">
             <div class="card-body">
                 <h5 class="card-title text-light mb-3"><i class="fa-solid fa-wand-magic-sparkles me-2"></i>Custom Parsers</h5>
-                <p class="text-muted small mb-3">Admin-defined regex field extraction (Python named capture groups) for log shapes the built-in extractors don't cover. Runs server-side against every ingested log's message, gap-filling only -- it never overrides a field a built-in extractor already populated. Test against real recent logs before saving.</p>
+                <p class="text-muted small mb-3">Admin-defined regex field extraction (Python named capture groups) for log shapes the built-in extractors don't cover. Runs server-side against every ingested log's message. Process/network fields (image, command line, hashes, etc.) are gap-fill only -- never overriding a built-in extractor's result. Severity, Event ID, Username, and Source IP have no competing built-in extractor to protect, so a matching parser always sets them (e.g. overriding a generic "SYSTEM" username with the real actor from a Security event's message body). Test against real recent logs before saving.</p>
 
                 <div class="row g-2 mb-2">
                     <div class="col-md-3">

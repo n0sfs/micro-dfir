@@ -667,6 +667,16 @@ CUSTOM_PARSER_TARGET_FIELDS = (
     'query_name', 'file_hash',
 )
 
+# severity/event_id/username/source_ip come straight from the log's own top-level
+# payload (usr/sev/eid/sip in api_ingest), not a genuine built-in EXTRACTOR the way
+# process_image/command_line/etc are derived from Windows XML/regex/auditd parsing --
+# there's nothing for a custom parser to "fight" there, just a raw default (often
+# generic/misleading, e.g. Security 4688 events always resolve their top-level user to
+# "SYSTEM" even though the real actor is in the message body). So a matching custom
+# parser always WINS for these 4 (no gap-only/setdefault gating like the rest) -- an
+# admin already reviewed the match via dry-run before saving it.
+_CUSTOM_PARSER_LOG_METADATA_FIELDS = frozenset({'severity', 'event_id', 'username', 'source_ip'})
+
 _CUSTOM_PARSERS_CACHE = {'data': None, 'time': 0}
 _CUSTOM_PARSERS_CACHE_TTL = 30
 
@@ -774,22 +784,22 @@ def api_ingest():
             # Admin-defined custom parsers fill GAPS left by the built-in extractors above --
             # never override an already-populated field (setdefault), so a custom parser can
             # never fight a built-in extraction. See CUSTOM_PARSER_TARGET_FIELDS.
-            for k, v in _run_custom_parsers(db, app_n, msg).items():
-                proc.setdefault(k, v)
-            # username/event_id/severity/source_ip are real CUSTOM_PARSER_TARGET_FIELDS
-            # entries but aren't part of `proc`'s own INSERT columns below (they come from
-            # the log's own top-level fields, usr/eid/sev/sip) -- apply a custom parser's
-            # extraction here, gap-filling only when the built-in value is still its unset
-            # placeholder ('-'/'INFO'/falsy, matching this file's existing placeholder
-            # conventions), so a real value is never overridden.
-            if usr in ('-', '') and proc.get('username'):
-                usr = proc['username']
-            if eid in ('-', '') and proc.get('event_id'):
-                eid = proc['event_id']
-            if sev == 'INFO' and proc.get('severity'):
-                sev = proc['severity']
-            if not sip and proc.get('source_ip'):
-                sip = proc['source_ip']
+            custom_fields = _run_custom_parsers(db, app_n, msg)
+            for k, v in custom_fields.items():
+                if k not in _CUSTOM_PARSER_LOG_METADATA_FIELDS:
+                    proc.setdefault(k, v)
+            # severity/event_id/username/source_ip aren't part of `proc`'s own INSERT
+            # columns below (they come from the log's own top-level usr/sev/eid/sip
+            # fields) -- see _CUSTOM_PARSER_LOG_METADATA_FIELDS for why these 4 always
+            # win when a custom parser matches, unlike the gap-fill-only fields above.
+            if 'username' in custom_fields:
+                usr = custom_fields['username']
+            if 'event_id' in custom_fields:
+                eid = custom_fields['event_id']
+            if 'severity' in custom_fields:
+                sev = custom_fields['severity']
+            if 'source_ip' in custom_fields:
+                sip = custom_fields['source_ip']
             # FIM sends its own computed sha256 as a dedicated field (not embedded in the
             # free-text message, which just reads "File changed: <path>") -- see
             # run_fim_check() in both agent scripts. Falls back to it only when the
