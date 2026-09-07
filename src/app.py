@@ -7583,23 +7583,6 @@ def api_log_pipeline_silent_source_alerts():
     ).fetchall()
     return jsonify([dict(r) for r in rows])
 
-# TEMPORARY one-time cleanup, not a permanent capability -- this app has no general
-# alert-deletion feature by design (alerts are audit-relevant SIEM history), so this is
-# scoped as narrowly as possible: only the truly-legacy 'Log Source Silent' rows that
-# predate host-level tracking entirely and can never be attributed to a host after the
-# fact. Remove this route once it's been run against production.
-@app.route('/api/log-pipeline/silent-source-alerts/purge-legacy', methods=['POST'])
-@login_required
-def api_purge_legacy_silent_alerts():
-    err = require_permission('settings.system.manage')
-    if err: return err
-    db = get_db()
-    cur = db.execute("DELETE FROM alerts WHERE rule_name = 'Log Source Silent' AND (host IS NULL OR host = '')")
-    deleted = cur.rowcount
-    db.commit()
-    log_audit('silent_alert_legacy_purge', 'alerts', None, f'deleted={deleted}')
-    return jsonify({'status': 'success', 'deleted': deleted})
-
 # Ground-truth list for the alert_created playbook editor's "Only if Rule is..."
 # condition -- every distinct rule_name that has EVER actually fired in this
 # deployment, covering both real Sigma rule titles and the inline heuristic engine's
