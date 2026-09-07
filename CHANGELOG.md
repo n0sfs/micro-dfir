@@ -83,6 +83,22 @@ the highest-value findings:
   1` riding the host index's rowid ordering, confirmed via `EXPLAIN QUERY
   PLAN`) rather than `MAX(timestamp)`, which would force a full scan of
   every row for that host on this app's 6.2M-row table.
+- **An analyst had to separately check Threat Intel, EDR Agents, and UEBA**
+  to tell whether a given alert's host/IP was actually notable. Added an
+  enrichment card to the alert detail modal: threat-intel verdict for
+  source/destination IP, asset criticality above standard, and UEBA risk
+  tier/score for host and user — each shown only when there's a real signal
+  (a "Low" risk tier is the server's always-on default for a zero score,
+  suppressed rather than shown as noise on every alert).
+- **Reports had no discoverable, real lookback control** — Security
+  Summary, Audit Trail, and the per-framework Compliance report all
+  hardcoded a 30-day window. Added a Lookback select (7/30/90/180 days) on
+  the Reports page, threaded through `generate_report.py`'s `run_report()`
+  into every windowed query and PDF narrative section; the Vulnerability
+  Report (a live snapshot, not a rolling window) hides the control rather
+  than pretending to accept it. Caught and fixed a real falsy-zero bug
+  while writing the fixture test: `days or 30` would silently treat an
+  explicit `days=0` as "unset" instead of clamping to 1.
 
 ### Closed the standing gap-list: SLA tiers, password strength, agent recovery, revert cancel
 
