@@ -1252,6 +1252,7 @@ function showLogDetail(idx) {
             <dt class="col-3">Src IP</dt><dd class="col-9">${pivotLinkHtml('source_ip', log.source_ip, highlightText(log.source_ip, termsFor('source_ip')))}${log.country_name ? ` <span class="badge bg-secondary" title="${escHtml(log.country_code || '')}">${escHtml(log.country_name)}</span>` : ''}</dd>
             <dt class="col-3">Dest IP</dt><dd class="col-9">${pivotLinkHtml('destination_ip', log.destination_ip, highlightText(log.destination_ip, termsFor('destination_ip')))}</dd>
         </dl>
+        <div id="alertEnrichmentWrap"></div>
         ${viewRuleBtn}
         ${log.type === 'alert' ? `
         <label class="form-label small text-muted mb-1">Triage</label>
@@ -1299,7 +1300,92 @@ function showLogDetail(idx) {
     `;
     if (canAddToCase) { renderAddToCaseControl(log); }
     if (canLinkToEntity) { renderLinkToEntityControl(log); }
+    renderAlertEnrichment(log);
     new bootstrap.Modal(document.getElementById('logDetailModal')).show();
+}
+
+// Threat intel verdict / asset criticality / UEBA risk are today only visible by
+// separately checking Threat Intel, EDR Agents, and UEBA -- this surfaces all three
+// inline on the alert an analyst is already looking at. Renders nothing (not a stale
+// "no data" placeholder) when a lookup finds nothing real to show -- e.g. a "Low" risk
+// tier is server-side _risk_tier(0, ...)'s always-on default for a score of zero, not
+// a genuine signal, so it's only shown when real risk_score_events actually exist.
+let _assetsCachePromise = null;
+function loadAssetsCached() {
+    if (!_assetsCachePromise) {
+        _assetsCachePromise = fetch('/api/assets').then(r => r.ok ? r.json() : []).catch(() => []);
+    }
+    return _assetsCachePromise;
+}
+
+function assetCriticalityBadge(crit) {
+    const c = (crit || 'standard').toLowerCase();
+    if (c === 'critical') return '<span class="badge bg-danger">Critical</span>';
+    if (c === 'important') return '<span class="badge bg-warning text-dark">Important</span>';
+    return '<span class="badge bg-secondary">Standard</span>';
+}
+
+function enrichmentRiskTierBadge(tier) {
+    const t = (tier || '').toLowerCase();
+    if (t === 'critical' || t === 'high') return `<span class="badge bg-danger">${escHtml(tier)}</span>`;
+    if (t === 'medium') return `<span class="badge bg-warning text-dark">${escHtml(tier)}</span>`;
+    return `<span class="badge bg-secondary">${escHtml(tier)}</span>`;
+}
+
+function tiVerdictBadge(status, corrobCount) {
+    if (status === 'malicious') {
+        const corrob = corrobCount > 1 ? ` (${corrobCount} feeds)` : '';
+        return `<span class="badge bg-danger"><i class="fa-solid fa-skull-crossbones me-1"></i>Malicious${corrob}</span>`;
+    }
+    if (status === 'revoked') return '<span class="badge bg-secondary" title="Matched a revoked/inactive indicator only">Revoked Match</span>';
+    return '';
+}
+
+let _enrichmentToken = 0;
+async function renderAlertEnrichment(log) {
+    const wrap = document.getElementById('alertEnrichmentWrap');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    const myToken = ++_enrichmentToken;
+    const parts = [];
+
+    const ipTargets = [];
+    if (log.source_ip && log.source_ip !== '-') ipTargets.push({ label: 'Src IP', value: log.source_ip });
+    if (log.destination_ip && log.destination_ip !== '-') ipTargets.push({ label: 'Dest IP', value: log.destination_ip });
+    const tiResults = await Promise.all(ipTargets.map(t =>
+        fetch('/api/ti/lookup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ioc: t.value }) })
+            .then(r => r.ok ? r.json() : null).catch(() => null).then(res => ({ ...t, res }))
+    ));
+    const tiHits = tiResults.filter(t => t.res && (t.res.status === 'malicious' || t.res.status === 'revoked'));
+    if (tiHits.length) {
+        parts.push(`<span class="me-3"><strong class="text-muted me-1">Threat Intel:</strong>${tiHits.map(t => `${escHtml(t.label)} ${tiVerdictBadge(t.res.status, t.res.corroboration_count)}`).join(' &nbsp; ')}</span>`);
+    }
+
+    if (log.host && log.host !== '-') {
+        const assets = await loadAssetsCached();
+        const asset = (assets || []).find(a => a.host === log.host);
+        if (asset && asset.criticality && asset.criticality !== 'standard') {
+            parts.push(`<span class="me-3"><strong class="text-muted me-1">Asset Criticality:</strong>${assetCriticalityBadge(asset.criticality)}</span>`);
+        }
+    }
+
+    const riskTargets = [];
+    if (log.host && log.host !== '-') riskTargets.push({ label: 'Host', type: 'host', id: log.host });
+    if (log.username && log.username !== '-') riskTargets.push({ label: 'User', type: 'user', id: log.username });
+    const riskResults = await Promise.all(riskTargets.map(t =>
+        fetch(`/api/ueba/risk-scores/${encodeURIComponent(t.type)}/${encodeURIComponent(t.id)}`)
+            .then(r => r.ok ? r.json() : null).catch(() => null).then(res => ({ ...t, res }))
+    ));
+    const riskHits = riskResults.filter(t => t.res && t.res.events && t.res.events.length > 0);
+    if (riskHits.length) {
+        parts.push(`<span class="me-3"><strong class="text-muted me-1">UEBA Risk:</strong>${riskHits.map(t => `${escHtml(t.label)} ${enrichmentRiskTierBadge(t.res.tier)} <span class="text-muted">(${escHtml(t.res.score)} pts)</span>`).join(' &nbsp; ')}</span>`);
+    }
+
+    // An analyst who clicks through several alert rows quickly could otherwise see a
+    // slower lookup's result land in a modal that has since moved on to a different
+    // alert -- only the most recently started renderAlertEnrichment call may write.
+    if (myToken !== _enrichmentToken) return;
+    wrap.innerHTML = parts.length ? `<div class="border border-secondary rounded p-2 mb-2">${parts.join('')}</div>` : '';
 }
 
 function saveTriage(aid) {
