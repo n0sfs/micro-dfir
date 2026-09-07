@@ -179,19 +179,20 @@ SECURITY_SEVERITY_COLORS = {
     'Low': '#6c757d', 'Informational': '#6c757d',
 }
 
-def generate_security_report():
+def generate_security_report(days=30):
     conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
     # Left as-is (UTC .isoformat() window, not this file's usual datetime.now() string) --
     # already-working production behavior for these 3 queries specifically; not the
     # concern of the narrative-enrichment work below, so not touched to avoid a
     # regression risk with no functional upside.
-    thirty_days_ago = (datetime.utcnow() - timedelta(days=30)).isoformat()
+    thirty_days_ago = (datetime.utcnow() - timedelta(days=days)).isoformat()
     total_events = cursor.execute("SELECT COUNT(*) FROM events WHERE timestamp >= ?", (thirty_days_ago,)).fetchone()[0]
     total_alerts = cursor.execute("SELECT COUNT(*) FROM alerts WHERE timestamp >= ?", (thirty_days_ago,)).fetchone()[0]
     top_alerts = [{"title": r[0], "severity": r[1], "count": r[2]} for r in cursor.execute(
         "SELECT sr.title, a.severity, COUNT(a.id) as hit_count FROM alerts a JOIN sigma_rules sr ON a.rule_id = sr.id "
         "WHERE a.timestamp >= ? GROUP BY sr.title, a.severity ORDER BY hit_count DESC LIMIT 5", (thirty_days_ago,)
     ).fetchall()]
+    window = f'-{days} days'
 
     # Everything below is new -- pulled from the same underlying data the Dashboards
     # widgets already show (case load/SLA, top-firing UEBA anomaly rules, risk-score
@@ -208,11 +209,11 @@ def generate_security_report():
         sla_hours = 24
     open_cases = cursor.execute("SELECT COUNT(*) FROM cases WHERE status = 'open'").fetchone()[0]
     cases_closed_30d = cursor.execute(
-        "SELECT COUNT(*) FROM cases WHERE status = 'closed' AND closed_at >= datetime('now', '-30 days')"
+        "SELECT COUNT(*) FROM cases WHERE status = 'closed' AND closed_at >= datetime('now', ?)", (window,)
     ).fetchone()[0]
     avg_close_hours = cursor.execute(
         "SELECT AVG((julianday(closed_at) - julianday(created_at)) * 24) FROM cases "
-        "WHERE status = 'closed' AND closed_at IS NOT NULL AND closed_at >= datetime('now', '-30 days')"
+        "WHERE status = 'closed' AND closed_at IS NOT NULL AND closed_at >= datetime('now', ?)", (window,)
     ).fetchone()[0]
     sla_breaches = cursor.execute(
         "SELECT COUNT(*) FROM cases WHERE status = 'open' AND (julianday('now') - julianday(created_at)) * 24 > ?",
@@ -224,8 +225,8 @@ def generate_security_report():
     top_anomaly_rules = [dict(r) for r in cursor.execute(
         "SELECT ar.name, ar.entity_type, COUNT(rse.id) as matches "
         "FROM anomaly_rules ar JOIN risk_score_events rse ON rse.rule_id = ar.id "
-        "WHERE rse.computed_at >= datetime('now', '-30 days') AND ar.enabled = 1 "
-        "GROUP BY ar.id ORDER BY matches DESC LIMIT 10"
+        "WHERE rse.computed_at >= datetime('now', ?) AND ar.enabled = 1 "
+        "GROUP BY ar.id ORDER BY matches DESC LIMIT 10", (window,)
     ).fetchall()]
 
     # Risk-score trend -- ported from api_dashboard_risk_trend (app.py:6478-6487).
@@ -233,7 +234,7 @@ def generate_security_report():
     # than a day-by-day table -- this is a static PDF, not an interactive chart.
     risk_days = [dict(r) for r in cursor.execute(
         "SELECT date(computed_at) as day, SUM(points) as total_points FROM risk_score_events "
-        "WHERE computed_at >= datetime('now', '-30 days') GROUP BY day ORDER BY day ASC"
+        "WHERE computed_at >= datetime('now', ?) GROUP BY day ORDER BY day ASC", (window,)
     ).fetchall()]
     risk_trend_total = sum(d['total_points'] for d in risk_days)
     risk_trend_direction = None
@@ -252,7 +253,7 @@ def generate_security_report():
     coverage_snapshots = [dict(r) for r in cursor.execute(
         "SELECT snapshot_date, coverage_pct, techniques_total, gap_count, inactive_count, "
         "active_count, validated_count FROM coverage_snapshots "
-        "WHERE snapshot_date >= date('now', '-30 days') ORDER BY snapshot_date"
+        "WHERE snapshot_date >= date('now', ?) ORDER BY snapshot_date", (window,)
     ).fetchall()]
     coverage_latest = coverage_snapshots[-1] if coverage_snapshots else None
     coverage_delta = (
@@ -263,6 +264,7 @@ def generate_security_report():
     context = {
         "date_generated": datetime.now().strftime("%B %d, %Y"),
         "report_title": "Managed Security Report",
+        "report_days": days,
         "branding": _branding_context(conn),
         "total_events": f"{total_events:,}", "total_alerts": f"{total_alerts:,}",
         "top_alerts": top_alerts,
@@ -308,10 +310,10 @@ def _framework_relevant_apps(cursor, framework_key):
             apps |= expected
     return apps
 
-def _framework_focused_context(conn, cursor, framework_key):
+def _framework_focused_context(conn, cursor, framework_key, days=30):
     label = COMPLIANCE_FRAMEWORK_LABELS.get(framework_key, framework_key)
     like_pattern = f'%{framework_key}%'
-    thirty_days_ago = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
+    thirty_days_ago = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
 
     # Rule coverage, scoped to this framework, with real fired-alert evidence per rule --
     # not just enabled=1. Same alerts-JOIN-sigma_rules shape already used by
@@ -405,6 +407,7 @@ def _framework_focused_context(conn, cursor, framework_key):
         "date_generated": datetime.now().strftime("%B %d, %Y"),
         "report_title": f"Compliance Report — {label}",
         "report_subtitle": "Detection rules, endpoint hardening, and audit evidence for this framework",
+        "report_days": days,
         "branding": _branding_context(conn),
         "framework_label": label,
         "rules": rules,
@@ -424,11 +427,11 @@ def _framework_focused_context(conn, cursor, framework_key):
         "log_volume_apps": sorted(relevant_apps),
     }
 
-def generate_compliance_report(framework_key=None):
+def generate_compliance_report(framework_key=None, days=30):
     conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
 
     if framework_key:
-        context = _framework_focused_context(conn, cursor, framework_key)
+        context = _framework_focused_context(conn, cursor, framework_key, days=days)
         conn.close()
         return _render_and_write('report_template_compliance_framework.html', context, _report_filename(f"Compliance_{framework_key}"))
 
@@ -467,9 +470,9 @@ def generate_compliance_report(framework_key=None):
     conn.close()
     return _render_and_write('report_template_compliance.html', context, _report_filename('Compliance'))
 
-def generate_audit_report():
+def generate_audit_report(days=30):
     conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
-    thirty_days_ago = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
+    thirty_days_ago = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
 
     action_counts = [dict(r) for r in cursor.execute(
         "SELECT action, COUNT(*) as count FROM audit_log WHERE timestamp >= ? GROUP BY action ORDER BY count DESC",
@@ -492,7 +495,8 @@ def generate_audit_report():
     context = {
         "date_generated": datetime.now().strftime("%B %d, %Y"),
         "report_title": "Audit Trail Report",
-        "report_subtitle": "Last 30 days",
+        "report_subtitle": f"Last {days} days",
+        "report_days": days,
         "branding": _branding_context(conn),
         "action_counts": action_counts,
         "sensitive_events": sensitive_events,
@@ -755,11 +759,18 @@ def _record_history(conn, report_type, filename, status, started_at, completed_a
 # duplicating the insert or a cron run silently having no record at all. A case report
 # (report_type == 'case') is the one path that needs case_id -- looked up here so a
 # failed generation still records which case it was for, not just that something failed.
-def run_report(report_type, triggered_by=None, trigger_source='manual', case_id=None, framework_key=None):
+def run_report(report_type, triggered_by=None, trigger_source='manual', case_id=None, framework_key=None, days=30):
     started_at = datetime.now().isoformat()
     conn = sqlite3.connect(DB_PATH, timeout=30)
     case_title = None
     framework_label = COMPLIANCE_FRAMEWORK_LABELS.get(framework_key) if framework_key else None
+    # `days or 30` would be wrong here -- 0 is a falsy int, so an explicit days=0 (e.g.
+    # `--days 0` from the CLI) would silently fall back to the 30-day default instead of
+    # clamping to 1 as intended.
+    try:
+        days = 30 if days is None else max(1, min(int(days), 365))
+    except (TypeError, ValueError):
+        days = 30
     try:
         # Defensive create -- mirrors _get_or_create_secret_key()'s own pattern in
         # app.py, in case this runs before migrate_report_history()/
@@ -781,9 +792,14 @@ def run_report(report_type, triggered_by=None, trigger_source='manual', case_id=
             case_title = row[0]
             filename = generate_case_report(case_id)
         elif report_type == 'compliance':
-            filename = generate_compliance_report(framework_key)
+            filename = generate_compliance_report(framework_key, days=days)
+        elif report_type == 'vulnerability':
+            # A live software-inventory snapshot, not a rolling time window -- 'days'
+            # genuinely doesn't apply here, so this is the one report type that ignores
+            # it rather than pretending to accept a lookback window it wouldn't use.
+            filename = generate_vulnerability_report()
         else:
-            filename = REPORT_GENERATORS.get(report_type, generate_security_report)()
+            filename = REPORT_GENERATORS.get(report_type, generate_security_report)(days=days)
         _record_history(conn, report_type, filename, 'success', started_at,
                          datetime.now().isoformat(), triggered_by, trigger_source, case_id=case_id, case_title=case_title,
                          framework_key=framework_key, framework_label=framework_label)
@@ -803,5 +819,7 @@ if __name__ == "__main__":
     parser.add_argument('--source', default='scheduled', choices=('manual', 'scheduled'))
     parser.add_argument('--case-id', type=int, default=None)
     parser.add_argument('--framework', default=None)
+    parser.add_argument('--days', type=int, default=30)
     args = parser.parse_args()
-    run_report(args.report_type, triggered_by=args.user, trigger_source=args.source, case_id=args.case_id, framework_key=args.framework)
+    run_report(args.report_type, triggered_by=args.user, trigger_source=args.source, case_id=args.case_id,
+               framework_key=args.framework, days=args.days)
