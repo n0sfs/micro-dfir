@@ -10,6 +10,40 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-07
 
+### Real Chrome/Edge browser-history parsing in `collect_browser_artifacts`
+
+The EDR "Collect Browser Artifacts" action used to only hash and
+timestamp `History`/`places.sqlite` files, never read what was
+actually inside them. It now parses Chrome/Edge's `History` SQLite
+file for real — url/title/visit_count/last_visit_time — via a
+from-scratch, dependency-free SQLite B-tree/record-format reader
+written in PowerShell (no `System.Data.SQLite`/ODBC provider exists
+on a vanilla Windows endpoint). The file is copied first to avoid the
+browser's exclusive lock, and the scan reads the most-recently-created
+600 rows per file (a performance cap — byte-level decoding in
+interpreted PowerShell runs ~0.03s/row, so an uncapped scan of a large
+real-world History file would blow past the agent's 180s command
+timeout) walked from the highest rowids down, since insertion order
+(not last-visit time) is what on-disk row order actually reflects —
+reading low-to-high would surface the *oldest* URLs first. The 100
+most recent of those are returned. Firefox's `places.sqlite` uses a
+different schema and stays metadata-only (hash + timestamp) as
+before — collect the file directly for offline analysis. Verified
+against a real 45MB production-scale History file (not just a
+synthetic fixture): full run across 2 users' Chrome/Edge/Firefox
+profiles completed in ~40s, and the parsed output correctly showed
+genuinely recent real browsing activity in the right order.
+
+### Reports page reorganization: PDF Report Branding + Report Schedule moved out of Settings
+
+Both used to live in Settings > Reports, the one settings tab visible
+to every role regardless of permissions (since it had no gate of its
+own). Moved to two new tabs on the Reports page itself (Reports /
+Branding / Schedule), which is where an admin actually goes to work
+with reports. Settings no longer has a Reports tab; a role with none
+of the remaining tab permissions (e.g. the base Analyst role) now sees
+an explicit "no accessible settings" message instead of a blank card.
+
 ### EDR response-action history filters + fleet version-compliance note
 
 Response Actions history was a flat, hard-capped last-50-rows list

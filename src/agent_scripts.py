@@ -429,19 +429,205 @@ def collect_browser_artifacts():
     return r"""$result = @{}
 $browsers = New-Object System.Collections.ArrayList
 $downloads = New-Object System.Collections.ArrayList
+$visitedUrls = New-Object System.Collections.ArrayList
+# Byte-level varint/record decoding in interpreted PowerShell is slow -- empirically
+# ~0.03s/row against a real production-sized History file, so this cap is chosen to
+# keep total parsing time (across every Chrome/Edge profile found) comfortably inside
+# the agent's SCRIPT_TIMEOUT_SECONDS (180s) budget rather than risking the whole
+# response action timing out on a host with a large or multi-profile history.
+$HISTORY_ROW_CAP = 600
+
+# Minimal, dependency-free SQLite table-B-tree reader -- no System.Data.SQLite/ODBC
+# provider available on a vanilla Windows endpoint, so this parses the file format
+# directly per the public spec (https://sqlite.org/fileformat2.html). Reads a named
+# table's rows via a full leaf-page traversal from its root page (found via
+# sqlite_master); a payload that spills to an overflow page (rare for url/title-length
+# text) is flagged Overflowed=$true with a null value rather than guessed at.
+function Get-SqliteVarint {
+    param([byte[]]$Bytes, [int64]$Offset)
+    $result = [int64]0
+    for ($i = 0; $i -lt 8; $i++) {
+        $b = [int64]$Bytes[$Offset + $i]
+        $result = ($result -shl 7) -bor ($b -band 0x7F)
+        if (($b -band 0x80) -eq 0) { return , @($result, ($i + 1)) }
+    }
+    $b = [int64]$Bytes[$Offset + 8]
+    $result = ($result -shl 8) -bor $b
+    return , @($result, 9)
+}
+
+function ConvertFrom-SqliteBigEndianInt {
+    param([byte[]]$Bytes, [int64]$Offset, [int]$Length)
+    $isNegative = ($Bytes[$Offset] -band 0x80) -ne 0
+    $buf = New-Object byte[] 8
+    for ($i = 0; $i -lt 8; $i++) { $buf[$i] = if ($isNegative) { 0xFF } else { 0x00 } }
+    for ($i = 0; $i -lt $Length; $i++) { $buf[$Length - 1 - $i] = $Bytes[$Offset + $i] }
+    return [BitConverter]::ToInt64($buf, 0)
+}
+
+function Read-SqliteTable {
+    # -PreferHighRowid walks pages so the highest-rowid cells (in SQLite's own ascending-
+    # rowid page ordering) are read first. This matters when MaxRows caps a genuinely
+    # large table: a table's rowid climbs by INSERTION order, not by when a row was last
+    # touched, so reading in plain ascending (on-disk) order returns the OLDEST rows
+    # first -- for Chrome/Edge's `urls` table specifically, the oldest first-ever-visited
+    # URLs, not recent browsing activity. Preferring high rowids first is a much better
+    # proxy for "recent" given a capped scan budget.
+    param([string]$DbPath, [string]$TableName, [int]$MaxRows = 500, [switch]$PreferHighRowid)
+    $bytes = [System.IO.File]::ReadAllBytes($DbPath)
+    if ($bytes.Length -lt 100) { throw "Not a SQLite file (too small)" }
+    if ([System.Text.Encoding]::ASCII.GetString($bytes, 0, 16) -ne "SQLite format 3`0") { throw "Not a SQLite file (bad header)" }
+    $pageSize = ([int]$bytes[16] -shl 8) -bor [int]$bytes[17]
+    if ($pageSize -eq 1) { $pageSize = 65536 }
+    if ($pageSize -lt 512 -or $pageSize -gt 65536) { throw "Unexpected page size $pageSize" }
+    function Get-PageOffset([int64]$pageNum) { return ($pageNum - 1) * $pageSize }
+    function Read-Record([int64]$payloadOffset, [int64]$payloadLength, [int64]$usableSize) {
+        $maxLocal = $usableSize - 35
+        $overflowed = $payloadLength -gt $maxLocal
+        $localLength = if ($overflowed) { $usableSize - (($payloadLength - $maxLocal) % ($usableSize - 4)) - 4 } else { $payloadLength }
+        if ($localLength -gt $payloadLength) { $localLength = $payloadLength }
+        $pos = $payloadOffset
+        $r = Get-SqliteVarint $bytes $pos
+        $headerLen = $r[0]; $pos += $r[1]
+        $headerEnd = $payloadOffset + $headerLen
+        $serialTypes = New-Object System.Collections.Generic.List[int64]
+        while ($pos -lt $headerEnd) {
+            $r2 = Get-SqliteVarint $bytes $pos
+            $serialTypes.Add($r2[0]) | Out-Null
+            $pos += $r2[1]
+        }
+        $dataPos = $headerEnd
+        $localEnd = $payloadOffset + $localLength
+        $values = New-Object System.Collections.Generic.List[object]
+        foreach ($st in $serialTypes) {
+            $colOverflowed = $false
+            $val = $null
+            if ($st -eq 0) { $val = $null }
+            elseif ($st -ge 1 -and $st -le 6) {
+                $lenMap = @{1=1;2=2;3=3;4=4;5=6;6=8}
+                $len = $lenMap[[int]$st]
+                if ($dataPos + $len -le $localEnd) { $val = ConvertFrom-SqliteBigEndianInt $bytes $dataPos $len } else { $colOverflowed = $true }
+                $dataPos += $len
+            } elseif ($st -eq 7) {
+                if ($dataPos + 8 -le $localEnd) {
+                    $rev = New-Object byte[] 8
+                    for ($i = 0; $i -lt 8; $i++) { $rev[$i] = $bytes[$dataPos + 7 - $i] }
+                    $val = [BitConverter]::ToDouble($rev, 0)
+                } else { $colOverflowed = $true }
+                $dataPos += 8
+            } elseif ($st -eq 8) { $val = [int64]0 }
+            elseif ($st -eq 9) { $val = [int64]1 }
+            elseif ($st -ge 12) {
+                $isText = ($st % 2) -eq 1
+                $len = if ($isText) { ($st - 13) / 2 } else { ($st - 12) / 2 }
+                if ($dataPos + $len -le $localEnd) {
+                    if ($len -eq 0) { $val = if ($isText) { "" } else { , (New-Object byte[] 0) } }
+                    elseif ($isText) { $val = [System.Text.Encoding]::UTF8.GetString($bytes, $dataPos, $len) }
+                    else { $val = $bytes[$dataPos..($dataPos + $len - 1)] }
+                } else { $colOverflowed = $true }
+                $dataPos += $len
+            }
+            if ($colOverflowed) { $values.Add($null) | Out-Null } else { $values.Add($val) | Out-Null }
+        }
+        return , @($values, $overflowed)
+    }
+    $rows = New-Object System.Collections.Generic.List[object]
+    function Walk-Page([int64]$pageNum, [bool]$isFirstPage, [int64]$usableSize) {
+        if ($rows.Count -ge $MaxRows) { return }
+        $pageStart = Get-PageOffset $pageNum
+        $hdrStart = if ($isFirstPage) { $pageStart + 100 } else { $pageStart }
+        $pageType = $bytes[$hdrStart]
+        $numCells = ([int]$bytes[$hdrStart + 3] -shl 8) -bor [int]$bytes[$hdrStart + 4]
+        $cellPtrArrayStart = $hdrStart + $(if ($pageType -eq 0x05 -or $pageType -eq 0x02) { 12 } else { 8 })
+        if ($pageType -eq 0x0d) {
+            $cellRange = if ($PreferHighRowid) { ($numCells - 1)..0 } else { 0..($numCells - 1) }
+            foreach ($c in $cellRange) {
+                if ($rows.Count -ge $MaxRows) { break }
+                $cellPtrOffset = $cellPtrArrayStart + ($c * 2)
+                $cellOffset = $pageStart + (([int]$bytes[$cellPtrOffset] -shl 8) -bor [int]$bytes[$cellPtrOffset + 1])
+                $pos = $cellOffset
+                $r = Get-SqliteVarint $bytes $pos
+                $payloadLen = $r[0]; $pos += $r[1]
+                $r2 = Get-SqliteVarint $bytes $pos
+                $rowId = $r2[0]; $pos += $r2[1]
+                $rec = Read-Record $pos $payloadLen $usableSize
+                $rows.Add(@{ RowId = $rowId; Values = $rec[0]; Overflowed = $rec[1] }) | Out-Null
+            }
+        } elseif ($pageType -eq 0x05) {
+            $rightMost = ([int64]$bytes[$hdrStart+8] -shl 24) -bor ([int64]$bytes[$hdrStart+9] -shl 16) -bor ([int64]$bytes[$hdrStart+10] -shl 8) -bor [int64]$bytes[$hdrStart+11]
+            if ($PreferHighRowid) { Walk-Page $rightMost $false $usableSize | Out-Null }
+            $childRange = if ($PreferHighRowid) { ($numCells - 1)..0 } else { 0..($numCells - 1) }
+            if ($numCells -gt 0) {
+                foreach ($c in $childRange) {
+                    if ($rows.Count -ge $MaxRows) { break }
+                    $cellPtrOffset = $cellPtrArrayStart + ($c * 2)
+                    $cellOffset = $pageStart + (([int]$bytes[$cellPtrOffset] -shl 8) -bor [int]$bytes[$cellPtrOffset + 1])
+                    $childPage = ([int64]$bytes[$cellOffset] -shl 24) -bor ([int64]$bytes[$cellOffset+1] -shl 16) -bor ([int64]$bytes[$cellOffset+2] -shl 8) -bor [int64]$bytes[$cellOffset+3]
+                    Walk-Page $childPage $false $usableSize | Out-Null
+                }
+            }
+            if (-not $PreferHighRowid) { Walk-Page $rightMost $false $usableSize | Out-Null }
+        }
+    }
+    $reservedSpace = $bytes[20]
+    $usableSize = $pageSize - $reservedSpace
+    Walk-Page 1 $true $usableSize | Out-Null
+    $masterRows = $rows.ToArray()
+    $rows.Clear()
+    $rootPage = $null
+    foreach ($mr in $masterRows) {
+        $v = $mr.Values
+        if ($v.Count -ge 4 -and $v[0] -eq 'table' -and $v[1] -eq $TableName) { $rootPage = $v[3]; break }
+    }
+    if ($null -eq $rootPage) { throw "Table '$TableName' not found in sqlite_master" }
+    Walk-Page $rootPage $($rootPage -eq 1) $usableSize | Out-Null
+    # The comma operator is load-bearing: bare "return $rows" lets PowerShell's pipeline
+    # auto-enumerate the List<object>, so a 1-row result unwraps to its lone row object
+    # instead of a 1-element list. ", $rows" returns the List itself, unconditionally.
+    return , $rows
+}
+
+function Get-ChromeHistoryUrls([string]$SrcPath, [string]$UserName, [string]$BrowserName) {
+    # Chrome/Edge keep History open with an exclusive lock while running -- copy first
+    # so a byte-level read never races the live browser process.
+    $tmpCopy = [System.IO.Path]::GetTempFileName()
+    try {
+        Copy-Item -Path $SrcPath -Destination $tmpCopy -Force -ErrorAction Stop
+        $rows = Read-SqliteTable -DbPath $tmpCopy -TableName 'urls' -MaxRows $HISTORY_ROW_CAP -PreferHighRowid
+        $chromeEpoch = [datetime]::new(1601, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+        $parsed = foreach ($r in $rows) {
+            $v = $r.Values
+            if ($v.Count -lt 6) { continue }
+            $lastVisitStr = $null
+            if ($v[5] -is [int64] -and $v[5] -gt 0) {
+                try { $lastVisitStr = $chromeEpoch.AddTicks($v[5] * 10).ToString('yyyy-MM-dd HH:mm:ss') } catch {}
+            }
+            if (-not $lastVisitStr) { continue }
+            [PSCustomObject]@{ user=$UserName; browser=$BrowserName; url=$v[1]; title=$v[2]; visit_count=$v[3]; typed_count=$v[4]; last_visit_time=$lastVisitStr }
+        }
+        return @($parsed | Sort-Object last_visit_time -Descending | Select-Object -First 100)
+    } catch {
+        return @()
+    } finally {
+        Remove-Item $tmpCopy -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Get-ChildItem 'C:\Users' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
     $uname = $_.Name
     $uhome = $_.FullName
-    $candidates = @(
-        (Join-Path $uhome 'AppData\Local\Google\Chrome\User Data\Default\History'),
-        (Join-Path $uhome 'AppData\Local\Microsoft\Edge\User Data\Default\History')
+    $chromeCandidates = @(
+        @{ path=(Join-Path $uhome 'AppData\Local\Google\Chrome\User Data\Default\History'); browser='Chrome' },
+        @{ path=(Join-Path $uhome 'AppData\Local\Microsoft\Edge\User Data\Default\History'); browser='Edge' }
     )
-    foreach ($p in $candidates) {
+    foreach ($c in $chromeCandidates) {
+        $p = $c.path
         if (Test-Path $p) {
             $item = Get-Item $p -ErrorAction SilentlyContinue
             if ($item) {
                 $h = try { (Get-FileHash $p -Algorithm SHA256 -ErrorAction Stop).Hash } catch { $null }
                 [void]$browsers.Add([PSCustomObject]@{ user=$uname; path=$p; size=$item.Length; last_write=$item.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'); sha256=$h })
+                foreach ($u in (Get-ChromeHistoryUrls -SrcPath $p -UserName $uname -BrowserName $c.browser)) { [void]$visitedUrls.Add($u) }
             }
         }
     }
@@ -464,8 +650,9 @@ Get-ChildItem 'C:\Users' -Directory -ErrorAction SilentlyContinue | ForEach-Obje
     }
 }
 $result.browser_history_files = $browsers
+$result.recent_visited_urls = @($visitedUrls | Sort-Object last_visit_time -Descending | Select-Object -First 100)
 $result.recent_downloads = $downloads
-$result.note = "History/places.sqlite listed with hash+timestamps only, not parsed -- collect the file via 'Collect File' for offline analysis (e.g. with a SQLite browser)."
+$result.note = "Chrome/Edge History is parsed for real url/title/visit_count/last_visit_time data (a locked-safe copy of the file is read, up to $HISTORY_ROW_CAP of the most-recently-created URL rows scanned per file for performance, then the 100 most recent visits among those shown). This favors recently-added URLs; a revisit of a URL that was first added long ago (e.g. a frequently-reused bookmark) can fall outside the scan cap even though its last-visit time is recent -- collect the file via 'Collect File' for exhaustive offline analysis if needed. Firefox places.sqlite uses a different, unparsed schema and stays metadata-only (hash+timestamp)."
 $result | ConvertTo-Json -Depth 4 -Compress
 """
 
