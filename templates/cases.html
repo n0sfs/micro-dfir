@@ -1481,9 +1481,11 @@ function uploadCaseAttachment() {
         .then(r => r.json().then(data => ({ ok: r.ok, data })))
         .then(({ ok, data }) => {
             if (!ok) { errBox.innerText = data.error || 'Failed to upload attachment.'; errBox.style.display = 'block'; return; }
-            fileEl.value = '';
-            descEl.value = '';
-            loadCaseAttachments(activeCaseId);
+            // Full case reload (not just loadCaseAttachments) -- matches Add Asset/Add
+            // Indicator's own convention, so the new 'attachment_added' Timeline entry
+            // shows up immediately instead of only appearing after the analyst
+            // navigates away and back.
+            openCaseDetail(activeCaseId);
         })
         .catch(err => { errBox.innerText = 'Error: ' + err; errBox.style.display = 'block'; });
 }
@@ -1491,7 +1493,7 @@ function uploadCaseAttachment() {
 async function deleteCaseAttachment(aid, name) {
     if (!(await confirmDialog(`Delete attachment "${name}"? This cannot be undone.`, { title: 'Delete attachment', danger: true, confirmLabel: 'Delete' }))) return;
     fetch(`/api/cases/${activeCaseId}/attachments/${aid}`, { method: 'DELETE' })
-        .then(() => loadCaseAttachments(activeCaseId))
+        .then(() => openCaseDetail(activeCaseId))
         .catch(err => toast('Error deleting attachment: ' + err, 'danger'));
 }
 
