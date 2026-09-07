@@ -1034,6 +1034,19 @@ function showDetailView() {
     document.getElementById('caseDetailView').style.display = '';
 }
 
+// The case-detail tab strip is rebuilt from scratch on every case load (loadAndRenderCaseDetail
+// regenerates #caseDetailBody's whole innerHTML each time), so there's no state to persist
+// across cases -- always starts on the first tab (Tasks), matching the markup's own
+// hardcoded "active"/visible default on tab index 0.
+function switchCaseDetailTab(key) {
+    document.querySelectorAll('#caseDetailTabs .nav-link').forEach(btn => {
+        btn.classList.toggle('active', btn.id === 'caseTabBtn-' + key);
+    });
+    document.querySelectorAll('.case-tab-pane').forEach(pane => {
+        pane.style.display = (pane.id === 'caseTabPane-' + key) ? 'block' : 'none';
+    });
+}
+
 function backToList() {
     activeCaseId = null;
     if (caseTimerInterval) { clearInterval(caseTimerInterval); caseTimerInterval = null; }
@@ -1065,244 +1078,299 @@ function loadAndRenderCaseDetail(cid) {
         const isClosed = c.status === 'closed';
         activeCaseClosed = isClosed;
         document.getElementById('caseDetailTitleHeading').innerHTML = `<i class="fa-solid fa-folder-open me-2"></i>${escHtml(c.title)}`;
+        // Everything besides the case-info form used to sit in a narrow col-lg-5 right
+        // column stacked 11 cards deep -- moved into tabs below the info card instead
+        // (same cards, same element IDs, same load/init calls) so the view doesn't turn
+        // into a long, thin scroll of unrelated sections.
+        const caseTabs = [
+            { key: 'tasks', label: `Tasks (${c.tasks.filter(t => t.status === 'done').length}/${c.tasks.length})`, icon: 'fa-list-check' },
+            ...(c.fields.length ? [{ key: 'fields', label: 'Custom Fields', icon: 'fa-table-list' }] : []),
+            { key: 'items', label: `Items (${c.items.length})`, icon: 'fa-paperclip' },
+            { key: 'related', label: 'Related Items', icon: 'fa-diagram-project' },
+            { key: 'relatedCases', label: 'Related Cases', icon: 'fa-folder-tree' },
+            { key: 'entities', label: 'Threat Intel', icon: 'fa-globe' },
+            { key: 'assets', label: `Assets (${c.assets.length})`, icon: 'fa-server' },
+            { key: 'edr', label: 'EDR Response', icon: 'fa-laptop-medical' },
+            { key: 'iocs', label: `Indicators (${c.iocs.length})`, icon: 'fa-fingerprint' },
+            { key: 'attachments', label: 'Attachments', icon: 'fa-paperclip' },
+            { key: 'analyze', label: 'Analyze', icon: 'fa-magnifying-glass-chart' },
+            { key: 'report', label: 'Report', icon: 'fa-file-pdf' },
+            { key: 'timeline', label: 'Timeline', icon: 'fa-clock-rotate-left' },
+        ];
         document.getElementById('caseDetailBody').innerHTML = `
-            <div class="row g-3">
-                <div class="col-lg-7">
-                    <div class="card bg-dark border-secondary mb-3">
-                        <div class="card-body">
-                            <div id="caseSlaTimersWrap">${renderCaseSlaTimers(c)}</div>
-                            ${isClosed ? '<div class="alert alert-secondary py-2 small mb-2"><i class="fa-solid fa-lock me-1"></i>This case is closed and read-only. Change Status below to reopen it.</div>' : ''}
-                            <div class="row g-2 mb-2">
-                                <div class="col-md-8">
-                                    <label class="form-label small text-muted mb-1">Title</label>
-                                    <input type="text" id="editCaseTitle" class="form-control bg-dark text-light border-secondary" value="${escHtml(c.title)}" ${isClosed ? 'disabled' : ''}>
-                                </div>
-                                <div class="col-md-4">
-                                    <label class="form-label small text-muted mb-1">Status</label>
-                                    <select id="editCaseStatusWorkflow" class="form-select bg-dark text-light border-secondary">
-                                        <option value="new" ${c.status !== 'closed' && (!c.workflow_state || c.workflow_state === 'new') ? 'selected' : ''}>New</option>
-                                        <option value="investigating" ${c.status !== 'closed' && c.workflow_state === 'investigating' ? 'selected' : ''}>Investigating</option>
-                                        <option value="awaiting_input" ${c.status !== 'closed' && c.workflow_state === 'awaiting_input' ? 'selected' : ''}>Awaiting Input</option>
-                                        <option value="resolved" ${c.status !== 'closed' && c.workflow_state === 'resolved' ? 'selected' : ''}>Resolved</option>
-                                        <option value="closed" ${c.status === 'closed' ? 'selected' : ''}>Closed</option>
-                                    </select>
-                                </div>
-                                <div class="col-md-4">
-                                    <label class="form-label small text-muted mb-1">Assignee</label>
-                                    <input type="text" id="editCaseAssignee" class="form-control bg-dark text-light border-secondary" value="${escHtml(c.assignee || '')}" ${isClosed ? 'disabled' : ''}>
-                                </div>
-                                <div class="col-md-4">
-                                    <label class="form-label small text-muted mb-1">Queue</label>
-                                    <select id="editCaseQueue" class="form-select bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}></select>
-                                </div>
-                                <div class="col-md-4">
-                                    <label class="form-label small text-muted mb-1">TLP</label>
-                                    <select id="editCaseTlp" class="form-select bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}></select>
-                                </div>
-                                <div class="col-md-4">
-                                    <label class="form-label small text-muted mb-1">Severity</label>
-                                    <select id="editCaseSeverity" class="form-select bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}>
-                                        <option value="critical" ${c.severity === 'critical' ? 'selected' : ''}>Critical</option>
-                                        <option value="high" ${c.severity === 'high' ? 'selected' : ''}>High</option>
-                                        <option value="medium" ${!c.severity || c.severity === 'medium' ? 'selected' : ''}>Medium</option>
-                                        <option value="low" ${c.severity === 'low' ? 'selected' : ''}>Low</option>
-                                    </select>
-                                </div>
-                                <div class="col-md-4">
-                                    <label class="form-label small text-muted mb-1">SLA Target</label>
-                                    <div class="form-control-plaintext text-muted small">${caseSlaHours}h fleet-wide <a href="/dashboards" class="text-light">(edit)</a></div>
-                                </div>
-                                <div class="col-12">
-                                    <label class="form-label small text-muted mb-1">Description</label>
-                                    <textarea id="editCaseDescription" class="form-control bg-dark text-light border-secondary" rows="3" ${isClosed ? 'disabled' : ''}>${escHtml(c.description || '')}</textarea>
-                                </div>
-                            </div>
-                            <button type="button" class="btn btn-sm btn-outline-primary" onclick="saveCaseDetail()"><i class="fa-solid fa-floppy-disk me-1"></i>Save</button>
-                            <span id="caseSaveMsg" class="small text-success ms-2" style="display:none;">Saved.</span>
+            <div class="card bg-dark border-secondary mb-3">
+                <div class="card-body">
+                    <div id="caseSlaTimersWrap">${renderCaseSlaTimers(c)}</div>
+                    ${isClosed ? '<div class="alert alert-secondary py-2 small mb-2"><i class="fa-solid fa-lock me-1"></i>This case is closed and read-only. Change Status below to reopen it.</div>' : ''}
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-8">
+                            <label class="form-label small text-muted mb-1">Title</label>
+                            <input type="text" id="editCaseTitle" class="form-control bg-dark text-light border-secondary" value="${escHtml(c.title)}" ${isClosed ? 'disabled' : ''}>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted mb-1">Status</label>
+                            <select id="editCaseStatusWorkflow" class="form-select bg-dark text-light border-secondary">
+                                <option value="new" ${c.status !== 'closed' && (!c.workflow_state || c.workflow_state === 'new') ? 'selected' : ''}>New</option>
+                                <option value="investigating" ${c.status !== 'closed' && c.workflow_state === 'investigating' ? 'selected' : ''}>Investigating</option>
+                                <option value="awaiting_input" ${c.status !== 'closed' && c.workflow_state === 'awaiting_input' ? 'selected' : ''}>Awaiting Input</option>
+                                <option value="resolved" ${c.status !== 'closed' && c.workflow_state === 'resolved' ? 'selected' : ''}>Resolved</option>
+                                <option value="closed" ${c.status === 'closed' ? 'selected' : ''}>Closed</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted mb-1">Assignee</label>
+                            <input type="text" id="editCaseAssignee" class="form-control bg-dark text-light border-secondary" value="${escHtml(c.assignee || '')}" ${isClosed ? 'disabled' : ''}>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted mb-1">Queue</label>
+                            <select id="editCaseQueue" class="form-select bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}></select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted mb-1">TLP</label>
+                            <select id="editCaseTlp" class="form-select bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}></select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted mb-1">Severity</label>
+                            <select id="editCaseSeverity" class="form-select bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}>
+                                <option value="critical" ${c.severity === 'critical' ? 'selected' : ''}>Critical</option>
+                                <option value="high" ${c.severity === 'high' ? 'selected' : ''}>High</option>
+                                <option value="medium" ${!c.severity || c.severity === 'medium' ? 'selected' : ''}>Medium</option>
+                                <option value="low" ${c.severity === 'low' ? 'selected' : ''}>Low</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted mb-1">SLA Target</label>
+                            <div class="form-control-plaintext text-muted small">${caseSlaHours}h fleet-wide <a href="/dashboards" class="text-light">(edit)</a></div>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label small text-muted mb-1">Description</label>
+                            <textarea id="editCaseDescription" class="form-control bg-dark text-light border-secondary" rows="3" ${isClosed ? 'disabled' : ''}>${escHtml(c.description || '')}</textarea>
                         </div>
                     </div>
-                    <div class="card bg-dark border-secondary mb-3">
-                        <div class="card-header border-secondary">Tasks (${c.tasks.filter(t => t.status === 'done').length}/${c.tasks.length})</div>
-                        <div class="card-body">
-                            <div id="caseTasksList">${c.tasks.length ? c.tasks.map(t => taskRow(t, isClosed)).join('') : '<p class="text-muted small mb-2">No tasks yet.</p>'}</div>
-                            <div class="d-flex gap-2 mt-2">
-                                <input type="text" id="newCaseTaskInput" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Add a task..." onkeyup="if(event.key === 'Enter') addCaseTask()" ${isClosed ? 'disabled' : ''}>
-                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addCaseTask()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-plus"></i></button>
-                            </div>
-                        </div>
-                    </div>
-                    ${c.fields.length ? `
-                    <div class="card bg-dark border-secondary mb-3">
-                        <div class="card-header border-secondary">Custom Fields <span class="text-muted small">— from the case template applied when this case was created</span></div>
-                        <div class="card-body">
-                            <div class="row g-2">${c.fields.map(f => caseFieldInput(f, isClosed)).join('')}</div>
-                            <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="saveCaseFields()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-floppy-disk me-1"></i>Save</button>
-                            <span id="caseFieldsSaveMsg" class="small text-success ms-2" style="display:none;">Saved.</span>
-                        </div>
-                    </div>` : ''}
+                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="saveCaseDetail()"><i class="fa-solid fa-floppy-disk me-1"></i>Save</button>
+                    <span id="caseSaveMsg" class="small text-success ms-2" style="display:none;">Saved.</span>
                 </div>
-                <div class="col-lg-5">
-                    <div class="card bg-dark border-secondary mb-3">
-                        <div class="card-header border-secondary">Items (${c.items.length}) <span class="text-muted small">— added from Log Search's detail view</span></div>
-                        <div class="card-body">
-                            ${c.items.length ? c.items.map(it => `
-                                <div class="d-flex justify-content-between align-items-start border border-secondary rounded p-2 mb-2">
-                                    <div>${itemSummaryLine(it)}</div>
-                                    <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2 ms-2" title="Remove from case" onclick="removeCaseItem(${it.id})" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-xmark"></i></button>
-                                </div>
-                            `).join('') : '<p class="text-muted small mb-0">No items added yet.</p>'}
+            </div>
+
+            <ul class="nav nav-tabs border-secondary mb-3 flex-nowrap overflow-auto" id="caseDetailTabs">
+                ${caseTabs.map((t, i) => `<li class="nav-item"><button type="button" class="nav-link text-nowrap ${i === 0 ? 'active' : ''}" id="caseTabBtn-${t.key}" onclick="switchCaseDetailTab('${t.key}')"><i class="fa-solid ${t.icon} me-1"></i>${t.label}</button></li>`).join('')}
+            </ul>
+
+            <div id="caseTabPane-tasks" class="case-tab-pane" style="display:block;">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-body">
+                        <div id="caseTasksList">${c.tasks.length ? c.tasks.map(t => taskRow(t, isClosed)).join('') : '<p class="text-muted small mb-2">No tasks yet.</p>'}</div>
+                        <div class="d-flex gap-2 mt-2">
+                            <input type="text" id="newCaseTaskInput" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Add a task..." onkeyup="if(event.key === 'Enter') addCaseTask()" ${isClosed ? 'disabled' : ''}>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addCaseTask()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-plus"></i></button>
                         </div>
                     </div>
-                    <div class="card bg-dark border-secondary mb-3">
-                        <div class="card-header border-secondary">Related Items <span class="text-muted small">— other alerts/anomalies/EDR events on this case's hosts, not yet linked</span></div>
-                        <div class="card-body" id="relatedItemsBody"><p class="text-muted small mb-0">Loading&hellip;</p></div>
+                </div>
+            </div>
+
+            ${c.fields.length ? `
+            <div id="caseTabPane-fields" class="case-tab-pane" style="display:none;">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-header border-secondary">Custom Fields <span class="text-muted small">— from the case template applied when this case was created</span></div>
+                    <div class="card-body">
+                        <div class="row g-2">${c.fields.map(f => caseFieldInput(f, isClosed)).join('')}</div>
+                        <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="saveCaseFields()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-floppy-disk me-1"></i>Save</button>
+                        <span id="caseFieldsSaveMsg" class="small text-success ms-2" style="display:none;">Saved.</span>
                     </div>
-                    <div class="card bg-dark border-secondary mb-3">
-                        <div class="card-header border-secondary">Related Cases <span class="text-muted small">— other cases sharing a host, indicator, or threat entity with this one</span></div>
-                        <div class="card-body" id="relatedCasesBody"><p class="text-muted small mb-0">Loading&hellip;</p></div>
-                    </div>
-                    <div class="card bg-dark border-secondary mb-3">
-                        <div class="card-header border-secondary">Threat Intel Entities</div>
-                        <div class="card-body"><div id="linkToEntityWrap"></div></div>
-                    </div>
-                    <div class="card bg-dark border-secondary mb-3">
-                        <div class="card-header border-secondary">Case Assets <span class="text-muted small">— hosts implicated in this case, with a compromise-status judgment call and an optional related indicator</span></div>
-                        <div class="card-body">
-                            ${c.assets.length ? `
-                            <div class="table-responsive mb-2">
-                                <table class="table table-dark table-sm align-middle mb-0">
-                                    <thead><tr><th>Host</th><th>Criticality</th><th>Status</th><th>Indicator</th><th>Notes</th><th>EDR</th><th></th></tr></thead>
-                                    <tbody>${c.assets.map(a => caseAssetRow(a, isClosed)).join('')}</tbody>
-                                </table>
-                            </div>` : '<p class="text-muted small mb-2">No assets tracked yet.</p>'}
-                            <div class="row g-2">
-                                <div class="col-4">
-                                    <input type="text" id="newAssetHost" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Host, e.g. WKS-04" ${isClosed ? 'disabled' : ''}>
-                                </div>
-                                <div class="col-3">
-                                    <select id="newAssetStatus" class="form-select form-select-sm bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}>
-                                        <option value="suspected">Suspected</option>
-                                        <option value="confirmed">Confirmed</option>
-                                        <option value="cleared">Cleared</option>
-                                    </select>
-                                </div>
-                                <div class="col-5">
-                                    <input type="text" id="newAssetIndicator" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Related indicator (optional)" ${isClosed ? 'disabled' : ''}>
-                                </div>
+                </div>
+            </div>` : ''}
+
+            <div id="caseTabPane-items" class="case-tab-pane" style="display:none;">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-header border-secondary">Items <span class="text-muted small">— added from Log Search's detail view</span></div>
+                    <div class="card-body">
+                        ${c.items.length ? c.items.map(it => `
+                            <div class="d-flex justify-content-between align-items-start border border-secondary rounded p-2 mb-2">
+                                <div>${itemSummaryLine(it)}</div>
+                                <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2 ms-2" title="Remove from case" onclick="removeCaseItem(${it.id})" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-xmark"></i></button>
                             </div>
-                            <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="addCaseAsset()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-plus me-1"></i>Add Asset</button>
-                            <div id="newAssetError" class="text-danger small mt-1" style="display:none;"></div>
-                        </div>
+                        `).join('') : '<p class="text-muted small mb-0">No items added yet.</p>'}
                     </div>
-                    <div class="card bg-dark border-secondary mb-3" id="caseEdrResponseCard">
-                        <div class="card-header border-secondary">EDR Response <span class="text-muted small">— run a response or collection action directly on one of this case's tracked hosts; the result is linked into this case automatically</span></div>
-                        <div class="card-body">
-                            ${c.assets.length ? `
-                            <div class="row g-2 align-items-end">
-                                <div class="col-3">
-                                    <label class="form-label small text-muted mb-1" for="edrResponseHost">Host</label>
-                                    <select id="edrResponseHost" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="renderEdrResponseActionSelect()" ${isClosed ? 'disabled' : ''}>
-                                        ${[...new Set(c.assets.map(a => a.host))].map(h => `<option value="${escHtml(h)}">${escHtml(h)}</option>`).join('')}
-                                    </select>
-                                </div>
-                                <div class="col-4">
-                                    <label class="form-label small text-muted mb-1" for="edrResponseAction">Action</label>
-                                    <select id="edrResponseAction" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onEdrResponseActionChange()" ${isClosed ? 'disabled' : ''}></select>
-                                </div>
-                                <div class="col-3" id="edrResponseParamWrap" style="display:none;">
-                                    <label class="form-label small text-muted mb-1" id="edrResponseParamLabel">Value</label>
-                                    <input type="text" id="edrResponseParamInput" class="form-control form-control-sm bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}>
-                                </div>
-                                <div class="col-2">
-                                    <button type="button" class="btn btn-sm btn-outline-warning w-100" id="edrResponseRunBtn" onclick="runEdrResponseAction()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-bolt me-1"></i>Run</button>
-                                </div>
+                </div>
+            </div>
+
+            <div id="caseTabPane-related" class="case-tab-pane" style="display:none;">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-header border-secondary">Related Items <span class="text-muted small">— other alerts/anomalies/EDR events on this case's hosts, not yet linked</span></div>
+                    <div class="card-body" id="relatedItemsBody"><p class="text-muted small mb-0">Loading&hellip;</p></div>
+                </div>
+            </div>
+
+            <div id="caseTabPane-relatedCases" class="case-tab-pane" style="display:none;">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-header border-secondary">Related Cases <span class="text-muted small">— other cases sharing a host, indicator, or threat entity with this one</span></div>
+                    <div class="card-body" id="relatedCasesBody"><p class="text-muted small mb-0">Loading&hellip;</p></div>
+                </div>
+            </div>
+
+            <div id="caseTabPane-entities" class="case-tab-pane" style="display:none;">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-header border-secondary">Threat Intel Entities</div>
+                    <div class="card-body"><div id="linkToEntityWrap"></div></div>
+                </div>
+            </div>
+
+            <div id="caseTabPane-assets" class="case-tab-pane" style="display:none;">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-header border-secondary">Case Assets <span class="text-muted small">— hosts implicated in this case, with a compromise-status judgment call and an optional related indicator</span></div>
+                    <div class="card-body">
+                        ${c.assets.length ? `
+                        <div class="table-responsive mb-2">
+                            <table class="table table-dark table-sm align-middle mb-0">
+                                <thead><tr><th>Host</th><th>Criticality</th><th>Status</th><th>Indicator</th><th>Notes</th><th>EDR</th><th></th></tr></thead>
+                                <tbody>${c.assets.map(a => caseAssetRow(a, isClosed)).join('')}</tbody>
+                            </table>
+                        </div>` : '<p class="text-muted small mb-2">No assets tracked yet.</p>'}
+                        <div class="row g-2">
+                            <div class="col-4">
+                                <input type="text" id="newAssetHost" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Host, e.g. WKS-04" ${isClosed ? 'disabled' : ''}>
                             </div>
-                            <div id="edrResponseMsg" class="small mt-2" style="display:none;"></div>
-                            ` : '<p class="text-muted small mb-0">Add a Case Asset above to run a response action against it.</p>'}
-                        </div>
-                    </div>
-                    <div class="card bg-dark border-secondary mb-3">
-                        <div class="card-header border-secondary">Indicators <span class="text-muted small">— hashes, domains, IPs, and URLs tied to this case; Check runs each against the local Threat Intel set</span></div>
-                        <div class="card-body">
-                            ${c.iocs.length ? `
-                            <div class="table-responsive mb-2">
-                                <table class="table table-dark table-sm align-middle mb-0">
-                                    <thead><tr><th>Type</th><th>Value</th><th>Notes</th><th></th><th></th></tr></thead>
-                                    <tbody>${c.iocs.map(i => caseIocRow(i, isClosed)).join('')}</tbody>
-                                </table>
-                            </div>` : '<p class="text-muted small mb-2">No indicators tracked yet.</p>'}
-                            <div class="row g-2">
-                                <div class="col-3">
-                                    <select id="newIocType" class="form-select form-select-sm bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}>
-                                        <option value="hash">Hash</option>
-                                        <option value="domain">Domain</option>
-                                        <option value="ip">IP</option>
-                                        <option value="url">URL</option>
-                                    </select>
-                                </div>
-                                <div class="col-4">
-                                    <input type="text" id="newIocValue" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Value" ${isClosed ? 'disabled' : ''}>
-                                </div>
-                                <div class="col-5">
-                                    <input type="text" id="newIocNotes" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Notes (optional)" ${isClosed ? 'disabled' : ''}>
-                                </div>
-                            </div>
-                            <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="addCaseIoc()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-plus me-1"></i>Add Indicator</button>
-                            <div id="newIocError" class="text-danger small mt-1" style="display:none;"></div>
-                        </div>
-                    </div>
-                    <div class="card bg-dark border-secondary mb-3">
-                        <div class="card-header border-secondary">Attachments <span class="text-muted small">— screenshots, exported logs, memory-dump excerpts, or other files relevant to this case (25 MB max)</span></div>
-                        <div class="card-body">
-                            <div id="caseAttachmentsBody"><p class="text-muted small mb-0">Loading&hellip;</p></div>
-                            <div class="row g-2 mt-1">
-                                <div class="col-5">
-                                    <input type="file" id="newAttachmentFile" class="form-control form-control-sm bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}>
-                                </div>
-                                <div class="col-5">
-                                    <input type="text" id="newAttachmentDescription" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Description (optional)" ${isClosed ? 'disabled' : ''}>
-                                </div>
-                                <div class="col-2">
-                                    <button type="button" class="btn btn-sm btn-outline-primary w-100" onclick="uploadCaseAttachment()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-upload me-1"></i>Upload</button>
-                                </div>
-                            </div>
-                            <div id="newAttachmentError" class="text-danger small mt-1" style="display:none;"></div>
-                        </div>
-                    </div>
-                    <div class="card bg-dark border-secondary mb-3">
-                        <div class="card-header border-secondary">Analyze Host / User <span class="text-muted small">— alerts, UEBA activity, risk score, and IOC enrichment over the Risk Scoring window, posted to the timeline</span></div>
-                        <div class="card-body">
-                            <div class="d-flex gap-2 flex-wrap">
-                                <select id="analyzeEntityType" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:110px;" ${isClosed ? 'disabled' : ''}>
-                                    <option value="host">Host</option>
-                                    <option value="user">User</option>
+                            <div class="col-3">
+                                <select id="newAssetStatus" class="form-select form-select-sm bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}>
+                                    <option value="suspected">Suspected</option>
+                                    <option value="confirmed">Confirmed</option>
+                                    <option value="cleared">Cleared</option>
                                 </select>
-                                <input type="text" id="analyzeEntityId" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:180px;" placeholder="e.g. WKS-04" ${isClosed ? 'disabled' : ''}>
-                                <button type="button" class="btn btn-sm btn-outline-primary" id="analyzeBtn" onclick="analyzeCaseEntity()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-magnifying-glass-chart me-1"></i>Analyze</button>
                             </div>
-                            <div id="analyzeMsg" class="small mt-2" style="display:none;"></div>
+                            <div class="col-5">
+                                <input type="text" id="newAssetIndicator" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Related indicator (optional)" ${isClosed ? 'disabled' : ''}>
+                            </div>
                         </div>
+                        <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="addCaseAsset()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-plus me-1"></i>Add Asset</button>
+                        <div id="newAssetError" class="text-danger small mt-1" style="display:none;"></div>
                     </div>
-                    <div class="card bg-dark border-secondary mb-3">
-                        <div class="card-header border-secondary d-flex justify-content-between align-items-center">
-                            <span>Case Report</span>
-                            <button type="button" class="btn btn-sm btn-outline-primary" id="generateReportBtn" onclick="generateCaseReport()"><i class="fa-solid fa-file-pdf me-1"></i>Generate Report</button>
+                </div>
+            </div>
+
+            <div id="caseTabPane-edr" class="case-tab-pane" style="display:none;">
+                <div class="card bg-dark border-secondary mb-3" id="caseEdrResponseCard">
+                    <div class="card-header border-secondary">EDR Response <span class="text-muted small">— run a response or collection action directly on one of this case's tracked hosts; the result is linked into this case automatically</span></div>
+                    <div class="card-body">
+                        ${c.assets.length ? `
+                        <div class="row g-2 align-items-end">
+                            <div class="col-3">
+                                <label class="form-label small text-muted mb-1" for="edrResponseHost">Host</label>
+                                <select id="edrResponseHost" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="renderEdrResponseActionSelect()" ${isClosed ? 'disabled' : ''}>
+                                    ${[...new Set(c.assets.map(a => a.host))].map(h => `<option value="${escHtml(h)}">${escHtml(h)}</option>`).join('')}
+                                </select>
+                            </div>
+                            <div class="col-4">
+                                <label class="form-label small text-muted mb-1" for="edrResponseAction">Action</label>
+                                <select id="edrResponseAction" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onEdrResponseActionChange()" ${isClosed ? 'disabled' : ''}></select>
+                            </div>
+                            <div class="col-3" id="edrResponseParamWrap" style="display:none;">
+                                <label class="form-label small text-muted mb-1" id="edrResponseParamLabel">Value</label>
+                                <input type="text" id="edrResponseParamInput" class="form-control form-control-sm bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}>
+                            </div>
+                            <div class="col-2">
+                                <button type="button" class="btn btn-sm btn-outline-warning w-100" id="edrResponseRunBtn" onclick="runEdrResponseAction()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-bolt me-1"></i>Run</button>
+                            </div>
                         </div>
-                        <div class="card-body">
-                            <p class="text-muted small mb-2">A PDF summarizing this case's tasks, linked items, host/user analysis, and full timeline.</p>
-                            <div id="caseReportsList"><p class="text-muted small mb-0">Loading&hellip;</p></div>
-                        </div>
+                        <div id="edrResponseMsg" class="small mt-2" style="display:none;"></div>
+                        ` : '<p class="text-muted small mb-0">Add a Case Asset above to run a response action against it.</p>'}
                     </div>
-                    <div class="card bg-dark border-secondary mb-3">
-                        <div class="card-header border-secondary">Timeline</div>
-                        <div class="card-body">
-                            <div class="d-flex gap-2 mb-3">
-                                <input type="text" id="newCaseNoteInput" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Add a note..." onkeyup="if(event.key === 'Enter') addCaseNote()" ${isClosed ? 'disabled' : ''}>
-                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addCaseNote()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-plus"></i></button>
+                </div>
+            </div>
+
+            <div id="caseTabPane-iocs" class="case-tab-pane" style="display:none;">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-header border-secondary">Indicators <span class="text-muted small">— hashes, domains, IPs, and URLs tied to this case; Check runs each against the local Threat Intel set</span></div>
+                    <div class="card-body">
+                        ${c.iocs.length ? `
+                        <div class="table-responsive mb-2">
+                            <table class="table table-dark table-sm align-middle mb-0">
+                                <thead><tr><th>Type</th><th>Value</th><th>Notes</th><th></th><th></th></tr></thead>
+                                <tbody>${c.iocs.map(i => caseIocRow(i, isClosed)).join('')}</tbody>
+                            </table>
+                        </div>` : '<p class="text-muted small mb-2">No indicators tracked yet.</p>'}
+                        <div class="row g-2">
+                            <div class="col-3">
+                                <select id="newIocType" class="form-select form-select-sm bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}>
+                                    <option value="hash">Hash</option>
+                                    <option value="domain">Domain</option>
+                                    <option value="ip">IP</option>
+                                    <option value="url">URL</option>
+                                </select>
                             </div>
-                            <div style="max-height:400px; overflow-y:auto;">
-                                ${c.events.length ? c.events.map(eventRow).join('') : '<p class="text-muted small">No timeline events yet.</p>'}
+                            <div class="col-4">
+                                <input type="text" id="newIocValue" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Value" ${isClosed ? 'disabled' : ''}>
                             </div>
+                            <div class="col-5">
+                                <input type="text" id="newIocNotes" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Notes (optional)" ${isClosed ? 'disabled' : ''}>
+                            </div>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="addCaseIoc()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-plus me-1"></i>Add Indicator</button>
+                        <div id="newIocError" class="text-danger small mt-1" style="display:none;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="caseTabPane-attachments" class="case-tab-pane" style="display:none;">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-header border-secondary">Attachments <span class="text-muted small">— screenshots, exported logs, memory-dump excerpts, or other files relevant to this case (25 MB max)</span></div>
+                    <div class="card-body">
+                        <div id="caseAttachmentsBody"><p class="text-muted small mb-0">Loading&hellip;</p></div>
+                        <div class="row g-2 mt-1">
+                            <div class="col-5">
+                                <input type="file" id="newAttachmentFile" class="form-control form-control-sm bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}>
+                            </div>
+                            <div class="col-5">
+                                <input type="text" id="newAttachmentDescription" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Description (optional)" ${isClosed ? 'disabled' : ''}>
+                            </div>
+                            <div class="col-2">
+                                <button type="button" class="btn btn-sm btn-outline-primary w-100" onclick="uploadCaseAttachment()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-upload me-1"></i>Upload</button>
+                            </div>
+                        </div>
+                        <div id="newAttachmentError" class="text-danger small mt-1" style="display:none;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="caseTabPane-analyze" class="case-tab-pane" style="display:none;">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-header border-secondary">Analyze Host / User <span class="text-muted small">— alerts, UEBA activity, risk score, and IOC enrichment over the Risk Scoring window, posted to the timeline</span></div>
+                    <div class="card-body">
+                        <div class="d-flex gap-2 flex-wrap">
+                            <select id="analyzeEntityType" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:110px;" ${isClosed ? 'disabled' : ''}>
+                                <option value="host">Host</option>
+                                <option value="user">User</option>
+                            </select>
+                            <input type="text" id="analyzeEntityId" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:180px;" placeholder="e.g. WKS-04" ${isClosed ? 'disabled' : ''}>
+                            <button type="button" class="btn btn-sm btn-outline-primary" id="analyzeBtn" onclick="analyzeCaseEntity()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-magnifying-glass-chart me-1"></i>Analyze</button>
+                        </div>
+                        <div id="analyzeMsg" class="small mt-2" style="display:none;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="caseTabPane-report" class="case-tab-pane" style="display:none;">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+                        <span>Case Report</span>
+                        <button type="button" class="btn btn-sm btn-outline-primary" id="generateReportBtn" onclick="generateCaseReport()"><i class="fa-solid fa-file-pdf me-1"></i>Generate Report</button>
+                    </div>
+                    <div class="card-body">
+                        <p class="text-muted small mb-2">A PDF summarizing this case's tasks, linked items, host/user analysis, and full timeline.</p>
+                        <div id="caseReportsList"><p class="text-muted small mb-0">Loading&hellip;</p></div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="caseTabPane-timeline" class="case-tab-pane" style="display:none;">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-header border-secondary">Timeline</div>
+                    <div class="card-body">
+                        <div class="d-flex gap-2 mb-3">
+                            <input type="text" id="newCaseNoteInput" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Add a note..." onkeyup="if(event.key === 'Enter') addCaseNote()" ${isClosed ? 'disabled' : ''}>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addCaseNote()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-plus"></i></button>
+                        </div>
+                        <div style="max-height:500px; overflow-y:auto;">
+                            ${c.events.length ? c.events.map(eventRow).join('') : '<p class="text-muted small">No timeline events yet.</p>'}
                         </div>
                     </div>
                 </div>
