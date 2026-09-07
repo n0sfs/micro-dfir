@@ -132,8 +132,8 @@
     <div class="col-lg-12">
         <div class="card bg-dark border-secondary">
             <div class="card-body">
-                <h5 class="card-title text-light mb-3"><i class="fa-solid fa-volume-xmark me-2"></i>Host Silent Alert</h5>
-                <p class="text-muted small mb-3">Distinct from a log source that has never ingested anything at all (see Coverage) -- this flags a HOST that WAS recently sending logs and then stopped sending anything at all, the "this endpoint went dark" case. Grouped by host (not by individual log channel), since a host going quiet usually silences every source on it at once -- one alert per incident instead of one per channel. The threshold adapts per host from its own recent history (multiples of its typical time between events), so a naturally chatty host and a naturally quiet one don't need separate hand-tuned thresholds.</p>
+                <h5 class="card-title text-light mb-3"><i class="fa-solid fa-volume-xmark me-2"></i>Silent Source Alert</h5>
+                <p class="text-muted small mb-3">Distinct from a log source that has never ingested anything at all (see Coverage) -- this flags a source that WAS recently sending logs and then stopped, the "this went dark" case. Two tiers: a HOST that stops sending everything at once (agent crashed, network dropped) fires one "Host Silent" alert rather than one per channel; a single log CHANNEL going quiet while the rest of that host keeps logging fine (e.g. the EDR service crashes but Windows keeps logging normally) fires a separate "Log Channel Silent" alert instead of going unnoticed. Both use the same adaptive threshold, computed per source from its own recent history (multiples of its typical time between events), so a naturally chatty source and a naturally quiet one don't need separate hand-tuned thresholds.</p>
                 <div class="row g-2 align-items-end mb-3">
                     <div class="col-auto">
                         <label class="form-label small text-muted mb-1" for="logSourceSilentMultiplier">Sensitivity (&times; typical gap)</label>
@@ -167,7 +167,7 @@
         <div class="card bg-dark border-secondary">
             <div class="card-body">
                 <div class="d-flex justify-content-between align-items-center mb-3">
-                    <h5 class="card-title text-light mb-0"><i class="fa-solid fa-triangle-exclamation me-2"></i>Silent Host Alerts</h5>
+                    <h5 class="card-title text-light mb-0"><i class="fa-solid fa-triangle-exclamation me-2"></i>Silent Source Alerts</h5>
                     <button class="btn btn-outline-secondary btn-sm" onclick="loadSilentSourceAlerts()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
                 </div>
                 <p class="text-muted small mb-3">Every time the check above actually fires, it lands here -- most recent first.</p>
@@ -1253,7 +1253,7 @@ function loadSilentSourceAlerts() {
         })
         .then(rows => {
             if (!Array.isArray(rows) || rows.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">No host has triggered this alert yet.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">Nothing has triggered this alert yet.</td></tr>';
                 return;
             }
             tbody.innerHTML = rows.map(a => `
