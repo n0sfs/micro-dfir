@@ -10,6 +10,21 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-07
 
+### Click-through drill-down on 3 dashboard charts
+
+None of the 24 dashboard widget types had any click-through from the
+chart itself into the underlying data. Added it to the 3 widgets with
+a clean categorical dimension: Severity Breakdown → Log Search filtered
+by that severity; Top-Firing Anomaly Rules → a free-text Log Search
+pivot on the rule name; Open Cases by Queue → the Cases page filtered
+to that queue (new `?queue=<id>` deep-link, mirroring the existing
+`?case=<id>` one). Time-bucketed trend charts (Alert Volume, Risk
+Score, etc.) were left alone — there's no precise date-range deep-link
+into Log Search yet to click through to, and landing on an approximate
+day would be worse than no drill-down. Live-verified all 3 against
+real production data, including confirming the Cases page's queue
+filter dropdown and table both correctly apply from the URL param.
+
 ### Dashboard widget edits now protected on shared role-default dashboards
 
 Adding/removing/rearranging dashboard widgets was deliberately open to
