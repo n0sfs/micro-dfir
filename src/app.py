@@ -6194,6 +6194,96 @@ def api_case_ioc_detail(cid, ioc_id):
     db.commit()
     return jsonify({"ok": 1})
 
+CASE_ATTACHMENTS_DIR = '/opt/micro-dfir/case_attachments'
+# No existing precedent to match anywhere in this codebase -- confirmed no
+# MAX_CONTENT_LENGTH, no other per-file byte cap exists at all (report generation, YARA
+# scans, cert uploads, the branding logo upload all skip size checks). 25MB is generous
+# for what a case attachment actually is in practice (a screenshot, a memory-dump
+# excerpt, a small exported log bundle) without letting a single upload consume
+# unbounded disk space.
+CASE_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
+
+@app.route('/api/cases/<int:cid>/attachments', methods=['GET', 'POST'])
+@login_required
+def api_case_attachments(cid):
+    db = get_db()
+    if request.method == 'GET':
+        rows = db.execute(
+            "SELECT id, original_filename, content_type, file_size_bytes, description, uploaded_by, uploaded_at "
+            "FROM case_attachments WHERE case_id = ? ORDER BY id DESC", (cid,)
+        ).fetchall()
+        return jsonify([dict(r) for r in rows])
+    err = _require_open_case(db, cid)
+    if err: return err
+    f = request.files.get('file')
+    if not f or not f.filename:
+        return jsonify({"error": "No file provided"}), 400
+    # Never trust a declared Content-Length -- seek the actual stream to measure the
+    # real size before it ever touches disk.
+    f.seek(0, os.SEEK_END)
+    size = f.tell()
+    f.seek(0)
+    if size == 0:
+        return jsonify({"error": "The uploaded file is empty"}), 400
+    if size > CASE_ATTACHMENT_MAX_BYTES:
+        return jsonify({"error": f"Attachments are capped at {CASE_ATTACHMENT_MAX_BYTES // (1024 * 1024)} MB"}), 400
+    original_filename = secure_filename(f.filename) or 'attachment'
+    # Stored under a random name, never the client-supplied one -- the same
+    # never-trust-a-client-filename-as-a-path reasoning download_report()'s id-keyed
+    # lookup already documents for report PDFs (that route replaced a real
+    # path-traversal bug in an earlier version of this app). The extension is kept
+    # (from the sanitized name, not the raw one) purely so a downloaded copy still
+    # opens correctly by default in whatever tool the analyst uses.
+    ext = original_filename.rsplit('.', 1)[-1].lower() if '.' in original_filename else ''
+    stored_filename = secrets.token_hex(16) + (f'.{ext}' if ext else '')
+    os.makedirs(CASE_ATTACHMENTS_DIR, exist_ok=True)
+    f.save(os.path.join(CASE_ATTACHMENTS_DIR, stored_filename))
+    description = (request.form.get('description') or '').strip() or None
+    cur = db.execute(
+        "INSERT INTO case_attachments (case_id, filename, original_filename, content_type, file_size_bytes, description, uploaded_by) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (cid, stored_filename, original_filename, f.content_type, size, description, current_user.username)
+    )
+    _log_case_event(db, cid, 'attachment_added', original_filename)
+    db.commit()
+    return jsonify({"status": "success", "id": cur.lastrowid})
+
+# Deliberately unauthenticated-content-type-agnostic and always forced as an attachment
+# (never rendered inline) -- an uploaded file in a DFIR case may legitimately BE a
+# malware sample or a suspicious script kept as evidence, so this route can't restrict
+# upload by extension the way the report-branding logo upload does. Forcing
+# as_attachment=True is what neutralizes the risk of ever executing/rendering one in a
+# browser instead, regardless of what it actually is.
+@app.route('/api/cases/<int:cid>/attachments/<int:aid>/download', methods=['GET'])
+@login_required
+def api_case_attachment_download(cid, aid):
+    from flask import send_from_directory
+    db = get_db()
+    row = db.execute(
+        "SELECT filename, original_filename FROM case_attachments WHERE id = ? AND case_id = ?", (aid, cid)
+    ).fetchone()
+    if not row or not os.path.exists(os.path.join(CASE_ATTACHMENTS_DIR, row['filename'])):
+        return jsonify({"error": "Attachment not found"}), 404
+    return send_from_directory(CASE_ATTACHMENTS_DIR, row['filename'], as_attachment=True, download_name=row['original_filename'])
+
+@app.route('/api/cases/<int:cid>/attachments/<int:aid>', methods=['DELETE'])
+@login_required
+def api_case_attachment_detail(cid, aid):
+    db = get_db()
+    err = _require_open_case(db, cid)
+    if err: return err
+    row = db.execute("SELECT filename, original_filename FROM case_attachments WHERE id = ? AND case_id = ?", (aid, cid)).fetchone()
+    if not row:
+        return jsonify({"error": "Attachment not found"}), 404
+    try:
+        os.remove(os.path.join(CASE_ATTACHMENTS_DIR, row['filename']))
+    except OSError:
+        pass  # already gone from disk -- still clean up the DB row rather than getting stuck
+    db.execute("DELETE FROM case_attachments WHERE id = ?", (aid,))
+    _log_case_event(db, cid, 'attachment_removed', row['original_filename'])
+    db.commit()
+    return jsonify({"ok": 1})
+
 @app.route('/api/cases/<int:cid>/tasks', methods=['POST'])
 @login_required
 def api_case_add_task(cid):
@@ -7492,6 +7582,23 @@ def api_log_pipeline_silent_source_alerts():
         (limit,)
     ).fetchall()
     return jsonify([dict(r) for r in rows])
+
+# TEMPORARY one-time cleanup, not a permanent capability -- this app has no general
+# alert-deletion feature by design (alerts are audit-relevant SIEM history), so this is
+# scoped as narrowly as possible: only the truly-legacy 'Log Source Silent' rows that
+# predate host-level tracking entirely and can never be attributed to a host after the
+# fact. Remove this route once it's been run against production.
+@app.route('/api/log-pipeline/silent-source-alerts/purge-legacy', methods=['POST'])
+@login_required
+def api_purge_legacy_silent_alerts():
+    err = require_permission('settings.system.manage')
+    if err: return err
+    db = get_db()
+    cur = db.execute("DELETE FROM alerts WHERE rule_name = 'Log Source Silent' AND (host IS NULL OR host = '')")
+    deleted = cur.rowcount
+    db.commit()
+    log_audit('silent_alert_legacy_purge', 'alerts', None, f'deleted={deleted}')
+    return jsonify({'status': 'success', 'deleted': deleted})
 
 # Ground-truth list for the alert_created playbook editor's "Only if Rule is..."
 # condition -- every distinct rule_name that has EVER actually fired in this
@@ -10335,6 +10442,31 @@ def migrate_case_iocs():
             UNIQUE(case_id, ioc_type, value)
         )''')
         conn.execute("CREATE INDEX IF NOT EXISTS idx_case_iocs_case ON case_iocs(case_id)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_case_attachments():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        # `filename` is a random on-disk name (never the client-supplied one) --
+        # `original_filename` is display-only, shown in the UI and restored on download
+        # via send_from_directory's download_name, same "never trust a client filename
+        # as a filesystem path" reasoning download_report()'s id-keyed lookup already
+        # documents for report PDFs.
+        conn.execute('''CREATE TABLE IF NOT EXISTS case_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id INTEGER NOT NULL,
+            filename TEXT NOT NULL,
+            original_filename TEXT NOT NULL,
+            content_type TEXT,
+            file_size_bytes INTEGER,
+            description TEXT,
+            uploaded_by TEXT,
+            uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_case_attachments_case ON case_attachments(case_id)")
         conn.commit()
         conn.close()
     except Exception:
@@ -16261,6 +16393,7 @@ migrate_case_assets()
 migrate_case_severity()
 migrate_case_reopen_tracking()
 migrate_case_iocs()
+migrate_case_attachments()
 migrate_dashboards()
 migrate_role_casing()
 migrate_users_must_change_password()
