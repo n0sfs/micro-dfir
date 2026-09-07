@@ -22,7 +22,7 @@
 #clTable .cl-right p{margin-bottom:.5rem;}
 #clTable .cl-right p:last-child{margin-bottom:0;}
 #clTable .cl-right ul{margin-bottom:.5rem;}
-#clTable mark{background-color:var(--accent-dim); color:inherit; padding:0 1px; border-radius:2px;}
+#clTable mark{background-color:#e0a800; color:#000; padding:0 1px; border-radius:2px;}
 </style>
 
 <div class="card bg-dark border-secondary">
@@ -603,7 +603,10 @@ function loadChangelogTab() {
         .then(d => {
             document.getElementById('clCurrentCommit').innerText = (d.current_commit || 'unknown').split(' ')[0];
             const { introLines, entries } = parseChangelogEntries(d.changelog || '');
-            document.getElementById('clIntro').innerText = introLines.join(' ').replace(/\s+/g, ' ').trim();
+            // Plain-text display (innerText, not innerHTML) -- strip markdown syntax
+            // markers rather than rendering them, since this intro line is shown as
+            // plain prose, not passed through the bold/code inline() renderer.
+            document.getElementById('clIntro').innerText = introLines.join(' ').replace(/\s+/g, ' ').replace(/\*\*/g, '').replace(/`/g, '').trim();
             changelogEntries = entries;
             filterChangelogTable();
         })
