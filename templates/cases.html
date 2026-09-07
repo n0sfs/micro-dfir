@@ -454,11 +454,13 @@ async function removeCaseIoc(iocId) {
 // renders this with a live status/severity/exit-code summary and a "View Full Result"
 // button (itemSummaryLine), so the analyst sees the actual output once the agent's next
 // check-in delivers it, not just "we queued something."
-async function queueCaseAssetCommand(hostname, label, params, confirmMsg) {
+async function queueCaseAssetCommand(hostname, label, params, confirmMsg, script) {
     if (confirmMsg && !(await confirmDialog(confirmMsg, {title: 'Confirm action', danger: true}))) return;
+    const body = {hostname, label, params: params || {}};
+    if (script !== undefined) body.script = script;
     fetch('/api/agent/commands', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({hostname, label, params: params || {}})
+        body: JSON.stringify(body)
     }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
         if (ok) {
             toast(`"${label}" queued for ${hostname}. It will run on the endpoint's next check-in (usually within 15s).`, 'success');
@@ -515,6 +517,13 @@ const CASE_EDR_ACTIONS = [
     { value: 'collect_live_forensics', label: 'Live Forensic Triage', permission: 'edr.command.advanced', osOnly: ['windows', 'linux'] },
     { value: 'collect_browser_artifacts', label: 'Browser Artifacts', permission: 'edr.command.advanced', osOnly: 'windows' },
     { value: 'check_process_injection_indicators', label: 'Process Injection Indicators', permission: 'edr.command.advanced', osOnly: ['windows', 'linux'] },
+    // Free-text fallback for anything the canned catalog above doesn't cover -- same
+    // 'custom' label + top-level `script` body field agents.html's console uses, gated
+    // to the same edr.command.advanced permission server-side (_queue_agent_command,
+    // src/app.py:16537-16540). isScript routes the typed value to the request's `script`
+    // field instead of `params[needsParams]` -- see runEdrResponseAction below.
+    { value: 'custom', label: 'Custom Command', permission: 'edr.command.advanced', needsParams: 'script', paramLabel: 'PowerShell / bash command', isScript: true,
+      confirm: (h, v) => `Run this custom command on ${h}?\n\n${v}` },
 ];
 
 function initEdrResponseCard() {
@@ -569,7 +578,10 @@ function onEdrResponseActionChange() {
     if (action && action.needsParams) {
         wrap.style.display = '';
         document.getElementById('edrResponseParamLabel').innerText = action.paramLabel;
-        document.getElementById('edrResponseParamInput').value = '';
+        const input = document.getElementById('edrResponseParamInput');
+        input.value = '';
+        input.rows = action.isScript ? 3 : 1;
+        input.style.fontFamily = action.isScript ? 'monospace' : '';
     } else {
         wrap.style.display = 'none';
     }
@@ -591,10 +603,16 @@ async function runEdrResponseAction() {
             msgBox.style.display = 'block';
             return;
         }
-        params[action.needsParams] = paramValue;
+        if (action.isScript) {
+            // Routed to the request's top-level `script` field, not `params` -- matches
+            // agents.html's free-text console and _queue_agent_command's 'custom' branch
+            // (src/app.py:16537-16540), which reads the raw script from `script`, not params.
+        } else {
+            params[action.needsParams] = paramValue;
+        }
     }
     const confirmMsg = action.confirm ? action.confirm(host, paramValue) : null;
-    await queueCaseAssetCommand(host, action.value, params, confirmMsg);
+    await queueCaseAssetCommand(host, action.value, params, confirmMsg, action.isScript ? paramValue : undefined);
 }
 
 // Standard TLP color convention -- red/amber/green/clear. PAP was captured here too at
@@ -788,7 +806,7 @@ function renderCases() {
     }
     tbody.innerHTML = rows.map(c => `
         <tr style="cursor:pointer;" onclick="openCaseDetail(${c.id})">
-            <td class="ps-3 fw-bold">${escHtml(c.title)}</td>
+            <td class="ps-3 fw-bold"><span class="text-muted small fw-normal me-1">#${c.id}</span>${escHtml(c.title)}</td>
             <td>${caseSeverityBadge(c.severity)}</td>
             <td>${caseStatusBadge(c.status)}</td>
             <td class="small">${c.queue_name ? `<span class="badge bg-secondary">${escHtml(c.queue_name)}</span>` : '<span class="text-muted">—</span>'}</td>
@@ -1127,7 +1145,7 @@ function loadAndRenderCaseDetail(cid) {
         if (!c || c.error) { toast((c && c.error) || 'Case not found.', 'danger'); backToList(); return; }
         const isClosed = c.status === 'closed';
         activeCaseClosed = isClosed;
-        document.getElementById('caseDetailTitleHeading').innerHTML = `<i class="fa-solid fa-folder-open me-2"></i>${escHtml(c.title)}`;
+        document.getElementById('caseDetailTitleHeading').innerHTML = `<i class="fa-solid fa-folder-open me-2"></i>${escHtml(c.title)} <span class="text-muted" style="font-size:.6em;font-weight:normal;">#${c.id}</span>`;
         // Everything besides the case-info form used to sit in a narrow col-lg-5 right
         // column stacked 11 cards deep -- moved into tabs below the info card instead
         // (same cards, same element IDs, same load/init calls) so the view doesn't turn
@@ -1315,7 +1333,7 @@ function loadAndRenderCaseDetail(cid) {
                             </div>
                             <div class="col-3" id="edrResponseParamWrap" style="display:none;">
                                 <label class="form-label small text-muted mb-1" id="edrResponseParamLabel">Value</label>
-                                <input type="text" id="edrResponseParamInput" class="form-control form-control-sm bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}>
+                                <textarea id="edrResponseParamInput" rows="1" class="form-control form-control-sm bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}></textarea>
                             </div>
                             <div class="col-2">
                                 <button type="button" class="btn btn-sm btn-outline-warning w-100" id="edrResponseRunBtn" onclick="runEdrResponseAction()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-bolt me-1"></i>Run</button>

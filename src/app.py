@@ -6442,6 +6442,14 @@ def api_case_asset_detail(cid, asset_id):
         _log_case_event(db, cid, 'asset_status_change', f"{asset['host']} → {status}")
         if status == 'confirmed':
             _fire_asset_confirmed_playbooks(db, cid)
+            # First confirmation only -- MTTC's start anchor. Local datetime.now(), same
+            # convention as agent_commands.completed_at, so the two are directly
+            # comparable in the MTTC query below with no UTC/local correction needed.
+            if not asset['confirmed_at']:
+                db.execute(
+                    "UPDATE case_assets SET confirmed_at = ? WHERE id = ?",
+                    (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), asset_id)
+                )
     db.commit()
     return jsonify({"status": "success"})
 
@@ -9446,6 +9454,7 @@ def _case_sla_hours_for(db, queue_id, severity):
 @app.route('/api/dashboards/case-stats', methods=['GET'])
 @login_required
 def api_dashboard_case_stats():
+    from datetime import timedelta
     days = _dashboard_window_days(request)
     db = get_db()
     sla_hours = _case_sla_hours(db)
@@ -9453,15 +9462,68 @@ def api_dashboard_case_stats():
     closed_in_range = db.execute(
         "SELECT COUNT(*) FROM cases WHERE status = 'closed' AND closed_at >= datetime('now', ?)", (f'-{days} days',)
     ).fetchone()[0]
+    # MTTR (mean time to recover): closed_at/created_at are both UTC (schema
+    # CURRENT_TIMESTAMP default), so no timezone correction needed for this pair.
     avg_close_hours = db.execute(
         "SELECT AVG((julianday(closed_at) - julianday(created_at)) * 24) FROM cases "
         "WHERE status = 'closed' AND closed_at IS NOT NULL AND closed_at >= datetime('now', ?)", (f'-{days} days',)
     ).fetchone()[0]
-    # TTA (time to acknowledge) -- filtered on acknowledged_at's own window, not
+    # MTTA (mean time to acknowledge) -- filtered on acknowledged_at's own window, not
     # closed_at's, since a case can be acknowledged well before (or without ever) closing.
+    # acknowledged_at is stamped via datetime.utcnow() (app.py api_case_detail), so this
+    # pair is also UTC/UTC -- consistent, no conversion needed.
     avg_tta_hours = db.execute(
         "SELECT AVG((julianday(acknowledged_at) - julianday(created_at)) * 24) FROM cases "
         "WHERE acknowledged_at IS NOT NULL AND acknowledged_at >= datetime('now', ?)", (f'-{days} days',)
+    ).fetchone()[0]
+    # MTTD (mean time to detect): alerts.timestamp defaults to SQLite's CURRENT_TIMESTAMP
+    # (UTC) on the main sigma-engine insert path, while live_logs.timestamp is written
+    # from Python's LOCAL datetime.now() at ingest -- the same recurring UTC-vs-local
+    # mismatch documented elsewhere in this codebase. Converting alerts.timestamp to
+    # localtime before diffing (and filtering against a Python-computed local cutoff,
+    # not SQL's own UTC 'now' literal) avoids silently reporting a value that's off by
+    # the server's UTC offset. Only alerts with event_id set (the sigma-engine path) are
+    # counted -- the older heuristic ingest path shares its alert/log timestamps
+    # (delta always ~0) and isn't a meaningful detection-latency signal.
+    cutoff_local = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+    avg_mttd_seconds = db.execute(
+        "SELECT AVG((julianday(datetime(a.timestamp, 'localtime')) - julianday(l.timestamp)) * 86400) "
+        "FROM alerts a JOIN live_logs l ON l.id = a.event_id "
+        "WHERE a.event_id IS NOT NULL AND datetime(a.timestamp, 'localtime') >= ? "
+        "AND datetime(a.timestamp, 'localtime') >= l.timestamp",
+        (cutoff_local,)
+    ).fetchone()[0]
+    # MTTI (mean time to investigate): from acknowledgment (analyst opened/started
+    # working the case -- the same anchor MTTA measures TO) to the case's own first
+    # 'resolved' workflow-state determination (benign vs escalate) recorded in
+    # case_events. Both acknowledged_at and case_events.ts are UTC, no conversion needed.
+    avg_mtti_hours = db.execute(
+        "SELECT AVG((julianday(first_resolved.ts) - julianday(c.acknowledged_at)) * 24) "
+        "FROM cases c JOIN ("
+        "  SELECT case_id, MIN(ts) as ts FROM case_events "
+        "  WHERE event_type = 'workflow_state_change' AND detail = 'resolved' GROUP BY case_id"
+        ") first_resolved ON first_resolved.case_id = c.id "
+        "WHERE c.acknowledged_at IS NOT NULL AND first_resolved.ts >= c.acknowledged_at "
+        "AND first_resolved.ts >= datetime('now', ?)",
+        (f'-{days} days',)
+    ).fetchone()[0]
+    # MTTC (mean time to contain): from an asset's first compromise_status='confirmed'
+    # stamp to the first completed containment-flavored EDR action result linked into
+    # that SAME case for that SAME host. confirmed_at is stamped via local datetime.now()
+    # (api_case_asset_detail) to match agent_commands.completed_at's own local
+    # convention -- both local, directly comparable with no timezone correction.
+    avg_mttc_hours = db.execute(
+        "SELECT AVG(hours_to_contain) FROM ("
+        "  SELECT ca.id, MIN((julianday(ac.completed_at) - julianday(ca.confirmed_at)) * 24) as hours_to_contain "
+        "  FROM case_assets ca "
+        "  JOIN case_items ci ON ci.case_id = ca.case_id AND ci.item_type = 'command_result' "
+        "  JOIN agent_commands ac ON ac.id = ci.item_id AND ac.hostname = ca.host "
+        "  WHERE ca.confirmed_at IS NOT NULL AND ac.completed_at IS NOT NULL "
+        "  AND ac.completed_at >= ca.confirmed_at AND ca.confirmed_at >= ? "
+        "  AND ac.label IN ('isolate_host', 'kill_process', 'kill_process_by_name', 'quarantine_file') "
+        "  GROUP BY ca.id"
+        ")",
+        (cutoff_local,)
     ).fetchone()[0]
     # Per-queue/per-severity SLA tiers mean "breached" is no longer one shared threshold
     # -- resolve each open case's own threshold and compare (see _case_sla_hours_for).
@@ -9475,6 +9537,9 @@ def api_dashboard_case_stats():
         'closed_in_range_count': closed_in_range,
         'avg_close_hours': round(avg_close_hours, 1) if avg_close_hours is not None else None,
         'avg_tta_hours': round(avg_tta_hours, 1) if avg_tta_hours is not None else None,
+        'avg_mttd_seconds': round(avg_mttd_seconds, 1) if avg_mttd_seconds is not None else None,
+        'avg_mtti_hours': round(avg_mtti_hours, 1) if avg_mtti_hours is not None else None,
+        'avg_mttc_hours': round(avg_mttc_hours, 1) if avg_mttc_hours is not None else None,
         'sla_target_hours': sla_hours,
         'sla_hours_by_severity': _case_sla_hours_by_severity(db),
         'sla_breached_count': sla_breached,
@@ -10687,6 +10752,12 @@ def migrate_case_assets():
             UNIQUE(case_id, host)
         )''')
         conn.execute("CREATE INDEX IF NOT EXISTS idx_case_assets_case ON case_assets(case_id)")
+        # confirmed_at is MTTC's start anchor (mean time to contain): stamped once, the
+        # first time an asset's compromise_status becomes 'confirmed' -- same "set once,
+        # first transition" convention as cases.acknowledged_at above.
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(case_assets)").fetchall()}
+        if 'confirmed_at' not in cols:
+            conn.execute("ALTER TABLE case_assets ADD COLUMN confirmed_at DATETIME")
         conn.commit()
         conn.close()
     except Exception:
