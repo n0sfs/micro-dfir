@@ -8,6 +8,29 @@ a new feature, a real architectural decision, an incident and its fix. Routine p
 fixes don't need their own line; group them into the feature they support. Newest first.
 Full commit-level detail is always available via `git log`.
 
+## 2026-09-07
+
+### Case attachments
+
+Cases had no way to attach a file — a screenshot, an exported log bundle,
+a memory-dump excerpt, a signed acknowledgement doc — flagged as the
+biggest genuine feature gap in the DFIR-lifecycle audit below. New
+`case_attachments` table + upload/list/download/delete routes, following
+the same `_require_open_case` + `_log_case_event` pattern every other
+case sub-resource already uses (no new permission key — ordinary case
+mutations carry none today). Uploads are stored under a random on-disk
+name, never the client-supplied one, and always served back with
+`as_attachment=True` — deliberately not extension-restricted, since a
+case attachment may legitimately BE a malware sample or suspicious
+script kept as evidence; forcing a download instead of an inline render
+is what neutralizes that risk. 25MB per-file cap (no existing precedent
+in this codebase to match against). Two real bugs caught during live
+verification and fixed same-session: upload/delete only refreshed the
+attachments list, so the resulting Timeline entries never appeared until
+the analyst navigated away and back; and those entries rendered as a raw
+`attachment_added`/`attachment_removed` string instead of a formatted
+label with the filename, unlike every other case event type.
+
 ## 2026-09-06
 
 ### Full-lifecycle DFIR audit: triage, case reports, and SOAR automation gaps
