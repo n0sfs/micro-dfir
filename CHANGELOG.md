@@ -10,6 +10,21 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-07
 
+### EDR response-action history filters + fleet version-compliance note
+
+Response Actions history was a flat, hard-capped last-50-rows list
+with no status or date filter. Added status/since_days params to
+`GET /api/agent/commands` and matching dropdowns on the Agents page;
+the 3 stat tiles stay fleet-wide totals even while the table is
+filtered. Also surfaces a "N of M hosts behind the newest agent
+version" note directly on the Agents page, reusing the Dashboards
+"Agent Fleet Health Trend" widget's own data (no new backend logic).
+While wiring that endpoint into a new surface, fixed the same local-
+time-vs-UTC drift bug already caught in `_run_due_log_source_silent_alerts`
+— `agent_polls.timestamp` is local server time, but the query compared
+it against SQLite's UTC `'now'`. Live-verified the status filter
+against 6 real failed actions across the real fleet.
+
 ### Click-through drill-down on 3 dashboard charts
 
 None of the 24 dashboard widget types had any click-through from the
