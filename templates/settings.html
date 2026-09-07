@@ -174,6 +174,36 @@
                 <button type="submit" class="btn btn-primary"><i class="fa-solid fa-save me-2"></i>Save & Apply Network Settings</button>
             </form>
             <small class="text-muted d-block mt-3"><i class="fa-solid fa-triangle-exclamation me-1"></i><strong>Warning:</strong> Applying changes will instantly reload Vector and restart Gunicorn in the background. You may need to reconnect your browser to the new UI IP and Port.</small>
+
+            <hr class="border-secondary my-4">
+
+            <h6 class="text-light mb-3"><i class="fa-solid fa-server me-2"></i>DNS Server</h6>
+            <p class="text-muted small mb-3">This appliance's own DNS forwarder + query logger (no external service) -- opt-in, never binds <code>0.0.0.0</code>, only answers devices you've manually pointed at the IP you choose here. Every query is written directly into the log store. Also editable from Log Pipeline &gt; DNS Query Logging, where recent activity can be browsed.</p>
+            <div class="row g-2 mb-2 align-items-end">
+                <div class="col-md-3">
+                    <div class="form-check form-switch mb-0">
+                        <input class="form-check-input" type="checkbox" id="dnsSvrEnabled">
+                        <label class="form-check-label small text-muted" for="dnsSvrEnabled">Enabled</label>
+                    </div>
+                </div>
+                <div class="col-md-5">
+                    <label class="form-label text-muted small mb-1" for="dnsSvrBindIp">Bind IP <span class="text-muted">(which interface)</span></label>
+                    <select id="dnsSvrBindIp" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onDnsSvrBindIpChange()">
+                        <option value="">Loading interfaces&hellip;</option>
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label text-muted small mb-1" for="dnsSvrPort">Port</label>
+                    <input type="number" id="dnsSvrPort" class="form-control form-control-sm bg-dark text-light border-secondary" value="53" min="1" max="65535">
+                </div>
+            </div>
+            <div class="mb-2">
+                <label class="form-label text-muted small mb-1" for="dnsSvrForwarders">Upstream forwarders <span class="text-muted">(comma-separated)</span></label>
+                <input type="text" id="dnsSvrForwarders" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="1.1.1.1,1.0.0.1">
+            </div>
+            <div id="dnsSvrInterfaceNote" class="small text-muted mb-3"></div>
+            <button type="button" class="btn btn-primary btn-sm" onclick="saveDnsServerConfig()"><i class="fa-solid fa-save me-1"></i> Save</button>
+            <div id="dnsSvrStatus" class="small mt-3">Loading&hellip;</div>
         </div>
     </div>
     {% endif %}
@@ -531,6 +561,7 @@ document.addEventListener("DOMContentLoaded", function() {
     loadRetentionSettings();
     loadArchiveSettings();
     loadDbBackupSettings();
+    loadDnsServerConfig();
     setInterval(loadMetrics, 5000);
 
     let certForm = document.getElementById('certUploadForm');
@@ -725,6 +756,92 @@ function pollUpdateProgress() {
             }
             _updatePollTimer = setTimeout(pollUpdateProgress, 2000);
         });
+}
+
+// ---- DNS Server config + status (same backend as Log Pipeline > DNS Query Logging --
+// this is a second, convenience access point for the same /api/settings/dns-server
+// config, not a separate copy of it). ----
+let dnsSvrInterfaces = [];
+
+function loadDnsServerInterfaces() {
+    return fetch('/api/settings/dns-server/interfaces')
+        .then(r => r.json())
+        .then(d => {
+            dnsSvrInterfaces = d.interfaces || [];
+            const sel = document.getElementById('dnsSvrBindIp');
+            if (!sel) return;
+            if (!dnsSvrInterfaces.length) {
+                sel.innerHTML = '<option value="">No network interfaces found</option>';
+                return;
+            }
+            sel.innerHTML = dnsSvrInterfaces.map(i => `<option value="${escHtml(i.ip)}">${escHtml(i.ip)} (${escHtml(i.interface)})</option>`).join('');
+        })
+        .catch(err => {
+            console.error('Error loading interfaces:', err);
+            const sel = document.getElementById('dnsSvrBindIp');
+            if (sel) sel.innerHTML = '<option value="">Failed to load interfaces</option>';
+        });
+}
+
+function loadDnsServerConfig() {
+    if (!document.getElementById('dnsSvrEnabled')) return;
+    loadDnsServerInterfaces().then(() => {
+        fetch('/api/settings/dns-server')
+            .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+            .then(d => {
+                document.getElementById('dnsSvrEnabled').checked = !!d.enabled;
+                document.getElementById('dnsSvrPort').value = d.port || 53;
+                document.getElementById('dnsSvrForwarders').value = d.forwarders || '1.1.1.1,1.0.0.1';
+                const sel = document.getElementById('dnsSvrBindIp');
+                if (d.bind_ip && !dnsSvrInterfaces.some(i => i.ip === d.bind_ip)) {
+                    sel.insertAdjacentHTML('afterbegin', `<option value="${escHtml(d.bind_ip)}">${escHtml(d.bind_ip)} (saved, not currently detected)</option>`);
+                }
+                if (d.bind_ip) sel.value = d.bind_ip;
+                onDnsSvrBindIpChange();
+                renderDnsServerStatus(d.status);
+            })
+            .catch(err => {
+                console.error('Error loading DNS server config:', err);
+                document.getElementById('dnsSvrStatus').innerHTML = '<span class="text-danger">Failed to load configuration.</span>';
+            });
+    });
+}
+
+function onDnsSvrBindIpChange() {
+    const sel = document.getElementById('dnsSvrBindIp');
+    const note = document.getElementById('dnsSvrInterfaceNote');
+    if (!sel || !note) return;
+    const match = dnsSvrInterfaces.find(i => i.ip === sel.value);
+    note.innerText = match ? `Currently selected: ${match.ip} on ${match.interface}.` : '';
+}
+
+function renderDnsServerStatus(status) {
+    const el = document.getElementById('dnsSvrStatus');
+    if (!el) return;
+    if (!status) { el.innerHTML = '<span class="text-muted">Not started yet -- save a configuration with Enabled checked.</span>'; return; }
+    if (status.running) {
+        el.innerHTML = `<i class="fa-solid fa-circle-check text-success me-1"></i>Running on ${escHtml(status.bind_ip)}:${status.port} since ${escHtml(status.started_at)}. Forwarders: ${escHtml((status.forwarders || []).join(', '))}`;
+    } else if (status.error) {
+        el.innerHTML = `<i class="fa-solid fa-triangle-exclamation text-danger me-1"></i>Failed to bind ${escHtml(status.bind_ip)}:${status.port}: ${escHtml(status.error)} <span class="text-muted">(checked ${escHtml(status.checked_at)})</span>`;
+    } else {
+        el.innerHTML = `<span class="text-muted">Disabled (checked ${escHtml(status.checked_at || '')}).</span>`;
+    }
+}
+
+function saveDnsServerConfig() {
+    const payload = {
+        enabled: document.getElementById('dnsSvrEnabled').checked,
+        bind_ip: document.getElementById('dnsSvrBindIp').value,
+        port: parseInt(document.getElementById('dnsSvrPort').value, 10) || 53,
+        forwarders: document.getElementById('dnsSvrForwarders').value.trim(),
+    };
+    fetch('/api/settings/dns-server', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) })
+        .then(r => r.json().then(d => ({ ok: r.ok, d })))
+        .then(({ ok, d }) => {
+            if (ok) { toast('DNS server configuration saved -- takes effect within ~10 seconds.', 'success'); setTimeout(loadDnsServerConfig, 3000); }
+            else toast(d.error || 'Failed to save.', 'danger');
+        })
+        .catch(err => toast('Error saving: ' + err, 'danger'));
 }
 
 // Telemetry Logic
