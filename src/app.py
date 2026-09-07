@@ -15681,6 +15681,22 @@ def agent_checkins():
                 for m in mapped:
                     m['version_since'] = vh_map.get((m['hostname'], m['version']))
 
+        # Last log actually ingested from this host, distinct from the agent_polls
+        # heartbeat above -- an agent can check in fine while its log shipping is
+        # silently broken (wrong channel config, EDR service down, etc.), and today
+        # nothing on this page distinguishes those two failure modes. One point
+        # lookup per visible host (max 20): `ORDER BY id DESC LIMIT 1` rides the
+        # existing idx_live_logs_host index's implicit (host, rowid) ordering to seek
+        # directly to the newest matching row, rather than `MAX(timestamp)` (or a
+        # timestamp-range filter) which would force a scan of every row for that
+        # host -- the exact class of slow query documented in CLAUDE.md.
+        for m in mapped:
+            row = db.execute(
+                "SELECT timestamp FROM live_logs WHERE host = ? ORDER BY id DESC LIMIT 1",
+                (m['hostname'],)
+            ).fetchone()
+            m['last_log_received'] = row['timestamp'] if row else None
+
         return jsonify(mapped)
     except Exception as e:
         print("Checkins error:", e)

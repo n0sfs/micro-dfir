@@ -104,6 +104,7 @@
                             <th>Endpoint IP</th>
                             <th>Status</th>
                             <th>Last Check-in</th>
+                            <th>Last Log Received</th>
                             <th class="endpoint-th">
                                 <div class="d-flex align-items-center justify-content-between">
                                     <span>Version</span>
@@ -119,7 +120,7 @@
                         </tr>
                     </thead>
                     <tbody id="endpointsTableBody">
-                        <tr><td colspan="10" class="text-center text-muted py-4">Loading active endpoints...</td></tr>
+                        <tr><td colspan="11" class="text-center text-muted py-4">Loading active endpoints...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -849,6 +850,16 @@ function relativeTime(ts) {
     return `${Math.round(s / 86400)}d ago`;
 }
 
+function lastLogReceivedCell(dev) {
+    if (!dev.last_log_received) {
+        const checkingIn = dev.status === 'Online' || dev.status === 'Idle';
+        return checkingIn
+            ? `<span class="text-warning" title="This endpoint is checking in but has never sent a log. Check its log-shipping configuration."><i class="fa-solid fa-triangle-exclamation me-1"></i>None yet</span>`
+            : `<span class="text-muted">—</span>`;
+    }
+    return `<span title="${escHtml(dev.last_log_received)}">${escHtml(relativeTime(dev.last_log_received)) || escHtml(dev.last_log_received)}</span>`;
+}
+
 function osIcon(os, osDetail) {
     const icon = os === 'linux' ? '<i class="fa-brands fa-linux text-warning" title="Linux"></i>'
         : os === 'macos' ? '<i class="fa-brands fa-apple text-light" title="macOS"></i>'
@@ -1101,7 +1112,7 @@ function renderEndpoints() {
 
     if (allEndpoints.length === 0) {
         document.getElementById('endpointCountLabel').innerText = '';
-        tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted py-3">No active agent endpoints detected.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted py-3">No active agent endpoints detected.</td></tr>';
         updateSelectAllCheckboxState();
         updateBulkActionBar();
         return;
@@ -1124,7 +1135,7 @@ function renderEndpoints() {
         : `${allEndpoints.length} endpoint${allEndpoints.length === 1 ? '' : 's'}`;
 
     if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted py-3">No endpoints match your filters.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted py-3">No endpoints match your filters.</td></tr>';
         updateSelectAllCheckboxState();
         updateBulkActionBar();
         return;
@@ -1144,6 +1155,7 @@ function renderEndpoints() {
                     <td><span class="text-info">${escHtml(dev.endpoint_ip)}</span></td>
                     <td>${endpointStatusBadge(dev.status)}</td>
                     <td class="text-nowrap"><span title="${escHtml(dev.last_check_in)}">${escHtml(relativeTime(dev.last_check_in)) || escHtml(dev.last_check_in)}</span></td>
+                    <td class="text-nowrap">${lastLogReceivedCell(dev)}</td>
                     <td class="text-nowrap">${versionBadge(dev)}</td>
                     <td class="text-nowrap"><input type="text" class="form-control form-control-sm bg-dark text-light border-secondary py-0" style="width:110px; font-size:.8rem;" value="${escHtml(dev.group || '')}" placeholder="—" title="Organizational grouping for bulk response actions -- not a config policy" onblur="saveEndpointGroup(rowHost(this), this.value)" onkeydown="if(event.key==='Enter') this.blur()"></td>
                     <td><div style="cursor:pointer; display:inline-block;" onclick="openHeartbeatHistoryModal(rowHost(this));" title="Click for 24h check-in history">${heartbeatSpark(dev.status, dev.recent_polls)}</div></td>
