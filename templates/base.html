@@ -563,6 +563,18 @@ body.sidebar-collapsed .nav-block .nav-badge{
             });
         }
 
+        // ---------- Cross-page pivot into Log Search ----------
+        // Any page can call this to land directly on a prefiltered Log Search instead of
+        // making an analyst copy a host/user/IP/IOC value and go search for it by hand --
+        // /siem?tab=search&q=<query> is read by dashboard.html's initSearchTab(). Bare
+        // values are auto-scoped to whichever field name is passed (host/username/
+        // source_ip/destination_ip/message); pass null for `field` to use the value
+        // as a raw query string as-is (e.g. an already-formed "host:X user:Y").
+        function pivotToLogSearch(field, value) {
+            const query = field ? `${field}:${String(value).includes(' ') ? `"${value}"` : value}` : String(value);
+            window.location.href = `/siem?tab=search&q=${encodeURIComponent(query)}`;
+        }
+
         // ---------- Styled prompt dialog (replaces prompt(), returns a Promise<string|null>) ----------
         function promptDialog(message, defaultValue, opts) {
             opts = opts || {};

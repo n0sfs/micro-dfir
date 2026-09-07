@@ -1125,6 +1125,17 @@ function highlightText(text, terms) {
     return escaped.replace(new RegExp(`(${pattern})`, 'gi'), '<mark class="search-highlight">$1</mark>');
 }
 
+// Wraps an already-rendered (escaped/highlighted) cell value in a pivot link to
+// /siem?tab=search&q=<field>:<value> (see pivotToLogSearch in base.html) -- "show me
+// everything else this host/user/IP did" from the alert detail modal, previously only
+// possible by copying the value out and building the search by hand. data-* attributes
+// (not an inline JS string literal) so a value containing a quote can't break the
+// onclick -- dataset auto-decodes the escHtml()'d attribute value back to the raw string.
+function pivotLinkHtml(field, rawValue, renderedHtml) {
+    if (!rawValue || rawValue === '-') return renderedHtml;
+    return `<a href="#" class="text-info" title="Search all logs for this ${escHtml(field)}" data-pivot-field="${escHtml(field)}" data-pivot-value="${escHtml(rawValue)}" onclick="pivotToLogSearch(this.dataset.pivotField, this.dataset.pivotValue); return false;">${renderedHtml}</a>`;
+}
+
 // The active search terms as of the last executed search, keyed by which column each
 // applies to — kept at module scope so both the results table and the detail modal
 // (opened later, after the box may have been edited again) highlight consistently.
@@ -1234,12 +1245,12 @@ function showLogDetail(idx) {
             <dt class="col-3">Type</dt><dd class="col-9">${typeBadge(log.type)}${atomicTestBadge(log)}</dd>
             ${srcLabel ? `<dt class="col-3">Detection Source</dt><dd class="col-9"><span class="badge bg-secondary">${escHtml(srcLabel)}</span></dd>` : ''}
             <dt class="col-3">Severity</dt><dd class="col-9"><span class="badge ${severityBadgeClass(log.severity)}">${escHtml((log.severity || '').toUpperCase())}</span></dd>
-            <dt class="col-3">Host</dt><dd class="col-9">${highlightText(log.host, termsFor('host'))}</dd>
+            <dt class="col-3">Host</dt><dd class="col-9">${pivotLinkHtml('host', log.host, highlightText(log.host, termsFor('host')))}</dd>
             <dt class="col-3">App / Rule</dt><dd class="col-9">${highlightText(log.app, termsFor('app'))}</dd>
             <dt class="col-3">Event ID</dt><dd class="col-9">${highlightText(log.event_id, termsFor('event_id'))}</dd>
-            <dt class="col-3">User</dt><dd class="col-9">${highlightText(log.username, termsFor('username'))}</dd>
-            <dt class="col-3">Src IP</dt><dd class="col-9">${highlightText(log.source_ip, termsFor('source_ip'))}${log.country_name ? ` <span class="badge bg-secondary" title="${escHtml(log.country_code || '')}">${escHtml(log.country_name)}</span>` : ''}</dd>
-            <dt class="col-3">Dest IP</dt><dd class="col-9">${highlightText(log.destination_ip, termsFor('destination_ip'))}</dd>
+            <dt class="col-3">User</dt><dd class="col-9">${pivotLinkHtml('username', log.username, highlightText(log.username, termsFor('username')))}</dd>
+            <dt class="col-3">Src IP</dt><dd class="col-9">${pivotLinkHtml('source_ip', log.source_ip, highlightText(log.source_ip, termsFor('source_ip')))}${log.country_name ? ` <span class="badge bg-secondary" title="${escHtml(log.country_code || '')}">${escHtml(log.country_name)}</span>` : ''}</dd>
+            <dt class="col-3">Dest IP</dt><dd class="col-9">${pivotLinkHtml('destination_ip', log.destination_ip, highlightText(log.destination_ip, termsFor('destination_ip')))}</dd>
         </dl>
         ${viewRuleBtn}
         ${log.type === 'alert' ? `
@@ -2178,6 +2189,11 @@ function initSearchTab() {
     // hand. Same ?param-read-on-init idiom as Detection Rules' ?rule_id= deep link.
     const _params = new URLSearchParams(window.location.search);
     const _deepLinkAlertId = _params.get('alert_id');
+    // General-purpose pivot: any page can link to /siem?tab=search&q=<query> to land
+    // directly on a prefiltered Log Search (e.g. host:WKS-01, or a bare IOC value) --
+    // previously only the one hardcoded alert_id case above could do this at all, so a
+    // case's asset/IOC or an alert's host/user/IP had nowhere to pivot to.
+    const _deepLinkQuery = _params.get('q');
     if (_deepLinkAlertId) {
         // buildLogQueryParams() ignores #searchQuery entirely unless this is checked --
         // loadSearchModePrefs() (just above) may have just turned it off from a saved
@@ -2194,6 +2210,14 @@ function initSearchTab() {
         // The default 5-minute window would hide any alert not fired in the last few
         // minutes -- widen to "All" so the deep-linked alert is never invisible just
         // because it's not brand new. updateFilters() -> loadDashboardData() runs after.
+        selectTimePreset('all');
+        updateFilters();
+    } else if (_deepLinkQuery) {
+        document.getElementById('toggleAdvancedQuery').checked = true;
+        updateSearchModeVisibility(false);
+        document.getElementById('searchQuery').value = _deepLinkQuery;
+        // Unlike the alert_id case, this isn't scoped to one row type -- a host/user
+        // pivot legitimately wants to see logs, alerts, and anomalies together.
         selectTimePreset('all');
         updateFilters();
     } else {
