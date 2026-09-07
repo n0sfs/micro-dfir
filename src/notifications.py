@@ -13,6 +13,8 @@
 import copy
 import json
 import smtplib
+from email.mime.application import MIMEApplication
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 import requests
@@ -75,6 +77,44 @@ def _send_email(config, alert):
 def _send_webhook(config, alert):
     try:
         requests.post(config['webhook_url'], json=alert, timeout=5)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def send_report_email(db, recipients, subject, body, attachment_path, attachment_filename):
+    """Emails a generated report PDF. Reuses the shared SMTP SERVER config from
+    get_alert_notification_config (host/port/credentials -- the actual mail
+    infrastructure) but takes its own recipient list passed in by the caller, since a
+    report's audience (compliance officers, management) is often a different group than
+    who's on the alert pager rotation, and belongs to a separate settings key
+    (report_schedule_config's email_recipients) the caller already resolved. Deliberately
+    gated only on smtp_host being configured, not alert_notification_config's own
+    smtp_enabled flag -- a report recipient list existing at all is this feature's own
+    opt-in signal, independent of whether alert emailing happens to be toggled on/off.
+    Best-effort: returns (ok, error), never raises."""
+    to_addrs = [a.strip() for a in (recipients or '').split(',') if a.strip()]
+    if not to_addrs:
+        return False, 'no recipients configured'
+    cfg = get_alert_notification_config(db)
+    if not cfg.get('smtp_host'):
+        return False, 'SMTP server not configured (see Notification Channels on the SOAR page)'
+    try:
+        msg = MIMEMultipart()
+        msg['Subject'] = subject
+        msg['From'] = cfg.get('smtp_from') or cfg.get('smtp_user') or 'micro-dfir@localhost'
+        msg['To'] = ', '.join(to_addrs)
+        msg.attach(MIMEText(body))
+        with open(attachment_path, 'rb') as f:
+            part = MIMEApplication(f.read(), Name=attachment_filename)
+        part['Content-Disposition'] = f'attachment; filename="{attachment_filename}"'
+        msg.attach(part)
+        with smtplib.SMTP(cfg['smtp_host'], int(cfg.get('smtp_port') or 587), timeout=20) as server:
+            if cfg.get('smtp_use_tls', True):
+                server.starttls()
+            if cfg.get('smtp_user') and cfg.get('smtp_pass'):
+                server.login(cfg['smtp_user'], cfg['smtp_pass'])
+            server.sendmail(msg['From'], to_addrs, msg.as_string())
         return True, None
     except Exception as e:
         return False, str(e)

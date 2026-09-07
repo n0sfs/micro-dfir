@@ -11,9 +11,9 @@ BASE_DIR = "/opt/micro-dfir"
 DB_PATH = os.path.join(BASE_DIR, "siem.db")
 
 REPORT_TYPES = ('security', 'compliance', 'audit', 'vulnerability')
-REPORT_SCHEDULE_FREQUENCIES = ('off', 'weekly', 'monthly')
+REPORT_SCHEDULE_FREQUENCIES = ('off', 'daily', 'weekly', 'monthly')
 REPORT_SCHEDULE_DEFAULTS = {'security': 'monthly', 'compliance': 'off', 'audit': 'off', 'vulnerability': 'off'}
-REPORT_SCHEDULE_CRON = {'weekly': '0 6 * * 1', 'monthly': '0 1 1 * *'}
+REPORT_SCHEDULE_CRON = {'daily': '0 5 * * *', 'weekly': '0 6 * * 1', 'monthly': '0 1 1 * *'}
 
 def get_report_schedule_config():
     cfg = dict(REPORT_SCHEDULE_DEFAULTS)
@@ -38,7 +38,7 @@ def apply_report_schedule_to_crontab(schedule_cfg):
     new_lines = []
     for report_type in REPORT_TYPES:
         freq = schedule_cfg.get(report_type, 'off')
-        if freq not in ('weekly', 'monthly'):
+        if freq not in ('daily', 'weekly', 'monthly'):
             continue
         cmd = (f"{BASE_DIR}/venv/bin/python3 {BASE_DIR}/src/generate_report.py "
                f"{report_type} --source=scheduled >> /var/log/microdfir-report.log 2>&1")

@@ -308,35 +308,40 @@
             <hr class="border-secondary my-4">
 
             <h6 class="text-info mb-3">Report Schedule</h6>
-            <p class="text-muted small mb-3">Automatically generate each report type on a recurring cadence, in addition to generating on demand from the SIEM tab's Reports pane.</p>
+            <p class="text-muted small mb-3">Automatically generate each report type on a recurring cadence, in addition to generating on demand from the Reports page.</p>
             <div class="row g-2 align-items-end mb-2" style="max-width:520px;">
                 <div class="col-6"><label class="form-label small text-muted mb-1" for="reportScheduleSecurity">Security Summary</label>
                     <select data-report-type="security" id="reportScheduleSecurity" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
-                        <option value="off">Off</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
+                        <option value="off">Off</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
                     </select>
                 </div>
                 <div class="col-6"><label class="form-label small text-muted mb-1" for="reportScheduleCompliance">Compliance Report</label>
                     <select data-report-type="compliance" id="reportScheduleCompliance" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
-                        <option value="off">Off</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
+                        <option value="off">Off</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
                     </select>
                 </div>
                 <div class="col-6"><label class="form-label small text-muted mb-1" for="reportScheduleAudit">Audit Trail Report</label>
                     <select data-report-type="audit" id="reportScheduleAudit" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
-                        <option value="off">Off</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
+                        <option value="off">Off</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
                     </select>
                 </div>
                 <div class="col-6"><label class="form-label small text-muted mb-1" for="reportScheduleVulnerability">Vulnerability Report</label>
                     <select data-report-type="vulnerability" id="reportScheduleVulnerability" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
-                        <option value="off">Off</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
+                        <option value="off">Off</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
                     </select>
                 </div>
+            </div>
+            <div class="mb-2" style="max-width:520px;">
+                <label class="form-label small text-muted mb-1" for="reportScheduleRecipients">Email Recipients <span class="text-muted">(comma-separated, optional)</span></label>
+                <input type="text" id="reportScheduleRecipients" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="soc-team@example.com, compliance@example.com" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
+                <p class="text-muted small mt-1 mb-0">Every report generated on the schedule above is emailed to this list automatically (as a PDF attachment) — uses the SMTP server configured under SOAR &gt; Notification Channels. Leave blank to only generate, not email. Reports can also be emailed on demand from the Reports page regardless of this setting.</p>
             </div>
             {% if has_permission('settings.reports.manage') %}
             <button class="btn btn-outline-primary btn-sm mt-2" onclick="saveReportSchedule()"><i class="fa-solid fa-save me-1"></i> Save Schedule</button>
             {% else %}
             <p class="text-muted small mb-0"><i class="fa-solid fa-lock me-1"></i>Tier 3 (Senior Analyst) or Admin role required to change the report schedule.</p>
             {% endif %}
-            <p class="text-muted small mt-2 mb-0">Weekly reports run Monday 06:00; monthly reports run the 1st at 01:00 — the appliance's own local system time.</p>
+            <p class="text-muted small mt-2 mb-0">Daily reports run 05:00; weekly reports run Monday 06:00; monthly reports run the 1st at 01:00 — the appliance's own local system time.</p>
             <div id="scheduleMsg" class="mt-2 small" style="display:none;"></div>
         </div>
     </div>
@@ -604,6 +609,8 @@ function loadReportSchedule() {
             document.querySelectorAll('[data-report-type]').forEach(sel => {
                 sel.value = cfg[sel.dataset.reportType] || 'off';
             });
+            const recipientsEl = document.getElementById('reportScheduleRecipients');
+            if (recipientsEl) recipientsEl.value = cfg.email_recipients || '';
         })
         .catch(e => {
             console.error('Error loading report schedule:', e);
@@ -617,6 +624,8 @@ function loadReportSchedule() {
 function saveReportSchedule() {
     const cfg = {};
     document.querySelectorAll('[data-report-type]').forEach(sel => { cfg[sel.dataset.reportType] = sel.value; });
+    const recipientsEl = document.getElementById('reportScheduleRecipients');
+    if (recipientsEl) cfg.email_recipients = recipientsEl.value;
     const msg = document.getElementById('scheduleMsg');
     fetch('/api/settings/report-schedule', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(cfg) })
         .then(r => r.json())
