@@ -526,12 +526,15 @@ document.addEventListener("DOMContentLoaded", function() {
 // app's "no frontend build step" constraint. HTML-escapes FIRST, then only recognizes
 // a small fixed set of patterns, so this can never inject markup from file content.
 function renderChangelogMarkdown(text) {
-    const esc = escHtml(text);
-    const lines = esc.split('\n');
+    // Split into lines BEFORE escaping, not after -- escHtml's innerText/innerHTML
+    // round-trip converts every \n into a <br>, so escaping the whole blob first and
+    // then splitting on '\n' finds no newlines at all (the browser already turned them
+    // into <br> tags) and collapses the entire file into a single "line".
+    const lines = (text || '').split('\n');
     let html = '';
     let inList = false;
     const closeList = () => { if (inList) { html += '</ul>'; inList = false; } };
-    const inline = (s) => s.replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    const inline = (s) => escHtml(s).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
     for (const raw of lines) {
         const line = raw;
         if (/^## /.test(line)) { closeList(); html += `<h5 class="text-warning mt-4 mb-2">${inline(line.slice(3))}</h5>`; }
