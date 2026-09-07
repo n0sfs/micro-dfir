@@ -9125,10 +9125,19 @@ def api_dashboard_agent_health_trend():
     days = _dashboard_window_days(request)
     bucket = "strftime('%Y-%m-%d %H:00', timestamp)" if days <= 7 else "strftime('%Y-%m-%d', timestamp)"
     db = get_db()
+    # agent_polls.timestamp is local SERVER time (datetime.datetime.now() at check-in,
+    # not UTC) -- SQLite's own 'now' literal is always UTC, so comparing it directly
+    # against this column drifts by the server's UTC offset, same bug class fixed in
+    # _run_due_log_source_silent_alerts. Lower-impact here (a few hours' skew at one
+    # edge of a multi-day trend window, not a binary alert-fire threshold), but this
+    # route is about to back a new fleet-health readout on the Agents page, so worth
+    # fixing rather than building a new feature on a known-drifting read.
+    from datetime import timedelta as _td
+    cutoff = (datetime.now() - _td(days=days)).strftime('%Y-%m-%d %H:%M:%S')
     trend = db.execute(
         f"SELECT {bucket} as t_bucket, COUNT(DISTINCT ip_address) as count FROM agent_polls "
-        f"WHERE timestamp >= datetime('now', ?) GROUP BY t_bucket ORDER BY t_bucket ASC",
-        (f'-{days} days',)
+        f"WHERE timestamp >= ? GROUP BY t_bucket ORDER BY t_bucket ASC",
+        (cutoff,)
     ).fetchall()
     # Latest poll per host (same MAX(id) GROUP BY ip_address shape api_dashboard_agent_status
     # uses above), not every poll ever -- a host that upgraded mid-window shouldn't count
@@ -16236,10 +16245,13 @@ def api_agent_commands():
         # needs at least the same floor permission dispatching a Tier 1 EDR action does.
         err = require_permission('edr.command.basic')
         if err: return err
+        from datetime import timedelta
         hostname = request.args.get('hostname', '')
         label_filter = request.args.get('label', '')
         cmd_id = request.args.get('id', type=int)
-        limit = request.args.get('limit', 30, type=int)
+        status_filter = request.args.get('status', '')
+        since_days = request.args.get('since_days', type=int)
+        limit = min(request.args.get('limit', 30, type=int) or 30, 500)
         conditions, params = [], []
         if hostname:
             conditions.append("hostname = ?")
@@ -16250,6 +16262,18 @@ def api_agent_commands():
         if cmd_id is not None:
             conditions.append("id = ?")
             params.append(cmd_id)
+        if status_filter in ('pending', 'sent', 'done', 'failed'):
+            conditions.append("status = ?")
+            params.append(status_filter)
+        if since_days is not None and since_days > 0:
+            # queued_at is written from Python's local datetime.now() at queue time (same
+            # convention as live_logs.timestamp/agent_polls.timestamp elsewhere in this
+            # app) -- datetime('now', ?) is SQLite's own UTC clock, so this mirrors
+            # _run_due_log_source_silent_alerts' fix rather than repeating that same
+            # non-UTC-server drift bug here.
+            cutoff = (datetime.now() - timedelta(days=since_days)).strftime('%Y-%m-%d %H:%M:%S')
+            conditions.append("queued_at >= ?")
+            params.append(cutoff)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         rows = db.execute(
             f"SELECT id, hostname, label, status, queued_by, queued_at, completed_at, exit_code, stdout, stderr FROM agent_commands {where} ORDER BY id DESC LIMIT ?",
