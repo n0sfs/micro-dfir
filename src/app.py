@@ -4932,7 +4932,8 @@ def api_yara_scan():
 @app.route('/reports')
 @login_required
 def reports_page():
-    return render_template('reports.html', current_user=current_user, compliance_frameworks=COMPLIANCE_FRAMEWORKS)
+    active_tab = request.args.get('tab', 'reports')
+    return render_template('reports.html', active_tab=active_tab, current_user=current_user, compliance_frameworks=COMPLIANCE_FRAMEWORKS)
 
 # Keyed off the report_history row's id, not a user-supplied filename -- the old
 # <filename> route took whatever the client sent straight into send_from_directory

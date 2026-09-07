@@ -6,74 +6,176 @@
     <p>Generated PDF security, compliance, audit, and vulnerability reports.</p>
 </div>
 
-<div class="row g-3 mb-3">
-    <div class="col-6 col-lg-3">
-        <div class="stat-tile">
-            <div class="stat-label" id="statLabel0">Loading&hellip;</div>
-            <div class="stat-value" id="statValue0">&hellip;</div>
+<ul class="nav nav-tabs border-secondary mb-3" id="reportsTabs">
+    <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'reports' else '' }}" id="tabBtnReports" onclick="switchReportsTab('reports')"><i class="fa-solid fa-folder-open me-1"></i>Reports</button></li>
+    <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'branding' else '' }}" id="tabBtnBranding" onclick="switchReportsTab('branding')"><i class="fa-solid fa-paintbrush me-1"></i>Branding</button></li>
+    <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'schedule' else '' }}" id="tabBtnSchedule" onclick="switchReportsTab('schedule')"><i class="fa-solid fa-clock me-1"></i>Schedule</button></li>
+</ul>
+
+<!-- Reports pane -->
+<div id="paneReports" style="display:none;">
+    <div class="row g-3 mb-3">
+        <div class="col-6 col-lg-3">
+            <div class="stat-tile">
+                <div class="stat-label" id="statLabel0">Loading&hellip;</div>
+                <div class="stat-value" id="statValue0">&hellip;</div>
+            </div>
+        </div>
+        <div class="col-6 col-lg-3">
+            <div class="stat-tile">
+                <div class="stat-label" id="statLabel1">Loading&hellip;</div>
+                <div class="stat-value" id="statValue1">&hellip;</div>
+            </div>
+        </div>
+        <div class="col-6 col-lg-3">
+            <div class="stat-tile">
+                <div class="stat-label" id="statLabel2">Loading&hellip;</div>
+                <div class="stat-value" id="statValue2">&hellip;</div>
+            </div>
+        </div>
+        <div class="col-6 col-lg-3">
+            <div class="stat-tile">
+                <div class="stat-label" id="statLabel3">Loading&hellip;</div>
+                <div class="stat-value" id="statValue3">&hellip;</div>
+            </div>
         </div>
     </div>
-    <div class="col-6 col-lg-3">
-        <div class="stat-tile">
-            <div class="stat-label" id="statLabel1">Loading&hellip;</div>
-            <div class="stat-value" id="statValue1">&hellip;</div>
+
+    <div class="card shadow-sm border-secondary bg-dark text-light mb-4">
+        <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+            <h5 class="mb-0 text-info"><i class="fa-solid fa-folder-open"></i> Generated PDF Reports</h5>
+            <form method="POST" action="{{ url_for('trigger_report') }}" class="m-0 d-flex gap-2 align-items-center">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <select name="type" id="reportTypeSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" onchange="onReportTypeChange()">
+                    <option value="security">Security Summary</option>
+                    <option value="compliance">Compliance Report</option>
+                    <option value="audit">Audit Trail Report</option>
+                    <option value="vulnerability">Vulnerability Report</option>
+                </select>
+                <select name="framework" id="reportFrameworkSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto; display:none;" title="Narrow the Compliance Report to one framework instead of the all-frameworks survey">
+                    <option value="">All Frameworks</option>
+                    {% for key, label in compliance_frameworks.items() %}
+                    <option value="{{ key }}">{{ label }}</option>
+                    {% endfor %}
+                </select>
+                <select name="days" id="reportDaysSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" title="How far back the report's time-windowed sections look">
+                    <option value="7">Last 7 days</option>
+                    <option value="30" selected>Last 30 days</option>
+                    <option value="90">Last 90 days</option>
+                    <option value="180">Last 180 days</option>
+                </select>
+                <button type="submit" class="btn btn-sm btn-outline-success"><i class="fa-solid fa-bolt"></i> Generate Report</button>
+            </form>
         </div>
-    </div>
-    <div class="col-6 col-lg-3">
-        <div class="stat-tile">
-            <div class="stat-label" id="statLabel2">Loading&hellip;</div>
-            <div class="stat-value" id="statValue2">&hellip;</div>
-        </div>
-    </div>
-    <div class="col-6 col-lg-3">
-        <div class="stat-tile">
-            <div class="stat-label" id="statLabel3">Loading&hellip;</div>
-            <div class="stat-value" id="statValue3">&hellip;</div>
+        <div class="card-body">
+            <div class="table-responsive">
+                <table class="table table-dark table-hover table-sm align-middle">
+                    <thead>
+                        <tr>
+                            <th>Type</th>
+                            <th>Generated</th>
+                            <th>Triggered By</th>
+                            <th>Status</th>
+                            <th>Size</th>
+                            <th class="text-end">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="reportHistoryBody"><tr><td colspan="6" class="text-center text-muted py-4">Loading…</td></tr></tbody>
+                </table>
+            </div>
         </div>
     </div>
 </div>
 
-<div class="card shadow-sm border-secondary bg-dark text-light mb-4">
-    <div class="card-header border-secondary d-flex justify-content-between align-items-center">
-        <h5 class="mb-0 text-info"><i class="fa-solid fa-folder-open"></i> Generated PDF Reports</h5>
-        <form method="POST" action="{{ url_for('trigger_report') }}" class="m-0 d-flex gap-2 align-items-center">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <select name="type" id="reportTypeSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" onchange="onReportTypeChange()">
-                <option value="security">Security Summary</option>
-                <option value="compliance">Compliance Report</option>
-                <option value="audit">Audit Trail Report</option>
-                <option value="vulnerability">Vulnerability Report</option>
-            </select>
-            <select name="framework" id="reportFrameworkSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto; display:none;" title="Narrow the Compliance Report to one framework instead of the all-frameworks survey">
-                <option value="">All Frameworks</option>
-                {% for key, label in compliance_frameworks.items() %}
-                <option value="{{ key }}">{{ label }}</option>
-                {% endfor %}
-            </select>
-            <select name="days" id="reportDaysSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" title="How far back the report's time-windowed sections look">
-                <option value="7">Last 7 days</option>
-                <option value="30" selected>Last 30 days</option>
-                <option value="90">Last 90 days</option>
-                <option value="180">Last 180 days</option>
-            </select>
-            <button type="submit" class="btn btn-sm btn-outline-success"><i class="fa-solid fa-bolt"></i> Generate Report</button>
-        </form>
+<!-- Branding pane -->
+<div id="paneBranding" style="display:none;">
+    <div class="card shadow-sm border-secondary bg-dark text-light mb-4">
+        <div class="card-header border-secondary">
+            <h5 class="mb-0 text-info"><i class="fa-solid fa-paintbrush"></i> PDF Report Branding</h5>
+        </div>
+        <div class="card-body">
+            <p class="text-muted small mb-3">Applied to every generated PDF report (Security, Compliance, Audit Trail) — company name, footer text, accent color, and an optional logo.</p>
+            <div class="row">
+                <div class="col-md-7">
+                    <form id="brandingForm" enctype="multipart/form-data">
+                        <div class="mb-2">
+                            <label class="form-label small text-muted mb-1" for="brandCompanyName">Company Name</label>
+                            <input type="text" name="company_name" id="brandCompanyName" class="form-control form-control-sm bg-dark text-light border-secondary" maxlength="120" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small text-muted mb-1" for="brandFooterText">Footer Text</label>
+                            <input type="text" name="footer_text" id="brandFooterText" class="form-control form-control-sm bg-dark text-light border-secondary" maxlength="200" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small text-muted mb-1" for="brandAccentColor">Accent Color</label>
+                            <input type="color" name="accent_color" id="brandAccentColor" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:80px;" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label small text-muted mb-1" for="brandLogoFile">Logo (PNG/JPG, optional)</label>
+                            <input type="file" name="logo" id="brandLogoFile" accept=".png,.jpg,.jpeg" class="form-control form-control-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
+                        </div>
+                        {% if has_permission('settings.reports.manage') %}
+                        <button type="submit" class="btn btn-outline-primary btn-sm"><i class="fa-solid fa-save me-1"></i> Save Branding</button>
+                        {% else %}
+                        <p class="text-muted small mb-0"><i class="fa-solid fa-lock me-1"></i>Tier 3 (Senior Analyst) or Admin role required to change report branding.</p>
+                        {% endif %}
+                        <div id="brandingMsg" class="mt-3 small" style="display:none;"></div>
+                    </form>
+                </div>
+                <div class="col-md-5">
+                    <label class="form-label small text-muted mb-1">Current Logo</label>
+                    <div class="border border-secondary rounded p-3 text-center bg-black" style="min-height:100px;">
+                        <img id="logoPreview" src="{{ url_for('report_branding_logo') }}" alt="Current report logo" style="max-height:80px; max-width:100%;" onerror="this.style.display='none'; document.getElementById('logoPreviewEmpty').style.display='block';">
+                        <p id="logoPreviewEmpty" class="text-muted small mb-0" style="display:none;">No logo uploaded.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
-    <div class="card-body">
-        <div class="table-responsive">
-            <table class="table table-dark table-hover table-sm align-middle">
-                <thead>
-                    <tr>
-                        <th>Type</th>
-                        <th>Generated</th>
-                        <th>Triggered By</th>
-                        <th>Status</th>
-                        <th>Size</th>
-                        <th class="text-end">Action</th>
-                    </tr>
-                </thead>
-                <tbody id="reportHistoryBody"><tr><td colspan="6" class="text-center text-muted py-4">Loading…</td></tr></tbody>
-            </table>
+</div>
+
+<!-- Schedule pane -->
+<div id="paneSchedule" style="display:none;">
+    <div class="card shadow-sm border-secondary bg-dark text-light mb-4">
+        <div class="card-header border-secondary">
+            <h5 class="mb-0 text-info"><i class="fa-solid fa-clock"></i> Report Schedule</h5>
+        </div>
+        <div class="card-body">
+            <p class="text-muted small mb-3">Automatically generate each report type on a recurring cadence, in addition to generating on demand from the Reports tab.</p>
+            <div class="row g-2 align-items-end mb-2" style="max-width:520px;">
+                <div class="col-6"><label class="form-label small text-muted mb-1" for="reportScheduleSecurity">Security Summary</label>
+                    <select data-report-type="security" id="reportScheduleSecurity" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
+                        <option value="off">Off</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
+                    </select>
+                </div>
+                <div class="col-6"><label class="form-label small text-muted mb-1" for="reportScheduleCompliance">Compliance Report</label>
+                    <select data-report-type="compliance" id="reportScheduleCompliance" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
+                        <option value="off">Off</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
+                    </select>
+                </div>
+                <div class="col-6"><label class="form-label small text-muted mb-1" for="reportScheduleAudit">Audit Trail Report</label>
+                    <select data-report-type="audit" id="reportScheduleAudit" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
+                        <option value="off">Off</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
+                    </select>
+                </div>
+                <div class="col-6"><label class="form-label small text-muted mb-1" for="reportScheduleVulnerability">Vulnerability Report</label>
+                    <select data-report-type="vulnerability" id="reportScheduleVulnerability" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
+                        <option value="off">Off</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
+                    </select>
+                </div>
+            </div>
+            <div class="mb-2" style="max-width:520px;">
+                <label class="form-label small text-muted mb-1" for="reportScheduleRecipients">Email Recipients <span class="text-muted">(comma-separated, optional)</span></label>
+                <input type="text" id="reportScheduleRecipients" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="soc-team@example.com, compliance@example.com" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
+                <p class="text-muted small mt-1 mb-0">Every report generated on the schedule above is emailed to this list automatically (as a PDF attachment) — uses the SMTP server configured under SOAR &gt; Notification Channels. Leave blank to only generate, not email. Reports can also be emailed on demand from the Reports tab regardless of this setting.</p>
+            </div>
+            {% if has_permission('settings.reports.manage') %}
+            <button class="btn btn-outline-primary btn-sm mt-2" onclick="saveReportSchedule()"><i class="fa-solid fa-save me-1"></i> Save Schedule</button>
+            {% else %}
+            <p class="text-muted small mb-0"><i class="fa-solid fa-lock me-1"></i>Tier 3 (Senior Analyst) or Admin role required to change the report schedule.</p>
+            {% endif %}
+            <p class="text-muted small mt-2 mb-0">Daily reports run 05:00; weekly reports run Monday 06:00; monthly reports run the 1st at 01:00 — the appliance's own local system time.</p>
+            <div id="scheduleMsg" class="mt-2 small" style="display:none;"></div>
         </div>
     </div>
 </div>
@@ -99,6 +201,23 @@ function setStatTile(i, label, value, large) {
     const vEl = document.getElementById('statValue' + i);
     if (lEl) lEl.innerText = label;
     if (vEl) { vEl.innerText = value; vEl.style.fontSize = large ? '1.05rem' : ''; }
+}
+
+// ---- Tab machinery (mirrors log_pipeline.html / coverage.html's own page-local pattern) ----
+const REPORTS_TABS = ['reports', 'branding', 'schedule'];
+const REPORTS_TAB_KEY = 'microdfir_reports_active_tab';
+
+function switchReportsTab(tab) {
+    if (!REPORTS_TABS.includes(tab)) tab = 'reports';
+    REPORTS_TABS.forEach(t => {
+        const cap = t.charAt(0).toUpperCase() + t.slice(1);
+        document.getElementById('tabBtn' + cap).classList.toggle('active', t === tab);
+        document.getElementById('pane' + cap).style.display = (t === tab) ? 'block' : 'none';
+    });
+    try { localStorage.setItem(REPORTS_TAB_KEY, tab); } catch (e) {}
+    const url = new URL(window.location);
+    url.searchParams.set('tab', tab);
+    window.history.replaceState({}, '', url);
 }
 
 const REPORT_TYPE_LABELS = { security: 'Security Summary', compliance: 'Compliance Report', audit: 'Audit Trail Report', vulnerability: 'Vulnerability Report' };
@@ -179,9 +298,124 @@ function emailReport(historyId, btn) {
         .finally(() => { btn.disabled = false; btn.innerHTML = original; });
 }
 
+// ---- Branding logic (moved from Settings > Reports) ----
+const REPORT_BRANDING_LOGO_URL = "{{ url_for('report_branding_logo') }}";
+function loadReportBranding() {
+    fetch('/api/settings/report-branding')
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
+        .then(cfg => {
+            document.getElementById('brandCompanyName').value = cfg.company_name || '';
+            document.getElementById('brandFooterText').value = cfg.footer_text || '';
+            document.getElementById('brandAccentColor').value = cfg.accent_color || '#0d6efd';
+        })
+        .catch(e => {
+            console.error('Error loading report branding:', e);
+            const msg = document.getElementById('brandingMsg');
+            msg.style.display = 'block';
+            msg.className = 'mt-3 small text-danger';
+            msg.innerHTML = 'Failed to load current branding settings -- saving now may overwrite them with blanks. <a href="#" onclick="location.reload(); return false;">Reload</a>';
+        });
+}
+
+function saveBranding() {
+    const fd = new FormData(document.getElementById('brandingForm'));
+    fetch('/api/settings/report-branding', { method: 'POST', body: fd })
+        .then(r => r.json())
+        .then(res => {
+            const msg = document.getElementById('brandingMsg');
+            msg.style.display = 'block';
+            if (res.status === 'success') {
+                msg.className = 'mt-3 small text-success';
+                msg.innerHTML = '<i class="fa-solid fa-check-circle"></i> Branding saved.';
+                document.getElementById('logoPreviewEmpty').style.display = 'none';
+                document.getElementById('logoPreview').style.display = '';
+                document.getElementById('logoPreview').src = REPORT_BRANDING_LOGO_URL + '?t=' + Date.now();
+            } else {
+                msg.className = 'mt-3 small text-danger';
+                msg.innerText = res.error || 'Failed to save branding.';
+            }
+        })
+        .catch(err => {
+            const msg = document.getElementById('brandingMsg');
+            msg.style.display = 'block';
+            msg.className = 'mt-3 small text-danger';
+            msg.innerText = 'Error saving branding: ' + err;
+        });
+}
+
+// ---- Report Schedule logic (moved from Settings > Reports) ----
+function loadReportSchedule() {
+    fetch('/api/settings/report-schedule')
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
+        .then(cfg => {
+            document.querySelectorAll('[data-report-type]').forEach(sel => {
+                sel.value = cfg[sel.dataset.reportType] || 'off';
+            });
+            const recipientsEl = document.getElementById('reportScheduleRecipients');
+            if (recipientsEl) recipientsEl.value = cfg.email_recipients || '';
+        })
+        .catch(e => {
+            console.error('Error loading report schedule:', e);
+            const msg = document.getElementById('scheduleMsg');
+            msg.style.display = 'block';
+            msg.className = 'mt-2 small text-danger';
+            msg.innerHTML = 'Failed to load the current schedule -- saving now may overwrite it. <a href="#" onclick="location.reload(); return false;">Reload</a>';
+        });
+}
+
+function saveReportSchedule() {
+    const cfg = {};
+    document.querySelectorAll('[data-report-type]').forEach(sel => { cfg[sel.dataset.reportType] = sel.value; });
+    const recipientsEl = document.getElementById('reportScheduleRecipients');
+    if (recipientsEl) cfg.email_recipients = recipientsEl.value;
+    const msg = document.getElementById('scheduleMsg');
+    fetch('/api/settings/report-schedule', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(cfg) })
+        .then(r => r.json())
+        .then(res => {
+            msg.style.display = 'block';
+            if (res.status === 'success') {
+                msg.className = 'mt-2 small text-success';
+                msg.innerHTML = '<i class="fa-solid fa-check-circle"></i> Schedule saved.';
+            } else if (res.status === 'partial') {
+                msg.className = 'mt-2 small text-warning';
+                msg.innerText = res.warning || 'Settings saved but the schedule may not have applied.';
+            } else {
+                msg.className = 'mt-2 small text-danger';
+                msg.innerText = res.error || 'Failed to save schedule.';
+            }
+        })
+        .catch(err => {
+            msg.style.display = 'block';
+            msg.className = 'mt-2 small text-danger';
+            msg.innerText = 'Error saving schedule: ' + err;
+        });
+}
+
 document.addEventListener("DOMContentLoaded", function() {
+    let savedTab = '{{ active_tab }}';
+    if (!REPORTS_TABS.includes(savedTab)) {
+        try { savedTab = localStorage.getItem(REPORTS_TAB_KEY) || 'reports'; } catch (e) { savedTab = 'reports'; }
+    }
+    switchReportsTab(savedTab);
+
     onReportTypeChange();
     loadReports();
+    loadReportBranding();
+    loadReportSchedule();
+
+    let brandingForm = document.getElementById('brandingForm');
+    if (brandingForm) {
+        brandingForm.addEventListener('submit', function(e) {
+            e.preventDefault();
+            saveBranding();
+        });
+    }
 });
 </script>
 {% endblock %}

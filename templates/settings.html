@@ -28,11 +28,22 @@
             {% if has_permission('settings.system.manage') %}
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnSystem" onclick="switchSettingsTab('system')"><i class="fa-solid fa-database me-2"></i>System</button></li>
             {% endif %}
-            <li class="nav-item"><button type="button" class="nav-link active" id="tabBtnReports" onclick="switchSettingsTab('reports')"><i class="fa-solid fa-file-pdf me-2"></i>Reports</button></li>
             {% if has_permission('audit.view') %}
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnAudit" onclick="switchSettingsTab('audit')"><i class="fa-solid fa-clipboard-list me-2"></i>Audit Log</button></li>
             {% endif %}
         </ul>
+    </div>
+
+    <!-- Shown only when a role has none of the permissions gating any tab above (e.g. the
+         base Analyst role, which has no settings.*/audit.view permission by default) --
+         PDF Report Branding/Report Schedule used to be an always-visible, ungated
+         read-only fallback here; now that they live on the Reports page, a role with zero
+         settings permissions would otherwise land on a blank card with no explanation. -->
+    <div id="paneNoSettingsAccess" style="display:none;">
+        <div class="card-body text-center text-muted py-4">
+            <i class="fa-solid fa-lock mb-2" style="font-size:1.5rem;"></i>
+            <p class="mb-0">Your role doesn't have access to any Settings section.</p>
+        </div>
     </div>
 
     {% if has_permission('settings.users.manage') %}
@@ -264,88 +275,6 @@
     </div>
     {% endif %}
 
-    <!-- Reports pane -->
-    <div id="paneReports" style="display:none;">
-        <div class="card-body">
-            <h6 class="text-info mb-3">PDF Report Branding</h6>
-            <p class="text-muted small mb-3">Applied to every generated PDF report (Security, Compliance, Audit Trail) — company name, footer text, accent color, and an optional logo.</p>
-            <div class="row">
-                <div class="col-md-7">
-                    <form id="brandingForm" enctype="multipart/form-data">
-                        <div class="mb-2">
-                            <label class="form-label small text-muted mb-1" for="brandCompanyName">Company Name</label>
-                            <input type="text" name="company_name" id="brandCompanyName" class="form-control form-control-sm bg-dark text-light border-secondary" maxlength="120" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
-                        </div>
-                        <div class="mb-2">
-                            <label class="form-label small text-muted mb-1" for="brandFooterText">Footer Text</label>
-                            <input type="text" name="footer_text" id="brandFooterText" class="form-control form-control-sm bg-dark text-light border-secondary" maxlength="200" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
-                        </div>
-                        <div class="mb-2">
-                            <label class="form-label small text-muted mb-1" for="brandAccentColor">Accent Color</label>
-                            <input type="color" name="accent_color" id="brandAccentColor" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:80px;" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
-                        </div>
-                        <div class="mb-3">
-                            <label class="form-label small text-muted mb-1" for="brandLogoFile">Logo (PNG/JPG, optional)</label>
-                            <input type="file" name="logo" id="brandLogoFile" accept=".png,.jpg,.jpeg" class="form-control form-control-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
-                        </div>
-                        {% if has_permission('settings.reports.manage') %}
-                        <button type="submit" class="btn btn-outline-primary btn-sm"><i class="fa-solid fa-save me-1"></i> Save Branding</button>
-                        {% else %}
-                        <p class="text-muted small mb-0"><i class="fa-solid fa-lock me-1"></i>Tier 3 (Senior Analyst) or Admin role required to change report branding.</p>
-                        {% endif %}
-                        <div id="brandingMsg" class="mt-3 small" style="display:none;"></div>
-                    </form>
-                </div>
-                <div class="col-md-5">
-                    <label class="form-label small text-muted mb-1">Current Logo</label>
-                    <div class="border border-secondary rounded p-3 text-center bg-black" style="min-height:100px;">
-                        <img id="logoPreview" src="{{ url_for('report_branding_logo') }}" alt="Current report logo" style="max-height:80px; max-width:100%;" onerror="this.style.display='none'; document.getElementById('logoPreviewEmpty').style.display='block';">
-                        <p id="logoPreviewEmpty" class="text-muted small mb-0" style="display:none;">No logo uploaded.</p>
-                    </div>
-                </div>
-            </div>
-
-            <hr class="border-secondary my-4">
-
-            <h6 class="text-info mb-3">Report Schedule</h6>
-            <p class="text-muted small mb-3">Automatically generate each report type on a recurring cadence, in addition to generating on demand from the Reports page.</p>
-            <div class="row g-2 align-items-end mb-2" style="max-width:520px;">
-                <div class="col-6"><label class="form-label small text-muted mb-1" for="reportScheduleSecurity">Security Summary</label>
-                    <select data-report-type="security" id="reportScheduleSecurity" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
-                        <option value="off">Off</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
-                    </select>
-                </div>
-                <div class="col-6"><label class="form-label small text-muted mb-1" for="reportScheduleCompliance">Compliance Report</label>
-                    <select data-report-type="compliance" id="reportScheduleCompliance" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
-                        <option value="off">Off</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
-                    </select>
-                </div>
-                <div class="col-6"><label class="form-label small text-muted mb-1" for="reportScheduleAudit">Audit Trail Report</label>
-                    <select data-report-type="audit" id="reportScheduleAudit" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
-                        <option value="off">Off</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
-                    </select>
-                </div>
-                <div class="col-6"><label class="form-label small text-muted mb-1" for="reportScheduleVulnerability">Vulnerability Report</label>
-                    <select data-report-type="vulnerability" id="reportScheduleVulnerability" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
-                        <option value="off">Off</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
-                    </select>
-                </div>
-            </div>
-            <div class="mb-2" style="max-width:520px;">
-                <label class="form-label small text-muted mb-1" for="reportScheduleRecipients">Email Recipients <span class="text-muted">(comma-separated, optional)</span></label>
-                <input type="text" id="reportScheduleRecipients" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="soc-team@example.com, compliance@example.com" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
-                <p class="text-muted small mt-1 mb-0">Every report generated on the schedule above is emailed to this list automatically (as a PDF attachment) — uses the SMTP server configured under SOAR &gt; Notification Channels. Leave blank to only generate, not email. Reports can also be emailed on demand from the Reports page regardless of this setting.</p>
-            </div>
-            {% if has_permission('settings.reports.manage') %}
-            <button class="btn btn-outline-primary btn-sm mt-2" onclick="saveReportSchedule()"><i class="fa-solid fa-save me-1"></i> Save Schedule</button>
-            {% else %}
-            <p class="text-muted small mb-0"><i class="fa-solid fa-lock me-1"></i>Tier 3 (Senior Analyst) or Admin role required to change the report schedule.</p>
-            {% endif %}
-            <p class="text-muted small mt-2 mb-0">Daily reports run 05:00; weekly reports run Monday 06:00; monthly reports run the 1st at 01:00 — the appliance's own local system time.</p>
-            <div id="scheduleMsg" class="mt-2 small" style="display:none;"></div>
-        </div>
-    </div>
-
     {% if has_permission('audit.view') %}
     <!-- Audit Log pane -->
     <div id="paneAudit" style="display:none;">
@@ -486,25 +415,35 @@
 
 <script>
 const SETTINGS_TAB_KEY = 'microdfir_settings_active_tab';
-// 'security'/'network'/'system' are admin-only server-side and 'audit' is admin-only
-// server-side (see the admin-role Jinja guards around their tab buttons/panes above)
-// -- a non-admin's DOM simply won't have those elements, so each lookup below is
-// null-checked rather than assumed to exist. 'reports' is the fallback default since
-// it's the first tab every role can actually see.
-const SETTINGS_TABS = ['security', 'network', 'system', 'reports', 'audit'];
+// 'security'/'network'/'system' and 'audit' are each gated server-side by their own
+// permission (see the Jinja guards around their tab buttons/panes above) -- a role
+// lacking that permission simply won't have those elements in the DOM, so each lookup
+// below is null-checked rather than assumed to exist. Unlike before, there's no longer
+// one ungated tab every role is guaranteed to see (that was Reports, now relocated to
+// its own page) -- a role with none of these four permissions (e.g. the base Analyst
+// role) sees the empty #paneNoSettingsAccess state instead of a blank card.
+const SETTINGS_TABS = ['security', 'network', 'system', 'audit'];
 
 function switchSettingsTab(tab) {
-    if (!SETTINGS_TABS.includes(tab)) tab = 'reports';
-    let resolvedTab = tab;
+    const availableTabs = SETTINGS_TABS.filter(t => {
+        const cap = t.charAt(0).toUpperCase() + t.slice(1);
+        return document.getElementById('tabBtn' + cap) && document.getElementById('pane' + cap);
+    });
+    const noAccessPane = document.getElementById('paneNoSettingsAccess');
+    if (!availableTabs.length) {
+        if (noAccessPane) noAccessPane.style.display = 'block';
+        return;
+    }
+    if (noAccessPane) noAccessPane.style.display = 'none';
+    if (!availableTabs.includes(tab)) tab = availableTabs[0];
     SETTINGS_TABS.forEach(t => {
         const cap = t.charAt(0).toUpperCase() + t.slice(1);
         const btn = document.getElementById('tabBtn' + cap);
         const pane = document.getElementById('pane' + cap);
-        if (!btn || !pane) { if (t === tab) resolvedTab = 'reports'; return; }
+        if (!btn || !pane) return;
         btn.classList.toggle('active', t === tab);
         pane.style.display = (t === tab) ? 'block' : 'none';
     });
-    if (resolvedTab !== tab) switchSettingsTab(resolvedTab);
     if (tab === 'audit' && document.getElementById('paneAudit')) loadAuditLog();
     try { localStorage.setItem(SETTINGS_TAB_KEY, tab); } catch (e) {}
 }
@@ -520,8 +459,8 @@ function initFilterDropdowns() {
 
 document.addEventListener("DOMContentLoaded", function() {
     initFilterDropdowns();
-    let savedTab = 'reports';
-    try { savedTab = localStorage.getItem(SETTINGS_TAB_KEY) || 'reports'; } catch (e) {}
+    let savedTab = 'security';
+    try { savedTab = localStorage.getItem(SETTINGS_TAB_KEY) || 'security'; } catch (e) {}
     switchSettingsTab(savedTab);
 
     loadMetrics();
@@ -529,8 +468,6 @@ document.addEventListener("DOMContentLoaded", function() {
     loadRetentionSettings();
     loadArchiveSettings();
     loadDbBackupSettings();
-    loadReportBranding();
-    loadReportSchedule();
     setInterval(loadMetrics, 5000);
 
     let certForm = document.getElementById('certUploadForm');
@@ -540,115 +477,7 @@ document.addEventListener("DOMContentLoaded", function() {
             uploadCerts();
         });
     }
-
-    let brandingForm = document.getElementById('brandingForm');
-    if (brandingForm) {
-        brandingForm.addEventListener('submit', function(e) {
-            e.preventDefault();
-            saveBranding();
-        });
-    }
 });
-
-// Report Branding Logic
-const REPORT_BRANDING_LOGO_URL = "{{ url_for('report_branding_logo') }}";
-function loadReportBranding() {
-    fetch('/api/settings/report-branding')
-        .then(r => {
-            if (!r.ok) throw new Error('HTTP ' + r.status);
-            return r.json();
-        })
-        .then(cfg => {
-            document.getElementById('brandCompanyName').value = cfg.company_name || '';
-            document.getElementById('brandFooterText').value = cfg.footer_text || '';
-            document.getElementById('brandAccentColor').value = cfg.accent_color || '#0d6efd';
-        })
-        .catch(e => {
-            console.error('Error loading report branding:', e);
-            const msg = document.getElementById('brandingMsg');
-            msg.style.display = 'block';
-            msg.className = 'mt-3 small text-danger';
-            msg.innerHTML = 'Failed to load current branding settings -- saving now may overwrite them with blanks. <a href="#" onclick="location.reload(); return false;">Reload</a>';
-        });
-}
-
-function saveBranding() {
-    const fd = new FormData(document.getElementById('brandingForm'));
-    fetch('/api/settings/report-branding', { method: 'POST', body: fd })
-        .then(r => r.json())
-        .then(res => {
-            const msg = document.getElementById('brandingMsg');
-            msg.style.display = 'block';
-            if (res.status === 'success') {
-                msg.className = 'mt-3 small text-success';
-                msg.innerHTML = '<i class="fa-solid fa-check-circle"></i> Branding saved.';
-                document.getElementById('logoPreviewEmpty').style.display = 'none';
-                document.getElementById('logoPreview').style.display = '';
-                document.getElementById('logoPreview').src = REPORT_BRANDING_LOGO_URL + '?t=' + Date.now();
-            } else {
-                msg.className = 'mt-3 small text-danger';
-                msg.innerText = res.error || 'Failed to save branding.';
-            }
-        })
-        .catch(err => {
-            const msg = document.getElementById('brandingMsg');
-            msg.style.display = 'block';
-            msg.className = 'mt-3 small text-danger';
-            msg.innerText = 'Error saving branding: ' + err;
-        });
-}
-
-// Report Schedule Logic
-function loadReportSchedule() {
-    fetch('/api/settings/report-schedule')
-        .then(r => {
-            if (!r.ok) throw new Error('HTTP ' + r.status);
-            return r.json();
-        })
-        .then(cfg => {
-            document.querySelectorAll('[data-report-type]').forEach(sel => {
-                sel.value = cfg[sel.dataset.reportType] || 'off';
-            });
-            const recipientsEl = document.getElementById('reportScheduleRecipients');
-            if (recipientsEl) recipientsEl.value = cfg.email_recipients || '';
-        })
-        .catch(e => {
-            console.error('Error loading report schedule:', e);
-            const msg = document.getElementById('scheduleMsg');
-            msg.style.display = 'block';
-            msg.className = 'mt-2 small text-danger';
-            msg.innerHTML = 'Failed to load the current schedule -- saving now may overwrite it. <a href="#" onclick="location.reload(); return false;">Reload</a>';
-        });
-}
-
-function saveReportSchedule() {
-    const cfg = {};
-    document.querySelectorAll('[data-report-type]').forEach(sel => { cfg[sel.dataset.reportType] = sel.value; });
-    const recipientsEl = document.getElementById('reportScheduleRecipients');
-    if (recipientsEl) cfg.email_recipients = recipientsEl.value;
-    const msg = document.getElementById('scheduleMsg');
-    fetch('/api/settings/report-schedule', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(cfg) })
-        .then(r => r.json())
-        .then(res => {
-            msg.style.display = 'block';
-            if (res.status === 'success') {
-                msg.className = 'mt-2 small text-success';
-                msg.innerHTML = '<i class="fa-solid fa-check-circle"></i> Schedule saved.';
-            } else if (res.status === 'partial') {
-                msg.className = 'mt-2 small text-warning';
-                msg.innerText = res.warning || 'Settings saved but the schedule may not have applied.';
-            } else {
-                msg.className = 'mt-2 small text-danger';
-                msg.innerText = res.error || 'Failed to save schedule.';
-            }
-        })
-        .catch(err => {
-            msg.style.display = 'block';
-            msg.className = 'mt-2 small text-danger';
-            msg.innerText = 'Error saving schedule: ' + err;
-        });
-}
-
 
 // Telemetry Logic
 function loadMetrics() {
