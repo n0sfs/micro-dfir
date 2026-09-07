@@ -39,6 +39,17 @@ own code shipped through the already-sanctioned deploy script, not new third-par
 software) -- no manual systemd setup needed. dnsmasq stays in place, untouched, as a
 still-working fallback.
 
+Fully live-verified on real production traffic after fixing two real bugs the rollout
+itself surfaced: a `NameError` (`timedelta` used without its own local import -- this
+file only imports `datetime` at module level, `timedelta` needs importing per-function,
+per its own established convention) that 500'd the new dashboard route, and a missing
+entry in the backend's own separate `WIDGET_TYPES` validation dict (distinct from the
+frontend's `WIDGET_REGISTRY`) that silently reverted the widget on every page reload
+even though it appeared to render fine. Real queries sent from an external client
+resolved correctly through the live proxy, appeared in DNS Activity with a correctly
+resolved host (matched against this same appliance's own EDR data), and the dashboard
+widget's volume/top-domains data persisted and rendered correctly after a fresh reload.
+
 ### Cases: tabbed case detail view + metric tiles on the list page
 
 The case detail view's right column had grown to 11 stacked cards (Items,
