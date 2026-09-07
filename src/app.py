@@ -2839,12 +2839,48 @@ def api_custom_parsers_preview():
         samples.append({'timestamp': r['timestamp'], 'host': r['host'], 'app': r['app'],
                          'message': r['message'], 'matched': bool(m), 'extracted': extracted})
 
-    return jsonify({
+    result = {
         'scanned': len(rows),
         'match_count': match_count,
         'sample': samples,
         'window_days': DROP_RULE_PREVIEW_WINDOW_DAYS,
-    })
+    }
+
+    # Optional: an ad-hoc single sample (typed by hand or pulled from Log Search via
+    # /api/custom-parsers/sample-logs below) tested instantly against the SAME real
+    # Python `re` engine production uses -- not a client-side JS-regex approximation,
+    # which would risk "lying" about named-group syntax/semantics that differ between
+    # Python and JS (e.g. Python's (?P<name>...) has no direct JS equivalent). This is
+    # what powers the live-as-you-type extraction preview in the parser editor.
+    sample_text = d.get('sample_text')
+    if sample_text:
+        sm = pattern.search(sample_text)
+        result['sample_match'] = {
+            'matched': bool(sm),
+            'extracted': ({k: v.strip() for k, v in sm.groupdict().items() if k in CUSTOM_PARSER_TARGET_FIELDS and v} if sm else {}),
+        }
+
+    return jsonify(result)
+
+# Feeds the parser editor's "Load Sample from Log Search" picker -- real recent log
+# messages (optionally app-scoped), no pattern needed. Same bounded window/limit as the
+# preview endpoint above, reused not duplicated.
+@app.route('/api/custom-parsers/sample-logs', methods=['GET'])
+@login_required
+def api_custom_parsers_sample_logs():
+    db = get_db()
+    app_match = (request.args.get('app_match') or '').strip()
+    where = "timestamp >= datetime('now', ?)"
+    params = [f'-{DROP_RULE_PREVIEW_WINDOW_DAYS} days']
+    if app_match:
+        where += " AND app = ?"
+        params.append(app_match)
+    rows = db.execute(
+        f"SELECT timestamp, host, app, message FROM live_logs WHERE {where} "
+        f"ORDER BY timestamp DESC LIMIT {DROP_RULE_PREVIEW_SAMPLE_LIMIT}",
+        params
+    ).fetchall()
+    return jsonify({'logs': [dict(r) for r in rows], 'window_days': DROP_RULE_PREVIEW_WINDOW_DAYS})
 
 # Small, hand-curated catalog of the built-in extractors api_ingest() always runs --
 # NOT derived dynamically, matching this file's own "duplicate a small catalog rather

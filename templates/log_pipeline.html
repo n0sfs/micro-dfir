@@ -293,7 +293,20 @@
                 </div>
                 <div class="mb-2">
                     <label class="form-label text-muted small mb-1" for="cpPattern">Pattern (Python regex, named capture groups e.g. <code>(?P&lt;username&gt;\w+)</code>)</label>
-                    <textarea id="cpPattern" class="form-control form-control-sm bg-black text-light border-secondary font-monospace" rows="2" spellcheck="false" placeholder="user=(?P<username>\w+)"></textarea>
+                    <textarea id="cpPattern" class="form-control form-control-sm bg-black text-light border-secondary font-monospace" rows="2" spellcheck="false" placeholder="user=(?P<username>\w+)" oninput="scheduleLivePreview()"></textarea>
+                </div>
+                <div class="mb-2">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                        <label class="form-label text-muted small mb-0" for="cpSampleLog">Sample Log <span class="text-muted">(paste one, or pull a real one below)</span></label>
+                        <div class="dropdown">
+                            <button type="button" class="btn btn-outline-secondary btn-sm py-0" data-bs-toggle="dropdown" aria-expanded="false" onclick="loadSampleLogPicker()"><i class="fa-solid fa-list me-1"></i>Load Sample from Log Search</button>
+                            <div class="dropdown-menu dropdown-menu-dark dropdown-menu-end p-2" id="cpSampleLogMenu" style="min-width:480px; max-width:640px; max-height:320px; overflow-y:auto;">
+                                <div class="text-muted small px-1">Loading recent logs&hellip;</div>
+                            </div>
+                        </div>
+                    </div>
+                    <textarea id="cpSampleLog" class="form-control form-control-sm bg-black text-light border-secondary font-monospace" rows="2" spellcheck="false" placeholder="Paste a real log message here, or use Load Sample from Log Search" oninput="scheduleLivePreview()"></textarea>
+                    <div id="cpLivePreview" class="small mt-1"></div>
                 </div>
                 <div class="d-flex gap-2 mb-3">
                     <button type="button" class="btn btn-outline-info btn-sm" onclick="previewCustomParser()"><i class="fa-solid fa-magnifying-glass me-1"></i>Test against recent logs</button>
@@ -1400,10 +1413,76 @@ function addCustomParser() {
         document.getElementById('cpPattern').value = '';
         document.getElementById('cpPriority').value = '100';
         document.getElementById('cpDescription').value = '';
+        document.getElementById('cpSampleLog').value = '';
+        document.getElementById('cpLivePreview').innerHTML = '';
         document.getElementById('cpPreviewPanel').style.display = 'none';
         loadCustomParsers();
         loadParserHealth();
     }).catch(err => { errBox.textContent = 'Error: ' + err; errBox.style.display = 'block'; });
+}
+
+// ---- Live extraction preview + "load a real sample from Log Search" ----
+// Runs the SAME server-side Python `re` engine production uses (via
+// /api/custom-parsers/preview's sample_text support) against whatever's in the Sample
+// Log box, debounced on every pattern/sample edit -- deliberately NOT a client-side
+// JS-regex approximation, since Python's (?P<name>...) named-group syntax (and other
+// regex-dialect differences) has no safe 1:1 JS equivalent; an approximate preview here
+// would risk showing the admin fields that don't actually match what production runs.
+let _cpLivePreviewTimer = null;
+function scheduleLivePreview() {
+    clearTimeout(_cpLivePreviewTimer);
+    _cpLivePreviewTimer = setTimeout(runLivePreview, 400);
+}
+
+function runLivePreview() {
+    const pattern = document.getElementById('cpPattern').value.trim();
+    const sampleText = document.getElementById('cpSampleLog').value;
+    const out = document.getElementById('cpLivePreview');
+    if (!pattern || !sampleText.trim()) { out.innerHTML = ''; return; }
+    out.innerHTML = '<span class="text-muted"><i class="fa-solid fa-spinner fa-spin me-1"></i>Checking&hellip;</span>';
+    fetch('/api/custom-parsers/preview', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({pattern, app_match: document.getElementById('cpAppMatch').value.trim(), sample_text: sampleText})
+    }).then(r => r.json().then(d => ({ok: r.ok, d}))).then(({ok, d}) => {
+        if (!ok) { out.innerHTML = `<span class="text-danger">${escHtml(d.error || 'Invalid pattern.')}</span>`; return; }
+        const sm = d.sample_match;
+        if (!sm || !sm.matched) { out.innerHTML = '<span class="text-muted"><i class="fa-solid fa-circle-xmark me-1"></i>No match against this sample.</span>'; return; }
+        const fields = Object.entries(sm.extracted || {});
+        if (!fields.length) { out.innerHTML = '<span class="text-warning"><i class="fa-solid fa-triangle-exclamation me-1"></i>Pattern matched, but no named group maps to a recognized target field.</span>'; return; }
+        out.innerHTML = '<i class="fa-solid fa-circle-check text-success me-1"></i>' + fields.map(([k, v]) => `<span class="badge bg-success-subtle text-success-emphasis border border-success me-1">${escHtml(k)}=${escHtml(v)}</span>`).join('');
+    }).catch(err => { out.innerHTML = `<span class="text-danger">Error: ${escHtml(String(err))}</span>`; });
+}
+
+function loadSampleLogPicker() {
+    const menu = document.getElementById('cpSampleLogMenu');
+    const appMatch = document.getElementById('cpAppMatch').value.trim();
+    menu.innerHTML = '<div class="text-muted small px-1"><i class="fa-solid fa-spinner fa-spin me-1"></i>Loading recent logs&hellip;</div>';
+    const qs = appMatch ? `?app_match=${encodeURIComponent(appMatch)}` : '';
+    fetch(`/api/custom-parsers/sample-logs${qs}`)
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(d => {
+            const logs = d.logs || [];
+            if (!logs.length) {
+                menu.innerHTML = `<div class="text-muted small px-1">No logs ingested in the last ${d.window_days || 7} days${appMatch ? ` for app "${escHtml(appMatch)}"` : ''}.</div>`;
+                return;
+            }
+            menu.innerHTML = logs.map((l, i) => `
+                <button type="button" class="dropdown-item small text-wrap py-1" style="white-space:normal;" onclick="pickSampleLog(${i})">
+                    <div class="text-muted" style="font-size:.75rem;">${escHtml(l.timestamp)} &middot; ${escHtml(l.host || '')} &middot; ${escHtml(l.app || '')}</div>
+                    <div class="font-monospace" style="font-size:.8rem;">${escHtml((l.message || '').slice(0, 160))}${(l.message || '').length > 160 ? '&hellip;' : ''}</div>
+                </button>`).join('');
+            window._cpSampleLogCache = logs;
+        })
+        .catch(err => { menu.innerHTML = `<div class="text-danger small px-1">Failed to load: ${escHtml(String(err))}</div>`; });
+}
+
+function pickSampleLog(i) {
+    const logs = window._cpSampleLogCache || [];
+    const l = logs[i];
+    if (!l) return;
+    document.getElementById('cpSampleLog').value = l.message || '';
+    runLivePreview();
 }
 
 function toggleCustomParser(id) {
