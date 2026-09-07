@@ -1259,7 +1259,7 @@ function loadSilentSourceAlerts() {
             tbody.innerHTML = rows.map(a => `
                 <tr>
                     <td class="text-nowrap small">${escHtml(a.timestamp || '')}</td>
-                    <td class="small">${escHtml(a.host || '—')}</td>
+                    <td class="small">${a.host ? escHtml(a.host) : '<span class="text-muted fst-italic" title="This alert fired before host-level tracking existed -- host identity was never recorded for it, not lost or broken">Unknown (legacy)</span>'}</td>
                     <td class="small">${escHtml(a.message || '')}${a.occurrence_count > 1 ? ` <span class="badge bg-secondary" title="Last seen ${escHtml(a.last_seen || '')}">&times;${a.occurrence_count}</span>` : ''}</td>
                     <td>${silentSourceAlertStatusBadge(a)}</td>
                 </tr>
