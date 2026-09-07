@@ -10,6 +10,19 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-07
 
+### Custom Parsers editor: live extraction preview + pull a sample from Log Search
+
+The pattern editor (Log Pipeline > Parsers) now shows which fields a regex
+would extract, live, as an admin types it — against a "Sample Log" box
+that can be hand-pasted or pulled from a real recent log via a new small
+picker (`GET /api/custom-parsers/sample-logs`). The live check runs
+through the same server-side Python `re` engine production uses (a new
+`sample_text` option on `POST /api/custom-parsers/preview`), deliberately
+not a client-side JS-regex approximation — Python's `(?P<name>...)` named-
+group syntax has no safe 1:1 JS equivalent, and this app's own convention
+is a preview should never risk "lying" about what production would
+actually do. "Test against recent logs" and Add Parser are unchanged.
+
 ### Real Chrome/Edge browser-history parsing in `collect_browser_artifacts`
 
 The EDR "Collect Browser Artifacts" action used to only hash and
