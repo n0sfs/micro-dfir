@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <h2><i class="fa-solid fa-file-pdf me-2"></i>Reports</h2>
+    <p>Generated PDF security, compliance, audit, and vulnerability reports.</p>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label" id="statLabel0">Loading&hellip;</div>
+            <div class="stat-value" id="statValue0">&hellip;</div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label" id="statLabel1">Loading&hellip;</div>
+            <div class="stat-value" id="statValue1">&hellip;</div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label" id="statLabel2">Loading&hellip;</div>
+            <div class="stat-value" id="statValue2">&hellip;</div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="stat-tile">
+            <div class="stat-label" id="statLabel3">Loading&hellip;</div>
+            <div class="stat-value" id="statValue3">&hellip;</div>
+        </div>
+    </div>
+</div>
+
+<div class="card shadow-sm border-secondary bg-dark text-light mb-4">
+    <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+        <h5 class="mb-0 text-info"><i class="fa-solid fa-folder-open"></i> Generated PDF Reports</h5>
+        <form method="POST" action="{{ url_for('trigger_report') }}" class="m-0 d-flex gap-2 align-items-center">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <select name="type" id="reportTypeSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" onchange="onReportTypeChange()">
+                <option value="security">Security Summary</option>
+                <option value="compliance">Compliance Report</option>
+                <option value="audit">Audit Trail Report</option>
+                <option value="vulnerability">Vulnerability Report</option>
+            </select>
+            <select name="framework" id="reportFrameworkSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto; display:none;" title="Narrow the Compliance Report to one framework instead of the all-frameworks survey">
+                <option value="">All Frameworks</option>
+                {% for key, label in compliance_frameworks.items() %}
+                <option value="{{ key }}">{{ label }}</option>
+                {% endfor %}
+            </select>
+            <button type="submit" class="btn btn-sm btn-outline-success"><i class="fa-solid fa-bolt"></i> Generate Report</button>
+        </form>
+    </div>
+    <div class="card-body">
+        <div class="table-responsive">
+            <table class="table table-dark table-hover table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th>Type</th>
+                        <th>Generated</th>
+                        <th>Triggered By</th>
+                        <th>Status</th>
+                        <th>Size</th>
+                        <th class="text-end">Action</th>
+                    </tr>
+                </thead>
+                <tbody id="reportHistoryBody"><tr><td colspan="6" class="text-center text-muted py-4">Loading…</td></tr></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+function escHtml(str) {
+    const d = document.createElement('div');
+    d.innerText = str == null ? '' : String(str);
+    return d.innerHTML;
+}
+
+// A loader's initial "Loading..." table state has no failure counterpart today -- a
+// non-2xx response (still a resolved fetch()) leaves it stuck showing "Loading..."
+// forever with no visible sign anything went wrong. This renders an explicit,
+// retriable failure row in its place. Mirrors dashboard.html's own renderLoadError.
+function renderLoadError(tbodyId, colspan, message) {
+    const tbody = document.getElementById(tbodyId);
+    if (tbody) tbody.innerHTML = `<tr><td colspan="${colspan}" class="text-center text-danger small py-3"><i class="fa-solid fa-triangle-exclamation me-1"></i>${escHtml(message || 'Failed to load.')} <a href="#" onclick="location.reload(); return false;">Reload</a></td></tr>`;
+}
+
+function setStatTile(i, label, value, large) {
+    const lEl = document.getElementById('statLabel' + i);
+    const vEl = document.getElementById('statValue' + i);
+    if (lEl) lEl.innerText = label;
+    if (vEl) { vEl.innerText = value; vEl.style.fontSize = large ? '1.05rem' : ''; }
+}
+
+const REPORT_TYPE_LABELS = { security: 'Security Summary', compliance: 'Compliance Report', audit: 'Audit Trail Report', vulnerability: 'Vulnerability Report' };
+
+// The framework select only means anything for report_type=compliance -- hidden (and
+// its value ignored server-side via COMPLIANCE_FRAMEWORKS validation regardless) for
+// the other two types.
+function onReportTypeChange() {
+    const isCompliance = document.getElementById('reportTypeSelect').value === 'compliance';
+    document.getElementById('reportFrameworkSelect').style.display = isCompliance ? '' : 'none';
+}
+
+let reportHistoryData = [];
+
+function updateReportStats() {
+    const successCount = reportHistoryData.filter(h => h.status === 'success').length;
+    const latest = reportHistoryData[0];
+    setStatTile(0, 'Total Reports', successCount);
+    setStatTile(1, 'Latest Report', latest ? (REPORT_TYPE_LABELS[latest.report_type] || latest.report_type) : 'None yet', true);
+    setStatTile(2, 'Last Generated', latest ? (latest.completed_at || latest.started_at || '—').split(' ')[0] : '—', true);
+    setStatTile(3, 'Format', 'PDF', true);
+}
+
+function loadReports() {
+    fetch('/api/reports/history').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(d => {
+        reportHistoryData = d.history || [];
+        renderReportHistory();
+        updateReportStats();
+    }).catch(err => {
+        console.error('Error loading report history:', err);
+        renderLoadError('reportHistoryBody', 6, 'Failed to load report history.');
+    });
+}
+
+function formatReportSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+function renderReportHistory() {
+    const body = document.getElementById('reportHistoryBody');
+    if (!reportHistoryData.length) {
+        body.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4"><i class="fa-solid fa-circle-info text-info me-1"></i>No reports generated yet.</td></tr>';
+        return;
+    }
+    body.innerHTML = reportHistoryData.map(h => `
+        <tr>
+            <td><i class="fa-regular fa-file-pdf text-danger me-2"></i>${escHtml(REPORT_TYPE_LABELS[h.report_type] || h.report_type)}${h.framework_label ? ' — ' + escHtml(h.framework_label) : ''}</td>
+            <td class="small text-muted">${escHtml(h.completed_at || h.started_at || '')}</td>
+            <td class="small">${h.triggered_by ? escHtml(h.triggered_by) : '<span class="text-muted">scheduled</span>'}</td>
+            <td>${h.status === 'success' ? '<span class="badge bg-success">Success</span>' : `<span class="badge bg-danger" title="${escHtml(h.error_message || '')}">Failed</span>`}</td>
+            <td class="small text-muted">${h.file_size_bytes ? formatReportSize(h.file_size_bytes) : '—'}</td>
+            <td class="text-end">${h.file_exists ? `<a href="/reports/download/${h.id}" class="btn btn-sm btn-outline-primary"><i class="fa-solid fa-download"></i> Download</a>` : '<span class="text-muted small">File deleted</span>'}</td>
+        </tr>`).join('');
+}
+
+document.addEventListener("DOMContentLoaded", function() {
+    loadReports();
+});
+</script>
+{% endblock %}
