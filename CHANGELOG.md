@@ -44,6 +44,15 @@ the highest-value findings:
   heavyweight `create_case`. Added `set_alert_status` (also marks the alert
   acknowledged) and `assign_alert` as alert-scoped actions, composing with
   the new rule-name condition above.
+- **No way to pivot from a host/user/IP/IOC into "show me everything else this
+  did"** — the URL-prefill machinery only existed for one hardcoded case
+  (MITRE Coverage's alert deep link); an analyst had to copy a value out and
+  build the search by hand. Generalized to a plain `?q=` param any page can
+  use, added a global `pivotToLogSearch()` helper, and wired it into the
+  alert detail modal (Host/User/Src IP/Dest IP are now clickable) and case
+  assets/IOCs (a "Search logs" button per row, type-aware for IOCs — hash
+  searches `file_hash`, an IP searches both `source_ip` and
+  `destination_ip`, a domain searches `query_name` and `message`).
 - **Log Pipeline's stat tiles showed config counts, not ingestion health** —
   "Active/Total Drop Rules" and a hardcoded "6" for total channels, zero
   volume/source-count/last-event-received. An admin landing here to answer
