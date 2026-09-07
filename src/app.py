@@ -10793,6 +10793,7 @@ WIDGET_TYPES = {
     'chart_case_stats': {}, 'chart_case_aging': {}, 'chart_case_queue_backlog': {},
     'chart_case_workload': {}, 'chart_case_close_trend': {}, 'chart_compliance_coverage': {},
     'chart_fim_activity': {}, 'chart_agent_health_trend': {}, 'chart_vulnerability_summary': {},
+    'chart_dns_activity': {},
     # "App" widgets (Batch 2) -- compact live embeds of other pages, all reusing their
     # existing endpoints (/api/alerts, /api/cases, /api/logs/search, /api/ti/lookup,
     # /api/agent/commands) rather than any new backend logic. Purely additive to this
