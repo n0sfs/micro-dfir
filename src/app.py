@@ -2682,13 +2682,16 @@ def del_drop(rid):
 @app.route('/api/dns-logging/status', methods=['GET'])
 @login_required
 def api_dns_logging_status():
+    from datetime import timedelta
     db = get_db()
     # live_logs.timestamp is written via Python's LOCAL datetime.now() (every ingest path
     # in this app does this, including dns_server.py below) -- SQL's own datetime('now')
     # literal is always UTC, so comparing against it silently drifts by this server's UTC
     # offset (a real, previously-fixed bug class in this codebase, see
     # _run_due_log_source_silent_alerts/api_dashboard_agent_health_trend). Computed here
-    # in Python instead, matching the established fix pattern.
+    # in Python instead, matching the established fix pattern. Only `datetime` itself is
+    # imported at module level (`from datetime import datetime`) -- timedelta needs its
+    # own local import in every function that uses it, per this file's own convention.
     cutoff = (datetime.now() - timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
     row = db.execute(
         "SELECT COUNT(*) as cnt FROM live_logs WHERE app = 'dnsmasq' AND timestamp >= ?", (cutoff,)
@@ -2858,6 +2861,7 @@ def api_dns_activity():
 @app.route('/api/dashboards/dns-activity', methods=['GET'])
 @login_required
 def api_dashboard_dns_activity():
+    from datetime import timedelta
     db = get_db()
     days = _dashboard_window_days(request)
     cutoff = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
