@@ -9360,7 +9360,8 @@ def api_dashboards():
     if request.method == 'GET':
         rows = db.execute(
             "SELECT d.id, d.name, d.created_by, d.created_at, "
-            "(SELECT COUNT(*) FROM dashboard_widgets WHERE dashboard_id = d.id) as widget_count "
+            "(SELECT COUNT(*) FROM dashboard_widgets WHERE dashboard_id = d.id) as widget_count, "
+            "EXISTS(SELECT 1 FROM roles WHERE default_dashboard_id = d.id) as is_role_default "
             "FROM dashboards d ORDER BY d.name"
         ).fetchall()
         return jsonify([dict(r) for r in rows])
@@ -9413,6 +9414,24 @@ def api_dashboard_detail(did):
     log_audit('dashboard_rename', 'dashboard', name)
     return jsonify({'status': 'success'})
 
+# A dashboard set as a ROLE's shared default (roles.default_dashboard_id) is a
+# materially different object than an ordinary personal/team dashboard -- rearranging,
+# adding, or deleting its widgets silently changes what EVERYONE with that role sees by
+# default, not just the editor's own view. Ordinary dashboards stay open to any
+# logged-in user (matching case items/tasks' own precedent, see the comment in
+# api_dashboard_detail() this mirrors) -- this only kicks in once a dashboard has
+# actually been promoted to a role default, which didn't exist as a concept when that
+# original "open to anyone" design was written.
+def _require_dashboard_widget_edit_access(db, did):
+    if not db.execute("SELECT 1 FROM roles WHERE default_dashboard_id = ?", (did,)).fetchone():
+        return None
+    owner = db.execute("SELECT created_by FROM dashboards WHERE id = ?", (did,)).fetchone()
+    if owner and owner['created_by'] == current_user.username:
+        return None
+    if is_admin():
+        return None
+    return jsonify({'error': 'This dashboard is a shared default for one or more roles -- only its creator or an admin can add, remove, or rearrange its widgets.'}), 403
+
 @app.route('/api/dashboards/<int:did>/widgets', methods=['GET', 'POST'])
 @login_required
 def api_dashboard_widgets(did):
@@ -9432,9 +9451,8 @@ def api_dashboard_widgets(did):
             out.append(item)
         return jsonify(out)
 
-    # Adding/removing/rearranging widgets is open to any logged-in user, matching
-    # how case items/tasks are editable by anyone today -- only the dashboard row
-    # itself (rename/delete) is creator-or-admin gated, see api_dashboard_detail().
+    err = _require_dashboard_widget_edit_access(db, did)
+    if err: return err
     d = request.json or {}
     widget_type = d.get('widget_type')
     if widget_type not in WIDGET_TYPES:
@@ -9459,6 +9477,8 @@ def api_dashboard_widgets_layout(did):
     db = get_db()
     if not db.execute("SELECT 1 FROM dashboards WHERE id = ?", (did,)).fetchone():
         return jsonify({'error': 'Dashboard not found'}), 404
+    err = _require_dashboard_widget_edit_access(db, did)
+    if err: return err
     items = request.json or []
     if not isinstance(items, list):
         return jsonify({'error': 'expected a JSON array'}), 400
@@ -9482,6 +9502,8 @@ def api_dashboard_widget_detail(did, wid):
     widget = db.execute("SELECT widget_type FROM dashboard_widgets WHERE id = ? AND dashboard_id = ?", (wid, did)).fetchone()
     if not widget:
         return jsonify({'error': 'Widget not found'}), 404
+    err = _require_dashboard_widget_edit_access(db, did)
+    if err: return err
     if request.method == 'DELETE':
         db.execute("DELETE FROM dashboard_widgets WHERE id = ?", (wid,))
         db.commit()
