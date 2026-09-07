@@ -66,6 +66,11 @@ the highest-value findings:
   by computing the boundary row's id directly and looking it up with
   `WHERE id <= ?` (a single B-tree seek reading exactly one row regardless of
   N) — confirmed live afterward at ~400ms on cache-hit.
+- **Reports had no discoverable home** — 17 real generated PDFs sat behind a
+  SIEM sub-tab an evaluator would never think to check. Added "Reports" as
+  its own top-level nav item (reuses the existing `dash(tab='reports')`
+  route, no backend/data move) so it's now a first-class destination
+  alongside SIEM/Coverage/EDR/UEBA/SOAR/Cases.
 
 ### Closed the standing gap-list: SLA tiers, password strength, agent recovery, revert cancel
 
