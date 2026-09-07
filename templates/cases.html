@@ -422,9 +422,11 @@ async function removeCaseIoc(iocId) {
 // Mirrors agents.html's queueCommand() (same /api/agent/commands endpoint, same
 // confirmDialog + toast pattern) -- duplicated locally rather than shared, matching
 // this codebase's existing per-file convention, since the two templates don't share a
-// script include. On success, also drops a note on the case timeline so isolating/
-// killing a process from a case asset row shows up in the case's own audit trail,
-// not just the EDR page's command history.
+// script include. On success, links the resulting agent_commands row into the case as
+// a real 'command_result' item (not just a text note) -- _case_item_summary already
+// renders this with a live status/severity/exit-code summary and a "View Full Result"
+// button (itemSummaryLine), so the analyst sees the actual output once the agent's next
+// check-in delivers it, not just "we queued something."
 async function queueCaseAssetCommand(hostname, label, params, confirmMsg) {
     if (confirmMsg && !(await confirmDialog(confirmMsg, {title: 'Confirm action', danger: true}))) return;
     fetch('/api/agent/commands', {
@@ -433,9 +435,9 @@ async function queueCaseAssetCommand(hostname, label, params, confirmMsg) {
     }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
         if (ok) {
             toast(`"${label}" queued for ${hostname}. It will run on the endpoint's next check-in (usually within 15s).`, 'success');
-            fetch(`/api/cases/${activeCaseId}/notes`, {
+            fetch(`/api/cases/${activeCaseId}/items`, {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({text: `Queued EDR action "${label}" on ${hostname} from Case Assets.`})
+                body: JSON.stringify({item_type: 'command_result', item_id: data.id})
             }).then(() => openCaseDetail(activeCaseId));
         } else {
             toast(data.error || 'Failed to queue command.', 'danger');
@@ -452,6 +454,120 @@ async function caseKillProcess(host) {
     if (pid === null) return;
     if (!/^\d+$/.test(pid.trim())) { toast('PID must be a whole number.', 'danger'); return; }
     queueCaseAssetCommand(host, 'kill_process', {pid: pid.trim()}, `Terminate PID ${pid.trim()} on ${host}? This cannot be undone.`);
+}
+
+// Fuller action catalog for the dedicated "EDR Response" card (vs. the two quick-shortcut
+// icons on each Case Assets row above) -- mirrors agents.html's CONSOLE_DROPDOWN_ACTIONS
+// (duplicated locally, same per-file convention), minus the raw-script/upgrade/sweep
+// actions that don't make sense to fire ad hoc from a case (sweeps are fleet-wide-config
+// driven, not a single-host investigative action). `confirm` is a function so the
+// message can include the specific host/param value, matching caseIsolateHost/
+// caseKillProcess's own per-action confirm text above.
+const CASE_EDR_ACTIONS = [
+    { value: 'isolate_host', label: 'Isolate Host', permission: 'edr.command.basic',
+      confirm: (h) => `Isolate ${h} from the network? Only traffic to/from this SOC server will be allowed.` },
+    { value: 'restore_network', label: 'Restore Network', permission: 'edr.command.basic',
+      confirm: (h) => `Restore normal network access on ${h}?` },
+    { value: 'collect_triage', label: 'Triage Collection', permission: 'edr.command.basic' },
+    { value: 'kill_process', label: 'Kill Process (PID)', permission: 'edr.command.basic', needsParams: 'pid', paramLabel: 'PID',
+      confirm: (h, v) => `Terminate PID ${v} on ${h}? This cannot be undone.` },
+    { value: 'kill_process_by_name', label: 'Kill Process by Name/Path', permission: 'edr.command.advanced', needsParams: 'pattern', paramLabel: 'Process name or path',
+      confirm: (h, v) => `Kill every process matching "${v}" on ${h}? This cannot be undone.` },
+    { value: 'quarantine_file', label: 'Quarantine File', permission: 'edr.command.basic', needsParams: 'path', paramLabel: 'File path',
+      confirm: (h, v) => `Quarantine ${v} on ${h}?` },
+    { value: 'collect_file', label: 'Collect File', permission: 'edr.command.advanced', needsParams: 'path', paramLabel: 'File path' },
+    { value: 'collect_registry_key', label: 'Registry Key', permission: 'edr.command.advanced', needsParams: 'key_path', paramLabel: 'Registry key path', osOnly: 'windows' },
+    { value: 'kill_scheduled_task', label: 'Kill Scheduled Task', permission: 'edr.command.basic', needsParams: 'task_name', paramLabel: 'Task name', osOnly: 'windows',
+      confirm: (h, v) => `Delete scheduled task "${v}" on ${h}?` },
+    { value: 'persistence_sweep', label: 'Persistence Sweep', permission: 'edr.command.advanced', osOnly: ['windows', 'linux'] },
+    { value: 'list_processes', label: 'List Processes', permission: 'edr.command.advanced' },
+    { value: 'collect_network_connections', label: 'Network Connections', permission: 'edr.command.advanced', osOnly: ['windows', 'linux'] },
+    { value: 'collect_dns_arp', label: 'DNS Cache / ARP Table', permission: 'edr.command.advanced', osOnly: ['windows', 'linux'] },
+    { value: 'collect_forensic_timestamps', label: 'Forensic Timestamps', permission: 'edr.command.advanced', osOnly: 'windows' },
+    { value: 'collect_recent_file_changes', label: 'Recent File Changes', permission: 'edr.command.advanced', osOnly: 'windows' },
+    { value: 'collect_live_forensics', label: 'Live Forensic Triage', permission: 'edr.command.advanced', osOnly: ['windows', 'linux'] },
+    { value: 'collect_browser_artifacts', label: 'Browser Artifacts', permission: 'edr.command.advanced', osOnly: 'windows' },
+    { value: 'check_process_injection_indicators', label: 'Process Injection Indicators', permission: 'edr.command.advanced', osOnly: ['windows', 'linux'] },
+];
+
+function initEdrResponseCard() {
+    const card = document.getElementById('caseEdrResponseCard');
+    if (!card) return;
+    if (!CAN_EDR_RESPOND) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    renderEdrResponseActionSelect();
+}
+
+function edrResponseSelectedOS() {
+    const hostEl = document.getElementById('edrResponseHost');
+    const agent = hostEl ? knownAgentsByHost[hostEl.value] : null;
+    return (agent && (agent.os === 'linux' || agent.os === 'macos')) ? agent.os : 'windows';
+}
+
+function renderEdrResponseActionSelect() {
+    const sel = document.getElementById('edrResponseAction');
+    const runBtn = document.getElementById('edrResponseRunBtn');
+    const msgBox = document.getElementById('edrResponseMsg');
+    if (!sel) return;
+    const hostEl = document.getElementById('edrResponseHost');
+    // A case asset's host is freeform text an analyst typed in -- there's no guarantee
+    // it maps to a real enrolled agent, same gate caseAssetEdrActions already applies
+    // to the per-row Isolate/Kill icons above.
+    const hasAgent = hostEl && !!knownAgentsByHost[hostEl.value];
+    // Combine with the closed-case gate baked into the button's initial 'disabled'
+    // attribute at render time -- this function runs again on every host change and
+    // must not accidentally re-enable Run on a closed case just because the newly
+    // selected host has a known agent.
+    if (runBtn) runBtn.disabled = !hasAgent || activeCaseClosed;
+    if (msgBox) {
+        if (!hasAgent) {
+            msgBox.className = 'small mt-2 text-muted';
+            msgBox.innerText = 'No enrolled EDR agent found for this hostname -- a queued command would never be picked up.';
+            msgBox.style.display = 'block';
+        } else {
+            msgBox.style.display = 'none';
+        }
+    }
+    const os = edrResponseSelectedOS();
+    const available = CASE_EDR_ACTIONS.filter(a => (!a.osOnly || (Array.isArray(a.osOnly) ? a.osOnly.includes(os) : a.osOnly === os)) && hasPermission(a.permission));
+    sel.innerHTML = available.map(a => `<option value="${a.value}">${escHtml(a.label)}</option>`).join('') || '<option value="">No actions available</option>';
+    onEdrResponseActionChange();
+}
+
+function onEdrResponseActionChange() {
+    const sel = document.getElementById('edrResponseAction');
+    const wrap = document.getElementById('edrResponseParamWrap');
+    if (!sel || !wrap) return;
+    const action = CASE_EDR_ACTIONS.find(a => a.value === sel.value);
+    if (action && action.needsParams) {
+        wrap.style.display = '';
+        document.getElementById('edrResponseParamLabel').innerText = action.paramLabel;
+        document.getElementById('edrResponseParamInput').value = '';
+    } else {
+        wrap.style.display = 'none';
+    }
+}
+
+async function runEdrResponseAction() {
+    const host = document.getElementById('edrResponseHost').value;
+    const action = CASE_EDR_ACTIONS.find(a => a.value === document.getElementById('edrResponseAction').value);
+    const msgBox = document.getElementById('edrResponseMsg');
+    msgBox.style.display = 'none';
+    if (!host || !action) return;
+    let params = {};
+    let paramValue = null;
+    if (action.needsParams) {
+        paramValue = document.getElementById('edrResponseParamInput').value.trim();
+        if (!paramValue) {
+            msgBox.className = 'small mt-2 text-danger';
+            msgBox.innerText = `${action.paramLabel} is required.`;
+            msgBox.style.display = 'block';
+            return;
+        }
+        params[action.needsParams] = paramValue;
+    }
+    const confirmMsg = action.confirm ? action.confirm(host, paramValue) : null;
+    await queueCaseAssetCommand(host, action.value, params, confirmMsg);
 }
 
 // Standard TLP color convention -- red/amber/green/clear. PAP was captured here too at
@@ -1078,6 +1194,33 @@ function loadAndRenderCaseDetail(cid) {
                             <div id="newAssetError" class="text-danger small mt-1" style="display:none;"></div>
                         </div>
                     </div>
+                    <div class="card bg-dark border-secondary mb-3" id="caseEdrResponseCard">
+                        <div class="card-header border-secondary">EDR Response <span class="text-muted small">— run a response or collection action directly on one of this case's tracked hosts; the result is linked into this case automatically</span></div>
+                        <div class="card-body">
+                            ${c.assets.length ? `
+                            <div class="row g-2 align-items-end">
+                                <div class="col-3">
+                                    <label class="form-label small text-muted mb-1" for="edrResponseHost">Host</label>
+                                    <select id="edrResponseHost" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="renderEdrResponseActionSelect()" ${isClosed ? 'disabled' : ''}>
+                                        ${[...new Set(c.assets.map(a => a.host))].map(h => `<option value="${escHtml(h)}">${escHtml(h)}</option>`).join('')}
+                                    </select>
+                                </div>
+                                <div class="col-4">
+                                    <label class="form-label small text-muted mb-1" for="edrResponseAction">Action</label>
+                                    <select id="edrResponseAction" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onEdrResponseActionChange()" ${isClosed ? 'disabled' : ''}></select>
+                                </div>
+                                <div class="col-3" id="edrResponseParamWrap" style="display:none;">
+                                    <label class="form-label small text-muted mb-1" id="edrResponseParamLabel">Value</label>
+                                    <input type="text" id="edrResponseParamInput" class="form-control form-control-sm bg-dark text-light border-secondary" ${isClosed ? 'disabled' : ''}>
+                                </div>
+                                <div class="col-2">
+                                    <button type="button" class="btn btn-sm btn-outline-warning w-100" id="edrResponseRunBtn" onclick="runEdrResponseAction()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-bolt me-1"></i>Run</button>
+                                </div>
+                            </div>
+                            <div id="edrResponseMsg" class="small mt-2" style="display:none;"></div>
+                            ` : '<p class="text-muted small mb-0">Add a Case Asset above to run a response action against it.</p>'}
+                        </div>
+                    </div>
                     <div class="card bg-dark border-secondary mb-3">
                         <div class="card-header border-secondary">Indicators <span class="text-muted small">— hashes, domains, IPs, and URLs tied to this case; Check runs each against the local Threat Intel set</span></div>
                         <div class="card-body">
@@ -1172,6 +1315,7 @@ function loadAndRenderCaseDetail(cid) {
         loadRelatedItems(c.id);
         loadRelatedCases(c.id);
         loadCaseAttachments(c.id);
+        initEdrResponseCard();
         showDetailView();
         // Live-ish SLA/TTA chips -- re-render just that strip every 30s while the case
         // is open in the browser, rather than re-fetching/re-rendering the whole case.
