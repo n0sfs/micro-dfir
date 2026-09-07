@@ -50,6 +50,8 @@
     </div>
 </div>
 
+<div id="fleetVersionNote" class="text-muted small mb-3" style="display:none;"></div>
+
 <div class="card bg-dark border-secondary">
     <div class="card-header border-secondary p-0">
         <ul class="nav nav-tabs border-0" id="agentsTabs">
@@ -319,9 +321,24 @@
         </div>
 
         <!-- History -->
-        <div class="card-body py-2 px-3 border-bottom border-secondary d-flex justify-content-between align-items-center">
+        <div class="card-body py-2 px-3 border-bottom border-secondary d-flex justify-content-between align-items-center flex-wrap gap-2">
             <h6 class="mb-0 text-muted"><i class="fa-solid fa-clock-rotate-left me-2"></i>All Response Action History</h6>
-            <button class="btn btn-outline-secondary btn-sm" onclick="loadCommandHistory()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
+            <div class="d-flex align-items-center gap-2">
+                <select id="cmdHistoryStatusFilter" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" onchange="loadCommandHistory()">
+                    <option value="">All statuses</option>
+                    <option value="failed">Failed</option>
+                    <option value="done">Completed</option>
+                    <option value="pending">Pending</option>
+                    <option value="sent">Sent</option>
+                </select>
+                <select id="cmdHistorySinceFilter" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" onchange="loadCommandHistory()">
+                    <option value="">Most recent 50</option>
+                    <option value="1">Last 24 hours</option>
+                    <option value="7">Last 7 days</option>
+                    <option value="30">Last 30 days</option>
+                </select>
+                <button class="btn btn-outline-secondary btn-sm" onclick="loadCommandHistory()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
+            </div>
         </div>
         <div class="card-body p-0">
             <div class="table-responsive" style="max-height: 600px; overflow-y: auto;">
@@ -474,6 +491,7 @@ document.addEventListener("DOMContentLoaded", function() {
 
     loadUniqueEndpoints();
     loadCommandHistory();
+    loadFleetVersionNote();
     renderConsoleActionSelect();
     renderConsoleFavSelect();
     initEndpointFilterDropdowns();
@@ -1963,19 +1981,36 @@ function statusBadgeCmd(status) {
 let cmdHistoryCache = [];
 
 function loadCommandHistory() {
-    fetch('/api/agent/commands?limit=50')
+    const statusFilter = document.getElementById('cmdHistoryStatusFilter')?.value || '';
+    const sinceFilter = document.getElementById('cmdHistorySinceFilter')?.value || '';
+    const filterActive = !!(statusFilter || sinceFilter);
+    let qs = 'limit=50';
+    if (statusFilter) qs += `&status=${encodeURIComponent(statusFilter)}`;
+    if (sinceFilter) qs += `&since_days=${encodeURIComponent(sinceFilter)}&limit=500`;
+    // The 3 stat tiles above the table are fleet-wide totals, not "whatever's currently
+    // filtered into view" -- filtering the table to Failed-only must not make the
+    // Completed/Pending tiles read as zero. When no filter is active the same single
+    // fetch already serves both (unchanged from before this feature), so this only adds
+    // a second request in the filtered case.
+    const statsPromise = filterActive
+        ? fetch('/api/agent/commands?limit=50').then(r => r.ok ? r.json() : []).catch(() => [])
+        : Promise.resolve(null); // null signals "use the main fetch's own rows for stats too"
+    fetch(`/api/agent/commands?${qs}`)
         .then(r => {
             if (!r.ok) throw new Error('HTTP ' + r.status);
             return r.json();
         })
-        .then(rows => {
+        .then(rows => statsPromise.then(statsRows => ({ rows, statsRows: statsRows === null ? rows : statsRows })))
+        .then(({ rows, statsRows }) => {
             cmdHistoryCache = rows;
-            document.getElementById('statPendingActions').innerText = (rows || []).filter(c => c.status === 'pending' || c.status === 'sent').length;
-            document.getElementById('statDoneActions').innerText = (rows || []).filter(c => c.status === 'done').length;
-            document.getElementById('statFailedActions').innerText = (rows || []).filter(c => c.status === 'failed').length;
+            document.getElementById('statPendingActions').innerText = (statsRows || []).filter(c => c.status === 'pending' || c.status === 'sent').length;
+            document.getElementById('statDoneActions').innerText = (statsRows || []).filter(c => c.status === 'done').length;
+            document.getElementById('statFailedActions').innerText = (statsRows || []).filter(c => c.status === 'failed').length;
             const tbody = document.getElementById('cmdHistoryBody');
             if (!rows || rows.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">No response actions have been run yet.</td></tr>';
+                tbody.innerHTML = filterActive
+                    ? '<tr><td colspan="6" class="text-center text-muted py-4">No response actions match the current filters.</td></tr>'
+                    : '<tr><td colspan="6" class="text-center text-muted py-4">No response actions have been run yet.</td></tr>';
             } else {
                 tbody.innerHTML = rows.map(c => `
                     <tr>
@@ -1994,6 +2029,26 @@ function loadCommandHistory() {
             console.error('Error loading command history:', err);
             renderLoadError('cmdHistoryBody', 6, 'Failed to load command history.');
         });
+}
+
+// Reuses the Dashboards "Agent Fleet Health Trend" widget's own endpoint (already
+// computes outdated_count/latest_version from the same real per-host version data) --
+// no new backend logic, just surfacing it directly on the Agents page itself instead of
+// requiring a trip to Dashboards to see whether the fleet is behind on agent versions.
+function loadFleetVersionNote() {
+    fetch('/api/dashboards/agent-health-trend?range=30d').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(d => {
+        const note = document.getElementById('fleetVersionNote');
+        if (!note) return;
+        const totalHosts = (d.versions || []).reduce((sum, v) => sum + v.count, 0);
+        if (!totalHosts) { note.style.display = 'none'; return; }
+        note.style.display = '';
+        note.innerHTML = d.outdated_count
+            ? `<i class="fa-solid fa-triangle-exclamation text-warning me-1"></i>${d.outdated_count} of ${totalHosts} host${totalHosts === 1 ? '' : 's'} behind the newest agent version (<code>${escHtml(d.latest_version)}</code>) seen in the last 30 days.`
+            : `<i class="fa-solid fa-circle-check text-success me-1"></i>All ${totalHosts} host${totalHosts === 1 ? '' : 's'} on the latest agent version (<code>${escHtml(d.latest_version)}</code>).`;
+    }).catch(err => console.error('Error loading fleet version note:', err));
 }
 
 // Returns {scanned, hits} if stdout parses as a real sweep-result shape, else null --
