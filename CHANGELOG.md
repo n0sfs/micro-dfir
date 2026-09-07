@@ -10,6 +10,33 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-07
 
+### EDR response actions from within a case
+
+An analyst had to leave a case, go run something from the separate
+Agents page, then manually remember to come back and note what they
+did — the existing per-row Isolate/Kill icons on Case Assets only
+dropped a plain text note, not the actual command output. Now:
+`queueCaseAssetCommand` links the resulting `agent_commands` row into
+the case as a real `command_result` item instead of a static note (no
+backend change needed — `CASE_ITEM_TYPES`/`_case_item_summary` already
+fully supported this item type, including a live status/severity
+summary and a "View Full Result" button; it just wasn't wired up from
+this call site). New "EDR Response" card in the case detail view: host
+picker scoped to the case's own tracked assets, and a much fuller
+action catalog (isolate/restore, kill process by PID or name,
+quarantine/collect a file, registry key, scheduled task, triage
+collection, persistence sweep, network connections, live forensics,
+etc.) mirroring the Agents page's own console dropdown, filtered by OS
+and by the same `edr.command.basic`/`edr.command.advanced` permissions
+already enforced there — no new permission key, no new approval gate
+(the existing manual Agents-page path is itself immediate/ungated, so
+this matches it rather than introducing an inconsistent new flow).
+Live-verified end to end against a real enrolled agent: queued
+`list_processes` from a case, watched the item go from "pending" to
+"Completed successfully" after the agent's real next check-in, and
+confirmed the actual process-list output rendered in the case's
+existing Response Action Result modal.
+
 ### Case attachments
 
 Cases had no way to attach a file — a screenshot, an exported log bundle,
