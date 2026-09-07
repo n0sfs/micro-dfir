@@ -14,6 +14,15 @@
 #usersTable .th-icon-btn{background:none; border:none; color:var(--text-muted); padding:0 2px; font-size:.72rem; cursor:pointer; line-height:1;}
 #usersTable .th-icon-btn:hover{color:var(--text-secondary);}
 #usersTable .th-icon-btn.active-filter{color:var(--accent);}
+#clTable{table-layout:fixed;}
+#clTable td{vertical-align:top;}
+#clTable .cl-left{width:200px;}
+#clTable .cl-date{color:#e0a800; font-weight:600; font-size:.75rem; text-transform:uppercase; letter-spacing:.02em;}
+#clTable .cl-title{color:var(--text-primary); font-weight:600; margin-top:2px; line-height:1.3;}
+#clTable .cl-right p{margin-bottom:.5rem;}
+#clTable .cl-right p:last-child{margin-bottom:0;}
+#clTable .cl-right ul{margin-bottom:.5rem;}
+#clTable mark{background-color:var(--accent-dim); color:inherit; padding:0 1px; border-radius:2px;}
 </style>
 
 <div class="card bg-dark border-secondary">
@@ -303,9 +312,23 @@
 
             <hr class="border-secondary my-4">
 
-            <h6 class="text-info mb-3">Changelog</h6>
-            <p class="text-muted small mb-3">A dated record of what's shipped and why, newest first.</p>
-            <div id="clChangelogBody" class="changelog-body small">Loading&hellip;</div>
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h6 class="text-info mb-0">Changelog</h6>
+                <div class="input-group input-group-sm" style="max-width:280px;">
+                    <span class="input-group-text bg-dark border-secondary text-muted"><i class="fa-solid fa-magnifying-glass"></i></span>
+                    <input type="text" id="clSearchBox" class="form-control bg-dark text-light border-secondary" placeholder="Search changelog&hellip;" oninput="filterChangelogTable()">
+                    <button type="button" class="btn btn-outline-secondary" id="clSearchClearBtn" style="display:none;" onclick="document.getElementById('clSearchBox').value=''; filterChangelogTable();" title="Clear search"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+            </div>
+            <p class="text-muted small mb-2" id="clIntro"></p>
+            <div id="clSearchNoResults" class="text-muted small text-center py-3" style="display:none;">No changelog entries match this search.</div>
+            <div class="table-responsive">
+                <table class="table table-dark table-sm align-middle mb-0" id="clTable">
+                    <tbody id="clChangelogBody">
+                        <tr><td class="text-muted small py-3">Loading&hellip;</td></tr>
+                    </tbody>
+                </table>
+            </div>
         </div>
     </div>
     {% endif %}
@@ -520,46 +543,106 @@ document.addEventListener("DOMContentLoaded", function() {
 });
 
 // ---- Changelog / Updates ----
-// Small, purpose-built markdown-ish renderer for CHANGELOG.md's own consistent shape
-// (## date headers, ### feature headers, plain paragraphs, `code`, occasional bullet
-// lists) -- not a general markdown parser and not a new CDN dependency, matching this
-// app's "no frontend build step" constraint. HTML-escapes FIRST, then only recognizes
-// a small fixed set of patterns, so this can never inject markup from file content.
-function renderChangelogMarkdown(text) {
-    // Split into lines BEFORE escaping, not after -- escHtml's innerText/innerHTML
-    // round-trip converts every \n into a <br>, so escaping the whole blob first and
-    // then splitting on '\n' finds no newlines at all (the browser already turned them
-    // into <br> tags) and collapses the entire file into a single "line".
+// Small, purpose-built markdown-ish parser for CHANGELOG.md's own consistent shape
+// (## date headers, ### feature-title headers each starting one entry, plain
+// paragraphs, `code`, occasional bullet lists) -- not a general markdown parser and not
+// a new CDN dependency, matching this app's "no frontend build step" constraint.
+// Returns {introLines, entries: [{date, title, bodyLines}]} so the caller can lay date+
+// title and body out as two separately-aligned table columns instead of a single
+// scrolling column of headers -- rendering (with HTML-escaping) happens separately, in
+// renderChangelogBody, so this parsing step itself can never inject markup.
+function parseChangelogEntries(text) {
+    // Split BEFORE any escaping -- escHtml's innerText/innerHTML round-trip converts
+    // every \n into a <br>, so splitting an already-escaped blob on '\n' finds nothing.
     const lines = (text || '').split('\n');
+    const introLines = [];
+    const entries = [];
+    let currentDate = '';
+    let current = null;
+    let mode = 'intro';
+    for (const line of lines) {
+        if (/^# /.test(line)) continue;
+        if (/^## /.test(line)) { if (current) entries.push(current); current = null; currentDate = line.slice(3).trim(); mode = 'date'; continue; }
+        if (/^### /.test(line)) { if (current) entries.push(current); current = { date: currentDate, title: line.slice(4).trim(), bodyLines: [] }; mode = 'body'; continue; }
+        if (mode === 'intro') introLines.push(line);
+        else if (mode === 'body' && current) current.bodyLines.push(line);
+    }
+    if (current) entries.push(current);
+    return { introLines, entries };
+}
+
+// Renders a block of body lines (paragraphs/lists/code/bold) to HTML, escaping first.
+// `highlight` (a lowercase search string) wraps matches in <mark> across title/body --
+// applied AFTER escaping+markup so a <mark> tag itself is never treated as searchable text.
+function renderChangelogBody(bodyLines, highlight) {
+    const mark = (s) => {
+        if (!highlight) return s;
+        const idx = s.toLowerCase().indexOf(highlight);
+        if (idx === -1) return s;
+        return s.slice(0, idx) + '<mark>' + s.slice(idx, idx + highlight.length) + '</mark>' + s.slice(idx + highlight.length);
+    };
+    const inline = (s) => mark(escHtml(s).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>'));
     let html = '';
     let inList = false;
     const closeList = () => { if (inList) { html += '</ul>'; inList = false; } };
-    const inline = (s) => escHtml(s).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-    for (const raw of lines) {
-        const line = raw;
-        if (/^## /.test(line)) { closeList(); html += `<h5 class="text-warning mt-4 mb-2">${inline(line.slice(3))}</h5>`; }
-        else if (/^### /.test(line)) { closeList(); html += `<h6 class="text-info mt-3 mb-1">${inline(line.slice(4))}</h6>`; }
-        else if (/^# /.test(line)) { closeList(); html += `<h4 class="mb-2">${inline(line.slice(2))}</h4>`; }
-        else if (/^[-*] /.test(line)) { if (!inList) { html += '<ul class="mb-2">'; inList = true; } html += `<li>${inline(line.slice(2))}</li>`; }
-        else if (line.trim() === '') { closeList(); }
+    for (const line of bodyLines) {
+        if (/^[-*] /.test(line)) { if (!inList) { html += '<ul class="mb-2">'; inList = true; } html += `<li>${inline(line.slice(2))}</li>`; }
+        else if (line.trim() === '') closeList();
         else { closeList(); html += `<p class="mb-2">${inline(line)}</p>`; }
     }
     closeList();
     return html;
 }
 
+let changelogEntries = [];
+
 function loadChangelogTab() {
-    const el = document.getElementById('clChangelogBody');
+    const tbody = document.getElementById('clChangelogBody');
     fetch('/api/settings/changelog')
         .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
         .then(d => {
             document.getElementById('clCurrentCommit').innerText = (d.current_commit || 'unknown').split(' ')[0];
-            el.innerHTML = renderChangelogMarkdown(d.changelog || '');
+            const { introLines, entries } = parseChangelogEntries(d.changelog || '');
+            document.getElementById('clIntro').innerText = introLines.join(' ').replace(/\s+/g, ' ').trim();
+            changelogEntries = entries;
+            filterChangelogTable();
         })
         .catch(err => {
-            el.innerHTML = `<span class="text-danger">Failed to load changelog: ${escHtml(String(err))}</span>`;
+            tbody.innerHTML = `<tr><td class="text-danger small py-3">Failed to load changelog: ${escHtml(String(err))}</td></tr>`;
             console.error('Error loading changelog:', err);
         });
+}
+
+function filterChangelogTable() {
+    const tbody = document.getElementById('clChangelogBody');
+    const noResults = document.getElementById('clSearchNoResults');
+    const q = (document.getElementById('clSearchBox').value || '').trim().toLowerCase();
+    const matches = !q ? changelogEntries : changelogEntries.filter(e =>
+        e.date.toLowerCase().includes(q) || e.title.toLowerCase().includes(q) || e.bodyLines.join(' ').toLowerCase().includes(q)
+    );
+    document.getElementById('clSearchClearBtn').style.display = q ? '' : 'none';
+    if (!matches.length) {
+        tbody.innerHTML = '';
+        noResults.style.display = 'block';
+        document.getElementById('clTable').style.display = 'none';
+        return;
+    }
+    noResults.style.display = 'none';
+    document.getElementById('clTable').style.display = '';
+    const mark = (s) => {
+        if (!q) return escHtml(s);
+        const idx = s.toLowerCase().indexOf(q);
+        if (idx === -1) return escHtml(s);
+        return escHtml(s.slice(0, idx)) + '<mark>' + escHtml(s.slice(idx, idx + q.length)) + '</mark>' + escHtml(s.slice(idx + q.length));
+    };
+    tbody.innerHTML = matches.map(e => `
+        <tr>
+            <td class="cl-left">
+                <div class="cl-date">${escHtml(e.date)}</div>
+                <div class="cl-title">${mark(e.title)}</div>
+            </td>
+            <td class="cl-right">${renderChangelogBody(e.bodyLines, q)}</td>
+        </tr>`).join('');
 }
 
 function checkForUpdates() {
