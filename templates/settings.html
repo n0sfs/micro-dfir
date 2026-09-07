@@ -28,6 +28,9 @@
             {% if has_permission('settings.system.manage') %}
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnSystem" onclick="switchSettingsTab('system')"><i class="fa-solid fa-database me-2"></i>System</button></li>
             {% endif %}
+            {% if has_permission('settings.system.manage') %}
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnChangelog" onclick="switchSettingsTab('changelog')"><i class="fa-solid fa-code-branch me-2"></i>Changelog</button></li>
+            {% endif %}
             {% if has_permission('audit.view') %}
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnAudit" onclick="switchSettingsTab('audit')"><i class="fa-solid fa-clipboard-list me-2"></i>Audit Log</button></li>
             {% endif %}
@@ -275,6 +278,38 @@
     </div>
     {% endif %}
 
+    {% if has_permission('settings.system.manage') %}
+    <!-- Changelog / Update pane -->
+    <div id="paneChangelog" style="display:none;">
+        <div class="card-body">
+            <h6 class="text-info mb-3">Version &amp; Updates</h6>
+            <div class="row g-2 align-items-center mb-2">
+                <div class="col-auto small text-muted">Running: <code id="clCurrentCommit">&hellip;</code></div>
+                <div class="col-auto small" id="clStatus"></div>
+            </div>
+            <div class="d-flex gap-2 mb-2">
+                <button class="btn btn-outline-secondary btn-sm" onclick="checkForUpdates()" id="clCheckBtn"><i class="fa-solid fa-magnifying-glass me-1"></i> Check for Updates</button>
+                <button class="btn btn-outline-success btn-sm" onclick="runUpdate()" id="clUpdateBtn" style="display:none;"><i class="fa-solid fa-cloud-arrow-down me-1"></i> Update Now</button>
+            </div>
+            <div id="clPendingCommits" class="small mb-3" style="display:none;">
+                <div class="text-muted mb-1">Commits not yet applied:</div>
+                <ul id="clPendingCommitsList" class="mb-0" style="max-height:180px; overflow-y:auto;"></ul>
+            </div>
+            <div id="clUpdateProgress" class="mb-3" style="display:none;">
+                <div class="small text-muted mb-1"><i class="fa-solid fa-spinner fa-spin me-1"></i>Update in progress -- this page will reload automatically once services are back.</div>
+                <pre id="clUpdateLog" class="bg-black text-light p-2 small" style="max-height:200px; overflow-y:auto; white-space:pre-wrap;"></pre>
+            </div>
+            <p class="text-muted small mb-0">Pulls the latest commit from this appliance's own GitHub repository, syncs it into <code>/opt/micro-dfir</code>, and restarts the three Micro DFIR services (a few seconds of interruption). Your database and settings are always preserved -- this is the exact same in-place update <code>update.sh</code> already performs when run by hand over SSH.</p>
+
+            <hr class="border-secondary my-4">
+
+            <h6 class="text-info mb-3">Changelog</h6>
+            <p class="text-muted small mb-3">A dated record of what's shipped and why, newest first.</p>
+            <div id="clChangelogBody" class="changelog-body small">Loading&hellip;</div>
+        </div>
+    </div>
+    {% endif %}
+
     {% if has_permission('audit.view') %}
     <!-- Audit Log pane -->
     <div id="paneAudit" style="display:none;">
@@ -422,7 +457,8 @@ const SETTINGS_TAB_KEY = 'microdfir_settings_active_tab';
 // one ungated tab every role is guaranteed to see (that was Reports, now relocated to
 // its own page) -- a role with none of these four permissions (e.g. the base Analyst
 // role) sees the empty #paneNoSettingsAccess state instead of a blank card.
-const SETTINGS_TABS = ['security', 'network', 'system', 'audit'];
+const SETTINGS_TABS = ['security', 'network', 'system', 'changelog', 'audit'];
+let changelogLoadedOnce = false;
 
 function switchSettingsTab(tab) {
     const availableTabs = SETTINGS_TABS.filter(t => {
@@ -445,6 +481,10 @@ function switchSettingsTab(tab) {
         pane.style.display = (t === tab) ? 'block' : 'none';
     });
     if (tab === 'audit' && document.getElementById('paneAudit')) loadAuditLog();
+    if (tab === 'changelog' && document.getElementById('paneChangelog') && !changelogLoadedOnce) {
+        changelogLoadedOnce = true;
+        loadChangelogTab();
+    }
     try { localStorage.setItem(SETTINGS_TAB_KEY, tab); } catch (e) {}
 }
 
@@ -478,6 +518,125 @@ document.addEventListener("DOMContentLoaded", function() {
         });
     }
 });
+
+// ---- Changelog / Updates ----
+// Small, purpose-built markdown-ish renderer for CHANGELOG.md's own consistent shape
+// (## date headers, ### feature headers, plain paragraphs, `code`, occasional bullet
+// lists) -- not a general markdown parser and not a new CDN dependency, matching this
+// app's "no frontend build step" constraint. HTML-escapes FIRST, then only recognizes
+// a small fixed set of patterns, so this can never inject markup from file content.
+function renderChangelogMarkdown(text) {
+    const esc = escHtml(text);
+    const lines = esc.split('\n');
+    let html = '';
+    let inList = false;
+    const closeList = () => { if (inList) { html += '</ul>'; inList = false; } };
+    const inline = (s) => s.replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    for (const raw of lines) {
+        const line = raw;
+        if (/^## /.test(line)) { closeList(); html += `<h5 class="text-warning mt-4 mb-2">${inline(line.slice(3))}</h5>`; }
+        else if (/^### /.test(line)) { closeList(); html += `<h6 class="text-info mt-3 mb-1">${inline(line.slice(4))}</h6>`; }
+        else if (/^# /.test(line)) { closeList(); html += `<h4 class="mb-2">${inline(line.slice(2))}</h4>`; }
+        else if (/^[-*] /.test(line)) { if (!inList) { html += '<ul class="mb-2">'; inList = true; } html += `<li>${inline(line.slice(2))}</li>`; }
+        else if (line.trim() === '') { closeList(); }
+        else { closeList(); html += `<p class="mb-2">${inline(line)}</p>`; }
+    }
+    closeList();
+    return html;
+}
+
+function loadChangelogTab() {
+    const el = document.getElementById('clChangelogBody');
+    fetch('/api/settings/changelog')
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(d => {
+            document.getElementById('clCurrentCommit').innerText = (d.current_commit || 'unknown').split(' ')[0];
+            el.innerHTML = renderChangelogMarkdown(d.changelog || '');
+        })
+        .catch(err => {
+            el.innerHTML = `<span class="text-danger">Failed to load changelog: ${escHtml(String(err))}</span>`;
+            console.error('Error loading changelog:', err);
+        });
+}
+
+function checkForUpdates() {
+    const statusEl = document.getElementById('clStatus');
+    const btn = document.getElementById('clCheckBtn');
+    const updateBtn = document.getElementById('clUpdateBtn');
+    const pendingWrap = document.getElementById('clPendingCommits');
+    btn.disabled = true;
+    statusEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i>Checking GitHub&hellip;';
+    fetch('/api/settings/update/check', { method: 'POST' })
+        .then(r => r.json().then(d => ({ ok: r.ok, d })))
+        .then(({ ok, d }) => {
+            if (!ok) { statusEl.innerHTML = `<span class="text-danger">${escHtml(d.error || 'Check failed.')}</span>`; return; }
+            if (d.commits_behind > 0) {
+                statusEl.innerHTML = `<span class="text-warning"><i class="fa-solid fa-triangle-exclamation me-1"></i>${d.commits_behind} commit(s) behind (${escHtml(d.remote_commit_short)}).</span>`;
+                updateBtn.style.display = '';
+                pendingWrap.style.display = 'block';
+                document.getElementById('clPendingCommitsList').innerHTML = d.pending_commits.map(c =>
+                    `<li><code>${escHtml(c.hash)}</code> ${escHtml(c.subject)} <span class="text-muted">(${escHtml((c.date || '').split(' ')[0])})</span></li>`
+                ).join('');
+            } else {
+                statusEl.innerHTML = '<span class="text-success"><i class="fa-solid fa-circle-check me-1"></i>Up to date.</span>';
+                updateBtn.style.display = 'none';
+                pendingWrap.style.display = 'none';
+            }
+        })
+        .catch(err => { statusEl.innerHTML = `<span class="text-danger">Error: ${escHtml(String(err))}</span>`; })
+        .finally(() => { btn.disabled = false; });
+}
+
+async function runUpdate() {
+    if (!(await confirmDialog('Pull the latest version from GitHub and restart Micro DFIR\'s services now? This causes a few seconds of interruption while services restart. Your database and settings are preserved.', {title: 'Update Micro DFIR', confirmLabel: 'Update Now'}))) return;
+    const updateBtn = document.getElementById('clUpdateBtn');
+    const checkBtn = document.getElementById('clCheckBtn');
+    const progress = document.getElementById('clUpdateProgress');
+    updateBtn.disabled = true;
+    checkBtn.disabled = true;
+    progress.style.display = 'block';
+    fetch('/api/settings/update/run', { method: 'POST' })
+        .then(r => r.json().then(d => ({ ok: r.ok, d })))
+        .then(({ ok, d }) => {
+            if (!ok) { toast(d.error || 'Failed to start update.', 'danger'); updateBtn.disabled = false; checkBtn.disabled = false; progress.style.display = 'none'; return; }
+            pollUpdateProgress();
+        })
+        .catch(err => { toast('Error starting update: ' + err, 'danger'); updateBtn.disabled = false; checkBtn.disabled = false; progress.style.display = 'none'; });
+}
+
+// Polls the update log while a run is in progress. Once /api/settings/update/log
+// itself stops responding (the service is mid-restart) or reports in_progress=false,
+// the update is done -- reload so the page picks up whichever version actually landed
+// (success or failure both leave the service running again within a few seconds, per
+// update.sh's Restart=always systemd unit).
+let _updatePollTimer = null;
+let _updatePollMisses = 0;
+function pollUpdateProgress() {
+    clearTimeout(_updatePollTimer);
+    fetch('/api/settings/update/log')
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(d => {
+            _updatePollMisses = 0;
+            const logEl = document.getElementById('clUpdateLog');
+            logEl.textContent = d.log || '';
+            logEl.scrollTop = logEl.scrollHeight;
+            if (d.in_progress) {
+                _updatePollTimer = setTimeout(pollUpdateProgress, 2000);
+            } else {
+                setTimeout(() => location.reload(), 1500);
+            }
+        })
+        .catch(() => {
+            // The service is very likely mid-restart right now (expected, not an error) --
+            // keep retrying for a while before giving up and asking for a manual reload.
+            _updatePollMisses++;
+            if (_updatePollMisses > 20) {
+                toast('Lost contact with the server -- reload the page once it responds again.', 'warning', {duration: 10000});
+                return;
+            }
+            _updatePollTimer = setTimeout(pollUpdateProgress, 2000);
+        });
+}
 
 // Telemetry Logic
 function loadMetrics() {

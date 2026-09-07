@@ -13111,6 +13111,11 @@ def api_audit_log():
     actions = [r['action'] for r in db.execute("SELECT DISTINCT action FROM audit_log ORDER BY action").fetchall()]
     return jsonify({'rows': [dict(r) for r in rows], 'total': total, 'actions': actions})
 
+@app.route('/help', methods=['GET'])
+@login_required
+def help_page():
+    return render_template('help.html', current_user=current_user)
+
 @app.route('/settings', methods=['GET'])
 @login_required
 def settings():
@@ -13285,6 +13290,102 @@ def api_settings_agent_offline_alert():
     db.commit()
     log_audit('agent_offline_alert_config_change', 'settings', None, f'offline_minutes={threshold}, cooldown={cooldown}m')
     return jsonify({'status': 'success', 'offline_minutes': threshold, 'cooldown_minutes': cooldown})
+
+# ---- Settings > Changelog: in-app view of CHANGELOG.md + a GitHub-pull update trigger ----
+# microsoc-web already runs as root (config/microsoc-web.service, User=root -- the same
+# privilege level update.sh itself requires) so no new sudo grant is needed for the app
+# to run update.sh directly; this reuses that existing privilege rather than introducing
+# a new one. The one real subtlety: update.sh's own last step is `systemctl restart
+# microsoc-web`, which kills the very gunicorn worker process handling this request --
+# so the run below is launched fully detached (start_new_session=True, own stdio) and
+# this route returns immediately after starting it, rather than waiting on it.
+_UPDATE_LOCK_PATH = '/tmp/microdfir_update.lock'
+_UPDATE_LOG_PATH = '/var/log/microdfir-update.log'
+
+def _run_git(args, timeout=15):
+    return subprocess.run(['git'] + args, cwd='/opt/micro-dfir', capture_output=True, text=True, timeout=timeout)
+
+@app.route('/api/settings/changelog', methods=['GET'])
+@login_required
+def api_settings_changelog():
+    try:
+        with open('/opt/micro-dfir/CHANGELOG.md', 'r', encoding='utf-8') as f:
+            text = f.read()
+    except OSError as e:
+        return jsonify({'error': f'Could not read CHANGELOG.md: {e}'}), 500
+    commit = _run_git(['log', '-1', '--format=%h %ci']).stdout.strip()
+    return jsonify({'changelog': text, 'current_commit': commit})
+
+@app.route('/api/settings/update/check', methods=['POST'])
+@login_required
+def api_settings_update_check():
+    err = require_permission('settings.system.manage')
+    if err: return err
+    try:
+        fetch = _run_git(['fetch', 'origin', 'main'], timeout=25)
+        if fetch.returncode != 0:
+            return jsonify({'error': f'git fetch failed: {(fetch.stderr or fetch.stdout).strip()[:500]}'}), 500
+        local = _run_git(['rev-parse', 'HEAD']).stdout.strip()
+        remote = _run_git(['rev-parse', 'origin/main']).stdout.strip()
+        behind_out = _run_git(['rev-list', '--count', f'{local}..{remote}']).stdout.strip()
+        behind = int(behind_out) if behind_out.isdigit() else 0
+        pending = []
+        if behind > 0:
+            log_out = _run_git(['log', f'{local}..{remote}', '--format=%h|%ci|%s', '-n', '20']).stdout.strip()
+            for line in log_out.split('\n'):
+                if not line:
+                    continue
+                parts = line.split('|', 2)
+                if len(parts) == 3:
+                    pending.append({'hash': parts[0], 'date': parts[1], 'subject': parts[2]})
+        return jsonify({
+            'current_commit_short': local[:8], 'remote_commit_short': remote[:8],
+            'commits_behind': behind, 'pending_commits': pending,
+            'update_in_progress': os.path.exists(_UPDATE_LOCK_PATH),
+        })
+    except subprocess.TimeoutExpired:
+        return jsonify({'error': 'git fetch timed out -- check this host\'s network/GitHub connectivity.'}), 504
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/settings/update/run', methods=['POST'])
+@login_required
+def api_settings_update_run():
+    err = require_permission('settings.system.manage')
+    if err: return err
+    if os.path.exists(_UPDATE_LOCK_PATH):
+        return jsonify({'error': 'An update is already running.'}), 409
+    with open(_UPDATE_LOCK_PATH, 'w') as f:
+        f.write(f"{os.getpid()} {datetime.now().isoformat()}")
+    log_audit('system_update_triggered', 'system', None, f'by {current_user.username}')
+    try:
+        with open(_UPDATE_LOG_PATH, 'a') as logf:
+            logf.write(f"\n\n===== Update triggered by {current_user.username} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+            logf.flush()
+            subprocess.Popen(
+                ['/bin/bash', '/opt/micro-dfir/update.sh'],
+                cwd='/opt/micro-dfir', stdout=logf, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+    except OSError as e:
+        try:
+            os.remove(_UPDATE_LOCK_PATH)
+        except OSError:
+            pass
+        return jsonify({'error': f'Failed to start update: {e}'}), 500
+    return jsonify({'status': 'started', 'hint': 'Services will restart momentarily -- this page will reload automatically once the update completes.'})
+
+@app.route('/api/settings/update/log', methods=['GET'])
+@login_required
+def api_settings_update_log():
+    err = require_permission('settings.system.manage')
+    if err: return err
+    text = ''
+    if os.path.exists(_UPDATE_LOG_PATH):
+        with open(_UPDATE_LOG_PATH, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()
+        text = ''.join(lines[-300:])
+    return jsonify({'log': text, 'in_progress': os.path.exists(_UPDATE_LOCK_PATH)})
 
 # Controls _run_due_case_stale_playbooks (see near _run_due_sla_breach_playbooks) -- an
 # open case with no case_events activity for stale_hours fires the case_stale trigger,

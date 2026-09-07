@@ -376,6 +376,7 @@ body.sidebar-collapsed .nav-block .nav-badge{
         <div class="sidebar-bottom">
             <div class="sidebar-divider"></div>
             <a href="{{ url_for('settings') }}" class="nav-link {{ 'active' if request.endpoint in ['settings','settings_network'] else '' }}" title="Settings"><i class="fa-solid fa-gear"></i><span>Settings</span></a>
+            <a href="{{ url_for('help_page') }}" class="nav-link {{ 'active' if request.endpoint == 'help_page' else '' }}" title="Help &amp; Reference"><i class="fa-solid fa-circle-question"></i><span>Help &amp; Reference</span></a>
             <a href="#" id="themeToggleBtn" class="nav-link" onclick="toggleTheme(); return false;" title="Switch to light mode"><i class="fa-solid fa-sun"></i><span>Light Mode</span></a>
         </div>
 

@@ -1,6 +1,13 @@
 #!/bin/bash
 if [ "$EUID" -ne 0 ]; then echo "Please run as root (sudo bash update.sh)"; exit 1; fi
 
+# Guards Settings > Changelog's "Update Now" button against a double-trigger while a run
+# is in progress (api_settings_update_run in app.py checks this file's existence before
+# starting a new one). Cleared on EVERY exit path -- success, a `git pull` failure's
+# early `exit 1`, or any other error -- so a failed run never leaves the UI stuck showing
+# "update in progress" forever. Harmless no-op for a manual `sudo bash update.sh` run.
+trap 'rm -f /tmp/microdfir_update.lock' EXIT
+
 SOC_DIR="/opt/micro-dfir"
 echo "[*] Pulling latest updates from GitHub..."
 cd "$(dirname "$0")"
