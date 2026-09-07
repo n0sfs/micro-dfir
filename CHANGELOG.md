@@ -10,6 +10,44 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-07
 
+### Cases: tabbed case detail view + metric tiles on the list page
+
+The case detail view's right column had grown to 11 stacked cards (Items,
+Related Items, Related Cases, Threat Intel, Assets, EDR Response,
+Indicators, Attachments, Analyze, Report, Timeline) plus Tasks on the
+left -- too much on one side, too much scrolling. Case info now sits
+full-width at top; everything else is a tab below it. Same element IDs,
+same load/init calls, purely a layout move. The Cases list page also
+gained 4 metric tiles at top (Open Cases, SLA Breaches, Closed (30d), Avg
+Time to Close), reusing the existing `/api/dashboards/case-stats`
+endpoint the Dashboards page's own Case Stats widget already calls.
+
+### Technitium DNS Server integration (opt-in, alongside dnsmasq for now)
+
+Polls Technitium's HTTP API (once its "Query Logs (Sqlite)" DNS App is
+installed) every ~30s from sigma_engine.py's existing loop and writes new
+query rows directly into `live_logs` as `app='technitium'` -- richer than
+dnsmasq's single regex-parsed line (client IP, qname, qtype, protocol,
+rcode, response type, RTT). Bypasses Vector entirely since Technitium's
+API is JSON+pagination, not a flat file to tail. Config (API URL/token/
+app name/class path) lives in Log Pipeline > DNS Query Logging, with a
+Test Connection action that shows the raw API response -- this appliance
+had never run a live Technitium instance when this was built, so the
+poller parses defensively and records a clear diagnostic status rather
+than guessing at an unconfirmed response shape. dnsmasq is untouched and
+still active until Technitium is confirmed working end-to-end.
+
+### Settings > Changelog: two-column layout + search
+
+Redesigned from a single scrolling column of markdown headers into a
+table: a narrow left column (date + entry title) aligned against a wide
+right column (the entry's body), plus a search box that filters entries
+and highlights matches. Also fixed a real rendering bug found along the
+way -- `escHtml`'s `innerText`/`innerHTML` round-trip silently converts
+every newline into a `<br>`, so escaping the whole file before splitting
+on `'\n'` found no newlines at all and collapsed the entire changelog
+into one mis-classified heading.
+
 ### Custom Parsers editor: live extraction preview + pull a sample from Log Search
 
 The pattern editor (Log Pipeline > Parsers) now shows which fields a regex
