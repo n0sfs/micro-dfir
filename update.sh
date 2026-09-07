@@ -62,9 +62,32 @@ venv/bin/python src/coverage_snapshot.py || true
 echo "[*] Syncing the report generation schedule to crontab..."
 venv/bin/python src/sync_report_schedule.py
 
+# src/dns_server.py (Micro DFIR's own DNS forwarder/logger, replacing the old dnsmasq
+# tap) ships its systemd unit in this repo like every other service here, but unlike
+# them it may not be REGISTERED with systemd yet on an existing host that predates this
+# feature. Unlike installing a genuinely new third-party package, this is just wiring up
+# a unit file for code that's already part of this same repo, already deployed through
+# this same sanctioned script -- safe to do here rather than requiring a separate manual
+# sudo step. Idempotent (matches this script's own cron-job-registration precedent
+# above): a re-run when it's already installed just re-copies the identical file and
+# no-ops on enable.
+if [ ! -f /etc/systemd/system/microsoc-dns.service ] || ! cmp -s "$SOC_DIR/config/microsoc-dns.service" /etc/systemd/system/microsoc-dns.service; then
+    echo "[*] Installing/updating the Micro DFIR DNS Server systemd unit..."
+    cp "$SOC_DIR/config/microsoc-dns.service" /etc/systemd/system/microsoc-dns.service
+    systemctl daemon-reload
+fi
+systemctl enable microsoc-dns >/dev/null 2>&1 || true
+
 echo "[*] Restarting Micro-SOC services to apply changes..."
 systemctl restart microsoc-web
 systemctl restart microsoc-soar
 systemctl restart microsoc-sigma
+# Unlike the old dnsmasq tap (a separate, rarely-changing external binary deliberately
+# left OUT of this restart list so a routine deploy could never interrupt DNS
+# resolution), this is our own actively-developed code -- it belongs in the normal
+# deploy lifecycle like the three services above. Guaranteed installed by this point
+# (see the block above), so this restart is never a no-op-with-error the way it would be
+# before the unit exists.
+systemctl restart microsoc-dns
 
 echo "[+] In-place update complete! Your database and settings were preserved."

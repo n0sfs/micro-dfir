@@ -376,116 +376,6 @@ auth.token = "{soc_token}"
 # can't silently drift without a diff showing both sides changing.
 DNSMASQ_QUERY_REGEX = r'query\[(?P<qtype>[A-Za-z0-9]+)\]\s+(?P<domain>\S+)\s+from\s+(?P<src_ip>\S+)'
 
-# ---- Technitium DNS Server integration ----
-# A genuine upgrade path for DNS query logging over the dnsmasq tap above: Technitium is
-# a real DNS server (not just a forwarder) with a full HTTP API and, once its "Query Logs
-# (Sqlite)" DNS App is installed, per-query structured logging (client IP, qname, qtype,
-# protocol, rcode, response type, RTT) far richer than dnsmasq's single regex-parsed line.
-# Deliberately NOT routed through Vector -- Technitium's API is JSON+pagination, not a
-# flat file to tail, so this polls directly and writes to live_logs the same way
-# ueba_engine.py/sigma_engine.py already do (a direct sqlite3 connection), reusing the
-# exact "read config, read a high-water mark from settings, advance it" shape those use.
-#
-# This ALSO doubles as the foundation for a deeper future integration ("configure/browse
-# Technitium from inside Micro DFIR, no separate login") the user asked about: one admin-
-# configured API token stored here, one small authenticated-call helper any future proxy
-# route can reuse -- end users never need Technitium's own login, only Micro DFIR's.
-#
-# The exact API endpoint/param names below are grounded in Technitium's public API docs
-# and third-party clients (Ansible collection, an MCP server) that document the same
-# /api/logs/query shape independently -- not guessed -- but this appliance has never
-# actually run Technitium, so _technitium_api_call surfaces the raw response on request
-# (see the /test route) specifically so a mismatch is immediately visible and fixable,
-# never silently swallowed.
-_TECHNITIUM_SETTINGS_KEYS = (
-    'technitium_api_url', 'technitium_api_token', 'technitium_app_name', 'technitium_class_path',
-)
-TECHNITIUM_DEFAULT_APP_NAME = 'Query Logs (Sqlite)'
-TECHNITIUM_DEFAULT_CLASS_PATH = 'QueryLogsSqlite.App'
-
-def _technitium_config(db):
-    rows = db.execute(
-        f"SELECT key, value FROM settings WHERE key IN ({','.join('?' for _ in _TECHNITIUM_SETTINGS_KEYS)})",
-        _TECHNITIUM_SETTINGS_KEYS
-    ).fetchall()
-    cfg = {r['key']: r['value'] for r in rows}
-    return {
-        'api_url': (cfg.get('technitium_api_url') or '').rstrip('/'),
-        'api_token': cfg.get('technitium_api_token') or '',
-        'app_name': cfg.get('technitium_app_name') or TECHNITIUM_DEFAULT_APP_NAME,
-        'class_path': cfg.get('technitium_class_path') or TECHNITIUM_DEFAULT_CLASS_PATH,
-    }
-
-def _technitium_api_call(cfg, path, params=None, timeout=15):
-    """Generic authenticated GET against Technitium's HTTP API. Returns (ok, data_or_error).
-    `path` is the endpoint path (e.g. '/api/logs/query'); `params` merges in cfg's token
-    automatically. Never raises -- network/JSON/API-level errors all come back as
-    (False, <human-readable string>) so a caller (poller or UI test action) can surface
-    the failure without needing its own try/except around every call site."""
-    if not cfg['api_url'] or not cfg['api_token']:
-        return False, 'Technitium is not configured (API URL and token are both required).'
-    p = dict(params or {})
-    p['token'] = cfg['api_token']
-    try:
-        r = requests.get(f"{cfg['api_url']}{path}", params=p, timeout=timeout)
-        r.raise_for_status()
-        data = r.json()
-    except requests.exceptions.RequestException as e:
-        return False, f'Could not reach Technitium at {cfg["api_url"]}: {e}'
-    except ValueError:
-        return False, 'Technitium returned a non-JSON response (unexpected).'
-    status = data.get('status')
-    if status == 'ok':
-        return True, data.get('response', data)
-    if status == 'invalid-token':
-        return False, 'Technitium rejected the API token (invalid or expired).'
-    return False, data.get('errorMessage') or f'Technitium returned status={status!r}.'
-
-@app.route('/api/settings/technitium', methods=['GET', 'POST'])
-@login_required
-def api_settings_technitium():
-    db = get_db()
-    if request.method == 'GET':
-        cfg = _technitium_config(db)
-        cfg['api_token_set'] = bool(cfg['api_token'])
-        del cfg['api_token']  # never echo the token back to the client
-        status_row = db.execute(
-            "SELECT value FROM settings WHERE key = 'technitium_poll_status'"
-        ).fetchone()
-        cfg['poll_status'] = json.loads(status_row['value']) if status_row and status_row['value'] else None
-        return jsonify(cfg)
-    err = require_permission('logsearch.droprules.manage')
-    if err: return err
-    d = request.json or {}
-    api_url = (d.get('api_url') or '').strip().rstrip('/')
-    app_name = (d.get('app_name') or '').strip() or TECHNITIUM_DEFAULT_APP_NAME
-    class_path = (d.get('class_path') or '').strip() or TECHNITIUM_DEFAULT_CLASS_PATH
-    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('technitium_api_url', ?)", (api_url,))
-    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('technitium_app_name', ?)", (app_name,))
-    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('technitium_class_path', ?)", (class_path,))
-    # Only overwrite the stored token when a new one was actually typed -- the GET route
-    # never echoes it back, so the save form's field is normally blank on every load;
-    # saving a blank token would otherwise silently wipe a previously-configured one.
-    if d.get('api_token'):
-        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('technitium_api_token', ?)", (d['api_token'].strip(),))
-    db.commit()
-    log_audit('technitium_config_change', 'settings', None, f'api_url={api_url}')
-    return jsonify({'status': 'success'})
-
-@app.route('/api/settings/technitium/test', methods=['POST'])
-@login_required
-def api_settings_technitium_test():
-    err = require_permission('logsearch.droprules.manage')
-    if err: return err
-    cfg = _technitium_config(get_db())
-    ok, result = _technitium_api_call(cfg, '/api/logs/query', {
-        'name': cfg['app_name'], 'classPath': cfg['class_path'],
-        'pageNumber': 1, 'entriesPerPage': 1,
-    })
-    if not ok:
-        return jsonify({'ok': False, 'error': result}), 400
-    return jsonify({'ok': True, 'raw_response': result})
-
 def _resolve_ingest_port(ui_port):
     # settings.ingest_port only reflects reality while the systemd unit still has the
     # dual --bind that /settings/network's save flow writes — a plain reinstall
@@ -2793,8 +2683,15 @@ def del_drop(rid):
 @login_required
 def api_dns_logging_status():
     db = get_db()
+    # live_logs.timestamp is written via Python's LOCAL datetime.now() (every ingest path
+    # in this app does this, including dns_server.py below) -- SQL's own datetime('now')
+    # literal is always UTC, so comparing against it silently drifts by this server's UTC
+    # offset (a real, previously-fixed bug class in this codebase, see
+    # _run_due_log_source_silent_alerts/api_dashboard_agent_health_trend). Computed here
+    # in Python instead, matching the established fix pattern.
+    cutoff = (datetime.now() - timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
     row = db.execute(
-        "SELECT COUNT(*) as cnt FROM live_logs WHERE app = 'dnsmasq' AND timestamp >= datetime('now', '-24 hours')"
+        "SELECT COUNT(*) as cnt FROM live_logs WHERE app = 'dnsmasq' AND timestamp >= ?", (cutoff,)
     ).fetchone()
     last_row = db.execute("SELECT MAX(timestamp) as last_seen FROM live_logs WHERE app = 'dnsmasq'").fetchone()
     return jsonify({
@@ -2803,6 +2700,195 @@ def api_dns_logging_status():
         'query_count_24h': row['cnt'],
         'parser_pattern': DNSMASQ_QUERY_REGEX,
         'parser_source': 'config/vector.toml (dnsmasq_parse transform, see generate_vector_config())',
+    })
+
+# ---- Micro DFIR's own DNS server (src/dns_server.py) ----
+# Replaces the earlier plan to integrate a separate third-party DNS server (Technitium):
+# a small forwarder/logger living in this same codebase needs no external service, no
+# second application's API to guess at, and no separate port/interface story -- see
+# dns_server.py's own module docstring for the full reasoning. Config lives in the shared
+# `settings` table; dns_server.py (a separate always-running process, its own systemd
+# unit) polls it every ~10s so a change here takes effect without a service restart.
+_DNS_SERVER_SETTINGS_KEYS = ('dns_server_enabled', 'dns_server_bind_ip', 'dns_server_port', 'dns_server_forwarders')
+DNS_SERVER_DEFAULT_FORWARDERS = '1.1.1.1,1.0.0.1'
+DNS_SERVER_DEFAULT_PORT = 53
+
+def _dns_server_config(db):
+    rows = db.execute(
+        f"SELECT key, value FROM settings WHERE key IN ({','.join('?' for _ in _DNS_SERVER_SETTINGS_KEYS)})",
+        _DNS_SERVER_SETTINGS_KEYS
+    ).fetchall()
+    cfg = {r['key']: r['value'] for r in rows}
+    try:
+        port = int(cfg.get('dns_server_port') or DNS_SERVER_DEFAULT_PORT)
+    except (TypeError, ValueError):
+        port = DNS_SERVER_DEFAULT_PORT
+    return {
+        'enabled': cfg.get('dns_server_enabled') == '1',
+        'bind_ip': cfg.get('dns_server_bind_ip') or '',
+        'port': port,
+        'forwarders': cfg.get('dns_server_forwarders') or DNS_SERVER_DEFAULT_FORWARDERS,
+    }
+
+@app.route('/api/settings/dns-server', methods=['GET', 'POST'])
+@login_required
+def api_settings_dns_server():
+    db = get_db()
+    if request.method == 'GET':
+        cfg = _dns_server_config(db)
+        status_row = db.execute("SELECT value FROM settings WHERE key = 'dns_server_status'").fetchone()
+        cfg['status'] = json.loads(status_row['value']) if status_row and status_row['value'] else None
+        return jsonify(cfg)
+    err = require_permission('logsearch.droprules.manage')
+    if err: return err
+    d = request.json or {}
+    enabled = bool(d.get('enabled'))
+    bind_ip = (d.get('bind_ip') or '').strip()
+    if enabled and not bind_ip:
+        return jsonify({'error': 'A bind IP is required to enable the DNS server.'}), 400
+    try:
+        port = int(d.get('port') or DNS_SERVER_DEFAULT_PORT)
+        if port < 1 or port > 65535:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Port must be a number between 1 and 65535.'}), 400
+    forwarders_raw = (d.get('forwarders') or DNS_SERVER_DEFAULT_FORWARDERS).strip()
+    forwarders = [f.strip() for f in forwarders_raw.split(',') if f.strip()]
+    if not forwarders:
+        return jsonify({'error': 'At least one upstream forwarder is required.'}), 400
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('dns_server_enabled', ?)", ('1' if enabled else '0',))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('dns_server_bind_ip', ?)", (bind_ip,))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('dns_server_port', ?)", (str(port),))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('dns_server_forwarders', ?)", (','.join(forwarders),))
+    db.commit()
+    log_audit('dns_server_config_change', 'settings', None, f'enabled={enabled}, bind_ip={bind_ip}, port={port}')
+    return jsonify({'status': 'success'})
+
+# Lists the host's own real network interfaces/IPs so an admin can pick a bind target
+# from what's ACTUALLY there instead of guessing/typing an IP by hand -- directly closes
+# the "will this work on wifi or ethernet" question by showing which interface each IP
+# actually belongs to (confirmed live on this appliance: its main IP is on wifi, not the
+# ethernet port, which is exactly the kind of surprise this listing prevents).
+@app.route('/api/settings/dns-server/interfaces', methods=['GET'])
+@login_required
+def api_settings_dns_server_interfaces():
+    try:
+        out = subprocess.run(['ip', '-o', '-4', 'addr', 'show'], capture_output=True, text=True, timeout=10)
+        if out.returncode != 0:
+            return jsonify({'error': 'Could not list network interfaces.', 'interfaces': []}), 500
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return jsonify({'error': str(e), 'interfaces': []}), 500
+    interfaces = []
+    for line in out.stdout.splitlines():
+        # Format: "2: enp3s0    inet 192.168.86.101/24 brd ... scope global enp3s0\  valid_lft ..."
+        parts = line.split()
+        if len(parts) < 4 or parts[2] != 'inet':
+            continue
+        iface = parts[1]
+        ip_cidr = parts[3]
+        ip = ip_cidr.split('/')[0]
+        if iface == 'lo' or ip.startswith('127.'):
+            continue
+        interfaces.append({'interface': iface, 'ip': ip})
+    return jsonify({'interfaces': interfaces})
+
+# DNS itself carries no host/user identity -- a query packet only ever has a source IP.
+# This is a deliberate, honest best-effort correlation against OTHER already-ingested
+# logs from the same IP (EDR/Windows/auditd events routinely carry both host and
+# username alongside their own source_ip), not a guarantee. Bounded to a 48h lookback so
+# a stale DHCP-lease reassignment (a different device inheriting an old IP) can't keep
+# attributing queries to the wrong host indefinitely; "no match yet" is a normal, expected
+# outcome for a device this appliance has no other visibility into, not a bug.
+DNS_CLIENT_CONTEXT_LOOKBACK_HOURS = 48
+
+def _resolve_dns_client_context(db, ip, near_ts):
+    if not ip:
+        return None, None
+    row = db.execute(
+        "SELECT host, username FROM live_logs WHERE source_ip = ? AND app != 'dns_server' "
+        "AND host IS NOT NULL AND host != '' AND timestamp <= ? AND timestamp >= datetime(?, ?) "
+        "ORDER BY timestamp DESC LIMIT 1",
+        (ip, near_ts, near_ts, f'-{DNS_CLIENT_CONTEXT_LOOKBACK_HOURS} hours')
+    ).fetchone()
+    if not row:
+        return None, None
+    return row['host'], (row['username'] if row['username'] not in (None, '', '-', 'SYSTEM') else None)
+
+# Paginated DNS query browsing (Log Pipeline's DNS Activity view) -- each row enriched
+# with the best-effort host/user correlation above. Capped page size since the host/user
+# lookup is one extra query per row (fine for a bounded page, not for an unbounded scan).
+DNS_ACTIVITY_PAGE_SIZE_MAX = 200
+
+@app.route('/api/dns-activity', methods=['GET'])
+@login_required
+def api_dns_activity():
+    db = get_db()
+    try:
+        limit = min(int(request.args.get('limit', 50)), DNS_ACTIVITY_PAGE_SIZE_MAX)
+    except (TypeError, ValueError):
+        limit = 50
+    q = (request.args.get('q') or '').strip()
+    where = "app = 'dns_server'"
+    params = []
+    if q:
+        where += " AND query_name LIKE ?"
+        params.append(f'%{q}%')
+    rows = db.execute(
+        f"SELECT id, timestamp, source_ip, query_name, event_id as qtype, message FROM live_logs "
+        f"WHERE {where} ORDER BY timestamp DESC LIMIT ?",
+        params + [limit]
+    ).fetchall()
+    out = []
+    for r in rows:
+        host, username = _resolve_dns_client_context(db, r['source_ip'], r['timestamp'])
+        out.append({
+            'id': r['id'], 'timestamp': r['timestamp'], 'source_ip': r['source_ip'],
+            'host': host, 'username': username, 'query_name': r['query_name'],
+            'qtype': r['qtype'], 'message': r['message'],
+        })
+    return jsonify({'queries': out})
+
+# Feeds the Dashboards "DNS Activity" widget: volume over time + top queried domains +
+# a real (not fabricated) threat-intel match count. That last figure reuses ioc_sightings
+# entirely as-is -- the existing "Known-Bad IOC Matched" Sigma rule already correlates
+# query_name against threat intel for EVERY log source including this one, so a domain
+# match here was already detected and recorded before this widget ever queries it; this
+# just counts how many of those hits trace back to a DNS-server-sourced alert
+# (alerts.log_app = 'dns_server'), it doesn't run any new matching logic of its own.
+@app.route('/api/dashboards/dns-activity', methods=['GET'])
+@login_required
+def api_dashboard_dns_activity():
+    db = get_db()
+    days = _dashboard_window_days(request)
+    cutoff = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+    # Bucket granularity matches api_dashboard_alert_trend's own exact convention (hourly
+    # at 7d, daily beyond it) -- this page's ranges are 7d/30d/90d only (DASHBOARD_RANGES
+    # has no sub-day option), so the threshold has to be 7, not 1, or the hourly branch
+    # would be unreachable dead code.
+    bucket_fmt = '%Y-%m-%d %H:00' if days <= 7 else '%Y-%m-%d'
+    volume_rows = db.execute(
+        f"SELECT strftime('{bucket_fmt}', timestamp) as bucket, COUNT(*) as cnt FROM live_logs "
+        f"WHERE app = 'dns_server' AND timestamp >= ? GROUP BY bucket ORDER BY bucket",
+        (cutoff,)
+    ).fetchall()
+    top_domains = db.execute(
+        "SELECT query_name, COUNT(*) as cnt FROM live_logs WHERE app = 'dns_server' AND timestamp >= ? "
+        "GROUP BY query_name ORDER BY cnt DESC LIMIT 10",
+        (cutoff,)
+    ).fetchall()
+    total = db.execute(
+        "SELECT COUNT(*) as cnt FROM live_logs WHERE app = 'dns_server' AND timestamp >= ?", (cutoff,)
+    ).fetchone()['cnt']
+    ti_matches = db.execute(
+        "SELECT COUNT(DISTINCT s.id) as cnt FROM ioc_sightings s JOIN alerts a ON a.id = s.alert_id "
+        "WHERE a.log_app = 'dns_server' AND s.seen_at >= ?", (cutoff,)
+    ).fetchone()['cnt']
+    return jsonify({
+        'volume': [{'bucket': r['bucket'], 'count': r['cnt']} for r in volume_rows],
+        'top_domains': [{'domain': r['query_name'], 'count': r['cnt']} for r in top_domains],
+        'total_queries': total,
+        'threat_intel_matches': ti_matches,
+        'days': days,
     })
 
 DROP_RULE_PREVIEW_WINDOW_DAYS = 7
@@ -3039,7 +3125,14 @@ _PARSER_CATALOG_BUILTINS = (
         'apps': ('dnsmasq',),
         'target_fields': (),
         'extra_where': None,
-        'description': 'Vector-side VRL regex (config/vector.toml, dnsmasq_parse transform) -- runs before ingestion.',
+        'description': 'Vector-side VRL regex (config/vector.toml, dnsmasq_parse transform) -- runs before ingestion. Legacy, superseded by the DNS Server parser below.',
+    },
+    {
+        'key': 'dns_server', 'name': 'Micro DFIR DNS Server', 'kind': 'built-in',
+        'apps': ('dns_server',),
+        'target_fields': ('source_ip', 'query_name'),
+        'extra_where': None,
+        'description': 'This appliance\'s own DNS forwarder/logger (src/dns_server.py) -- writes real, structured client IP + queried domain + query type directly at ingest, no regex parsing step needed.',
     },
 )
 

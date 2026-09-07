@@ -196,39 +196,66 @@
 <!-- ============================= DNS LOGGING PANE ============================= -->
 <div id="paneDns" style="display: {{ 'block' if active_tab == 'dns' else 'none' }};">
 
-<!-- Technitium DNS Server -->
+<!-- Micro DFIR DNS Server -->
 <div class="row g-4 mb-4">
     <div class="col-lg-12">
         <div class="card bg-dark border-secondary">
             <div class="card-body">
-                <h5 class="card-title text-light mb-3"><i class="fa-solid fa-server me-2"></i>Technitium DNS Server</h5>
-                <p class="text-muted small mb-3">A real DNS server with per-query structured logging (client IP, domain, query type, protocol, response code) -- a genuine upgrade over the dnsmasq tap below. Requires Technitium's own "Query Logs (Sqlite)" DNS App to be installed (see Technitium's web console &gt; Apps). This appliance polls Technitium's HTTP API every ~30s using the API token below and writes new query rows in directly -- nothing routes through Vector for this source.</p>
-                <div class="row g-2 mb-2">
-                    <div class="col-md-6">
-                        <label class="form-label text-muted small mb-1" for="techApiUrl">API URL</label>
-                        <input type="text" id="techApiUrl" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="http://192.168.86.100:5380">
+                <h5 class="card-title text-light mb-3"><i class="fa-solid fa-server me-2"></i>Micro DFIR DNS Server</h5>
+                <p class="text-muted small mb-3">This appliance's own DNS forwarder + query logger (no external service) -- opt-in, same philosophy as the dnsmasq tap below: never binds <code>0.0.0.0</code>, only answers devices you've manually pointed at the IP you choose here. Every query (client IP, domain, record type, response code) is written directly into the log store, no separate ingestion step. Point a device's DNS setting at the IP below to opt it in.</p>
+                <div class="row g-2 mb-2 align-items-end">
+                    <div class="col-md-3">
+                        <div class="form-check form-switch mb-0">
+                            <input class="form-check-input" type="checkbox" id="dnsSvrEnabled">
+                            <label class="form-check-label small text-muted" for="dnsSvrEnabled">Enabled</label>
+                        </div>
                     </div>
-                    <div class="col-md-6">
-                        <label class="form-label text-muted small mb-1" for="techApiToken">API Token</label>
-                        <input type="password" id="techApiToken" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="(unchanged -- leave blank to keep the saved token)">
+                    <div class="col-md-5">
+                        <label class="form-label text-muted small mb-1" for="dnsSvrBindIp">Bind IP <span class="text-muted">(which interface -- see the note below)</span></label>
+                        <select id="dnsSvrBindIp" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onDnsSvrBindIpChange()">
+                            <option value="">Loading interfaces&hellip;</option>
+                        </select>
                     </div>
-                </div>
-                <div class="row g-2 mb-3">
-                    <div class="col-md-6">
-                        <label class="form-label text-muted small mb-1" for="techAppName">Query Logs app name</label>
-                        <input type="text" id="techAppName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Query Logs (Sqlite)">
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label text-muted small mb-1" for="techClassPath">Query Logs app class path</label>
-                        <input type="text" id="techClassPath" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="QueryLogsSqlite.App">
+                    <div class="col-md-4">
+                        <label class="form-label text-muted small mb-1" for="dnsSvrPort">Port</label>
+                        <input type="number" id="dnsSvrPort" class="form-control form-control-sm bg-dark text-light border-secondary" value="53" min="1" max="65535">
                     </div>
                 </div>
-                <div class="d-flex gap-2 mb-3">
-                    <button type="button" class="btn btn-primary btn-sm" onclick="saveTechnitiumConfig()"><i class="fa-solid fa-save me-1"></i> Save</button>
-                    <button type="button" class="btn btn-outline-info btn-sm" onclick="testTechnitiumConnection()"><i class="fa-solid fa-plug-circle-check me-1"></i> Test Connection</button>
+                <div class="mb-2">
+                    <label class="form-label text-muted small mb-1" for="dnsSvrForwarders">Upstream forwarders <span class="text-muted">(comma-separated)</span></label>
+                    <input type="text" id="dnsSvrForwarders" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="1.1.1.1,1.0.0.1">
                 </div>
-                <div id="techTestResult" class="small mb-3" style="display:none;"></div>
-                <div id="techPollStatus" class="small text-muted">Loading&hellip;</div>
+                <div id="dnsSvrInterfaceNote" class="small text-muted mb-3"></div>
+                <button type="button" class="btn btn-primary btn-sm" onclick="saveDnsServerConfig()"><i class="fa-solid fa-save me-1"></i> Save</button>
+                <div id="dnsSvrStatus" class="small mt-3">Loading&hellip;</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-4 mb-4">
+    <div class="col-lg-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="card-title text-light mb-0"><i class="fa-solid fa-list me-2"></i>DNS Activity</h5>
+                    <div class="input-group input-group-sm" style="max-width:260px;">
+                        <span class="input-group-text bg-dark border-secondary text-muted"><i class="fa-solid fa-magnifying-glass"></i></span>
+                        <input type="text" id="dnsActivitySearch" class="form-control bg-dark text-light border-secondary" placeholder="Filter by domain&hellip;" onkeyup="if(event.key === 'Enter') loadDnsActivity()">
+                        <button type="button" class="btn btn-outline-secondary" onclick="loadDnsActivity()"><i class="fa-solid fa-rotate"></i></button>
+                    </div>
+                </div>
+                <p class="text-muted small mb-3">The most recent queries from this appliance's own DNS server. Host/User are a best-effort match against other recent activity from the same IP (this server's own logs, from EDR/Windows/auditd events) -- DNS itself carries no such identity, so a blank cell just means no corroborating activity has been seen from that IP yet, not necessarily an unknown device.</p>
+                <div class="table-responsive">
+                    <table class="table table-dark table-hover table-sm align-middle mb-0">
+                        <thead>
+                            <tr><th>Timestamp</th><th>Source IP</th><th>Host</th><th>User</th><th>Domain</th><th>Type</th></tr>
+                        </thead>
+                        <tbody id="dnsActivityBody">
+                            <tr><td colspan="6" class="text-center text-muted py-3">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
     </div>
@@ -1226,63 +1253,115 @@ async function removeLinuxChannelOverride() {
         }).catch(err => toast('Error removing override: ' + err, 'danger'));
 }
 
-// ---- Technitium DNS Server config + status ----
-function loadTechnitiumConfig() {
-    fetch('/api/settings/technitium')
-        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+// ---- Micro DFIR DNS Server config + status + activity ----
+let dnsSvrInterfaces = [];
+
+function loadDnsServerInterfaces() {
+    return fetch('/api/settings/dns-server/interfaces')
+        .then(r => r.json())
         .then(d => {
-            document.getElementById('techApiUrl').value = d.api_url || '';
-            document.getElementById('techApiToken').placeholder = d.api_token_set ? '(unchanged -- leave blank to keep the saved token)' : 'Paste the API token from Technitium\'s web console';
-            document.getElementById('techAppName').value = d.app_name || '';
-            document.getElementById('techClassPath').value = d.class_path || '';
-            renderTechnitiumPollStatus(d.poll_status);
+            dnsSvrInterfaces = d.interfaces || [];
+            const sel = document.getElementById('dnsSvrBindIp');
+            if (!dnsSvrInterfaces.length) {
+                sel.innerHTML = '<option value="">No network interfaces found</option>';
+                return;
+            }
+            sel.innerHTML = dnsSvrInterfaces.map(i => `<option value="${escHtml(i.ip)}">${escHtml(i.ip)} (${escHtml(i.interface)})</option>`).join('');
         })
         .catch(err => {
-            console.error('Error loading Technitium config:', err);
-            document.getElementById('techPollStatus').innerHTML = '<span class="text-danger">Failed to load configuration.</span>';
+            console.error('Error loading interfaces:', err);
+            document.getElementById('dnsSvrBindIp').innerHTML = '<option value="">Failed to load interfaces</option>';
         });
 }
 
-function renderTechnitiumPollStatus(status) {
-    const el = document.getElementById('techPollStatus');
-    if (!status) { el.innerHTML = 'Not configured yet -- add an API URL and token above, save, then Test Connection.'; return; }
-    if (status.ok) {
-        el.innerHTML = `<i class="fa-solid fa-circle-check text-success me-1"></i>Last poll ${escHtml(status.checked_at)}: inserted ${status.inserted}, skipped ${status.skipped}.`;
+function loadDnsServerConfig() {
+    loadDnsServerInterfaces().then(() => {
+        fetch('/api/settings/dns-server')
+            .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+            .then(d => {
+                document.getElementById('dnsSvrEnabled').checked = !!d.enabled;
+                document.getElementById('dnsSvrPort').value = d.port || 53;
+                document.getElementById('dnsSvrForwarders').value = d.forwarders || '1.1.1.1,1.0.0.1';
+                const sel = document.getElementById('dnsSvrBindIp');
+                if (d.bind_ip && !dnsSvrInterfaces.some(i => i.ip === d.bind_ip)) {
+                    // The saved IP isn't among the interfaces detected just now (host
+                    // network changed, or this is the very first load with nothing
+                    // detected yet) -- add it anyway so Save doesn't silently revert it.
+                    sel.insertAdjacentHTML('afterbegin', `<option value="${escHtml(d.bind_ip)}">${escHtml(d.bind_ip)} (saved, not currently detected)</option>`);
+                }
+                if (d.bind_ip) sel.value = d.bind_ip;
+                const note = document.getElementById('dnsSvrInterfaceNote');
+                const match = dnsSvrInterfaces.find(i => i.ip === sel.value);
+                note.innerText = match ? `Currently selected: ${match.ip} on ${match.interface}.` : '';
+                renderDnsServerStatus(d.status);
+            })
+            .catch(err => {
+                console.error('Error loading DNS server config:', err);
+                document.getElementById('dnsSvrStatus').innerHTML = '<span class="text-danger">Failed to load configuration.</span>';
+            });
+    });
+}
+
+function onDnsSvrBindIpChange() {
+    const val = document.getElementById('dnsSvrBindIp').value;
+    const match = dnsSvrInterfaces.find(i => i.ip === val);
+    document.getElementById('dnsSvrInterfaceNote').innerText = match ? `Currently selected: ${match.ip} on ${match.interface}.` : '';
+}
+
+function renderDnsServerStatus(status) {
+    const el = document.getElementById('dnsSvrStatus');
+    if (!status) { el.innerHTML = '<span class="text-muted">Not started yet -- save a configuration with Enabled checked.</span>'; return; }
+    if (status.running) {
+        el.innerHTML = `<i class="fa-solid fa-circle-check text-success me-1"></i>Running on ${escHtml(status.bind_ip)}:${status.port} since ${escHtml(status.started_at)}. Forwarders: ${escHtml((status.forwarders || []).join(', '))}`;
+    } else if (status.error) {
+        el.innerHTML = `<i class="fa-solid fa-triangle-exclamation text-danger me-1"></i>Failed to bind ${escHtml(status.bind_ip)}:${status.port}: ${escHtml(status.error)} <span class="text-muted">(checked ${escHtml(status.checked_at)})</span>`;
     } else {
-        el.innerHTML = `<i class="fa-solid fa-triangle-exclamation text-danger me-1"></i>Last poll ${escHtml(status.checked_at)} failed: ${escHtml(status.error)}`;
+        el.innerHTML = `<span class="text-muted">Disabled (checked ${escHtml(status.checked_at || '')}).</span>`;
     }
 }
 
-function saveTechnitiumConfig() {
+function saveDnsServerConfig() {
     const payload = {
-        api_url: document.getElementById('techApiUrl').value.trim(),
-        api_token: document.getElementById('techApiToken').value,
-        app_name: document.getElementById('techAppName').value.trim(),
-        class_path: document.getElementById('techClassPath').value.trim(),
+        enabled: document.getElementById('dnsSvrEnabled').checked,
+        bind_ip: document.getElementById('dnsSvrBindIp').value,
+        port: parseInt(document.getElementById('dnsSvrPort').value, 10) || 53,
+        forwarders: document.getElementById('dnsSvrForwarders').value.trim(),
     };
-    fetch('/api/settings/technitium', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) })
+    fetch('/api/settings/dns-server', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) })
         .then(r => r.json().then(d => ({ ok: r.ok, d })))
         .then(({ ok, d }) => {
-            if (ok) { toast('Technitium configuration saved.', 'success'); document.getElementById('techApiToken').value = ''; loadTechnitiumConfig(); }
+            if (ok) { toast('DNS server configuration saved -- takes effect within ~10 seconds.', 'success'); setTimeout(loadDnsServerConfig, 3000); }
             else toast(d.error || 'Failed to save.', 'danger');
         })
         .catch(err => toast('Error saving: ' + err, 'danger'));
 }
 
-function testTechnitiumConnection() {
-    const box = document.getElementById('techTestResult');
-    box.style.display = 'block';
-    box.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i>Testing&hellip;';
-    fetch('/api/settings/technitium/test', { method: 'POST' })
-        .then(r => r.json().then(d => ({ ok: r.ok, d })))
-        .then(({ ok, d }) => {
-            if (ok) {
-                box.innerHTML = `<div class="text-success mb-1"><i class="fa-solid fa-circle-check me-1"></i>Connected. Raw response (for verifying the field names this integration expects):</div><pre class="bg-black border border-secondary rounded p-2 mb-0" style="white-space:pre-wrap; max-height:220px; overflow-y:auto;">${escHtml(JSON.stringify(d.raw_response, null, 2))}</pre>`;
-            } else {
-                box.innerHTML = `<span class="text-danger"><i class="fa-solid fa-triangle-exclamation me-1"></i>${escHtml(d.error || 'Test failed.')}</span>`;
+function loadDnsActivity() {
+    const tbody = document.getElementById('dnsActivityBody');
+    const q = document.getElementById('dnsActivitySearch').value.trim();
+    const qs = q ? `?q=${encodeURIComponent(q)}` : '';
+    fetch(`/api/dns-activity${qs}`)
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(d => {
+            const rows = d.queries || [];
+            if (!rows.length) {
+                tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">No DNS activity logged yet.</td></tr>';
+                return;
             }
+            tbody.innerHTML = rows.map(r => `
+                <tr>
+                    <td class="text-muted text-nowrap small">${escHtml(r.timestamp)}</td>
+                    <td>${escHtml(r.source_ip || '')}</td>
+                    <td>${r.host ? escHtml(r.host) : '<span class="text-muted">—</span>'}</td>
+                    <td>${r.username ? escHtml(r.username) : '<span class="text-muted">—</span>'}</td>
+                    <td class="small">${escHtml(r.query_name || '')}</td>
+                    <td><span class="badge bg-secondary">${escHtml(r.qtype || '')}</span></td>
+                </tr>`).join('');
         })
-        .catch(err => { box.innerHTML = `<span class="text-danger">Error: ${escHtml(String(err))}</span>`; });
+        .catch(err => {
+            console.error('Error loading DNS activity:', err);
+            tbody.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-3">Failed to load. <a href="#" onclick="loadDnsActivity(); return false;">Retry</a></td></tr>`;
+        });
 }
 
 // Read-only status/parser view for the opt-in DNS query logging feature (dnsmasq) --
@@ -1614,7 +1693,8 @@ document.addEventListener("DOMContentLoaded", function() {
     loadChannelGroupsDropdown();
     loadChannelSettings();
     loadDnsLoggingStatus();
-    loadTechnitiumConfig();
+    loadDnsServerConfig();
+    loadDnsActivity();
     loadLogSourceSilentConfig();
     loadSilentSourceAlerts();
     loadLinuxChannelGroupsDropdown();
