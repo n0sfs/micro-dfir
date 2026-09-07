@@ -712,7 +712,7 @@ def generate_case_report(case_id):
     context = {
         "date_generated": datetime.now().strftime("%B %d, %Y"),
         "report_title": "Case Report",
-        "report_subtitle": case['title'],
+        "report_subtitle": f"#{case['id']} — {case['title']}",
         "branding": _branding_context(conn),
         "case": case,
         "tlp_pap_colors": CASE_TLP_PAP_COLORS,

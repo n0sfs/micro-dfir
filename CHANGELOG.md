@@ -10,6 +10,46 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-07
 
+### Case numbers, custom EDR commands from a case, and SOC lifecycle metrics (MTTD/MTTA/MTTI/MTTC/MTTR)
+
+Three small-to-medium fixes/additions in one pass. **Case numbers**: cases only ever
+showed a title, never their `id` — added a `#{id}` badge next to the title in the case
+list, the case detail header, and the PDF case report's subtitle
+(`generate_case_report`). Deliberately reused the existing raw autoincrement id rather
+than inventing a formatted `CASE-2026-00147`-style scheme — there's no existing
+convention in this app for that, and it's a bigger, separate decision if wanted later.
+
+**Custom EDR command from a case**: the case detail "EDR Response" tab only offered the
+canned action catalog (Isolate Host, Kill Process, etc.) — no free-text command like the
+main EDR page's console has. Added a "Custom Command" entry that routes the typed value
+into the request's `script` field (not `params`), matching exactly how the standalone
+EDR console's free-text box already talks to `/api/agent/commands` — no backend changes
+needed, since `_queue_agent_command`'s `'custom'` branch and the case tab's existing
+result-linking (`case_items` → `agent_commands`) both already work generically.
+
+**SOC lifecycle metrics**: added MTTD, MTTI, and MTTC to `/api/dashboards/case-stats`,
+joining the already-shipped MTTA (`avg_tta_hours`) and MTTR (`avg_close_hours`) into one
+"SOC Lifecycle Metrics" row on the Case Metrics & SLA dashboard widget.
+- **MTTD** (detect): `alerts.timestamp` (UTC, sigma-engine insert path) vs. the
+  triggering `live_logs.timestamp` (local) via the `event_id` FK — the two columns are on
+  different clocks (the same recurring UTC-vs-local mismatch documented elsewhere in this
+  codebase), so the query converts `alerts.timestamp` to localtime before diffing, and
+  filters against a Python-computed local cutoff rather than SQL's own UTC `'now'`.
+  Heuristic-path alerts (no `event_id`) are excluded — their alert/log timestamps are the
+  same value, which would silently report ~0 latency instead of a real number.
+- **MTTI** (investigate): first `case_events` `workflow_state_change → 'resolved'` row
+  minus `acknowledged_at` — "time spent actively investigating, once started," using
+  data this app was already recording.
+- **MTTC** (contain): new `case_assets.confirmed_at` column, stamped once on the first
+  `compromise_status → 'confirmed'` transition (same "local `datetime.now()`, set once"
+  convention as `agent_commands.completed_at`, so the two compare directly with no
+  timezone correction), against the first completed containment-flavored EDR action
+  (isolate/kill/quarantine) linked into that *same case* for that *same host*.
+- Real fixture-tested: correct averaging, correct exclusion of the heuristic MTTD path,
+  correct "first event wins" semantics for MTTI/MTTC (a later duplicate doesn't skew the
+  result), and a cross-case leakage guard for MTTC (a containment result linked into a
+  *different* case must not count toward this case's confirmed asset).
+
 ### Micro DFIR's own DNS server, replacing the earlier dnsmasq/Technitium plans
 
 After scoping a Technitium DNS Server integration (built, then removed once we decided
