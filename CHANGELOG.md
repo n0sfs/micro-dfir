@@ -71,6 +71,15 @@ the highest-value findings:
   its own top-level nav item (reuses the existing `dash(tab='reports')`
   route, no backend/data move) so it's now a first-class destination
   alongside SIEM/Coverage/EDR/UEBA/SOAR/Cases.
+- **Agent heartbeat and log ingestion were indistinguishable** — the Agents
+  page could only show "checking in fine" (`agent_polls`); an agent whose
+  log shipping silently broke (bad channel config, EDR service crashed)
+  looked identical to a healthy one. Added a "Last Log Received" column
+  sourced from `live_logs`, with a warning when a checked-in host has never
+  sent a single log. Point-lookup per visible host (`ORDER BY id DESC LIMIT
+  1` riding the host index's rowid ordering, confirmed via `EXPLAIN QUERY
+  PLAN`) rather than `MAX(timestamp)`, which would force a full scan of
+  every row for that host on this app's 6.2M-row table.
 
 ### Closed the standing gap-list: SLA tiers, password strength, agent recovery, revert cancel
 
