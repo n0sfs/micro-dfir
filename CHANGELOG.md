@@ -10,6 +10,26 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-07
 
+### Report email delivery + daily schedule option
+
+SOAR playbooks and alert notifications have had real, working SMTP
+infrastructure (`src/notifications.py`) for a while, but generated
+reports had zero delivery mechanism beyond logging in and downloading —
+a scheduled report just sat on disk with nobody notified. Added
+`notifications.send_report_email()` (the first sender in this codebase
+to build a `MIMEMultipart` message with a PDF attachment — the existing
+senders only ever built plain text), a global "Email Recipients" field
+next to the existing per-report-type schedule dropdowns (Settings >
+Reports), auto-email on every scheduled (not manual) report completion,
+and an on-demand "Email" button next to Download in the Reports history
+table for sending any already-generated report regardless of the
+schedule. Also added `daily` as a third schedule frequency (05:00)
+alongside weekly/monthly. Live-verified the full pipeline end to end
+(recipients config → send route → SMTP attempt); a real delivery
+couldn't be confirmed since this appliance has no SMTP server
+configured, but the failure surfaced the exact expected, correctly
+worded error rather than failing silently or opaquely.
+
 ### EDR response actions from within a case
 
 An analyst had to leave a case, go run something from the separate
