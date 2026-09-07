@@ -10,6 +10,21 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-07
 
+### Dashboard widget edits now protected on shared role-default dashboards
+
+Adding/removing/rearranging dashboard widgets was deliberately open to
+any logged-in user (matching how case items/tasks work), but that
+design predates per-role default dashboards — once a dashboard is
+assigned as an entire role's default view (`roles.default_dashboard_id`),
+any click there silently changes what everyone with that role sees, not
+just the editor's own. Narrowed precisely: only gated when the target
+dashboard IS currently a role's default, same creator-or-admin rule the
+dashboard's own rename/delete already enforced — an ordinary personal/
+team dashboard stays exactly as open as before. Frontend mirrors this
+proactively (Add Widget/Edit Layout hidden with a "Shared default —
+read-only" note) instead of letting a non-owner drag widgets around and
+hit a 403 on save.
+
 ### Report email delivery + daily schedule option
 
 SOAR playbooks and alert notifications have had real, working SMTP
