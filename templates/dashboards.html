@@ -427,7 +427,12 @@ function renderSeverityWidget(container, widgetId, config) {
                 labels: d.severity.map(x => titleCase(x.severity)),
                 datasets: [{ data: d.severity.map(x => x.count), backgroundColor: d.severity.map(x => severityColor(x.severity, c)), borderColor: 'transparent' }],
             },
-            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: c.text, boxWidth: 12 } } } },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: { legend: { position: 'bottom', labels: { color: c.text, boxWidth: 12 } } },
+                onClick: (evt, elements) => { if (elements.length) pivotToLogSearch('severity', d.severity[elements[0].index].severity); },
+                onHover: (evt, elements) => { evt.native.target.style.cursor = elements.length ? 'pointer' : 'default'; },
+            },
         });
     }).catch(err => {
         console.error('Error loading severity breakdown:', err);
@@ -551,7 +556,15 @@ function renderAnomalyRulesWidget(container, widgetId, config) {
         DASH_CHARTS[widgetId] = new Chart(canvas.getContext('2d'), {
             type: 'bar',
             data: { labels: d.rules.map(x => x.name), datasets: [{ label: 'Matches', data: d.rules.map(x => x.matches), backgroundColor: c.accent }] },
-            options: baseHBarOptions(c),
+            options: {
+                ...baseHBarOptions(c),
+                // No dedicated indexed field for "which anomaly rule fired" in Log
+                // Search's schema -- a free-text pivot (null field) against the rule
+                // name is the closest match, same fallback iocPivotQuery already uses
+                // for a domain/url IOC with no single owning column.
+                onClick: (evt, elements) => { if (elements.length) pivotToLogSearch(null, d.rules[elements[0].index].name); },
+                onHover: (evt, elements) => { evt.native.target.style.cursor = elements.length ? 'pointer' : 'default'; },
+            },
         });
     }).catch(err => {
         console.error('Error loading top anomaly rules:', err);
@@ -1160,7 +1173,15 @@ function renderCaseQueueBacklogWidget(container, widgetId, config) {
         DASH_CHARTS[widgetId] = new Chart(canvas.getContext('2d'), {
             type: 'bar',
             data: { labels: d.queues.map(q => q.name), datasets: [{ label: 'Open Cases', data: d.queues.map(q => q.count), backgroundColor: c.accent }] },
-            options: baseHBarOptions(c),
+            options: {
+                ...baseHBarOptions(c),
+                onClick: (evt, elements) => {
+                    if (!elements.length) return;
+                    const qid = d.queues[elements[0].index].queue_id;
+                    window.location.href = qid ? `/cases?queue=${qid}` : '/cases';
+                },
+                onHover: (evt, elements) => { evt.native.target.style.cursor = elements.length ? 'pointer' : 'default'; },
+            },
         });
     }).catch(err => {
         console.error('Error loading case queue backlog:', err);
