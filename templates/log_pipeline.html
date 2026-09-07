@@ -195,11 +195,50 @@
 
 <!-- ============================= DNS LOGGING PANE ============================= -->
 <div id="paneDns" style="display: {{ 'block' if active_tab == 'dns' else 'none' }};">
+
+<!-- Technitium DNS Server -->
 <div class="row g-4 mb-4">
     <div class="col-lg-12">
         <div class="card bg-dark border-secondary">
             <div class="card-body">
-                <h5 class="card-title text-light mb-3"><i class="fa-solid fa-globe me-2"></i>DNS Query Logging</h5>
+                <h5 class="card-title text-light mb-3"><i class="fa-solid fa-server me-2"></i>Technitium DNS Server</h5>
+                <p class="text-muted small mb-3">A real DNS server with per-query structured logging (client IP, domain, query type, protocol, response code) -- a genuine upgrade over the dnsmasq tap below. Requires Technitium's own "Query Logs (Sqlite)" DNS App to be installed (see Technitium's web console &gt; Apps). This appliance polls Technitium's HTTP API every ~30s using the API token below and writes new query rows in directly -- nothing routes through Vector for this source.</p>
+                <div class="row g-2 mb-2">
+                    <div class="col-md-6">
+                        <label class="form-label text-muted small mb-1" for="techApiUrl">API URL</label>
+                        <input type="text" id="techApiUrl" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="http://192.168.86.100:5380">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label text-muted small mb-1" for="techApiToken">API Token</label>
+                        <input type="password" id="techApiToken" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="(unchanged -- leave blank to keep the saved token)">
+                    </div>
+                </div>
+                <div class="row g-2 mb-3">
+                    <div class="col-md-6">
+                        <label class="form-label text-muted small mb-1" for="techAppName">Query Logs app name</label>
+                        <input type="text" id="techAppName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Query Logs (Sqlite)">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label text-muted small mb-1" for="techClassPath">Query Logs app class path</label>
+                        <input type="text" id="techClassPath" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="QueryLogsSqlite.App">
+                    </div>
+                </div>
+                <div class="d-flex gap-2 mb-3">
+                    <button type="button" class="btn btn-primary btn-sm" onclick="saveTechnitiumConfig()"><i class="fa-solid fa-save me-1"></i> Save</button>
+                    <button type="button" class="btn btn-outline-info btn-sm" onclick="testTechnitiumConnection()"><i class="fa-solid fa-plug-circle-check me-1"></i> Test Connection</button>
+                </div>
+                <div id="techTestResult" class="small mb-3" style="display:none;"></div>
+                <div id="techPollStatus" class="small text-muted">Loading&hellip;</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-4 mb-4">
+    <div class="col-lg-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-body">
+                <h5 class="card-title text-light mb-3"><i class="fa-solid fa-globe me-2"></i>DNS Query Logging (dnsmasq, legacy)</h5>
                 <p class="text-muted small mb-3">Opt-in DNS query capture via a separate dnsmasq process (config/microsoc-dnsmasq.service) -- never this network's DHCP or default resolver. Point a specific device's own DNS setting at this appliance's IP to opt it in; nothing here changes automatically for the rest of the network. Read-only: this panel shows status and the exact parser in use, but editing the parser or dnsmasq's own config is not done from the UI.</p>
                 <div class="row g-3 mb-3" id="dnsLoggingHero">
                     <div class="col-6 col-md-3 text-center"><div class="fs-4 fw-bold" id="dnsLoggingActive">—</div><div class="text-muted small">Status</div></div>
@@ -1187,6 +1226,65 @@ async function removeLinuxChannelOverride() {
         }).catch(err => toast('Error removing override: ' + err, 'danger'));
 }
 
+// ---- Technitium DNS Server config + status ----
+function loadTechnitiumConfig() {
+    fetch('/api/settings/technitium')
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(d => {
+            document.getElementById('techApiUrl').value = d.api_url || '';
+            document.getElementById('techApiToken').placeholder = d.api_token_set ? '(unchanged -- leave blank to keep the saved token)' : 'Paste the API token from Technitium\'s web console';
+            document.getElementById('techAppName').value = d.app_name || '';
+            document.getElementById('techClassPath').value = d.class_path || '';
+            renderTechnitiumPollStatus(d.poll_status);
+        })
+        .catch(err => {
+            console.error('Error loading Technitium config:', err);
+            document.getElementById('techPollStatus').innerHTML = '<span class="text-danger">Failed to load configuration.</span>';
+        });
+}
+
+function renderTechnitiumPollStatus(status) {
+    const el = document.getElementById('techPollStatus');
+    if (!status) { el.innerHTML = 'Not configured yet -- add an API URL and token above, save, then Test Connection.'; return; }
+    if (status.ok) {
+        el.innerHTML = `<i class="fa-solid fa-circle-check text-success me-1"></i>Last poll ${escHtml(status.checked_at)}: inserted ${status.inserted}, skipped ${status.skipped}.`;
+    } else {
+        el.innerHTML = `<i class="fa-solid fa-triangle-exclamation text-danger me-1"></i>Last poll ${escHtml(status.checked_at)} failed: ${escHtml(status.error)}`;
+    }
+}
+
+function saveTechnitiumConfig() {
+    const payload = {
+        api_url: document.getElementById('techApiUrl').value.trim(),
+        api_token: document.getElementById('techApiToken').value,
+        app_name: document.getElementById('techAppName').value.trim(),
+        class_path: document.getElementById('techClassPath').value.trim(),
+    };
+    fetch('/api/settings/technitium', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) })
+        .then(r => r.json().then(d => ({ ok: r.ok, d })))
+        .then(({ ok, d }) => {
+            if (ok) { toast('Technitium configuration saved.', 'success'); document.getElementById('techApiToken').value = ''; loadTechnitiumConfig(); }
+            else toast(d.error || 'Failed to save.', 'danger');
+        })
+        .catch(err => toast('Error saving: ' + err, 'danger'));
+}
+
+function testTechnitiumConnection() {
+    const box = document.getElementById('techTestResult');
+    box.style.display = 'block';
+    box.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i>Testing&hellip;';
+    fetch('/api/settings/technitium/test', { method: 'POST' })
+        .then(r => r.json().then(d => ({ ok: r.ok, d })))
+        .then(({ ok, d }) => {
+            if (ok) {
+                box.innerHTML = `<div class="text-success mb-1"><i class="fa-solid fa-circle-check me-1"></i>Connected. Raw response (for verifying the field names this integration expects):</div><pre class="bg-black border border-secondary rounded p-2 mb-0" style="white-space:pre-wrap; max-height:220px; overflow-y:auto;">${escHtml(JSON.stringify(d.raw_response, null, 2))}</pre>`;
+            } else {
+                box.innerHTML = `<span class="text-danger"><i class="fa-solid fa-triangle-exclamation me-1"></i>${escHtml(d.error || 'Test failed.')}</span>`;
+            }
+        })
+        .catch(err => { box.innerHTML = `<span class="text-danger">Error: ${escHtml(String(err))}</span>`; });
+}
+
 // Read-only status/parser view for the opt-in DNS query logging feature (dnsmasq) --
 // no create/edit/save here by design, see /api/dns-logging/status's own comment.
 function loadDnsLoggingStatus() {
@@ -1516,6 +1614,7 @@ document.addEventListener("DOMContentLoaded", function() {
     loadChannelGroupsDropdown();
     loadChannelSettings();
     loadDnsLoggingStatus();
+    loadTechnitiumConfig();
     loadLogSourceSilentConfig();
     loadSilentSourceAlerts();
     loadLinuxChannelGroupsDropdown();
