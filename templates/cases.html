@@ -884,6 +884,8 @@ function caseEventLabel(e) {
         asset_removed: `Asset removed: <strong>${escHtml(e.detail)}</strong>`,
         ioc_added: `Indicator added: <strong>${escHtml(e.detail)}</strong>`,
         ioc_removed: `Indicator removed: <strong>${escHtml(e.detail)}</strong>`,
+        attachment_added: `Attachment added: <strong>${escHtml(e.detail)}</strong>`,
+        attachment_removed: `Attachment removed: <strong>${escHtml(e.detail)}</strong>`,
     };
     return map[e.event_type] || escHtml(e.event_type);
 }
