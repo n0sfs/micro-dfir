@@ -4968,9 +4968,17 @@ def trigger_report():
     framework_key = request.form.get('framework') or None
     if framework_key not in COMPLIANCE_FRAMEWORKS:
         framework_key = None
+    # Validated the same defensive way as report_type/framework_key above -- an admin
+    # picks from a fixed dropdown, but the form value still crosses a trust boundary
+    # before it reaches a subprocess argv. Clamped, not rejected, since a garbage value
+    # here isn't attacker-meaningful (it only narrows/widens the caller's own report).
+    try:
+        days = max(1, min(int(request.form.get('days', 30)), 365))
+    except (TypeError, ValueError):
+        days = 30
     try:
         cmd = ["/opt/micro-dfir/venv/bin/python3", "/opt/micro-dfir/src/generate_report.py",
-               report_type, f"--user={current_user.username}", "--source=manual"]
+               report_type, f"--user={current_user.username}", "--source=manual", f"--days={days}"]
         if framework_key:
             cmd.append(f"--framework={framework_key}")
         subprocess.run(cmd, check=True, timeout=120)

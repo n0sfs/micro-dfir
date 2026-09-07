@@ -50,6 +50,12 @@
                 <option value="{{ key }}">{{ label }}</option>
                 {% endfor %}
             </select>
+            <select name="days" id="reportDaysSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" title="How far back the report's time-windowed sections look">
+                <option value="7">Last 7 days</option>
+                <option value="30" selected>Last 30 days</option>
+                <option value="90">Last 90 days</option>
+                <option value="180">Last 180 days</option>
+            </select>
             <button type="submit" class="btn btn-sm btn-outline-success"><i class="fa-solid fa-bolt"></i> Generate Report</button>
         </form>
     </div>
@@ -99,10 +105,13 @@ const REPORT_TYPE_LABELS = { security: 'Security Summary', compliance: 'Complian
 
 // The framework select only means anything for report_type=compliance -- hidden (and
 // its value ignored server-side via COMPLIANCE_FRAMEWORKS validation regardless) for
-// the other two types.
+// the other types. The lookback select is meaningless for a Vulnerability Report (a
+// live software-inventory snapshot, not a rolling time window) -- hidden there too
+// rather than offering a control that silently does nothing.
 function onReportTypeChange() {
-    const isCompliance = document.getElementById('reportTypeSelect').value === 'compliance';
-    document.getElementById('reportFrameworkSelect').style.display = isCompliance ? '' : 'none';
+    const type = document.getElementById('reportTypeSelect').value;
+    document.getElementById('reportFrameworkSelect').style.display = type === 'compliance' ? '' : 'none';
+    document.getElementById('reportDaysSelect').style.display = type === 'vulnerability' ? 'none' : '';
 }
 
 let reportHistoryData = [];
@@ -154,6 +163,7 @@ function renderReportHistory() {
 }
 
 document.addEventListener("DOMContentLoaded", function() {
+    onReportTypeChange();
     loadReports();
 });
 </script>
