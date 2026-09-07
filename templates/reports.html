@@ -158,8 +158,25 @@ function renderReportHistory() {
             <td class="small">${h.triggered_by ? escHtml(h.triggered_by) : '<span class="text-muted">scheduled</span>'}</td>
             <td>${h.status === 'success' ? '<span class="badge bg-success">Success</span>' : `<span class="badge bg-danger" title="${escHtml(h.error_message || '')}">Failed</span>`}</td>
             <td class="small text-muted">${h.file_size_bytes ? formatReportSize(h.file_size_bytes) : '—'}</td>
-            <td class="text-end">${h.file_exists ? `<a href="/reports/download/${h.id}" class="btn btn-sm btn-outline-primary"><i class="fa-solid fa-download"></i> Download</a>` : '<span class="text-muted small">File deleted</span>'}</td>
+            <td class="text-end">${h.file_exists ? `<a href="/reports/download/${h.id}" class="btn btn-sm btn-outline-primary"><i class="fa-solid fa-download"></i> Download</a> <button type="button" class="btn btn-sm btn-outline-secondary" title="Email this report to the configured recipients" onclick="emailReport(${h.id}, this)"><i class="fa-solid fa-envelope"></i></button>` : '<span class="text-muted small">File deleted</span>'}</td>
         </tr>`).join('');
+}
+
+function emailReport(historyId, btn) {
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+    fetch(`/api/reports/${historyId}/email`, { method: 'POST' })
+        .then(r => r.json().then(data => ({ ok: r.ok, data })))
+        .then(({ ok, data }) => {
+            if (ok) {
+                toast('Report emailed.', 'success');
+            } else {
+                toast(data.error || 'Failed to email report.', 'danger');
+            }
+        })
+        .catch(err => toast('Error emailing report: ' + err, 'danger'))
+        .finally(() => { btn.disabled = false; btn.innerHTML = original; });
 }
 
 document.addEventListener("DOMContentLoaded", function() {

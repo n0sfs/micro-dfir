@@ -2,7 +2,10 @@ import base64, json, mimetypes, os, re, sqlite3
 from datetime import datetime, timedelta
 from jinja2 import Environment, FileSystemLoader
 from weasyprint import HTML
+import notifications
 import vuln_matching
+
+REPORT_TYPE_EMAIL_LABELS = {'security': 'Security Summary', 'compliance': 'Compliance', 'audit': 'Audit Trail', 'vulnerability': 'Vulnerability'}
 
 BASE_DIR = "/opt/micro-dfir"
 DB_PATH = os.path.join(BASE_DIR, "siem.db")
@@ -762,6 +765,7 @@ def _record_history(conn, report_type, filename, status, started_at, completed_a
 def run_report(report_type, triggered_by=None, trigger_source='manual', case_id=None, framework_key=None, days=30):
     started_at = datetime.now().isoformat()
     conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
     case_title = None
     framework_label = COMPLIANCE_FRAMEWORK_LABELS.get(framework_key) if framework_key else None
     # `days or 30` would be wrong here -- 0 is a falsy int, so an explicit days=0 (e.g.
@@ -803,6 +807,29 @@ def run_report(report_type, triggered_by=None, trigger_source='manual', case_id=
         _record_history(conn, report_type, filename, 'success', started_at,
                          datetime.now().isoformat(), triggered_by, trigger_source, case_id=case_id, case_title=case_title,
                          framework_key=framework_key, framework_label=framework_label)
+        # Auto-email only for scheduled (cron) runs -- a manual "Generate Report" click
+        # during testing/preview should never unexpectedly spam the configured
+        # distribution list; that path gets its own explicit "Email Report" button
+        # instead (POST /api/reports/<id>/email in app.py). Best-effort: a delivery
+        # failure here must never turn an otherwise-successful report generation into a
+        # reported failure, so it's caught and logged, not raised.
+        if trigger_source == 'scheduled' and report_type != 'case':
+            try:
+                sched_row = conn.execute("SELECT value FROM settings WHERE key = 'report_schedule_config'").fetchone()
+                recipients = json.loads(sched_row['value']).get('email_recipients', '') if sched_row and sched_row['value'] else ''
+                if recipients.strip():
+                    label = REPORT_TYPE_EMAIL_LABELS.get(report_type, report_type.title())
+                    if framework_label:
+                        label += f" — {framework_label}"
+                    subject = f"Micro DFIR: {label} Report — {datetime.now().strftime('%Y-%m-%d')}"
+                    body = f"The scheduled {label} report has been generated and is attached.\n\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M')}."
+                    ok, err = notifications.send_report_email(
+                        conn, recipients, subject, body, os.path.join(REPORT_OUTPUT_DIR, filename), filename
+                    )
+                    if not ok:
+                        print(f"[-] Scheduled report email delivery failed: {err}")
+            except Exception as e:
+                print(f"[-] Report email step errored (report itself still generated successfully): {e}")
     except Exception as e:
         _record_history(conn, report_type, '', 'failed', started_at,
                          datetime.now().isoformat(), triggered_by, trigger_source, str(e), case_id=case_id, case_title=case_title,

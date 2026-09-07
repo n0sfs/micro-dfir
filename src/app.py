@@ -5006,6 +5006,43 @@ def api_report_history():
         r['file_exists'] = bool(r['filename']) and os.path.exists(os.path.join('/opt/micro-dfir/reports', r['filename']))
     return jsonify({'history': rows})
 
+REPORT_TYPE_EMAIL_LABELS = {'security': 'Security Summary', 'compliance': 'Compliance', 'audit': 'Audit Trail', 'vulnerability': 'Vulnerability'}
+
+# On-demand send for an already-generated report -- distinct from run_report()'s own
+# auto-email-on-schedule step (generate_report.py), which only fires for
+# trigger_source='scheduled' runs so a manual "Generate Report" click during testing/
+# preview never unexpectedly spams the configured distribution list. This route is the
+# explicit, deliberate "send this one now" action for either case.
+@app.route('/api/reports/<int:history_id>/email', methods=['POST'])
+@login_required
+def api_email_report(history_id):
+    err = require_permission('settings.reports.manage')
+    if err: return err
+    db = get_db()
+    row = db.execute(
+        "SELECT report_type, filename, status, framework_label FROM report_history WHERE id = ? AND case_id IS NULL",
+        (history_id,)
+    ).fetchone()
+    if not row or row['status'] != 'success' or not row['filename']:
+        return jsonify({'error': 'Report not found or not available to send'}), 404
+    filepath = os.path.join('/opt/micro-dfir/reports', row['filename'])
+    if not os.path.exists(filepath):
+        return jsonify({'error': 'Report file no longer exists on disk'}), 404
+    recipients = get_report_schedule_config(db).get('email_recipients', '')
+    if not recipients.strip():
+        return jsonify({'error': 'No report recipients configured. Set them in the schedule settings above first.'}), 400
+    label = REPORT_TYPE_EMAIL_LABELS.get(row['report_type'], row['report_type'].title())
+    if row['framework_label']:
+        label += f" — {row['framework_label']}"
+    from notifications import send_report_email
+    subject = f"Micro DFIR: {label} Report"
+    body = f"The {label} report is attached.\n\nSent by {current_user.username} on {datetime.now().strftime('%Y-%m-%d %H:%M')}."
+    ok, send_err = send_report_email(db, recipients, subject, body, filepath, row['filename'])
+    log_audit('report_email_send', 'report', str(history_id), f"ok={ok}" + (f" error={send_err}" if send_err else ""))
+    if not ok:
+        return jsonify({'error': f'Failed to send: {send_err}'}), 500
+    return jsonify({'status': 'success'})
+
 @app.route('/api/cases/<int:cid>/reports', methods=['GET', 'POST'])
 @login_required
 def api_case_reports(cid):
@@ -5092,11 +5129,12 @@ def report_branding_logo():
 # Mirrored in src/sync_report_schedule.py (a standalone script, same reasoning as
 # generate_report.py's own duplicated REPORT_BRANDING_DEFAULTS -- it has no Flask app
 # context and is invoked once at deploy time, not imported from here).
-REPORT_SCHEDULE_FREQUENCIES = ('off', 'weekly', 'monthly')
-REPORT_SCHEDULE_DEFAULTS = {'security': 'monthly', 'compliance': 'off', 'audit': 'off', 'vulnerability': 'off'}
+REPORT_SCHEDULE_FREQUENCIES = ('off', 'daily', 'weekly', 'monthly')
+REPORT_SCHEDULE_DEFAULTS = {'security': 'monthly', 'compliance': 'off', 'audit': 'off', 'vulnerability': 'off', 'email_recipients': ''}
 REPORT_SCHEDULE_CRON = {
-    'weekly': '0 6 * * 1',   # Monday 06:00 -- lands before the start of the work week
-    'monthly': '0 1 1 * *',  # 1st of month 01:00 -- matches install.sh's old convention
+    'daily': '0 5 * * *',     # 05:00 daily -- lands before the day's first analyst shift
+    'weekly': '0 6 * * 1',    # Monday 06:00 -- lands before the start of the work week
+    'monthly': '0 1 1 * *',   # 1st of month 01:00 -- matches install.sh's old convention
 }
 
 def get_report_schedule_config(db):
@@ -5106,7 +5144,14 @@ def get_report_schedule_config(db):
     if row and row['value']:
         try:
             saved = json.loads(row['value'])
-            cfg.update({k: v for k, v in saved.items() if k in REPORT_TYPES and v in REPORT_SCHEDULE_FREQUENCIES})
+            for report_type in REPORT_TYPES:
+                if report_type in saved and saved[report_type] in REPORT_SCHEDULE_FREQUENCIES:
+                    cfg[report_type] = saved[report_type]
+            # Not a report type -- a single global distribution list emailed whenever
+            # ANY scheduled report completes (see generate_report.py's run_report()).
+            # Kept out of the per-type loop above since it isn't itself a frequency value.
+            if isinstance(saved.get('email_recipients'), str):
+                cfg['email_recipients'] = saved['email_recipients']
         except (json.JSONDecodeError, TypeError):
             pass
     return cfg
@@ -5134,7 +5179,7 @@ def apply_report_schedule_to_crontab(schedule_cfg):
     new_lines = []
     for report_type in REPORT_TYPES:
         freq = schedule_cfg.get(report_type, 'off')
-        if freq not in ('weekly', 'monthly'):
+        if freq not in ('daily', 'weekly', 'monthly'):
             continue
         cmd = (f"/opt/micro-dfir/venv/bin/python3 /opt/micro-dfir/src/generate_report.py "
                f"{report_type} --source=scheduled >> /var/log/microdfir-report.log 2>&1")
@@ -5160,6 +5205,13 @@ def api_report_schedule():
     for report_type in REPORT_TYPES:
         if report_type in d and d[report_type] in REPORT_SCHEDULE_FREQUENCIES:
             cfg[report_type] = d[report_type]
+    if 'email_recipients' in d:
+        raw = (d['email_recipients'] or '').strip()
+        addrs = [a.strip() for a in raw.split(',') if a.strip()]
+        bad = [a for a in addrs if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', a)]
+        if bad:
+            return jsonify({'error': f"Not a valid email address: {', '.join(bad)}"}), 400
+        cfg['email_recipients'] = ', '.join(addrs)
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('report_schedule_config', ?)", (json.dumps(cfg),))
     db.commit()
     ok, err = apply_report_schedule_to_crontab(cfg)
