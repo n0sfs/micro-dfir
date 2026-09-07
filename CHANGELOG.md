@@ -90,6 +90,21 @@ the highest-value findings:
   tier/score for host and user — each shown only when there's a real signal
   (a "Low" risk tier is the server's always-on default for a zero score,
   suppressed rather than shown as noise on every alert).
+- **A specific log channel going dark on an otherwise-healthy host was
+  invisible** — "Host Silent" only ever detected a host going completely
+  dark; one channel stopping (EDR service crashes, Sysmon service stops)
+  while the rest of the host kept logging fine went unnoticed. Added "Log
+  Channel Silent", reusing the identical adaptive per-source threshold
+  math, scoped to (host, app) pairs and gated on the host having logged
+  something from another source very recently — proof it's a real
+  per-channel gap, not a duplicate of a host-wide outage the existing check
+  already catches. While writing the fixture test, found and fixed a real,
+  already-shipped bug in the existing check: `live_logs.timestamp` is local
+  server time, but the query compared it against SQLite's own UTC `'now'`
+  literal — on this appliance's `America/New_York` server that silently
+  inflated every silence figure by ~4-5 hours, firing alerts prematurely.
+  Verified directly: a real 5-hour gap computed as 9 hours by the old
+  query, 5 hours by the fixed one.
 - **Reports had no discoverable, real lookback control** — Security
   Summary, Audit Trail, and the per-framework Compliance report all
   hardcoded a 30-day window. Added a Lookback select (7/30/90/180 days) on
