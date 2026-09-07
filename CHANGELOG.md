@@ -67,10 +67,13 @@ the highest-value findings:
   `WHERE id <= ?` (a single B-tree seek reading exactly one row regardless of
   N) — confirmed live afterward at ~400ms on cache-hit.
 - **Reports had no discoverable home** — 17 real generated PDFs sat behind a
-  SIEM sub-tab an evaluator would never think to check. Added "Reports" as
-  its own top-level nav item (reuses the existing `dash(tab='reports')`
-  route, no backend/data move) so it's now a first-class destination
-  alongside SIEM/Coverage/EDR/UEBA/SOAR/Cases.
+  SIEM sub-tab an evaluator would never think to check. First attempt only
+  added a second nav entry point into the same SIEM tab strip, which the
+  user correctly flagged as not a real fix — reworked into a genuine
+  extraction (`templates/reports.html` + `/reports` route), the same
+  pattern already used to split Coverage out of SIEM earlier this session.
+  SIEM's tab strip is now just Log Search / Detection Rules / Detection
+  Tuning; old `?tab=reports` bookmarks redirect to the new page.
 - **Agent heartbeat and log ingestion were indistinguishable** — the Agents
   page could only show "checking in fine" (`agent_polls`); an agent whose
   log shipping silently broke (bad channel config, EDR service crashed)
