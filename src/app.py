@@ -6401,9 +6401,15 @@ def api_case_add_asset(cid):
         return jsonify({"error": "That host is already tracked in this case"}), 400
     related_indicator = (data.get('related_indicator') or '').strip() or None
     notes = (data.get('notes') or '').strip() or None
+    # confirmed_at (MTTC's start anchor) must be stamped here too, not just on the PUT
+    # transition below -- an asset can be added as already-'confirmed' in one step
+    # (an analyst who already knows the host is compromised when they add it), and that
+    # path bypassed the stamp entirely until this fix, silently leaving MTTC unable to
+    # ever measure containment time for such assets.
+    confirmed_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S') if status == 'confirmed' else None
     db.execute(
-        "INSERT INTO case_assets (case_id, host, compromise_status, related_indicator, notes, added_by) VALUES (?, ?, ?, ?, ?, ?)",
-        (cid, host, status, related_indicator, notes, current_user.username)
+        "INSERT INTO case_assets (case_id, host, compromise_status, related_indicator, notes, added_by, confirmed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (cid, host, status, related_indicator, notes, current_user.username, confirmed_at)
     )
     _log_case_event(db, cid, 'asset_added', f"{host} ({status})")
     if status == 'confirmed':
