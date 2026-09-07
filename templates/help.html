@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <h2><i class="fa-solid fa-circle-question me-2"></i>Help &amp; Reference</h2>
+    <p>How Micro DFIR is put together, and how to use each part of it.</p>
+</div>
+
+<style>
+.help-layout{display:flex; gap:24px; align-items:flex-start;}
+.help-toc{flex:0 0 220px; position:sticky; top:16px; align-self:flex-start;}
+.help-toc a{display:block; padding:4px 10px; color:var(--text-muted); text-decoration:none; border-left:2px solid transparent; font-size:.85rem;}
+.help-toc a:hover{color:var(--text-secondary);}
+.help-toc a.active{color:var(--accent); border-left-color:var(--accent);}
+.help-content{flex:1; min-width:0;}
+.help-section{margin-bottom:2.5rem; scroll-margin-top:16px;}
+.help-section h4{color:var(--text-primary); border-bottom:1px solid var(--border); padding-bottom:.4rem; margin-bottom:1rem;}
+.help-section h6{color:var(--accent); margin-top:1.25rem; margin-bottom:.5rem;}
+.help-section p, .help-section li{color:var(--text-secondary); font-size:.9rem;}
+.help-section table{width:100%; margin-bottom:1rem;}
+.help-section table th{color:var(--text-muted); font-size:.75rem; text-transform:uppercase; font-weight:600; padding:6px 10px; border-bottom:1px solid var(--border);}
+.help-section table td{padding:6px 10px; border-bottom:1px solid var(--border-light); font-size:.85rem; color:var(--text-secondary); vertical-align:top;}
+@media (max-width: 900px){ .help-layout{flex-direction:column;} .help-toc{position:static; flex:none; width:100%;} }
+</style>
+
+<div class="help-layout">
+    <nav class="help-toc" id="helpToc">
+        <a href="#overview">Overview &amp; Navigation</a>
+        <a href="#rbac">Roles &amp; Permissions</a>
+        <a href="#cases">Cases</a>
+        <a href="#siem">SIEM &amp; Detection Rules</a>
+        <a href="#log-pipeline">Log Pipeline</a>
+        <a href="#edr">EDR / Agents</a>
+        <a href="#ueba">UEBA</a>
+        <a href="#soar">SOAR (Playbooks)</a>
+        <a href="#coverage">Coverage</a>
+        <a href="#reports">Reports</a>
+        <a href="#system">Backup, Retention &amp; Updates</a>
+    </nav>
+
+    <div class="help-content">
+        <div class="help-section" id="overview">
+            <h4>Overview &amp; Navigation</h4>
+            <p>Micro DFIR is a single-appliance SOC platform combining SIEM, EDR, UEBA, SOAR, threat intel, and case management on one host. The left sidebar groups every feature area into its own page; most pages have their own sub-tabs (visible as a row of buttons near the top) rather than further nesting into the sidebar.</p>
+            <p>A few conventions apply across the whole app: destructive or high-impact actions (deleting a rule, purging logs, isolating a host) always show a confirmation dialog first. A stuck "Loading…" table with no data usually means a request failed — most tables show a red retry message instead these days, but if a page seems frozen, reloading is always safe.</p>
+        </div>
+
+        <div class="help-section" id="rbac">
+            <h4>Roles &amp; Permissions</h4>
+            <p>Access is controlled by <strong>roles</strong> (Settings &gt; Security), each a named set of individual permission keys — not a fixed tier ladder. Three roles ship by default and can't be deleted, though their permissions can be edited:</p>
+            <table>
+                <thead><tr><th>Role</th><th>Typical scope</th></tr></thead>
+                <tbody>
+                    <tr><td>Tier 1/2 Analyst</td><td>Triage, cases, basic EDR response actions.</td></tr>
+                    <tr><td>Tier 3 Senior Analyst</td><td>Adds hunting, detection tuning, and backend data access.</td></tr>
+                    <tr><td>Admin</td><td>Everything, including user/role management, system settings, and updates.</td></tr>
+                </tbody>
+            </table>
+            <p>Admins can also create fully custom roles with any combination of permissions — useful for a narrowly-scoped role like an insider-threat investigator who needs UEBA and asset access but not system administration. A permission check happens server-side on every request; the sidebar and page controls simply hide what a role can't use.</p>
+        </div>
+
+        <div class="help-section" id="cases">
+            <h4>Cases</h4>
+            <p>A case tracks an investigation: linked alerts, UEBA anomalies, assets, tasks, notes, and a timeline of everything that happened. Two fields describe a case's state, and they mean different things:</p>
+            <ul>
+                <li><strong>Status (open/closed)</strong> — the administrative state of the case file.</li>
+                <li><strong>Workflow state (new / investigating / awaiting input / resolved)</strong> — where the investigation itself stands.</li>
+            </ul>
+            <p><em>Resolved</em> means the technical investigation is done — the case may still be open administratively while paperwork or follow-up wraps up. <em>Closed</em> is the formal administrative close of the case file; closing a case automatically marks it resolved unless you set a different workflow state explicitly. A closed case can always be reopened if new evidence surfaces.</p>
+            <p>TLP (Traffic Light Protocol) and PAP (Permissible Actions Protocol) fields start unset ("not assessed") rather than defaulting to a specific classification — set them explicitly once you've actually assessed the case's sensitivity.</p>
+        </div>
+
+        <div class="help-section" id="siem">
+            <h4>SIEM &amp; Detection Rules</h4>
+            <p>Detection rules are written in <strong>Sigma</strong> (the open, backend-agnostic detection-rule format) and compiled against this appliance's own SQLite-backed log store. Rules can be imported from the SigmaHQ community ruleset (whole release packs, or a picker to select individual rules), hand-authored via the guided rule builder, or edited directly as YAML.</p>
+            <p>Every rule carries a severity, and alerts it produces flow into the same triage queue as everything else. Rule Tuning lets you attach exclusions to a specific rule (e.g. "ignore this host") without touching the rule's own logic, and a false-positive triage action can suggest one for you, pre-filled from the alert you just triaged.</p>
+            <p>Log Search (a SIEM sub-tab) is the raw query interface into ingested logs — every other feature that needs to show "here's what actually happened" ultimately pulls from the same table this searches.</p>
+        </div>
+
+        <div class="help-section" id="log-pipeline">
+            <h4>Log Pipeline</h4>
+            <p>Controls what happens to a log between arriving at the appliance and landing in the searchable log store:</p>
+            <ul>
+                <li><strong>Drop Rules</strong> — discard noisy/unwanted events before they're ever stored, with a dry-run preview against real recent traffic before you commit to one.</li>
+                <li><strong>DNS Query Logging</strong> — opt-in DNS query capture for hosts using this appliance as their resolver.</li>
+                <li><strong>Windows / Linux Log Channels</strong> — which event log channels (Windows) or auditd rules (Linux) get pushed to agents, with optional per-agent-group overrides.</li>
+                <li><strong>Silent Hosts</strong> — alerts when a previously-active host or log source has gone quiet.</li>
+                <li><strong>Parsers</strong> — the field-extraction layer. Four built-in extractors always run (Windows Event XML, a Windows message-body regex fallback, Linux auditd, and the DNS query parser); admin-defined <strong>custom parsers</strong> fill gaps the built-ins don't cover, using named-group regex patterns. The parser editor shows a live preview of what a pattern would extract as you type it, and can pull a real recent log in to test against before you save.</li>
+            </ul>
+        </div>
+
+        <div class="help-section" id="edr">
+            <h4>EDR / Agents</h4>
+            <p>Lightweight Windows/Linux/macOS agent scripts check in periodically and can be given <strong>response actions</strong> to run — queued from the Agents page and picked up on the endpoint's next check-in (usually within 15 seconds while online). Actions range from read-only collection (process list, network connections, browser history, software inventory) to active response (kill a process, isolate a host from the network, quarantine a file).</p>
+            <p>The most impactful actions — isolating a host, killing a process — require the <code>edr.command.advanced</code> permission; routine collection actions use the more widely-granted <code>edr.command.basic</code>. Automatic Endpoint Sweeps can run a bundle of safe, read-only checks (hash sweeps, YARA string sweeps, hardening checks, software inventory) on a schedule across every online endpoint, instead of only when queued by hand.</p>
+        </div>
+
+        <div class="help-section" id="ueba">
+            <h4>UEBA</h4>
+            <p>User and Entity Behavior Analytics scores hosts and users on accumulated risk — failed logins, rare processes, threat-intel matches, anomalous timing, and more — each indicator contributing points toward an entity's overall risk score. Scoring weights are fully editable (UEBA &gt; Scoring &amp; Rules) rather than fixed. An entity whose score crosses a threshold can automatically open a case.</p>
+            <p>The Asset &amp; Identity tab is where hosts get a criticality tier (standard/important/critical) — this feeds both UEBA's peer-group comparisons and general risk context elsewhere in the app.</p>
+        </div>
+
+        <div class="help-section" id="soar">
+            <h4>SOAR (Playbooks)</h4>
+            <p>Playbooks are trigger + action sequences: a trigger (case created, alert created, SLA breached, and others) fires a sequence of actions (apply a case template, send a notification, run an EDR action, and more). Some actions — anything that isolates a host or restores network access — always require human approval via the Pending Approvals queue, regardless of who built the playbook; this is a deliberate, non-configurable safety property.</p>
+            <p>Custom webhook actions let an admin define a reusable, named HTTP action (e.g. "Notify PagerDuty") without needing a code change for every new integration.</p>
+        </div>
+
+        <div class="help-section" id="coverage">
+            <h4>Coverage</h4>
+            <p>Three related views of detection posture, as sub-tabs of the same page:</p>
+            <ul>
+                <li><strong>MITRE ATT&amp;CK</strong> — which techniques have real, validated detection coverage vs. a gap, tracked over time.</li>
+                <li><strong>Compliance</strong> — the same idea mapped onto compliance frameworks (e.g. PCI DSS, CIS Controls) instead of ATT&amp;CK techniques.</li>
+                <li><strong>Vulnerability</strong> — a live snapshot of known CVEs matched against each endpoint's installed software inventory.</li>
+            </ul>
+        </div>
+
+        <div class="help-section" id="reports">
+            <h4>Reports</h4>
+            <p>Generates PDF reports (Security Summary, Compliance, Audit Trail, Vulnerability) on demand or on a recurring schedule, with three sub-tabs:</p>
+            <ul>
+                <li><strong>Reports</strong> — generate one now, browse history, download or email a past report.</li>
+                <li><strong>Branding</strong> — company name, footer text, accent color, and an optional logo applied to every generated report.</li>
+                <li><strong>Schedule</strong> — a recurring cadence (daily/weekly/monthly) per report type, with an optional email recipient list (uses the SMTP server configured under SOAR &gt; Notification Channels).</li>
+            </ul>
+        </div>
+
+        <div class="help-section" id="system">
+            <h4>Backup, Retention &amp; Updates</h4>
+            <p>Settings &gt; System covers log retention (automatic purge of old logs past a configured age), log archiving (moving old logs to cold storage instead of deleting them), and database backups (scheduled or on-demand, with a configurable retention window on the backups themselves).</p>
+            <p>Settings &gt; Changelog shows what version this appliance is running, checks GitHub for anything newer, and can pull and apply an update in place — the exact same process as running <code>update.sh</code> by hand, just triggered from the UI. An update briefly restarts the platform's services; your database and settings are always preserved.</p>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const links = Array.from(document.querySelectorAll('#helpToc a'));
+    const sections = links.map(a => document.querySelector(a.getAttribute('href')));
+    function updateActive() {
+        let current = sections[0];
+        for (const s of sections) {
+            if (s && s.getBoundingClientRect().top - 80 <= 0) current = s;
+        }
+        links.forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + (current && current.id)));
+    }
+    window.addEventListener('scroll', updateActive, { passive: true });
+    updateActive();
+});
+</script>
+{% endblock %}
