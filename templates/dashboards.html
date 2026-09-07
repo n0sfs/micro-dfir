@@ -373,6 +373,50 @@ function renderFimActivityWidget(container, widgetId, config) {
     });
 }
 
+// Volume-over-time chart + top queried domains + a real threat-intel-match count
+// (reuses ioc_sightings as-is -- the existing "Known-Bad IOC Matched" Sigma rule
+// already correlates query_name against threat intel for every log source including
+// this one, so this widget doesn't run any detection logic of its own, just counts
+// what was already found). Empty entirely (not an error) until Micro DFIR's own DNS
+// server (Log Pipeline > DNS Query Logging) is enabled and has real traffic.
+function renderDnsActivityWidget(container, widgetId, config) {
+    container.innerHTML = '<div class="text-muted small">Loading…</div>';
+    fetch(`/api/dashboards/dns-activity?range=${widgetRange(config)}`).then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(d => {
+        if (!d.total_queries) {
+            container.innerHTML = '<div class="text-muted small text-center py-4"><i class="fa-solid fa-globe me-1"></i>No DNS activity in this window yet -- enable Micro DFIR\'s DNS server under Log Pipeline &gt; DNS Query Logging.</div>';
+            return;
+        }
+        container.innerHTML = '<div style="height:60%;"><canvas></canvas></div><div class="mt-2 small widget-dns-summary"></div><div class="mt-1 d-flex flex-wrap gap-1 widget-dns-domains"></div>';
+        const canvas = container.querySelector('canvas');
+        const c = chartTheme();
+        destroyChart(widgetId);
+        DASH_CHARTS[widgetId] = new Chart(canvas.getContext('2d'), {
+            type: 'line',
+            data: { labels: d.volume.map(x => x.bucket), datasets: [{
+                label: 'DNS queries', data: d.volume.map(x => x.count),
+                borderColor: c.accent, backgroundColor: c.accent + '26',
+                borderWidth: 2, fill: true, tension: 0.25, pointRadius: 2,
+            }] },
+            options: baseLineOptions(c),
+        });
+        const summary = container.querySelector('.widget-dns-summary');
+        summary.innerHTML = `${d.total_queries.toLocaleString()} quer${d.total_queries === 1 ? 'y' : 'ies'} in this window` +
+            (d.threat_intel_matches > 0
+                ? ` · <span class="text-danger">${d.threat_intel_matches} matched known threat intel</span>`
+                : ' · <span class="text-muted">no threat-intel matches</span>');
+        const domainsEl = container.querySelector('.widget-dns-domains');
+        domainsEl.innerHTML = d.top_domains.map(dm =>
+            `<span class="badge bg-secondary" title="${dm.count} quer${dm.count === 1 ? 'y' : 'ies'}" style="cursor:pointer;" onclick="pivotToLogSearch('query_name', '${dm.domain.replace(/'/g, "\\'")}')">${escHtml(dm.domain)} (${dm.count})</span>`
+        ).join('');
+    }).catch(err => {
+        console.error('Error loading DNS activity:', err);
+        renderWidgetLoadError(container, 'Failed to load.');
+    });
+}
+
 function renderAgentHealthTrendWidget(container, widgetId, config) {
     container.innerHTML = '<canvas></canvas><p class="small text-muted mt-1 mb-0 widget-note"></p>';
     const canvas = container.querySelector('canvas');
@@ -2074,6 +2118,7 @@ const WIDGET_REGISTRY = {
     chart_fim_activity:       { label: 'File Integrity Activity', icon: 'fa-file-shield', category: 'chart', defaultW: 8, defaultH: 4, render: renderFimActivityWidget },
     chart_agent_health_trend: { label: 'Agent Fleet Health', icon: 'fa-heart-pulse', category: 'chart', defaultW: 8, defaultH: 4, render: renderAgentHealthTrendWidget },
     chart_vulnerability_summary: { label: 'Vulnerability Summary', icon: 'fa-bug', category: 'chart', defaultW: 8, defaultH: 5, live: true, render: renderVulnerabilitySummaryWidget },
+    chart_dns_activity:       { label: 'DNS Activity', icon: 'fa-globe', category: 'chart', defaultW: 8, defaultH: 5, render: renderDnsActivityWidget },
     // App widgets (Batch 2) -- compact live embeds, all reusing existing endpoints.
     app_alerts:        { label: 'Alerts', icon: 'fa-triangle-exclamation', category: 'app', defaultW: 4, defaultH: 5, render: renderAlertsWidget },
     app_cases:         { label: 'Cases', icon: 'fa-folder-open', category: 'app', defaultW: 4, defaultH: 5, render: renderCasesWidget },

@@ -10,6 +10,35 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-07
 
+### Micro DFIR's own DNS server, replacing the earlier dnsmasq/Technitium plans
+
+After scoping a Technitium DNS Server integration (built, then removed once we decided
+against it -- it needs a separate DNS App plugin just for query logging, a separate
+service to run, and its own API to guess at), built our own small DNS forwarder +
+query logger directly in this codebase instead (`src/dns_server.py`, using `dnslib` for
+wire-format parsing so nothing hand-rolls DNS packet handling): a real UDP+TCP proxy to
+real upstream resolvers (default 1.1.1.1/1.0.0.1), logging every query (client IP,
+domain, record type, response code) straight into `live_logs` as `app='dns_server'` via
+a batched background flush -- no external service, no separate API, no port/interface
+guessing. Verified with a genuine end-to-end test: real UDP and TCP round trips through
+the actual running proxy to real public resolvers, correct transaction-ID handling,
+graceful survival of a malformed packet, and real rows landing in a real database.
+
+Same opt-in safety philosophy as the dnsmasq tap it replaces (never binds `0.0.0.0`,
+only enabled+configured explicitly) but config lives in Settings now (Log Pipeline > DNS
+Query Logging), including a bind-IP dropdown built from the host's own real network
+interfaces -- this appliance's main IP turned out to be on wifi, not ethernet, which is
+exactly the kind of surprise that dropdown exists to prevent. A new DNS Activity view
+shows recent queries with a best-effort host/user match against other recent activity
+from the same IP (DNS itself carries no such identity, so this is an honest correlation,
+not a guarantee), and a new Dashboards widget charts query volume over time, top queried
+domains, and a real threat-intel-match count -- reusing the existing "Known-Bad IOC
+Matched" Sigma rule's own `ioc_sightings` records rather than re-implementing detection.
+`update.sh` now self-installs the new systemd unit on deploy (safe here since it's our
+own code shipped through the already-sanctioned deploy script, not new third-party
+software) -- no manual systemd setup needed. dnsmasq stays in place, untouched, as a
+still-working fallback.
+
 ### Cases: tabbed case detail view + metric tiles on the list page
 
 The case detail view's right column had grown to 11 stacked cards (Items,
