@@ -902,6 +902,8 @@ def dash():
         return redirect(url_for('coverage_page'))
     if active_tab == 'pipeline':
         return redirect(url_for('log_pipeline_page'))
+    if active_tab == 'reports':
+        return redirect(url_for('reports_page'))
     return render_template('dashboard.html', active_tab=active_tab, current_user=current_user,
                             compliance_frameworks=COMPLIANCE_FRAMEWORKS, log_search_allowed_fields=LOG_SEARCH_ALLOWED_FIELDS)
 
@@ -4929,7 +4931,8 @@ def api_yara_scan():
 # ==========================================
 @app.route('/reports')
 @login_required
-def reports(): return redirect(url_for('dash', tab='reports'))
+def reports_page():
+    return render_template('reports.html', current_user=current_user, compliance_frameworks=COMPLIANCE_FRAMEWORKS)
 
 # Keyed off the report_history row's id, not a user-supplied filename -- the old
 # <filename> route took whatever the client sent straight into send_from_directory
@@ -4944,7 +4947,7 @@ def download_report(history_id):
     row = get_db().execute("SELECT filename FROM report_history WHERE id = ?", (history_id,)).fetchone()
     if not row or not os.path.exists(os.path.join('/opt/micro-dfir/reports', row['filename'])):
         flash("Report file not found.", "warning")
-        return redirect(url_for('dash', tab='reports'))
+        return redirect(url_for('reports_page'))
     return send_from_directory('/opt/micro-dfir/reports', row['filename'], as_attachment=True)
 
 REPORT_TYPES = ('security', 'compliance', 'audit', 'vulnerability')
@@ -4953,7 +4956,7 @@ REPORT_TYPES = ('security', 'compliance', 'audit', 'vulnerability')
 @login_required
 def trigger_report():
     if not validate_csrf():
-        return redirect(url_for('dash', tab='reports'))
+        return redirect(url_for('reports_page'))
     report_type = request.form.get('type', 'security')
     if report_type not in REPORT_TYPES:
         report_type = 'security'
@@ -4977,7 +4980,7 @@ def trigger_report():
         flash("Report generation timed out.", "danger")
     except Exception as e:
         flash(f"Failed to generate report: {str(e)}", "danger")
-    return redirect(url_for('dash', tab='reports'))
+    return redirect(url_for('reports_page'))
 
 @app.route('/api/reports/history', methods=['GET'])
 @login_required
