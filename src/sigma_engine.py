@@ -872,6 +872,155 @@ def run_due_ioc_purge():
     if deleted:
         print(f"[+] Automatic IOC purge: deleted {deleted} stale indicator(s) older than {retention_days} day(s) (cutoff {cutoff}).", flush=True)
 
+# ---- Technitium DNS Server query-log polling ----
+# Dual-defined against app.py's own _technitium_config/_technitium_api_call (same
+# convention as UEBA_DEFAULTS/RISK_SCORE_DEFAULTS -- two separate processes, no shared
+# import). This process is the one with an existing always-on 30s loop, so it's the
+# natural home for the poll itself; app.py's copy of these helpers backs its Settings UI
+# (config save/test-connection), not a second poller.
+_TECHNITIUM_SETTINGS_KEYS = (
+    'technitium_api_url', 'technitium_api_token', 'technitium_app_name', 'technitium_class_path',
+)
+TECHNITIUM_DEFAULT_APP_NAME = 'Query Logs (Sqlite)'
+TECHNITIUM_DEFAULT_CLASS_PATH = 'QueryLogsSqlite.App'
+TECHNITIUM_POLL_PAGE_SIZE = 500
+
+def _technitium_config(cursor):
+    rows = cursor.execute(
+        f"SELECT key, value FROM settings WHERE key IN ({','.join('?' for _ in _TECHNITIUM_SETTINGS_KEYS)})",
+        _TECHNITIUM_SETTINGS_KEYS
+    ).fetchall()
+    cfg = {r['key']: r['value'] for r in rows}
+    return {
+        'api_url': (cfg.get('technitium_api_url') or '').rstrip('/'),
+        'api_token': cfg.get('technitium_api_token') or '',
+        'app_name': cfg.get('technitium_app_name') or TECHNITIUM_DEFAULT_APP_NAME,
+        'class_path': cfg.get('technitium_class_path') or TECHNITIUM_DEFAULT_CLASS_PATH,
+    }
+
+def _technitium_api_call(cfg, path, params=None, timeout=15):
+    if not cfg['api_url'] or not cfg['api_token']:
+        return False, 'not configured'
+    p = dict(params or {})
+    p['token'] = cfg['api_token']
+    try:
+        r = requests.get(f"{cfg['api_url']}{path}", params=p, timeout=timeout)
+        r.raise_for_status()
+        data = r.json()
+    except requests.exceptions.RequestException as e:
+        return False, f'Could not reach Technitium: {e}'
+    except ValueError:
+        return False, 'Technitium returned a non-JSON response.'
+    status = data.get('status')
+    if status == 'ok':
+        return True, data.get('response', data)
+    if status == 'invalid-token':
+        return False, 'Technitium rejected the API token.'
+    return False, data.get('errorMessage') or f'Technitium returned status={status!r}.'
+
+# Response entries carry timestamp/qname/qtype/qclass/answer/rcode/clientIpAddress/
+# protocol/responseType/responseRtt per Technitium's Query Logs app -- mapped defensively
+# (via .get, never a bare KeyError) since this appliance has never run a live instance to
+# confirm the exact field names against; a row missing an expected field is skipped with
+# a count logged, never silently guessed at or fabricated.
+def _technitium_row_to_live_log(row):
+    ts = row.get('timestamp')
+    qname = row.get('qname')
+    if not ts or not qname:
+        return None
+    client_ip = row.get('clientIpAddress') or ''
+    qtype = row.get('qtype') or ''
+    rcode = row.get('rcode') or ''
+    protocol = row.get('protocol') or ''
+    response_type = row.get('responseType') or ''
+    message = f"DNS query from {client_ip}: {qname} ({qtype}) rcode={rcode} type={response_type} proto={protocol}"
+    return {
+        'timestamp': ts, 'host': client_ip, 'app': 'technitium', 'event_id': '-',
+        'username': '-', 'source_ip': client_ip, 'query_name': qname, 'message': message,
+    }
+
+def run_due_technitium_poll():
+    if not os.path.exists(DB_PATH):
+        return
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cfg = _technitium_config(cursor)
+        if not cfg['api_url'] or not cfg['api_token']:
+            return  # opt-in, same as dnsmasq query logging before it -- not configured, not an error
+
+        last_row = cursor.execute("SELECT value FROM settings WHERE key = 'technitium_poll_last_timestamp'").fetchone()
+        start = last_row['value'] if last_row and last_row['value'] else \
+            (datetime.datetime.now() - datetime.timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%S')
+
+        inserted = 0
+        skipped = 0
+        max_ts_seen = start
+        page = 1
+        while True:
+            ok, result = _technitium_api_call(cfg, '/api/logs/query', {
+                'name': cfg['app_name'], 'classPath': cfg['class_path'],
+                'pageNumber': page, 'entriesPerPage': TECHNITIUM_POLL_PAGE_SIZE,
+                'start': start, 'descendingOrder': 'false',
+            })
+            if not ok:
+                status_json = json.dumps({'ok': False, 'error': result, 'checked_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
+                cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('technitium_poll_status', ?)", (status_json,))
+                conn.commit()
+                print(f"[-] Technitium poll failed: {result}", flush=True)
+                return
+            # Defensive: the exact inner key wrapping the log-entry array is not confirmed
+            # against a live instance -- try the documented/likely shapes rather than
+            # assuming one and crashing (or worse, silently treating an unexpected shape
+            # as "zero new rows" forever).
+            entries = None
+            if isinstance(result, list):
+                entries = result
+            elif isinstance(result, dict):
+                for key in ('logs', 'queryLogs', 'entries', 'rows'):
+                    if isinstance(result.get(key), list):
+                        entries = result[key]
+                        break
+            if entries is None:
+                status_json = json.dumps({'ok': False, 'error': f'Unrecognized response shape (keys: {list(result.keys()) if isinstance(result, dict) else type(result).__name__}) -- see Settings > Log Pipeline > DNS Query Logging > Test Connection for the raw response.', 'checked_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
+                cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('technitium_poll_status', ?)", (status_json,))
+                conn.commit()
+                print("[-] Technitium poll: unrecognized response shape, see technitium_poll_status", flush=True)
+                return
+            if not entries:
+                break
+            rows_to_insert = []
+            for row in entries:
+                mapped = _technitium_row_to_live_log(row)
+                if not mapped:
+                    skipped += 1
+                    continue
+                if mapped['timestamp'] > max_ts_seen:
+                    max_ts_seen = mapped['timestamp']
+                rows_to_insert.append(mapped)
+            if rows_to_insert:
+                cursor.executemany(
+                    "INSERT INTO live_logs (timestamp, host, app, event_id, username, source_ip, query_name, message) "
+                    "VALUES (:timestamp, :host, :app, :event_id, :username, :source_ip, :query_name, :message)",
+                    rows_to_insert
+                )
+                inserted += len(rows_to_insert)
+            if len(entries) < TECHNITIUM_POLL_PAGE_SIZE:
+                break  # last page
+            page += 1
+            if page > 200:  # hard safety cap -- never loop unboundedly on one poll cycle
+                break
+
+        cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('technitium_poll_last_timestamp', ?)", (max_ts_seen,))
+        status_json = json.dumps({'ok': True, 'inserted': inserted, 'skipped': skipped, 'checked_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
+        cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('technitium_poll_status', ?)", (status_json,))
+        conn.commit()
+        if inserted:
+            print(f"[+] Technitium poll: inserted {inserted} DNS query log row(s) (skipped {skipped}).", flush=True)
+    finally:
+        conn.close()
+
 if __name__ == "__main__":
     # Threat intel feed auto-sync, automatic log purge, and automatic IOC purge all
     # piggyback on this loop rather than running as their own scheduler service — this
@@ -902,6 +1051,10 @@ if __name__ == "__main__":
             run_due_ioc_purge()
         except Exception as e:
             print(f"[-] Automatic IOC purge check failed: {e}")
+        try:
+            run_due_technitium_poll()
+        except Exception as e:
+            print(f"[-] Technitium DNS poll check failed: {e}")
         try:
             # 127.0.0.1 only works when gunicorn binds 0.0.0.0; Settings > Network's
             # dual-bind flow can bind ui_bind_ip to one specific IP instead (the exact

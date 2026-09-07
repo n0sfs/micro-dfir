@@ -376,6 +376,116 @@ auth.token = "{soc_token}"
 # can't silently drift without a diff showing both sides changing.
 DNSMASQ_QUERY_REGEX = r'query\[(?P<qtype>[A-Za-z0-9]+)\]\s+(?P<domain>\S+)\s+from\s+(?P<src_ip>\S+)'
 
+# ---- Technitium DNS Server integration ----
+# A genuine upgrade path for DNS query logging over the dnsmasq tap above: Technitium is
+# a real DNS server (not just a forwarder) with a full HTTP API and, once its "Query Logs
+# (Sqlite)" DNS App is installed, per-query structured logging (client IP, qname, qtype,
+# protocol, rcode, response type, RTT) far richer than dnsmasq's single regex-parsed line.
+# Deliberately NOT routed through Vector -- Technitium's API is JSON+pagination, not a
+# flat file to tail, so this polls directly and writes to live_logs the same way
+# ueba_engine.py/sigma_engine.py already do (a direct sqlite3 connection), reusing the
+# exact "read config, read a high-water mark from settings, advance it" shape those use.
+#
+# This ALSO doubles as the foundation for a deeper future integration ("configure/browse
+# Technitium from inside Micro DFIR, no separate login") the user asked about: one admin-
+# configured API token stored here, one small authenticated-call helper any future proxy
+# route can reuse -- end users never need Technitium's own login, only Micro DFIR's.
+#
+# The exact API endpoint/param names below are grounded in Technitium's public API docs
+# and third-party clients (Ansible collection, an MCP server) that document the same
+# /api/logs/query shape independently -- not guessed -- but this appliance has never
+# actually run Technitium, so _technitium_api_call surfaces the raw response on request
+# (see the /test route) specifically so a mismatch is immediately visible and fixable,
+# never silently swallowed.
+_TECHNITIUM_SETTINGS_KEYS = (
+    'technitium_api_url', 'technitium_api_token', 'technitium_app_name', 'technitium_class_path',
+)
+TECHNITIUM_DEFAULT_APP_NAME = 'Query Logs (Sqlite)'
+TECHNITIUM_DEFAULT_CLASS_PATH = 'QueryLogsSqlite.App'
+
+def _technitium_config(db):
+    rows = db.execute(
+        f"SELECT key, value FROM settings WHERE key IN ({','.join('?' for _ in _TECHNITIUM_SETTINGS_KEYS)})",
+        _TECHNITIUM_SETTINGS_KEYS
+    ).fetchall()
+    cfg = {r['key']: r['value'] for r in rows}
+    return {
+        'api_url': (cfg.get('technitium_api_url') or '').rstrip('/'),
+        'api_token': cfg.get('technitium_api_token') or '',
+        'app_name': cfg.get('technitium_app_name') or TECHNITIUM_DEFAULT_APP_NAME,
+        'class_path': cfg.get('technitium_class_path') or TECHNITIUM_DEFAULT_CLASS_PATH,
+    }
+
+def _technitium_api_call(cfg, path, params=None, timeout=15):
+    """Generic authenticated GET against Technitium's HTTP API. Returns (ok, data_or_error).
+    `path` is the endpoint path (e.g. '/api/logs/query'); `params` merges in cfg's token
+    automatically. Never raises -- network/JSON/API-level errors all come back as
+    (False, <human-readable string>) so a caller (poller or UI test action) can surface
+    the failure without needing its own try/except around every call site."""
+    if not cfg['api_url'] or not cfg['api_token']:
+        return False, 'Technitium is not configured (API URL and token are both required).'
+    p = dict(params or {})
+    p['token'] = cfg['api_token']
+    try:
+        r = requests.get(f"{cfg['api_url']}{path}", params=p, timeout=timeout)
+        r.raise_for_status()
+        data = r.json()
+    except requests.exceptions.RequestException as e:
+        return False, f'Could not reach Technitium at {cfg["api_url"]}: {e}'
+    except ValueError:
+        return False, 'Technitium returned a non-JSON response (unexpected).'
+    status = data.get('status')
+    if status == 'ok':
+        return True, data.get('response', data)
+    if status == 'invalid-token':
+        return False, 'Technitium rejected the API token (invalid or expired).'
+    return False, data.get('errorMessage') or f'Technitium returned status={status!r}.'
+
+@app.route('/api/settings/technitium', methods=['GET', 'POST'])
+@login_required
+def api_settings_technitium():
+    db = get_db()
+    if request.method == 'GET':
+        cfg = _technitium_config(db)
+        cfg['api_token_set'] = bool(cfg['api_token'])
+        del cfg['api_token']  # never echo the token back to the client
+        status_row = db.execute(
+            "SELECT value FROM settings WHERE key = 'technitium_poll_status'"
+        ).fetchone()
+        cfg['poll_status'] = json.loads(status_row['value']) if status_row and status_row['value'] else None
+        return jsonify(cfg)
+    err = require_permission('logsearch.droprules.manage')
+    if err: return err
+    d = request.json or {}
+    api_url = (d.get('api_url') or '').strip().rstrip('/')
+    app_name = (d.get('app_name') or '').strip() or TECHNITIUM_DEFAULT_APP_NAME
+    class_path = (d.get('class_path') or '').strip() or TECHNITIUM_DEFAULT_CLASS_PATH
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('technitium_api_url', ?)", (api_url,))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('technitium_app_name', ?)", (app_name,))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('technitium_class_path', ?)", (class_path,))
+    # Only overwrite the stored token when a new one was actually typed -- the GET route
+    # never echoes it back, so the save form's field is normally blank on every load;
+    # saving a blank token would otherwise silently wipe a previously-configured one.
+    if d.get('api_token'):
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('technitium_api_token', ?)", (d['api_token'].strip(),))
+    db.commit()
+    log_audit('technitium_config_change', 'settings', None, f'api_url={api_url}')
+    return jsonify({'status': 'success'})
+
+@app.route('/api/settings/technitium/test', methods=['POST'])
+@login_required
+def api_settings_technitium_test():
+    err = require_permission('logsearch.droprules.manage')
+    if err: return err
+    cfg = _technitium_config(get_db())
+    ok, result = _technitium_api_call(cfg, '/api/logs/query', {
+        'name': cfg['app_name'], 'classPath': cfg['class_path'],
+        'pageNumber': 1, 'entriesPerPage': 1,
+    })
+    if not ok:
+        return jsonify({'ok': False, 'error': result}), 400
+    return jsonify({'ok': True, 'raw_response': result})
+
 def _resolve_ingest_port(ui_port):
     # settings.ingest_port only reflects reality while the systemd unit still has the
     # dual --bind that /settings/network's save flow writes — a plain reinstall
