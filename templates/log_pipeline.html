@@ -1206,7 +1206,7 @@ function loadLogSourceSilentConfig() {
             document.getElementById('logSourceSilentMinHours').value = data.min_hours;
             document.getElementById('logSourceSilentCooldown').value = data.cooldown_hours;
             document.getElementById('logSourceSilentStatus').innerText =
-                `Currently: a host silent for ${data.multiplier}x its own typical gap (minimum ${data.min_hours}h) triggers a "Host Silent" alert, at most once every ${data.cooldown_hours}h per host.`;
+                `Currently: a source silent for ${data.multiplier}x its own typical gap (minimum ${data.min_hours}h) triggers a "Host Silent" or "Log Channel Silent" alert, at most once every ${data.cooldown_hours}h per source.`;
         })
         .catch(e => {
             console.error('Host silent alert settings load issue:', e);
