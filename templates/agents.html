@@ -1369,7 +1369,7 @@ const CONSOLE_ACTION_DISPLAY = {
         collect_software_inventory: 'Collect-Software-Inventory (installed apps from the registry Uninstall keys -- feeds the "Check for Vulnerabilities" CVE correlation)',
         collect_installed_patches: 'Collect-Installed-Patches (Win32_QuickFixEngineering hotfix list + OS build info -- no per-CVE-to-KB matching, that data isn\'t in any feed this app ingests)',
         sca_check: 'SCA-Check (hand-authored, CIS-Benchmark-flavored hardening checks -- firewall, SMBv1, RDP NLA, Defender, UAC, BitLocker, and more)',
-        collect_browser_artifacts: 'Collect-Browser-Artifacts (Chrome/Edge/Firefox history file metadata + recent downloads, all user profiles)',
+        collect_browser_artifacts: 'Collect-Browser-Artifacts (real Chrome/Edge visited-URL history, up to 600 most-recent-created rows per profile + recent downloads; Firefox stays file metadata only, all user profiles)',
         collect_forensic_timestamps: 'Collect-Forensic-Timestamps (Prefetch listing, Amcache/Shimcache metadata)',
         collect_recent_file_changes: 'Collect-Recent-File-Changes (files modified in the last 24h across common drop locations)',
         collect_live_forensics: 'Collect-Live-Forensics (USB device history, PowerShell console history, targeted Security-log events, BitLocker recovery keys, Recent-Items LNK shortcuts)',
