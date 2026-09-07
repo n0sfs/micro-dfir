@@ -1770,6 +1770,11 @@ document.addEventListener("DOMContentLoaded", function() {
     // are awaited alongside it for the same reason -- the SLA timer chips and the
     // Case Assets EDR buttons both need them on that same first render.
     Promise.all([loadCaseQueues(), loadCaseSlaHours(), loadKnownAgents()]).then(() => {
+        // Deep-link from the Dashboards "Open Cases by Queue" widget -- queueFilterSelect
+        // is populated by loadCaseQueues() above, so its options exist by the time this
+        // sets a value on it.
+        const queueParam = new URLSearchParams(window.location.search).get('queue');
+        if (queueParam) document.getElementById('queueFilterSelect').value = queueParam;
         loadCases();
         const cidParam = new URLSearchParams(window.location.search).get('case');
         if (cidParam) openCaseDetail(parseInt(cidParam, 10));

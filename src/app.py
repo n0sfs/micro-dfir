@@ -9249,7 +9249,7 @@ def api_dashboard_case_aging():
 @login_required
 def api_dashboard_case_queue_backlog():
     rows = get_db().execute(
-        "SELECT COALESCE(q.name, 'Unassigned') as name, COUNT(*) as count FROM cases c "
+        "SELECT q.id as queue_id, COALESCE(q.name, 'Unassigned') as name, COUNT(*) as count FROM cases c "
         "LEFT JOIN case_queues q ON q.id = c.queue_id WHERE c.status = 'open' "
         "GROUP BY c.queue_id ORDER BY count DESC"
     ).fetchall()
