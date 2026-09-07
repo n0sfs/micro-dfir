@@ -307,6 +307,7 @@ function caseAssetRow(a, isClosed) {
             <td class="small text-muted">${escHtml(a.notes || '')}</td>
             <td class="text-nowrap">
                 <a href="/ueba?tab=timeline&host=${encodeURIComponent('host:' + a.host)}" class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="View this host's activity on the UEBA Timeline"><i class="fa-solid fa-timeline"></i></a>
+                <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 me-1" title="Search all logs for this host" onclick="pivotToLogSearch('host', '${escJs(a.host)}')"><i class="fa-solid fa-magnifying-glass"></i></button>
                 ${caseAssetEdrActions(a)}
             </td>
             <td class="text-end"><button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove asset" onclick="removeCaseAsset(${a.id})" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-xmark"></i></button></td>
@@ -329,9 +330,23 @@ function caseIocRow(i, isClosed) {
             <td class="text-end text-nowrap">
                 <button type="button" class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="Check against the local Threat Intel set" onclick="checkCaseIoc(${i.id}, '${escJs(i.value)}')"><i class="fa-solid fa-magnifying-glass"></i></button>
                 <button type="button" class="btn btn-sm btn-outline-warning py-0 px-2 me-1" title="Check against external enrichment sources (VirusTotal, AbuseIPDB, URLhaus, etc.)" onclick="checkCaseIocExternal(${i.id}, '${escJs(i.value)}', '${escJs(i.ioc_type)}')"><i class="fa-solid fa-globe"></i></button>
+                <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 me-1" title="Search all logs for this indicator" onclick="pivotToLogSearch(null, '${escJs(iocPivotQuery(i))}')"><i class="fa-solid fa-magnifying-glass-arrow-right"></i></button>
                 <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove indicator" onclick="removeCaseIoc(${i.id})" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-xmark"></i></button>
             </td>
         </tr>`;
+}
+
+// The most common investigative move after adding an IOC: "where else did this appear?"
+// Type-aware so the pivot lands on the field that actually holds this kind of value
+// (an IP could be either src or dest, so both are OR'd) instead of a generic message
+// substring search that would miss structured-field matches (e.g. a hash only ever
+// stored in live_logs.file_hash, never repeated in the free-text message).
+function iocPivotQuery(i) {
+    const v = String(i.value).includes(' ') ? `"${i.value}"` : i.value;
+    if (i.ioc_type === 'hash') return `file_hash:${v}`;
+    if (i.ioc_type === 'ip') return `source_ip:${v} OR destination_ip:${v}`;
+    if (i.ioc_type === 'domain') return `query_name:${v} OR message:${v}`;
+    return `message:${v}`;
 }
 
 function checkCaseIoc(iocId, value) {
