@@ -18,6 +18,33 @@
         </div>
     </div>
 
+    <div class="row g-3 mb-3">
+        <div class="col-6 col-lg-3">
+            <div class="stat-tile">
+                <div class="stat-label">Open Cases</div>
+                <div class="stat-value" id="caseStatOpen">&hellip;</div>
+            </div>
+        </div>
+        <div class="col-6 col-lg-3">
+            <div class="stat-tile">
+                <div class="stat-label">SLA Breaches</div>
+                <div class="stat-value" id="caseStatSlaBreaches" style="color:var(--bs-danger, #dc3545);">&hellip;</div>
+            </div>
+        </div>
+        <div class="col-6 col-lg-3">
+            <div class="stat-tile">
+                <div class="stat-label">Closed (30d)</div>
+                <div class="stat-value" id="caseStatClosed">&hellip;</div>
+            </div>
+        </div>
+        <div class="col-6 col-lg-3">
+            <div class="stat-tile">
+                <div class="stat-label">Avg Time to Close</div>
+                <div class="stat-value" id="caseStatAvgClose" style="font-size:1.3rem;">&hellip;</div>
+            </div>
+        </div>
+    </div>
+
     <div class="card bg-dark border-secondary">
         <div class="card-header border-secondary d-flex justify-content-between align-items-center flex-wrap gap-2">
             <span><i class="fa-solid fa-list me-2"></i>All Cases</span>
@@ -699,6 +726,28 @@ function loadCases() {
     });
 }
 
+// Reuses the exact same endpoint the Dashboards page's Case Stats widget already calls
+// (api_dashboard_case_stats) -- no new backend route needed, just a second consumer of
+// data that already exists. Fixed 30-day window, matching that widget's own default.
+function loadCaseStatsTiles() {
+    fetch('/api/dashboards/case-stats?days=30')
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(d => {
+            document.getElementById('caseStatOpen').innerText = d.open_count;
+            const breachEl = document.getElementById('caseStatSlaBreaches');
+            breachEl.innerText = d.sla_breached_count;
+            breachEl.style.color = d.sla_breached_count > 0 ? 'var(--bs-danger, #dc3545)' : '';
+            document.getElementById('caseStatClosed').innerText = d.closed_in_range_count;
+            document.getElementById('caseStatAvgClose').innerText = d.avg_close_hours !== null ? hoursLabel(d.avg_close_hours) : '—';
+        })
+        .catch(err => {
+            console.error('Error loading case stats:', err);
+            ['caseStatOpen', 'caseStatSlaBreaches', 'caseStatClosed', 'caseStatAvgClose'].forEach(id => {
+                document.getElementById(id).innerText = '—';
+            });
+        });
+}
+
 // Loaded once at page init and re-fetched after any queue create/edit/delete/membership
 // change -- feeds the list view's queue filter/"My queues only" toggle, the New Case
 // modal's queue picker, the case detail view's queue picker, and the Manage Queues table.
@@ -1052,6 +1101,7 @@ function backToList() {
     if (caseTimerInterval) { clearInterval(caseTimerInterval); caseTimerInterval = null; }
     showListView();
     loadCases();
+    loadCaseStatsTiles();
     if (window.location.search) history.pushState({}, '', '/cases');
 }
 
@@ -1844,6 +1894,7 @@ document.addEventListener("DOMContentLoaded", function() {
         const queueParam = new URLSearchParams(window.location.search).get('queue');
         if (queueParam) document.getElementById('queueFilterSelect').value = queueParam;
         loadCases();
+        loadCaseStatsTiles();
         const cidParam = new URLSearchParams(window.location.search).get('case');
         if (cidParam) openCaseDetail(parseInt(cidParam, 10));
     });
