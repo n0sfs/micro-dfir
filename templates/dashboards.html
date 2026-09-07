@@ -44,8 +44,9 @@
             <option value="30d" selected>Last 30 days</option>
             <option value="90d">Last 90 days</option>
         </select>
-        <button type="button" class="btn btn-sm btn-outline-primary" onclick="showAddWidgetModal()"><i class="fa-solid fa-plus me-1"></i>Add Widget</button>
+        <button type="button" id="addWidgetBtn" class="btn btn-sm btn-outline-primary" onclick="showAddWidgetModal()"><i class="fa-solid fa-plus me-1"></i>Add Widget</button>
         <button type="button" id="editModeToggle" class="btn btn-sm btn-outline-secondary" onclick="toggleEditMode()"><i class="fa-solid fa-arrows-up-down-left-right me-1"></i>Edit Layout</button>
+        <span id="dashLockedNote" class="text-muted small" style="display:none;" title="This dashboard is a shared default for one or more roles -- only its creator or an admin can change its widgets. Create your own dashboard to customize freely."><i class="fa-solid fa-lock me-1"></i>Shared default — read-only</span>
     </div>
 </div>
 
@@ -2102,6 +2103,11 @@ function debounce(fn, ms) {
 let grid = null;
 let currentDashboardId = null;
 let allDashboards = [];
+// Set by updateDashOwnerControls() on every dashboard switch -- gates the per-widget
+// Remove/Configure buttons the same way the toolbar's Add Widget/Edit Layout buttons
+// are gated, so a non-owner viewing a shared role-default dashboard never sees a
+// control that would just 403 when clicked.
+let currentDashboardEditable = true;
 
 function initGrid() {
     grid = GridStack.init({
@@ -2147,13 +2153,14 @@ function addWidgetToGrid(w) {
     // type already gets in the Add Widget picker, so the same color reads as "custom"
     // in both places.
     const customBadge = def.configurable ? '<span class="badge bg-primary me-1" title="A widget you built yourself, not part of the built-in catalog">Custom</span>' : '';
-    const configureBtn = def.configurable ? `<button type="button" class="btn btn-sm btn-link text-muted p-0 me-2 widget-configure-btn" onclick="openCustomWidgetConfigModal(${w.id}, RENDERED_WIDGETS[${w.id}].config)" title="Configure"><i class="fa-solid fa-gear"></i></button>` : '';
+    const configureBtn = (def.configurable && currentDashboardEditable) ? `<button type="button" class="btn btn-sm btn-link text-muted p-0 me-2 widget-configure-btn" onclick="openCustomWidgetConfigModal(${w.id}, RENDERED_WIDGETS[${w.id}].config)" title="Configure"><i class="fa-solid fa-gear"></i></button>` : '';
+    const removeBtn = currentDashboardEditable ? `<button type="button" class="btn btn-sm btn-link text-muted p-0 widget-remove-btn" onclick="removeWidget(${w.id})" title="Remove"><i class="fa-solid fa-xmark"></i></button>` : '';
     grid.addWidget({
         id: String(w.id), x: w.x, y: w.y, w: w.w, h: w.h,
         content: `<div class="card bg-dark border-secondary widget-card">
             <div class="card-header border-secondary d-flex justify-content-between align-items-center">
                 <span id="widgetTitle_${w.id}"><i class="fa-solid ${def.icon} me-2"></i>${escHtml((w.config && w.config.title) || def.label)}</span>
-                <span class="d-flex align-items-center">${customBadge}${liveBadge}${configureBtn}<button type="button" class="btn btn-sm btn-link text-muted p-0 widget-remove-btn" onclick="removeWidget(${w.id})" title="Remove"><i class="fa-solid fa-xmark"></i></button></span>
+                <span class="d-flex align-items-center">${customBadge}${liveBadge}${configureBtn}${removeBtn}</span>
             </div>
             <div class="card-body widget-body" id="widgetBody_${w.id}"></div>
         </div>`,
@@ -2197,6 +2204,21 @@ function updateDashOwnerControls() {
     const canManage = !!dash && (IS_ADMIN || dash.created_by === CURRENT_USERNAME);
     document.getElementById('renameDashBtn').style.display = canManage ? '' : 'none';
     document.getElementById('deleteDashBtn').style.display = canManage ? '' : 'none';
+    // A dashboard set as a ROLE's shared default is a different kind of object than an
+    // ordinary personal/team one -- rearranging or adding widgets on it changes what
+    // EVERYONE with that role sees by default. Server-side already enforces this (see
+    // _require_dashboard_widget_edit_access in app.py); hiding the controls here means
+    // a non-owner sees a read-only view up front instead of dragging widgets around
+    // and only then hitting a 403.
+    const canEditWidgets = !!dash && (canManage || !dash.is_role_default);
+    currentDashboardEditable = canEditWidgets;
+    const addBtn = document.getElementById('addWidgetBtn');
+    const editBtn = document.getElementById('editModeToggle');
+    if (addBtn) addBtn.style.display = canEditWidgets ? '' : 'none';
+    if (editBtn) editBtn.style.display = canEditWidgets ? '' : 'none';
+    if (!canEditWidgets && grid && !grid.opts.staticGrid) toggleEditMode(); // force out of edit mode if it was on
+    const lockNote = document.getElementById('dashLockedNote');
+    if (lockNote) lockNote.style.display = canEditWidgets ? 'none' : '';
 }
 
 function populateDashboardSelect() {
