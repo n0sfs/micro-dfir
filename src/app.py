@@ -7352,7 +7352,19 @@ def _run_due_log_source_silent_alerts(db):
     # incident. The baseline/threshold is still computed from that host's OWN combined
     # log volume across every source it sends, so a chatty host and a quiet one each get
     # a cadence-appropriate threshold without hand-tuning.
+    from datetime import timedelta
     cfg = _log_source_silent_config(db)
+    # live_logs.timestamp is written from Python's local datetime.now() at ingest (see
+    # api_ingest()), NOT UTC -- SQLite's own 'now' literal is always UTC regardless of
+    # the OS timezone, so comparing it directly against this column silently inflates
+    # every silence_hours figure by the server's UTC offset (confirmed live: this
+    # appliance runs America/New_York, a steady +4/+5h bias that made every host look
+    # that much more overdue than it really was, firing alerts prematurely). Binding a
+    # Python-computed local 'now' instead keeps both sides of every comparison in the
+    # same clock, matching the documented convention _run_due_offline_agent_alerts
+    # already established for the identical agent_polls.timestamp situation.
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    cutoff_str = (datetime.now() - timedelta(days=LOG_SOURCE_SILENT_BASELINE_DAYS)).strftime('%Y-%m-%d %H:%M:%S')
     # A source that never reports its own hostname (a raw syslog sender, a misconfigured
     # device) falls back to the literal string 'UNKNOWN' at ingest -- grouping every such
     # source together under that one bucket would let one still-alive UNKNOWN-host sender
@@ -7364,11 +7376,11 @@ def _run_due_log_source_silent_alerts(db):
         "SELECT host, CASE WHEN host = 'UNKNOWN' THEN app ELSE NULL END as app_disambiguator, "
         "COUNT(*) as baseline_count, "
         "(julianday(MAX(timestamp)) - julianday(MIN(timestamp))) * 24 as observed_span_hours, "
-        "(julianday('now') - julianday(MAX(timestamp))) * 24 as silence_hours, "
+        "(julianday(?) - julianday(MAX(timestamp))) * 24 as silence_hours, "
         "MAX(timestamp) as last_seen "
-        "FROM live_logs WHERE host IS NOT NULL AND host != '' AND timestamp >= datetime('now', ?) "
+        "FROM live_logs WHERE host IS NOT NULL AND host != '' AND timestamp >= ? "
         "GROUP BY host, app_disambiguator HAVING baseline_count >= ?",
-        (f'-{LOG_SOURCE_SILENT_BASELINE_DAYS} days', LOG_SOURCE_SILENT_MIN_BASELINE_EVENTS)
+        (now_str, cutoff_str, LOG_SOURCE_SILENT_MIN_BASELINE_EVENTS)
     ).fetchall()
     for r in rows:
         avg_gap_hours = r['observed_span_hours'] / max(r['baseline_count'] - 1, 1)
@@ -7399,13 +7411,76 @@ def _run_due_log_source_silent_alerts(db):
             'id': new_alert_id, 'rule_title': 'Host Silent', 'severity': 'MEDIUM', 'host': r['host'],
             'username': None, 'source_ip': None, 'message': msg, 'timestamp': None,
         }, run_case_playbooks_fn=lambda cid, qid, tlp, st, sev: _run_playbooks_for_case(db, cid, 'case_created', qid, tlp, st, sev))
+
+    # Per-channel silence on an otherwise-alive host -- the host-level check above
+    # deliberately merges every source on a host into one bucket (a dead host silences
+    # everything at once, so per-app alerting for THAT case is redundant noise), but it
+    # also means one specific channel going dark (the EDR service crashes, a Sysmon
+    # service stops) while the rest of the host keeps logging fine is invisible today.
+    # Reuses the identical adaptive-threshold math, scoped to (host, app) pairs, and only
+    # fires when the host has logged something from some OTHER source within cfg['min_hours']
+    # -- proof the host itself is alive right now, so this can only ever be about the one
+    # silent channel, never a duplicate of a host-wide outage the check above already
+    # catches (a truly dead host never satisfies that freshness gate).
+    app_rows = db.execute(
+        "WITH per_app AS ("
+        "  SELECT host, app, COUNT(*) as baseline_count, "
+        "         (julianday(MAX(timestamp)) - julianday(MIN(timestamp))) * 24 as observed_span_hours, "
+        "         (julianday(?) - julianday(MAX(timestamp))) * 24 as silence_hours, "
+        "         MAX(timestamp) as last_seen "
+        "  FROM live_logs WHERE host IS NOT NULL AND host NOT IN ('', 'UNKNOWN') "
+        "    AND app IS NOT NULL AND app != '' AND timestamp >= ? "
+        "  GROUP BY host, app HAVING baseline_count >= ?"
+        "), host_overall AS ("
+        "  SELECT host, MAX(timestamp) as host_last_seen FROM live_logs "
+        "  WHERE host IS NOT NULL AND host NOT IN ('', 'UNKNOWN') AND timestamp >= ? "
+        "  GROUP BY host"
+        ") "
+        "SELECT pa.host, pa.app, pa.baseline_count, pa.observed_span_hours, pa.silence_hours, pa.last_seen "
+        "FROM per_app pa JOIN host_overall ho ON ho.host = pa.host "
+        "WHERE (julianday(?) - julianday(ho.host_last_seen)) * 24 <= ? AND ho.host_last_seen > pa.last_seen",
+        (now_str, cutoff_str, LOG_SOURCE_SILENT_MIN_BASELINE_EVENTS,
+         cutoff_str, now_str, cfg['min_hours'])
+    ).fetchall()
+    for r in app_rows:
+        avg_gap_hours = r['observed_span_hours'] / max(r['baseline_count'] - 1, 1)
+        threshold_hours = max(avg_gap_hours * cfg['multiplier'], cfg['min_hours'])
+        if r['silence_hours'] <= threshold_hours:
+            continue
+        # A distinct composite key (not reused from the host-level 'group_key' above) so
+        # this channel's own cooldown can never be masked by, or mask, the host-level
+        # alert's cooldown for the same host -- mirrors the existing UNKNOWN-host
+        # disambiguation trick of encoding identity into the `host` column.
+        group_key = f"{r['host']}::{r['app']}"
+        already = db.execute(
+            "SELECT 1 FROM log_source_silent_alerts WHERE host = ? AND alerted_at >= datetime('now', ?)",
+            (group_key, f"-{cfg['cooldown_hours']} hours")
+        ).fetchone()
+        if already:
+            continue
+        msg = (f"Log channel '{r['app']}' on host '{r['host']}' has not sent any logs for "
+               f"{round(r['silence_hours'], 1)}h (expected roughly every {round(avg_gap_hours, 1)}h "
+               f"based on its own recent history; last event at {r['last_seen']}), even though the "
+               f"host itself is still actively logging via other sources.")
+        ins_cur = db.execute(
+            "INSERT INTO alerts (timestamp, rule_name, severity, host, message, occurrence_count, last_seen) "
+            "VALUES (datetime('now'), 'Log Channel Silent', 'MEDIUM', ?, ?, 1, datetime('now'))",
+            (r['host'], msg)
+        )
+        new_alert_id = ins_cur.lastrowid
+        db.execute("INSERT INTO log_source_silent_alerts (app, host, alerted_at) VALUES (?, ?, datetime('now'))", (group_key, group_key))
+        soar_alerts.run_playbooks_for_alert(db, {
+            'id': new_alert_id, 'rule_title': 'Log Channel Silent', 'severity': 'MEDIUM', 'host': r['host'],
+            'username': None, 'source_ip': None, 'message': msg, 'timestamp': None,
+        }, run_case_playbooks_fn=lambda cid, qid, tlp, st, sev: _run_playbooks_for_case(db, cid, 'case_created', qid, tlp, st, sev))
     db.commit()
 
 # Real fired history for the Silent Log Sources tab (Log Pipeline) -- a dedicated, scoped
 # query rather than reusing GET /api/alerts (which defaults to the 30 most recent alerts
 # of ANY type and would let a busy Sigma/UEBA alert stream silently push these out of view).
-# Matches both the current 'Host Silent' rule_name and the pre-rework 'Log Source Silent'
-# name so alerts fired before the per-host rework still show up in this history.
+# Matches the current 'Host Silent' and 'Log Channel Silent' rule_names plus the
+# pre-rework 'Log Source Silent' name so alerts fired before the per-host rework still
+# show up in this history.
 @app.route('/api/log-pipeline/silent-source-alerts', methods=['GET'])
 @login_required
 def api_log_pipeline_silent_source_alerts():
@@ -7413,7 +7488,7 @@ def api_log_pipeline_silent_source_alerts():
     limit = min(request.args.get('limit', 50, type=int) or 50, 200)
     rows = db.execute(
         "SELECT id, timestamp, host, message, acknowledged, status, occurrence_count, last_seen "
-        "FROM alerts WHERE rule_name IN ('Host Silent', 'Log Source Silent') ORDER BY id DESC LIMIT ?",
+        "FROM alerts WHERE rule_name IN ('Host Silent', 'Log Channel Silent', 'Log Source Silent') ORDER BY id DESC LIMIT ?",
         (limit,)
     ).fetchall()
     return jsonify([dict(r) for r in rows])
