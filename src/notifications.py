@@ -46,6 +46,19 @@ def get_alert_notification_config(db):
     return cfg
 
 
+# Shared by _send_email (alert notifications) and send_report_email (report delivery)
+# below -- both build a different message (plain alert text vs. a PDF attachment) but
+# use the exact same connect/TLS/auth/sendmail sequence against the same SMTP SERVER
+# config, so only that sequence lives in one place.
+def _smtp_send(cfg, msg, to_addrs, timeout=10):
+    with smtplib.SMTP(cfg['smtp_host'], int(cfg.get('smtp_port') or 587), timeout=timeout) as server:
+        if cfg.get('smtp_use_tls', True):
+            server.starttls()
+        if cfg.get('smtp_user') and cfg.get('smtp_pass'):
+            server.login(cfg['smtp_user'], cfg['smtp_pass'])
+        server.sendmail(msg['From'], to_addrs, msg.as_string())
+
+
 def _send_email(config, alert):
     try:
         to_addrs = [a.strip() for a in (config.get('smtp_to') or '').split(',') if a.strip()]
@@ -63,12 +76,7 @@ def _send_email(config, alert):
         msg['Subject'] = f"[{alert.get('severity', '')}] {alert.get('rule_title', 'Alert')} on {alert.get('host', '')}"
         msg['From'] = config.get('smtp_from') or config.get('smtp_user') or 'micro-dfir@localhost'
         msg['To'] = ', '.join(to_addrs)
-        with smtplib.SMTP(config['smtp_host'], int(config.get('smtp_port') or 587), timeout=10) as server:
-            if config.get('smtp_use_tls', True):
-                server.starttls()
-            if config.get('smtp_user') and config.get('smtp_pass'):
-                server.login(config['smtp_user'], config['smtp_pass'])
-            server.sendmail(msg['From'], to_addrs, msg.as_string())
+        _smtp_send(config, msg, to_addrs, timeout=10)
         return True, None
     except Exception as e:
         return False, str(e)
@@ -109,12 +117,7 @@ def send_report_email(db, recipients, subject, body, attachment_path, attachment
             part = MIMEApplication(f.read(), Name=attachment_filename)
         part['Content-Disposition'] = f'attachment; filename="{attachment_filename}"'
         msg.attach(part)
-        with smtplib.SMTP(cfg['smtp_host'], int(cfg.get('smtp_port') or 587), timeout=20) as server:
-            if cfg.get('smtp_use_tls', True):
-                server.starttls()
-            if cfg.get('smtp_user') and cfg.get('smtp_pass'):
-                server.login(cfg['smtp_user'], cfg['smtp_pass'])
-            server.sendmail(msg['From'], to_addrs, msg.as_string())
+        _smtp_send(cfg, msg, to_addrs, timeout=20)
         return True, None
     except Exception as e:
         return False, str(e)

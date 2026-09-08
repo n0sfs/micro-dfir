@@ -672,7 +672,17 @@ def generate_case_report(case_id):
     events_rows = [dict(e) for e in conn.execute(
         "SELECT ts, actor, event_type, detail FROM case_events WHERE case_id = ? ORDER BY ts, id", (case_id,)
     ).fetchall()]
-    analyses = [{'ts': e['ts'], 'actor': e['actor'], 'text': e['detail'] or ''}
+    # case_events.ts is UTC (SQLite CURRENT_TIMESTAMP default) -- converted to local for
+    # display here and in the merged timeline below, matching command_result/fim_event
+    # items' own local Python-datetime.now()-written timestamps (see the timeline
+    # comment further down for the full per-item-type breakdown).
+    def _to_local(ts):
+        if not ts:
+            return ts
+        row = conn.execute("SELECT datetime(?, 'localtime')", (ts,)).fetchone()
+        return row[0] if row and row[0] else ts
+
+    analyses = [{'ts': _to_local(e['ts']), 'actor': e['actor'], 'text': e['detail'] or ''}
                 for e in events_rows if e['event_type'] == 'analysis']
 
     # Assets ("which hosts are implicated, at what confidence") and IOCs ("what to
@@ -694,16 +704,31 @@ def generate_case_report(case_id):
     # by when it was ADDED to the case (added_at) and "Timeline" only ever showed analyst
     # actions -- neither told the story of what actually happened, in order. `kind`
     # distinguishes an evidence row from an analyst-action row for the template's badge.
+    #
+    # The four item types (and case_events.ts) are on TWO different clocks, the same
+    # recurring UTC-vs-local mismatch documented elsewhere in this codebase: alert
+    # (alerts.timestamp) and ueba_event (events.timestamp, confirmed written via
+    # SQLite's own datetime('now') even though ueba_engine.py's INSERT runs through a
+    # DuckDB connection -- DuckDB has no native datetime() function, so this specific
+    # write is forwarded to SQLite's engine on the attached table) and case_events.ts
+    # are all SQLite CURRENT_TIMESTAMP-style columns: UTC. command_result
+    # (agent_commands.queued_at) and fim_event (live_logs.timestamp) are both written
+    # from Python's local datetime.now() at insert time: local. Sorting the raw strings
+    # together without normalizing first put every UTC-sourced row several hours
+    # "ahead" of its true chronological position relative to local-sourced rows.
+    _UTC_ITEM_TYPES = ('alert', 'ueba_event')
     timeline = []
     for it in items:
+        raw_ts = it.get('timestamp') or ''
+        ts = _to_local(raw_ts) if it.get('item_type') in _UTC_ITEM_TYPES else raw_ts
         timeline.append({
-            'ts': it.get('timestamp') or '', 'kind': 'item', 'severity': it.get('severity'),
+            'ts': ts, 'kind': 'item', 'severity': it.get('severity'),
             'label': it.get('label') or it.get('item_type', 'Item'), 'detail': (it.get('message') or '')[:200],
             'host': it.get('host'), 'username': it.get('username'), 'actor': None,
         })
     for e in events_rows:
         timeline.append({
-            'ts': e['ts'] or '', 'kind': 'event', 'severity': None,
+            'ts': _to_local(e['ts']) or '', 'kind': 'event', 'severity': None,
             'label': _case_event_label(e['event_type'], e['detail']), 'detail': None,
             'host': None, 'username': None, 'actor': e['actor'] or '',
         })

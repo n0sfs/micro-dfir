@@ -90,7 +90,8 @@
     {% endfor %}
     {% endif %}
 
-    <h2 class="section-title">Incident Timeline ({{ timeline|length }})</h2>
+    {% set _timeline_item_count = timeline|selectattr('kind', 'equalto', 'item')|list|length %}
+    <h2 class="section-title">Incident Timeline ({{ timeline|length }} total — {{ _timeline_item_count }} linked item{{ '' if _timeline_item_count == 1 else 's' }}, {{ timeline|length - _timeline_item_count }} analyst action{{ '' if (timeline|length - _timeline_item_count) == 1 else 's' }})</h2>
     <p style="font-size:9pt; color:#666;">Evidence (alerts, anomalies, EDR events -- ordered by when it actually happened) merged with analyst actions (notes, status changes, playbook runs -- ordered by when they were done), together in one chronological sequence.</p>
     {% if timeline %}
     {% for e in timeline %}
