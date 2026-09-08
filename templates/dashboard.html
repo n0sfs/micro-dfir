@@ -261,6 +261,9 @@
         <label class="form-check-label small text-muted" for="includeArchive" title="Also search logs older than the archive window (Settings > System > Log Archiving) -- slower, since it scans cold storage too.">Include Archived Logs</label>
     </div>
     <div class="d-flex align-items-center gap-2">
+    <button type="button" class="btn btn-outline-secondary btn-sm" id="logTzToggleBtn" onclick="toggleLogSearchTz()" title="Timestamps are always stored in UTC. Toggle to display them in your browser's local timezone instead.">
+        <i class="fa-solid fa-clock me-1"></i><span id="logTzToggleLabel">UTC</span>
+    </button>
     <div class="dropdown">
         <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" title="Save the current filters as a reusable search, or load one you saved before">
             <i class="fa-solid fa-bookmark me-1"></i> Saved Searches
@@ -1777,11 +1780,40 @@ function alertStatusBadge(status) {
     return ` <span class="badge ${cls}" style="font-size:.65rem;">${escHtml(label)}</span>`;
 }
 
+// The server now sends every log.time value as genuine UTC ('YYYY-MM-DD HH:MM:SS', no
+// offset marker -- see _build_optimized_log_query's post-limit UTC conversion for the
+// local-clock 'log'/'log_archive' branches). This toggle is a pure client-side display
+// choice on top of that guarantee, persisted per-viewer like any other localStorage UI
+// preference (not something the server needs to know about).
+let logSearchDisplayTz = 'utc';
+try { logSearchDisplayTz = localStorage.getItem('microdfir_log_search_tz') === 'local' ? 'local' : 'utc'; } catch (e) {}
+
+function formatLogTimestamp(utcTimeStr) {
+    if (!utcTimeStr) return utcTimeStr;
+    if (logSearchDisplayTz === 'utc') return utcTimeStr;
+    // Server sends 'YYYY-MM-DD HH:MM:SS' with no 'Z'/offset -- Date() would otherwise
+    // parse that as LOCAL time (wrong, it's UTC). Swap the space for 'T' and append 'Z'
+    // to make the UTC-ness explicit before parsing.
+    const d = new Date(utcTimeStr.replace(' ', 'T') + 'Z');
+    if (isNaN(d.getTime())) return utcTimeStr;
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function toggleLogSearchTz() {
+    logSearchDisplayTz = logSearchDisplayTz === 'utc' ? 'local' : 'utc';
+    try { localStorage.setItem('microdfir_log_search_tz', logSearchDisplayTz); } catch (e) {}
+    const label = document.getElementById('logTzToggleLabel');
+    if (label) label.innerText = logSearchDisplayTz === 'utc' ? 'UTC' : 'Local';
+    renderLogsTableHead();
+    renderLogsTableRows(currentLogs);
+}
+
 function renderCell(col, log, idx) {
     let rendered;
     switch (col) {
-        case 'time': rendered = escHtml(log.time); break;
-        case 'type': rendered = typeBadge(log.type) + atomicTestBadge(log) + (log.occurrence_count > 1 ? ` <span class="badge bg-secondary" title="Same alert recurred ${log.occurrence_count} times since ${escHtml(log.time)}">&times;${log.occurrence_count}</span>` : '') + (log.type === 'alert' ? alertStatusBadge(log.status) : ''); break;
+        case 'time': rendered = escHtml(formatLogTimestamp(log.time)); break;
+        case 'type': rendered = typeBadge(log.type) + atomicTestBadge(log) + (log.occurrence_count > 1 ? ` <span class="badge bg-secondary" title="Same alert recurred ${log.occurrence_count} times since ${escHtml(formatLogTimestamp(log.time))}">&times;${log.occurrence_count}</span>` : '') + (log.type === 'alert' ? alertStatusBadge(log.status) : ''); break;
         case 'severity': rendered = `<span class="badge ${severityBadgeClass(log.severity)}">${escHtml((log.severity || '').toUpperCase())}</span>`; break;
         case 'source_ip': rendered = highlightText(log[col], termsFor(col)) + (log.country_name ? ` <span class="badge bg-secondary" title="${escHtml(log.country_code || '')}">${escHtml(log.country_name)}</span>` : ''); break;
         // Dedicated Status/Assignee columns are opt-in (see LOG_TABLE_COLUMNS) and, unlike
@@ -1849,11 +1881,12 @@ function renderLogsTableHead() {
     let row = document.getElementById('logsTableHeadRow');
     if (!row) return;
     row.innerHTML = activeColumnDefs().map(c => {
+        const label = c.key === 'time' ? `Time (${logSearchDisplayTz === 'utc' ? 'UTC' : 'Local'})` : c.label;
         const sortCol = SORTABLE_LOG_COLUMNS[c.key];
-        if (!sortCol) return `<th>${escHtml(c.label)}</th>`;
+        if (!sortCol) return `<th>${escHtml(label)}</th>`;
         const active = logSortState.col === sortCol;
         const arrow = active ? (logSortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
-        return `<th style="cursor:pointer; user-select:none;" title="Sort by ${escHtml(c.label)}" onclick="setSortColumn('${sortCol}')">${escHtml(c.label)}${arrow}</th>`;
+        return `<th style="cursor:pointer; user-select:none;" title="Sort by ${escHtml(label)}" onclick="setSortColumn('${sortCol}')">${escHtml(label)}${arrow}</th>`;
     }).join('');
 }
 
@@ -3691,6 +3724,8 @@ document.addEventListener("DOMContentLoaded", function() {
     const urlTab = new URLSearchParams(window.location.search).get('tab');
     if (urlTab && SIEM_TABS.includes(urlTab)) startTab = urlTab;
     switchSiemTab(startTab);
+    const tzLabel = document.getElementById('logTzToggleLabel');
+    if (tzLabel) tzLabel.innerText = logSearchDisplayTz === 'utc' ? 'UTC' : 'Local';
 });
 </script>
 {% endblock %}
