@@ -88,6 +88,11 @@ def _forward_query(data, forwarders):
     receives the reply to the query it just sent -- no transaction-ID bookkeeping needed
     even under heavy concurrent load from multiple clients reusing the same 16-bit ID."""
     for upstream in forwarders:
+        # sock must be bound before the try so `finally` can never reference an
+        # undefined name -- if socket.socket() itself raises (e.g. fd exhaustion
+        # under load), the old code's finally block masked that OSError with an
+        # unhandled NameError instead of falling through to the next forwarder.
+        sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.settimeout(UPSTREAM_TIMEOUT)
@@ -97,7 +102,8 @@ def _forward_query(data, forwarders):
         except OSError:
             continue
         finally:
-            sock.close()
+            if sock is not None:
+                sock.close()
     return None
 
 
