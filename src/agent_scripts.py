@@ -482,9 +482,28 @@ function Read-SqliteTable {
     if ($pageSize -lt 512 -or $pageSize -gt 65536) { throw "Unexpected page size $pageSize" }
     function Get-PageOffset([int64]$pageNum) { return ($pageNum - 1) * $pageSize }
     function Read-Record([int64]$payloadOffset, [int64]$payloadLength, [int64]$usableSize) {
+        # Per the SQLite file format spec (fileformat2.html section 1.5): X = usableSize-35
+        # is the max local payload for a table leaf cell; when P > X, the number of bytes
+        # actually stored locally is K = M + ((P-M) % (usableSize-4)), clamped to M when
+        # K > X -- where M = ((usableSize-12)*32/255)-23 (integer division), NOT X itself.
+        # An earlier version of this function substituted X for M in that formula, which
+        # for a typical 4096-byte page overestimates the local length by roughly 2-3x
+        # (e.g. computes 3153 bytes local where the true value is 908) -- reading well
+        # past the record's real boundary and risking misinterpreting trailing overflow-
+        # pointer/adjacent-cell bytes as genuine string/blob content instead of correctly
+        # falling through to the $colOverflowed = $true / null path below.
         $maxLocal = $usableSize - 35
         $overflowed = $payloadLength -gt $maxLocal
-        $localLength = if ($overflowed) { $usableSize - (($payloadLength - $maxLocal) % ($usableSize - 4)) - 4 } else { $payloadLength }
+        if ($overflowed) {
+            # PowerShell's `/` always yields a double, and casting that to [int64] ROUNDS
+            # to nearest rather than truncating -- the spec requires floor (truncating)
+            # integer division here, so [math]::Floor is required, not a plain [int64] cast.
+            $minLocal = [int64][math]::Floor((($usableSize - 12) * 32) / 255.0) - 23
+            $k = $minLocal + (($payloadLength - $minLocal) % ($usableSize - 4))
+            $localLength = if ($k -le $maxLocal) { $k } else { $minLocal }
+        } else {
+            $localLength = $payloadLength
+        }
         if ($localLength -gt $payloadLength) { $localLength = $payloadLength }
         $pos = $payloadOffset
         $r = Get-SqliteVarint $bytes $pos

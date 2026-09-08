@@ -2903,9 +2903,10 @@ def api_dashboard_dns_activity():
         "GROUP BY query_name ORDER BY cnt DESC LIMIT 10",
         (cutoff,)
     ).fetchall()
-    total = db.execute(
-        "SELECT COUNT(*) as cnt FROM live_logs WHERE app = 'dns_server' AND timestamp >= ?", (cutoff,)
-    ).fetchone()['cnt']
+    # total is exactly sum(cnt) over the same WHERE clause volume_rows already scanned
+    # (one bucket per row) -- deriving it here avoids a second full scan of the same
+    # filtered row set purely to recompute a number already in hand.
+    total = sum(r['cnt'] for r in volume_rows)
     ti_matches = db.execute(
         "SELECT COUNT(DISTINCT s.id) as cnt FROM ioc_sightings s JOIN alerts a ON a.id = s.alert_id "
         "WHERE a.log_app = 'dns_server' AND s.seen_at >= ?", (cutoff,)
@@ -6407,6 +6408,18 @@ def api_case_related_cases(cid):
     out.sort(key=lambda x: (-len(x['reasons']), x['created_at']))
     return jsonify(out)
 
+# Single source of truth for MTTC's start anchor (case_assets.confirmed_at), shared by
+# the create route (an asset can be added already-'confirmed' in one step) and the
+# update route (an existing asset transitions into 'confirmed') below -- previously
+# each had its own copy of the "stamp once, on first confirmation only" rule, and the
+# create route's copy was added later, missed entirely on the first pass.
+def _confirmed_at_value(new_status, existing_confirmed_at=None):
+    if new_status == 'confirmed' and not existing_confirmed_at:
+        # Local datetime.now(), matching agent_commands.completed_at's own convention
+        # so the MTTC query needs no UTC/local correction between the two columns.
+        return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    return existing_confirmed_at
+
 @app.route('/api/cases/<int:cid>/assets', methods=['POST'])
 @login_required
 def api_case_add_asset(cid):
@@ -6429,7 +6442,7 @@ def api_case_add_asset(cid):
     # (an analyst who already knows the host is compromised when they add it), and that
     # path bypassed the stamp entirely until this fix, silently leaving MTTC unable to
     # ever measure containment time for such assets.
-    confirmed_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S') if status == 'confirmed' else None
+    confirmed_at = _confirmed_at_value(status)
     db.execute(
         "INSERT INTO case_assets (case_id, host, compromise_status, related_indicator, notes, added_by, confirmed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (cid, host, status, related_indicator, notes, current_user.username, confirmed_at)
@@ -6471,14 +6484,9 @@ def api_case_asset_detail(cid, asset_id):
         _log_case_event(db, cid, 'asset_status_change', f"{asset['host']} → {status}")
         if status == 'confirmed':
             _fire_asset_confirmed_playbooks(db, cid)
-            # First confirmation only -- MTTC's start anchor. Local datetime.now(), same
-            # convention as agent_commands.completed_at, so the two are directly
-            # comparable in the MTTC query below with no UTC/local correction needed.
-            if not asset['confirmed_at']:
-                db.execute(
-                    "UPDATE case_assets SET confirmed_at = ? WHERE id = ?",
-                    (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), asset_id)
-                )
+        new_confirmed_at = _confirmed_at_value(status, asset['confirmed_at'])
+        if new_confirmed_at != asset['confirmed_at']:
+            db.execute("UPDATE case_assets SET confirmed_at = ? WHERE id = ?", (new_confirmed_at, asset_id))
     db.commit()
     return jsonify({"status": "success"})
 
@@ -7795,6 +7803,11 @@ def _run_due_log_source_silent_alerts(db):
     # silent as long as ANY of them keeps sending. Sub-grouping by app ONLY for that one
     # fallback value (real hostnames still group purely by host, undisturbed) restores
     # per-source granularity exactly where host identity isn't actually known.
+    # A row that's BOTH host='UNKNOWN' AND has no app either (blank/NULL -- not expected
+    # from any real ingest path today, but not impossible from a raw/malformed sender)
+    # is excluded outright rather than silently merged with every other equally-
+    # unidentifiable row into one shared bucket -- the same masking risk the app
+    # disambiguator above exists to prevent, one level deeper.
     rows = db.execute(
         "SELECT host, CASE WHEN host = 'UNKNOWN' THEN app ELSE NULL END as app_disambiguator, "
         "COUNT(*) as baseline_count, "
@@ -7802,6 +7815,7 @@ def _run_due_log_source_silent_alerts(db):
         "(julianday(?) - julianday(MAX(timestamp))) * 24 as silence_hours, "
         "MAX(timestamp) as last_seen "
         "FROM live_logs WHERE host IS NOT NULL AND host != '' AND timestamp >= ? "
+        "AND (host != 'UNKNOWN' OR (app IS NOT NULL AND app != '')) "
         "GROUP BY host, app_disambiguator HAVING baseline_count >= ?",
         (now_str, cutoff_str, LOG_SOURCE_SILENT_MIN_BASELINE_EVENTS)
     ).fetchall()
@@ -9488,15 +9502,16 @@ def api_dashboard_case_stats():
     db = get_db()
     sla_hours = _case_sla_hours(db)
     open_count = db.execute("SELECT COUNT(*) FROM cases WHERE status = 'open'").fetchone()[0]
-    closed_in_range = db.execute(
-        "SELECT COUNT(*) FROM cases WHERE status = 'closed' AND closed_at >= datetime('now', ?)", (f'-{days} days',)
-    ).fetchone()[0]
-    # MTTR (mean time to recover): closed_at/created_at are both UTC (schema
-    # CURRENT_TIMESTAMP default), so no timezone correction needed for this pair.
-    avg_close_hours = db.execute(
-        "SELECT AVG((julianday(closed_at) - julianday(created_at)) * 24) FROM cases "
+    # closed_in_range (COUNT) and avg_close_hours/MTTR (AVG) filter on the exact same
+    # predicate -- one query answers both instead of two full scans of the same row set.
+    # closed_at/created_at are both UTC (schema CURRENT_TIMESTAMP default), so no
+    # timezone correction needed for this pair.
+    closed_range_row = db.execute(
+        "SELECT COUNT(*) as cnt, AVG((julianday(closed_at) - julianday(created_at)) * 24) as avg_hours FROM cases "
         "WHERE status = 'closed' AND closed_at IS NOT NULL AND closed_at >= datetime('now', ?)", (f'-{days} days',)
-    ).fetchone()[0]
+    ).fetchone()
+    closed_in_range = closed_range_row['cnt']
+    avg_close_hours = closed_range_row['avg_hours']
     # MTTA (mean time to acknowledge) -- filtered on acknowledged_at's own window, not
     # closed_at's, since a case can be acknowledged well before (or without ever) closing.
     # acknowledged_at is stamped via datetime.utcnow() (app.py api_case_detail), so this

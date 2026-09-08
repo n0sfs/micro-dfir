@@ -8,6 +8,82 @@ a new feature, a real architectural decision, an incident and its fix. Routine p
 fixes don't need their own line; group them into the feature they support. Newest first.
 Full commit-level detail is always available via `git log`.
 
+## 2026-09-08
+
+### Bug-hunt pass, round 2: the lower-priority findings from the earlier review
+
+Follow-up to the previous day's 8-angle review — went through the findings that were
+triaged as real but lower-severity, fixing the ones that held up and explicitly
+declining the ones that turned out to already match this codebase's own established
+conventions on closer look:
+
+- **`generate_case_report`'s Incident Timeline sorted UTC and local timestamps
+  together as raw strings.** Alert/UEBA-anomaly items and `case_events.ts` are UTC
+  (SQLite `CURRENT_TIMESTAMP`-style columns — confirmed `events.timestamp` is UTC too,
+  even though `ueba_engine.py`'s INSERT runs through a DuckDB connection: DuckDB has no
+  native `datetime()` function, so that specific write is forwarded to SQLite's own
+  engine on the attached table); EDR command-result and FIM-event items are local
+  (Python `datetime.now()` at write time) — the same recurring mismatch documented
+  elsewhere in this codebase. Normalized the UTC-sourced timestamps to local before the
+  merge+sort, verified with a timezone-agnostic fixture test reproducing a real
+  alert→FIM→containment→note→anomaly sequence.
+- **A real forensic-accuracy bug** in the browser-artifacts SQLite parser
+  (`agent_scripts.py`'s `Read-Record`): the overflow-payload-length formula substituted
+  `X` (max local payload) where the SQLite file format spec calls for `M` (min local
+  payload, a different, smaller value) — for a typical 4096-byte page this overestimated
+  how many bytes are genuinely stored locally by roughly 2-3x (908 correct vs. 3153
+  computed), risking misreading trailing overflow-pointer/adjacent-cell bytes as
+  genuine URL/title text instead of correctly falling through to the existing
+  `Overflowed=$true`/null safety path. Fixed to match the spec exactly (`M =
+  ((usableSize-12)*32/255)-23`, `K = M + ((P-M) % (usableSize-4))`, clamped to `M` when
+  `K > X`) — caught a second real bug fixing the first: PowerShell's `[int64]` cast
+  *rounds* rather than truncates, so the initial fix needed `[math]::Floor` too.
+  Verified directly in real PowerShell (not just Python simulation) against 5 cases
+  including the `K > X` clamp branch, a zero-error AST parse of the actual deployed
+  script, and a real end-to-end run against a genuine SQLite file with byte-perfect
+  extraction of non-overflowing values.
+- **`_run_due_log_source_silent_alerts`'s UNKNOWN-host grouping** could still collapse
+  two genuinely different, both-unidentifiable sources (`host='UNKNOWN'` and a blank/
+  NULL `app`) into one shared cooldown bucket, letting one mask the other going silent
+  — the same masking risk the existing per-app disambiguation already guards against,
+  one level deeper. Such rows are now excluded from the sweep entirely rather than
+  merged.
+- **`case_assets.confirmed_at`'s "stamp once, on first confirmation" rule** was
+  duplicated across the create and update routes (the create path's copy was added
+  later, in the same pass that first noticed it was missing). Consolidated into one
+  `_confirmed_at_value()` both routes call.
+- **`notifications.py`'s two email senders** (`_send_email` for alerts,
+  `send_report_email` for report delivery) each had their own copy of the SMTP connect/
+  TLS/auth/sendmail sequence. Extracted into a shared `_smtp_send()`; verified end-to-
+  end against a real local SMTP listener (not mocked), confirming an actual message
+  crosses an actual socket correctly.
+- **Two redundant-query cleanups**: the DNS Activity dashboard widget's `total_queries`
+  was a second full scan of the same filtered `live_logs` rows the volume-bucket query
+  already covered (now derived as `sum(bucket counts)`); `api_dashboard_case_stats`'
+  `closed_in_range` count and `avg_close_hours`/MTTR average were two separate scans of
+  the identical `WHERE` clause (now one query, `COUNT(*)` + `AVG(...)` together).
+- **The PDF case report's "Incident Timeline" header** lost its standalone linked-item
+  count when Linked Items and Timeline were merged into one chronological list a few
+  phases back. Restored as a breakdown alongside the combined total ("N total — N
+  linked items, N analyst actions"), computed in the template from the merged list's
+  own `kind` field — no new data needed.
+
+**Explicitly left as-is, with reasoning**: the SLA-breach/-compliance loops in
+`api_dashboard_case_stats` (and the pre-existing `_run_due_sla_breach_playbooks`) call
+`_case_sla_hours_for` once per case rather than batching — a real N+1 shape, but this
+codebase already has a standing, documented decision (the comment right above
+`_run_due_sla_breach_playbooks`) that case-table volume on a single appliance is always
+small enough for this not to matter; adding a batching resolver would be solving a
+problem that doesn't exist here. `REPORT_TYPE_EMAIL_LABELS` being duplicated between
+`app.py` and `generate_report.py` matches this exact file's own established, documented
+"dual-definition config dict" convention (see `COMPLIANCE_FRAMEWORK_LABELS`/
+`SCA_CHECK_FRAMEWORKS` two lines away) — not a bug, just the same pattern already
+chosen deliberately for small catalogs shared between the Flask app and a standalone,
+no-Flask-dependency script. The DNS server's thread-per-datagram design and
+`generate_report.py`'s currently-unreachable (both real callers already clamp) `days`
+parameter validation gap were left alone as genuine but out-of-scope architecture/
+defense-in-depth questions, not live bugs.
+
 ## 2026-09-07
 
 ### Changelog rendering: bulleted list items that wrap across multiple source lines
