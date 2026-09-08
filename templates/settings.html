@@ -616,16 +616,31 @@ function renderChangelogBody(bodyLines, highlight) {
     let html = '';
     let inList = false;
     let paraLines = [];
-    const closeList = () => { if (inList) { html += '</ul>'; inList = false; } };
+    // Buffers the CURRENT <li>'s lines the same way paraLines buffers a paragraph's --
+    // CHANGELOG.md's own bullets hard-wrap across multiple source lines exactly like
+    // its prose paragraphs do (2-space-indented continuation lines), and the earlier
+    // one-line-per-<li> version silently dropped every continuation line out of the
+    // list entirely, rendering it as a stray unbulleted paragraph instead.
+    let listItemLines = null;
+    const flushListItem = () => { if (listItemLines !== null) { html += `<li>${inline(listItemLines.join(' '))}</li>`; listItemLines = null; } };
+    const closeList = () => { flushListItem(); if (inList) { html += '</ul>'; inList = false; } };
     // CHANGELOG.md hard-wraps prose at ~88 chars for readability in a text editor -- each
     // of those source lines is one paragraph's worth of text, not its own paragraph, so
     // consecutive plain-text lines are joined into a single flowing <p> that reflows to
     // the actual rendered column width, instead of rendering one narrow <p> per source line.
     const flushPara = () => { if (paraLines.length) { html += `<p class="mb-2">${inline(paraLines.join(' '))}</p>`; paraLines = []; } };
     for (const line of bodyLines) {
-        if (/^[-*] /.test(line)) { flushPara(); if (!inList) { html += '<ul class="mb-2">'; inList = true; } html += `<li>${inline(line.slice(2))}</li>`; }
-        else if (line.trim() === '') { flushPara(); closeList(); }
-        else { closeList(); paraLines.push(line.trim()); }
+        if (/^[-*] /.test(line)) {
+            flushPara(); flushListItem();
+            if (!inList) { html += '<ul class="mb-2">'; inList = true; }
+            listItemLines = [line.slice(2).trim()];
+        } else if (line.trim() === '') {
+            flushPara(); closeList();
+        } else if (inList && listItemLines !== null) {
+            listItemLines.push(line.trim());
+        } else {
+            closeList(); paraLines.push(line.trim());
+        }
     }
     flushPara();
     closeList();

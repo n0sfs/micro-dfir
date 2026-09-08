@@ -10,6 +10,18 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-07
 
+### Changelog rendering: bulleted list items that wrap across multiple source lines
+
+Self-caught via this very entry, live, right after deploying the bug-hunt pass below:
+`renderChangelogBody()`'s earlier paragraph-reflow fix (see the "own DNS server" entry
+further down) only handled hard-wrapped *prose* paragraphs — a bulleted item that ALSO
+wraps across multiple 2-space-indented source lines (CHANGELOG.md uses this pattern for
+bullets too) had its continuation lines fall through to the plain-paragraph branch,
+rendering as a stray unbulleted `<p>` disconnected from its own bullet. Fixed by giving
+list items the same line-buffering treatment paragraphs already had. Verified against
+the exact real bullet that exposed this, plus a regression guard for a real paragraph
+correctly following a blank-line-separated list.
+
 ### Bug-hunt pass: stored XSS, 3 missing permission gates, and 3 smaller correctness fixes
 
 An 8-angle multi-agent code review of this session's cumulative diff (everything since
