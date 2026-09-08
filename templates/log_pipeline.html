@@ -1890,6 +1890,19 @@ let importHistory = [];
 let importMappingProfiles = [];
 let importAbort = false;  // set true on a 409/fatal error to stop an in-flight loop
 
+// Log Search has no ?range=/?types=/?fieldKey=/?fieldVal= URL-driven deep-link (confirmed
+// directly -- its init only reads ?tab= and ?q=/?alert_id=, dashboard.html:2246-2284). The
+// real, already-working deep-link mechanism is a single Advanced Query string via ?q=,
+// which automatically switches to Advanced mode, widens the time window to "All", and
+// runs the search (same path MITRE Coverage's "View Alert" link already uses for
+// item_id:). import_id: is a real, exact-match-only field (never a substring LIKE --
+// see the matching item_id special case in _parse_search_query, app.py) and only ever
+// non-null on import-branch rows, so this alone correctly isolates one import batch
+// without needing a separate type filter too.
+function importLogSearchLink(importId) {
+    return `/siem?tab=search&q=${encodeURIComponent('import_id:' + importId)}`;
+}
+
 function importGoToStep(n) {
     for (let i = 1; i <= 6; i++) {
         const el = document.getElementById('importStep' + i);
@@ -2139,7 +2152,7 @@ function importRunCommitLoop() {
                 document.getElementById('importDoneBanner').textContent =
                     `Done: ${d.rows_imported} row(s) imported, ${d.rows_failed} row(s) failed to parse.`;
                 const link = document.getElementById('importDoneSearchLink');
-                link.href = `/siem?tab=search&range=all&types=import&fieldKey=import_id&fieldVal=${importState.id}`;
+                link.href = importLogSearchLink(importState.id);
                 importGoToStep(6);
                 loadImportHistory();
             } else {
@@ -2231,7 +2244,7 @@ function renderImportHistory() {
             <td class="small text-muted">${escHtml(imp.created_by || '')}</td>
             <td class="small text-muted">${escHtml(imp.created_at || '')}</td>
             <td>
-                ${imp.status === 'complete' ? `<a href="/siem?tab=search&range=all&types=import&fieldKey=import_id&fieldVal=${imp.id}" target="_blank" class="btn btn-sm btn-outline-info me-1" title="View in Log Search"><i class="fa-solid fa-magnifying-glass"></i></a>` : ''}
+                ${imp.status === 'complete' ? `<a href="${importLogSearchLink(imp.id)}" target="_blank" class="btn btn-sm btn-outline-info me-1" title="View in Log Search"><i class="fa-solid fa-magnifying-glass"></i></a>` : ''}
                 <button class="btn btn-sm btn-outline-danger" title="Delete this import" onclick="deleteImport(${imp.id})"><i class="fa-solid fa-trash"></i></button>
             </td>
         </tr>`;

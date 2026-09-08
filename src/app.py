@@ -15421,17 +15421,18 @@ def _parse_search_query(q):
 
         like_value = _wildcard_term_to_like(value).lower()
 
-        if field == 'item_id':
+        if field in ('item_id', 'import_id'):
             # Exact match, not the generic substring LIKE every other field uses below --
             # item_id:5 matching 5/15/25/51 via substring LIKE would make this deep-link
             # mechanism (MITRE Coverage's Validated popup, ?alert_id= on Log Search)
-            # silently wrong. Combined with a type filter (item_id-space isn't unique
-            # across the logs/alerts/anomalies union) by whoever builds the link. A
-            # non-numeric item_id: value can never match a real row -- resolved to an
-            # always-false clause rather than raising, so a malformed query just returns
-            # zero results.
+            # silently wrong -- same reasoning applies to import_id: (the Log Import
+            # wizard's "Done" screen deep link, import_id:1 must never also match 11/21).
+            # Combined with a type filter (item_id-space isn't unique across the
+            # logs/alerts/anomalies union) by whoever builds the link. A non-numeric
+            # value can never match a real row -- resolved to an always-false clause
+            # rather than raising, so a malformed query just returns zero results.
             try:
-                sql = "item_id = ?"
+                sql = f"{field} = ?"
                 term_params = [int(value)]
             except ValueError:
                 sql = "1 = 0"
