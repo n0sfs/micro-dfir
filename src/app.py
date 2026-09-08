@@ -218,6 +218,15 @@ def _record_vector_config_status(db, ok, error=None):
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('vector_config_status_error', ?)", (error or '',))
     db.commit()
 
+def _cleanup_vector_candidate(candidate_path):
+    # A failed validate (or a validate subprocess that never ran) leaves this worker's
+    # own per-PID candidate file behind with nothing to move it out of the way --
+    # remove it so /etc/vector/ doesn't accumulate one stale file per failed attempt.
+    try:
+        os.remove(candidate_path)
+    except OSError:
+        pass
+
 def generate_vector_config():
     import shutil, time
     db = get_db()
@@ -347,7 +356,17 @@ tls.verify_certificate = false
 auth.strategy = "bearer"
 auth.token = "{soc_token}"
 """
-    candidate_path = "/etc/vector/vector.toml.candidate"
+    # Per-PID, not a shared literal path -- this function runs once per gunicorn worker
+    # at startup (module-level call, no --preload, so each of the 3 workers imports and
+    # executes this independently) plus on-demand from drop-rule mutations. A shared
+    # candidate_path meant concurrently-booting workers raced on the same file: one
+    # worker's shutil.move() below would rename it away mid-write or mid-validate for
+    # another, throwing FileNotFoundError (confirmed live in production journalctl).
+    # Each worker now owns its own candidate file end-to-end; only the final move
+    # target (/etc/vector/vector.toml) is shared, and os.rename is already atomic on
+    # the same filesystem, so concurrent workers moving their own (identical, since
+    # they all read the same settings/drop_rules) content into place is harmless.
+    candidate_path = f"/etc/vector/vector.toml.candidate.{os.getpid()}"
     with open(candidate_path, "w") as f:
         f.write(toml)
     try:
@@ -357,9 +376,11 @@ auth.token = "{soc_token}"
         )
     except Exception as e:
         _record_vector_config_status(db, ok=False, error=f"vector validate failed to run: {e}")
+        _cleanup_vector_candidate(candidate_path)
         return False
     if validate.returncode != 0:
         _record_vector_config_status(db, ok=False, error=(validate.stderr or validate.stdout or 'validation failed')[:2000])
+        _cleanup_vector_candidate(candidate_path)
         return False
     shutil.move(candidate_path, "/etc/vector/vector.toml")
     subprocess.run(["systemctl", "reload", "vector"], capture_output=True, timeout=15)
