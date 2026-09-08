@@ -10,6 +10,47 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-08
 
+### Log Search: fixed the mixed-clock `UNIFIED_LOGS_SQL` gap flagged below, plus a UTC/Local display toggle
+
+Follow-up to the "Bigger, deliberately NOT fixed" gap flagged right below this entry
+earlier the same day: `live_logs.timestamp` (local server clock) was being merged into
+the same unified `timestamp` column as `alerts`/`events`/`agent_commands.queued_at`
+(all UTC) across Log Search's 4 branches, corrupting chronological sort order and
+date-range filtering whenever branches mixed.
+
+**Backend** (`src/app.py`): split time-range filtering, cursor pagination, and row
+counting into clock-aware variants — a local-clock version for the `log`/`log_archive`
+branches, a UTC version (`datetime(?, 'utc')`, wrapping the bound *parameter*, never
+the indexed column) for `alert`/`anomaly`/`command`. The `log`/`log_archive` branches'
+final output is then converted to UTC in a cheap post-limit wrapper
+(`datetime(timestamp, 'utc')`), so every row leaving `_build_optimized_log_query`
+carries a genuinely comparable UTC `timestamp` regardless of source branch — sort,
+range filters, and CSV/JSON export are all correct across mixed-branch results now.
+Verified via a real `EXPLAIN QUERY PLAN` comparison that `live_logs`' index
+(`idx_live_logs_timestamp`) is still used (`SEARCH ... USING INDEX`, not a full
+`SCAN`) — wrapping the parameter instead of the column was the deciding factor, since
+`live_logs` is by far the largest table (~150K rows/day in this instance, vs. the other
+three branches' combined ~5,100/day). Cursor ("Load More") pagination got the same
+clock-aware treatment so paging still doesn't drop or duplicate rows across branches —
+7 real fixture tests cover chronological ordering, range filtering, row counts, and
+2-page pagination with no drops/dupes.
+
+**Frontend** (`templates/dashboard.html`): a UTC/Local toggle button next to the export
+row (matching the existing "Log scale/Linear scale" toggle-label convention from the
+Dashboards page), persisted per-viewer in `localStorage`. Since the backend now
+guarantees every `log.time` value is real UTC, the Local mode conversion is a pure
+client-side `Date` parse-and-reformat — no second server round-trip. The Time column's
+header label reflects whichever mode is active. CSV/JSON export deliberately stays
+UTC-only regardless of the toggle — exports are meant to be an unambiguous, canonical
+record for another tool to consume, not a per-viewer display preference.
+
+**Deliberately still out of scope**: `api_logs_timeline` (the dashboard's log-volume
+chart, which uses the flat `UNIFIED_LOGS_SQL` constant directly for an aggregate
+bucketed query) was not touched — no natural "convert after limiting" point exists for
+a `GROUP BY` bucket query, and real production row-count evidence gathered this session
+shows its accuracy impact is minor (dominated by `live_logs`' own volume). Flagged as a
+possible future follow-up, not a regression from this pass.
+
 ### Real pre-existing bug, found while live-verifying the timeline fix: `agent_commands.queued_at` is UTC, not local
 
 Caught by generating a real Case Report PDF right after deploying the round-2 timeline

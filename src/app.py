@@ -14450,6 +14450,21 @@ _COMMAND_BRANCH_SQL = """SELECT queued_at as timestamp,
        status as status, NULL as assignee, NULL as file_hash, NULL as query_name, 0 as is_atomic_test
 FROM agent_commands"""
 
+# The exact column order every LOG_TYPE_BRANCHES branch SELECTs in (all 4 must match,
+# positionally, for their UNION ALL to combine correctly) -- kept here so
+# _build_optimized_log_query can re-project a branch's columns with `timestamp`
+# converted, in the SAME position, without disturbing the positional alignment the
+# other (unconverted) branches still rely on. If a branch's own SELECT list above ever
+# changes, this must be updated to match -- same "small catalog duplicated on purpose,
+# no generic mechanism" convention as the rest of this file.
+_UNIFIED_LOG_COLUMNS = (
+    'timestamp', 'severity', 'host', 'app', 'event_id', 'username', 'source_ip', 'destination_ip', 'message', 'log_type',
+    'rule_id', 'rule_source', 'log_event_id', 'log_app', 'raw_json',
+    'process_image', 'command_line', 'parent_image', 'parent_command_line', 'original_file_name', 'raw_xml',
+    'occurrence_count', 'last_seen', 'item_id', 'entity_type',
+    'status', 'assignee', 'file_hash', 'query_name', 'is_atomic_test',
+)
+
 # (log_type, branch_sql) pairs, in the same branch order as the historical flat unions.
 LOG_TYPE_BRANCHES = [
     ('log', _LOG_BRANCH_SQL), ('alert', _ALERT_BRANCH_SQL), ('anomaly', _ANOMALY_BRANCH_SQL), ('command', _COMMAND_BRANCH_SQL)
@@ -14548,24 +14563,34 @@ def _build_log_sort(args):
 # tie) but at that point the two rows are indistinguishable from each other anyway -- this
 # is the same "good enough, not mathematically perfect" trade-off the surrounding query-
 # language code already makes elsewhere (e.g. no true USN-journal parsing).
-def _build_log_cursor(args):
+# wrap_cursor_time: applied ONLY to the SQL text of the `?` placeholder(s) that bind
+# cursor_time (never cursor_val or cursor_tiebreak, which aren't timestamps) -- e.g.
+# `lambda p: f"datetime({p}, 'localtime')"` for a branch whose raw `timestamp` column
+# is local while cursor_time itself is always UTC (it's taken from the previous page's
+# already-uniformly-UTC displayed output, see _build_optimized_log_query). Defaults to
+# identity (no wrap) for UTC-native branches, where cursor_time already matches the raw
+# column's own clock. This only rewrites the SQL TEXT, never the parameter VALUES/order
+# -- the returned params list is identical in shape and content regardless of the wrap,
+# so a caller can safely reuse one params list across both a wrapped and unwrapped call.
+def _build_log_cursor(args, wrap_cursor_time=lambda p: p):
     cursor_time = args.get('cursor_time')
     if not cursor_time:
         return None, []
     sort_col = _resolve_sort_column(args)
     op = '>' if args.get('dir', 'desc').lower() == 'asc' else '<'
     cursor_tiebreak = args.get('cursor_tiebreak', '')
+    ct = wrap_cursor_time('?')
     if sort_col == 'timestamp':
         # The tuple collapses to (timestamp, message) since sort_col IS timestamp already.
         return (
-            f"(timestamp {op} ? OR (timestamp = ? AND COALESCE(message, '') {op} COALESCE(?, '')))",
+            f"(timestamp {op} {ct} OR (timestamp = {ct} AND COALESCE(message, '') {op} COALESCE(?, '')))",
             [cursor_time, cursor_time, cursor_tiebreak]
         )
     cursor_val = args.get('cursor_sort', '')
     return (
         f"(COALESCE({sort_col}, '') {op} COALESCE(?, '') "
-        f"OR (COALESCE({sort_col}, '') = COALESCE(?, '') AND timestamp {op} ?) "
-        f"OR (COALESCE({sort_col}, '') = COALESCE(?, '') AND timestamp = ? AND COALESCE(message, '') {op} COALESCE(?, '')))",
+        f"OR (COALESCE({sort_col}, '') = COALESCE(?, '') AND timestamp {op} {ct}) "
+        f"OR (COALESCE({sort_col}, '') = COALESCE(?, '') AND timestamp = {ct} AND COALESCE(message, '') {op} COALESCE(?, '')))",
         [cursor_val, cursor_val, cursor_time, cursor_val, cursor_time, cursor_tiebreak]
     )
 
@@ -14671,10 +14696,57 @@ def _parse_search_query(q):
 def _active_log_types(args):
     return {t.strip() for t in args.get('types', '').split(',') if t.strip()}
 
-def _build_log_filters(args):
+# Isolated from _build_log_filters' other (app/severity/type/field/search) conditions
+# because those columns mean the same thing on every LOG_TYPE_BRANCHES branch, while
+# `timestamp` does not: live_logs/live_logs_archive store it in LOCAL server time
+# (Python datetime.now() at write time), but alerts/events/agent_commands all store it
+# in UTC (SQLite's own CURRENT_TIMESTAMP default -- confirmed directly against
+# schema.sql and every real INSERT/write site for each table). A caller merging
+# branches on different clocks (_build_optimized_log_query) needs a branch-appropriate
+# variant of JUST this condition -- see _utc_branch_time_condition below, the UTC-native
+# counterpart built from this function's own output.
+def _build_log_time_condition(args):
     import datetime
-    q = args.get('q', '').lower()
     time_range = args.get('range', '24h')
+    if time_range == 'custom':
+        start = _parse_datetime_local(args.get('start', ''))
+        end = _parse_datetime_local(args.get('end', ''))
+        conditions, params = [], []
+        if start:
+            conditions.append("timestamp >= ?")
+            params.append(start)
+        if end:
+            conditions.append("timestamp <= ?")
+            params.append(end)
+        return (" and ".join(conditions) if conditions else None), params
+    elif time_range and time_range.lower() != 'all':
+        now = datetime.datetime.now()
+        unit, amount = _RANGE_DELTAS.get(time_range, ('hours', 24))
+        delta = datetime.timedelta(**{unit: amount})
+        return "timestamp >= ?", [(now - delta).strftime('%Y-%m-%d %H:%M:%S')]
+    return None, []
+
+# Same time-range input as _build_log_time_condition, wrapped for a branch whose own
+# `timestamp` is natively UTC (alert/anomaly/command) rather than local (log/
+# log_archive). Only the bound PARAMETER is wrapped in datetime(?, 'utc') -- never the
+# `timestamp` column itself -- so the branch's own index on its timestamp/queued_at
+# column is still usable for this comparison exactly as it is today; wrapping the
+# column instead would force a full unindexed scan on every Log Search query. Uses
+# SQLite's own 'utc' modifier (the exact inverse of 'localtime', both already used
+# elsewhere in this file) rather than hand-rolled Python offset math, so it stays
+# correct across a DST transition.
+def _utc_branch_time_condition(args):
+    cond, params = _build_log_time_condition(args)
+    if not cond:
+        return cond, params
+    return cond.replace('?', "datetime(?, 'utc')"), params
+
+# Every Log Search filter EXCEPT the time-range condition (see _build_log_time_condition
+# for why that one has to stay separate) -- app/severity/type/field/search all operate
+# on columns that mean the same thing on every branch, so this applies identically
+# everywhere and never needs a branch-specific variant.
+def _build_log_other_filters(args):
+    q = args.get('q', '').lower()
     app_filter = args.get('app', '')
     severity_filter = args.get('severity', '')
     active_types = _active_log_types(args)
@@ -14682,23 +14754,7 @@ def _build_log_filters(args):
     field_op = args.get('fieldOp', 'contains')
     field_val = args.get('fieldVal', '').lower()
 
-    params, conditions = [], []
-
-    if time_range == 'custom':
-        start = _parse_datetime_local(args.get('start', ''))
-        end = _parse_datetime_local(args.get('end', ''))
-        if start:
-            conditions.append("timestamp >= ?")
-            params.append(start)
-        if end:
-            conditions.append("timestamp <= ?")
-            params.append(end)
-    elif time_range and time_range.lower() != 'all':
-        now = datetime.datetime.now()
-        unit, amount = _RANGE_DELTAS.get(time_range, ('hours', 24))
-        delta = datetime.timedelta(**{unit: amount})
-        conditions.append("timestamp >= ?")
-        params.append((now - delta).strftime('%Y-%m-%d %H:%M:%S'))
+    conditions, params = [], []
 
     if app_filter:
         apps = [a.strip() for a in app_filter.split(',') if a.strip()]
@@ -14749,6 +14805,19 @@ def _build_log_filters(args):
             conditions.append(query_sql)
             params.extend(query_params)
 
+    return (" and ".join(conditions) if conditions else None), params
+
+# Combines _build_log_time_condition (server-local -- correct against a single raw
+# table on its own native clock) with _build_log_other_filters into ONE where_clause,
+# matching this function's original combined shape exactly -- kept only for the Custom
+# Chart widget below, which queries live_logs directly (a single table, genuinely all
+# on the local clock, no branch-mixing) and has no reason to touch the branch-aware
+# split _build_optimized_log_query/_count_log_rows use instead.
+def _build_log_filters(args):
+    time_condition, time_params = _build_log_time_condition(args)
+    other_condition, other_params = _build_log_other_filters(args)
+    conditions = ([time_condition] if time_condition else []) + ([other_condition] if other_condition else [])
+    params = list(time_params) + list(other_params)
     where_clause = (" WHERE " + " and ".join(conditions)) if conditions else ""
     return where_clause, params
 
@@ -14906,16 +14975,63 @@ def _run_custom_widget_query(config):
 # efficient top-K scan instead. This is exact, not an approximation: the global top-K
 # under any sort comparator is always a subset of each branch's own top-K under that
 # same comparator, so per-branch LIMIT can never drop a row that belonged in the result.
-def _build_optimized_log_query(branches, where_clause, where_params, sort_clause, limit):
+# `time_args`/`cursor_args` (raw request.args-like mappings, NOT pre-built SQL) let this
+# function compute a branch-appropriate variant of the time-range filter and Load More
+# cursor condition per branch, since `timestamp` is local on log/log_archive branches
+# and UTC everywhere else (see _build_log_time_condition's comment for the full why).
+# `other_where_sql`/`other_where_params` (app/severity/type/field/search -- everything
+# EXCEPT the time-range and cursor conditions) apply identically to every branch, since
+# none of those columns are clock-dependent.
+def _build_optimized_log_query(branches, other_where_sql, other_where_params, sort_clause, limit, time_args, cursor_args):
     # SQLite doesn't allow a bare "(SELECT ... LIMIT ?) UNION ALL (SELECT ... LIMIT ?)"
     # -- parenthesizing an individual compound-select operand isn't valid syntax there
     # (unlike Postgres). Each per-branch top-K query is wrapped as its own FROM
     # subquery instead, so the outer UNION ALL operand is a plain, unparenthesized
     # SELECT * FROM (...) with the ORDER BY/LIMIT safely nested inside.
+    #
+    # Both the time-range and cursor conditions are built as TWO variants each: a
+    # "local" one (bare `timestamp` column, used AS-IS -- correct for log/log_archive,
+    # and still able to use idx_live_logs_timestamp since the column itself is never
+    # wrapped) and a "utc" one (the bound PARAMETER wrapped in datetime(?, 'utc')/
+    # 'localtime', never the column -- correct for alert/anomaly/command, whose own
+    # index similarly stays usable). Wrapping the parameter instead of the column is
+    # the reason this fix costs nothing on live_logs, the one table where a lost index
+    # would actually matter (this app's own comments elsewhere document a 93s-vs-1.5s
+    # gap from an unrelated indexing issue on that exact table).
+    time_cond_local, time_params_local = _build_log_time_condition(time_args)
+    time_cond_utc, time_params_utc = _utc_branch_time_condition(time_args)
+    # cursor_time (Load More's continuation token) is always taken from the PREVIOUS
+    # page's already-uniformly-UTC displayed `timestamp` (see the log/log_archive
+    # conversion below) -- so the UTC-native branches need it unwrapped (identity), and
+    # log/log_archive need it converted TO local to match their own raw column.
+    cursor_cond_utc, cursor_params = _build_log_cursor(cursor_args)
+    cursor_cond_local, _ = _build_log_cursor(cursor_args, wrap_cursor_time=lambda p: f"datetime({p}, 'localtime')")
+
+    # timestamp first, converted; every other column unchanged and in its original
+    # position -- must stay positionally identical to the other (unconverted) branches'
+    # `SELECT *` for the UNION ALL to combine columns correctly. See _UNIFIED_LOG_COLUMNS.
+    _other_cols = ", ".join(c for c in _UNIFIED_LOG_COLUMNS if c != 'timestamp')
+
     per_branch_sql, all_params = [], []
-    for _, branch_sql in branches:
-        per_branch_sql.append(f"SELECT * FROM (SELECT * FROM ({branch_sql}) {where_clause} {sort_clause} LIMIT ?)")
-        all_params.extend(where_params)
+    for branch_type, branch_sql in branches:
+        is_local = branch_type == 'log'
+        time_cond, time_params = (time_cond_local, time_params_local) if is_local else (time_cond_utc, time_params_utc)
+        cursor_cond = cursor_cond_local if is_local else cursor_cond_utc
+
+        branch_conditions = ([time_cond] if time_cond else []) + ([cursor_cond] if cursor_cond else []) + ([other_where_sql] if other_where_sql else [])
+        branch_where = (" WHERE " + " and ".join(branch_conditions)) if branch_conditions else ""
+        branch_params = list(time_params) + (list(cursor_params) if cursor_cond else []) + list(other_where_params)
+
+        inner = f"SELECT * FROM ({branch_sql}) {branch_where} {sort_clause} LIMIT ?"
+        if is_local:
+            # Converts ONLY this branch's already-per-branch-LIMITed rows (a handful,
+            # not the whole table) so the FINAL cross-branch sort below -- and the
+            # displayed timestamp itself -- is uniformly UTC regardless of which
+            # branch a row came from.
+            per_branch_sql.append(f"SELECT datetime(timestamp, 'utc') as timestamp, {_other_cols} FROM ({inner})")
+        else:
+            per_branch_sql.append(f"SELECT * FROM ({inner})")
+        all_params.extend(branch_params)
         all_params.append(limit)
     merged = "(\n" + "\nUNION ALL\n".join(per_branch_sql) + "\n) AS unified_logs"
     all_params.append(limit)
@@ -14925,12 +15041,21 @@ def _build_optimized_log_query(branches, where_clause, where_params, sort_clause
 # same reasoning as _build_optimized_log_query: lets each branch's own index satisfy its
 # own filtered count instead of depending on whether SQLite's optimizer flattens the
 # union and pushes the WHERE down (a real but unconfirmable-without-EXPLAIN-QUERY-PLAN
-# question on the union-wrapped shape).
-def _count_log_rows(db, branches, where_clause, where_params):
-    return sum(
-        db.execute(f"SELECT COUNT(*) FROM ({branch_sql}) {where_clause}", where_params).fetchone()[0]
-        for _, branch_sql in branches
-    )
+# question on the union-wrapped shape). Same branch-clock-aware time condition as
+# _build_optimized_log_query (no cursor condition needed here -- the total-match count
+# is independent of Load More's pagination position).
+def _count_log_rows(db, branches, other_where_sql, other_where_params, time_args):
+    time_cond_local, time_params_local = _build_log_time_condition(time_args)
+    time_cond_utc, time_params_utc = _utc_branch_time_condition(time_args)
+    total = 0
+    for branch_type, branch_sql in branches:
+        is_local = branch_type == 'log'
+        time_cond, time_params = (time_cond_local, time_params_local) if is_local else (time_cond_utc, time_params_utc)
+        conditions = ([time_cond] if time_cond else []) + ([other_where_sql] if other_where_sql else [])
+        where_clause = (" WHERE " + " and ".join(conditions)) if conditions else ""
+        params = list(time_params) + list(other_where_params)
+        total += db.execute(f"SELECT COUNT(*) FROM ({branch_sql}) {where_clause}", params).fetchone()[0]
+    return total
 
 # Shared by /api/logs/search and /api/logs/export's format=json path, so the two never
 # drift into different row shapes -- both consume the same sqlite3.Row list straight off
@@ -15016,7 +15141,7 @@ def api_logs_search():
     from flask import request, jsonify
     try:
         db = get_db()
-        where_clause, params = _build_log_filters(request.args)
+        other_where, other_params = _build_log_other_filters(request.args)
         active_types = _active_log_types(request.args)
         branches = LOG_TYPE_BRANCHES_WITH_ARCHIVE if request.args.get('include_archive') == '1' else LOG_TYPE_BRANCHES
         if active_types:
@@ -15027,16 +15152,6 @@ def api_logs_search():
         if not branches:
             return jsonify({'logs': [], 'count': 0, 'total_matches': 0})
 
-        # Load More passes cursor_time (+ cursor_sort when not sorting by timestamp) from
-        # the last row of the page it already has -- folded into the same WHERE as an
-        # additional AND'd condition, same connective as every other filter here.
-        cursor_clause, cursor_params = _build_log_cursor(request.args)
-        full_where = where_clause
-        full_params = list(params)
-        if cursor_clause:
-            full_params += cursor_params
-            full_where = f"{where_clause} AND {cursor_clause}" if where_clause else f" WHERE {cursor_clause}"
-
         # The total-match count never changes between pages of the SAME search (filters
         # are identical, only the cursor differs), so Load More passes skip_count=1 to
         # avoid re-running that full COUNT(*) scan on every click -- the frontend already
@@ -15044,8 +15159,14 @@ def api_logs_search():
         if request.args.get('skip_count') == '1':
             total_count = None
         else:
-            total_count = _count_log_rows(db, branches, where_clause, params)
-        query_sql, query_params = _build_optimized_log_query(branches, full_where, full_params, sort_clause, limit)
+            total_count = _count_log_rows(db, branches, other_where, other_params, request.args)
+        # Time-range and Load More's cursor condition are built per-branch inside
+        # _build_optimized_log_query (see its own docstring/comments) -- `timestamp`
+        # means local time on log/log_archive and UTC everywhere else, so one shared
+        # condition can't correctly filter every branch the way other_where can.
+        query_sql, query_params = _build_optimized_log_query(
+            branches, other_where, other_params, sort_clause, limit, request.args, request.args
+        )
         rows = db.execute(query_sql, query_params).fetchall()
         logs = _build_log_response_rows(rows)
 
@@ -15069,7 +15190,7 @@ def export_logs_csv():
     import csv, io
     try:
         db = get_db()
-        where_clause, params = _build_log_filters(request.args)
+        other_where, other_params = _build_log_other_filters(request.args)
         active_types = _active_log_types(request.args)
         branches = LOG_TYPE_BRANCHES_WITH_ARCHIVE if request.args.get('include_archive') == '1' else LOG_TYPE_BRANCHES
         if active_types:
@@ -15077,9 +15198,12 @@ def export_logs_csv():
         sort_clause = _build_log_sort(request.args)
         export_format = 'json' if request.args.get('format') == 'json' else 'csv'
 
-        # Increased export limit (10,000 records) for deep incident analysis.
+        # Increased export limit (10,000 records) for deep incident analysis. No
+        # cursor_time on an export request, so the cursor_args pass-through is a no-op.
         if branches:
-            query, query_params = _build_optimized_log_query(branches, where_clause, params, sort_clause, 10000)
+            query, query_params = _build_optimized_log_query(
+                branches, other_where, other_params, sort_clause, 10000, request.args, request.args
+            )
             cursor = db.execute(query, query_params)
             rows = cursor.fetchall()
         else:
