@@ -115,6 +115,7 @@ PERMISSION_REGISTRY = [
     {'key': 'cases.queues.manage', 'label': 'Manage case queues', 'category': 'Cases'},
     {'key': 'cases.templates.manage', 'label': 'Manage case templates & custom fields', 'category': 'Cases'},
     {'key': 'logsearch.droprules.manage', 'label': 'Manage ingestion drop rules', 'category': 'Log Search'},
+    {'key': 'logsearch.import.manage', 'label': 'Import external logs (CSV/JSON)', 'category': 'Log Search'},
     {'key': 'rules.manage', 'label': 'Manage detection rules', 'category': 'Detection Rules'},
     {'key': 'ueba.config.manage', 'label': 'Manage UEBA config & anomaly rules', 'category': 'UEBA'},
     {'key': 'threatintel.manage', 'label': 'Manage TI feeds, entities & enrichment', 'category': 'Threat Intel'},
@@ -3105,6 +3106,501 @@ def api_custom_parsers_sample_logs():
         params
     ).fetchall()
     return jsonify({'logs': [dict(r) for r in rows], 'window_days': DROP_RULE_PREVIEW_WINDOW_DAYS})
+
+# ============================================================================
+# Log Import (Phase 1) -- CSV/NDJSON/JSON-array import from other SIEMs into a
+# dedicated imported_logs table, searchable via Log Search only (no live Sigma/UEBA
+# interaction -- see the plan's Context for why). Every route below is gated
+# logsearch.import.manage, GETs included -- import history can contain sensitive
+# customer-migration context (filenames, labels), and this repo has a documented,
+# recurring bug class of a GET route shipping with only @login_required when its
+# mutating sibling is correctly gated (CHANGELOG.md).
+# ============================================================================
+
+LOG_IMPORTS_RAW_DIR = '/opt/micro-dfir/log_imports/raw'
+LOG_IMPORTS_STAGING_DIR = '/opt/micro-dfir/log_imports/staging'
+# NDJSON is the one format api_logs_import_normalize can truly resume mid-parse (a
+# text-mode tell()/seek() cookie via f.readline(), never the file's own next()/for-loop
+# iteration -- Python's io module explicitly disables tell() on a text file once next()
+# has been called on it, confirmed directly: "OSError: telling position disabled by
+# next() call"). That's exactly what csv.reader/csv.DictReader do internally, so CSV
+# can't use this same trick -- it's parsed in one single pass instead, same as
+# json_array (which can't be resumed either, without a real streaming JSON decoder this
+# app doesn't depend on). Generous but bounded, same reasoning CASE_ATTACHMENT_MAX_BYTES
+# gives for its own cap -- a genuinely bigger migration is split into multiple files.
+LOG_IMPORT_MAX_BYTES = 250 * 1024 * 1024              # NDJSON: true chunked resume
+LOG_IMPORT_CSV_MAX_BYTES = 50 * 1024 * 1024            # CSV: single-pass, lighter than json_array's json.load()
+LOG_IMPORT_JSON_ARRAY_MAX_BYTES = 25 * 1024 * 1024     # JSON array: single-pass, holds the whole structure in memory
+
+
+def _detect_import_format(raw_path, source_filename):
+    ext = (source_filename or '').lower()
+    if ext.endswith('.csv'):
+        return 'csv'
+    with open(raw_path, 'r', encoding='utf-8-sig', errors='replace') as f:
+        while True:
+            ch = f.read(1)
+            if not ch:
+                return 'ndjson'  # empty file -- doesn't matter, nothing to process either way
+            if ch.isspace():
+                continue
+            return 'json_array' if ch == '[' else 'ndjson'
+
+
+def _import_apply_mapping(import_id, mapping, timestamp_field, timestamp_format, tz_choice, tz_custom_minutes, sample_limit, severity_value_map=None):
+    """Used by /preview -- reads up to `sample_limit` rows from the START of the staging
+    NDJSON file (read-only, never advances any offset). /commit has its own inline
+    chunked-read loop (needs the optimistic-concurrency conditional UPDATE and resumes
+    from commit_offset, neither of which this read-only preview helper needs) that calls
+    _map_and_parse_import_row directly instead of through here. Returns (rows, errors,
+    next_offset, reached_eof)."""
+    db = get_db()
+    imp = db.execute("SELECT * FROM imports WHERE id = ?", (import_id,)).fetchone()
+    tz_offset = _resolve_import_tz_offset_minutes(tz_choice, tz_custom_minutes)
+    if tz_offset is None:
+        return None, [{'error_message': f"invalid timezone choice '{tz_choice}'"}], None, False
+    for target in mapping.values():
+        if target not in IMPORT_TARGET_COLUMNS:
+            return None, [{'error_message': f"mapping target '{target}' is not a recognized column"}], None, False
+    rows, errors = [], []
+    reached_eof = False
+    with open(imp['staging_path'], 'r', encoding='utf-8') as f:
+        row_number = 0
+        while row_number < sample_limit:
+            line = f.readline()
+            if not line:
+                reached_eof = True
+                break
+            row_number += 1
+            try:
+                raw_obj = json.loads(line)
+            except json.JSONDecodeError:
+                errors.append({'row_number': row_number, 'error_message': 'malformed staged JSON line', 'raw_line': line[:500]})
+                continue
+            row, err = _map_and_parse_import_row(raw_obj, mapping, timestamp_field, timestamp_format, tz_offset, severity_value_map)
+            if err:
+                errors.append({'row_number': row_number, 'error_message': err, 'raw_line': line[:500]})
+                continue
+            row['import_id'] = import_id
+            rows.append(row)
+        next_offset = f.tell()
+    return rows, errors, next_offset, reached_eof
+
+
+@app.route('/api/logs/import/upload', methods=['POST'])
+@login_required
+def api_logs_import_upload():
+    err = require_permission('logsearch.import.manage')
+    if err: return err
+    f = request.files.get('file')
+    if not f or not f.filename:
+        return jsonify({'error': 'A file is required'}), 400
+    name = (request.form.get('name') or '').strip() or f.filename
+    # Never trust a declared Content-Length -- same real-size-measurement discipline
+    # api_case_attachments uses (app.py ~6562-6570).
+    f.seek(0, os.SEEK_END)
+    size = f.tell()
+    f.seek(0)
+    if size == 0:
+        return jsonify({'error': 'The uploaded file is empty'}), 400
+    if size > LOG_IMPORT_MAX_BYTES:
+        return jsonify({'error': f'Import files are capped at {LOG_IMPORT_MAX_BYTES // (1024 * 1024)} MB -- split a larger export into multiple files'}), 400
+    original_filename = secure_filename(f.filename) or 'import'
+    ext = original_filename.rsplit('.', 1)[-1].lower() if '.' in original_filename else ''
+    os.makedirs(LOG_IMPORTS_RAW_DIR, exist_ok=True)
+    stored_name = secrets.token_hex(16) + (f'.{ext}' if ext else '')
+    raw_path = os.path.join(LOG_IMPORTS_RAW_DIR, stored_name)
+    f.save(raw_path)
+
+    fmt = _detect_import_format(raw_path, original_filename)
+    if fmt == 'json_array' and size > LOG_IMPORT_JSON_ARRAY_MAX_BYTES:
+        os.remove(raw_path)
+        return jsonify({'error': f'A JSON-array file is parsed in a single pass (not resumable) and is capped at '
+                                  f'{LOG_IMPORT_JSON_ARRAY_MAX_BYTES // (1024 * 1024)} MB -- export as NDJSON (one object per line) '
+                                  f'or CSV instead for a larger file'}), 400
+    if fmt == 'csv' and size > LOG_IMPORT_CSV_MAX_BYTES:
+        os.remove(raw_path)
+        return jsonify({'error': f'A CSV file is parsed in a single pass (not resumable) and is capped at '
+                                  f'{LOG_IMPORT_CSV_MAX_BYTES // (1024 * 1024)} MB -- export as NDJSON (one object per line) instead '
+                                  f'for a larger file, or split this export into multiple CSV files'}), 400
+
+    # Cheap streaming byte-scan for an approximate row count -- not per-row parsing, just
+    # counting a byte value, so this stays fast even near the size cap.
+    total_rows = 0
+    with open(raw_path, 'rb') as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b''):
+            total_rows += chunk.count(b'\n')
+
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO imports (name, source_filename, raw_path, status, total_rows, created_by) "
+        "VALUES (?, ?, ?, 'uploaded', ?, ?)",
+        (name, original_filename, raw_path, total_rows, current_user.username)
+    )
+    db.commit()
+    log_audit('log_import_upload', 'import', cur.lastrowid, f"{original_filename} ({size} bytes)")
+    return jsonify({'import_id': cur.lastrowid, 'total_rows': total_rows})
+
+
+def _import_records_from_csv(raw_path):
+    """csv.reader/DictReader iterate a text file via its own next()/for-loop protocol,
+    which Python's io module explicitly documents as disabling tell() on that file object
+    afterward (confirmed directly: raises "OSError: telling position disabled by next()
+    call") -- so a CSV file can't be resumed mid-parse via the tell()/seek() cookie
+    pattern NDJSON uses below. CSV is therefore parsed in one single pass instead, same
+    as json_array -- see LOG_IMPORT_CSV_MAX_BYTES's upload-time size cap, which exists
+    specifically because this path isn't chunked."""
+    import csv
+    with open(raw_path, 'r', encoding='utf-8-sig', newline='', errors='replace') as f:
+        return list(csv.DictReader(f))
+
+
+@app.route('/api/logs/import/<int:import_id>/normalize', methods=['POST'])
+@login_required
+def api_logs_import_normalize(import_id):
+    err = require_permission('logsearch.import.manage')
+    if err: return err
+    db = get_db()
+    imp = db.execute("SELECT * FROM imports WHERE id = ?", (import_id,)).fetchone()
+    if not imp:
+        return jsonify({'error': 'Import not found'}), 404
+    if imp['status'] not in ('uploaded', 'normalizing'):
+        # Idempotent: a client that's already past this phase (e.g. a stale tab resuming
+        # after a page reload) just gets told where things stand, not an error.
+        return jsonify({'status': imp['status'], 'rows_normalized': imp['rows_normalized'], 'total_rows': imp['total_rows']})
+
+    body = request.json or {}
+    lines_per_call = min(max(int(body.get('lines_per_call', 5000) or 5000), 100), 20000)
+    os.makedirs(LOG_IMPORTS_STAGING_DIR, exist_ok=True)
+    staging_path = imp['staging_path'] or os.path.join(LOG_IMPORTS_STAGING_DIR, f'{import_id}_{secrets.token_hex(8)}.ndjson')
+
+    fmt = imp['format'] or _detect_import_format(imp['raw_path'], imp['source_filename'])
+    fields_seen = set(json.loads(imp['detected_fields_json'])) if imp['detected_fields_json'] else set()
+    preview_rows = json.loads(imp['preview_rows_json']) if imp['preview_rows_json'] else []
+
+    if fmt in ('json_array', 'csv'):
+        # Single-pass, not resumable (see _import_records_from_csv / the upload-time size
+        # caps for each format) -- always processed fully on the first /normalize call.
+        try:
+            if fmt == 'json_array':
+                with open(imp['raw_path'], 'r', encoding='utf-8-sig', errors='replace') as f:
+                    records = json.load(f)
+                if not isinstance(records, list):
+                    return jsonify({'error': 'Top-level JSON value is not an array'}), 400
+            else:
+                records = _import_records_from_csv(imp['raw_path'])
+        except Exception as e:
+            return jsonify({'error': f'Could not parse the file: {e}'}), 400
+        rows_normalized = 0
+        with open(staging_path, 'w', encoding='utf-8') as out:
+            for rec in records:
+                if not isinstance(rec, dict):
+                    continue
+                fields_seen.update(rec.keys())
+                if len(preview_rows) < 20:
+                    preview_rows.append(rec)
+                out.write(json.dumps(rec, default=str) + '\n')
+                rows_normalized += 1
+        os.remove(imp['raw_path'])
+        suggested_mapping = {k: IMPORT_FIELD_ALIASES[k.lower()] for k in fields_seen if k.lower() in IMPORT_FIELD_ALIASES}
+        db.execute(
+            "UPDATE imports SET format = ?, staging_path = ?, rows_normalized = ?, total_rows = ?, "
+            "detected_fields_json = ?, preview_rows_json = ?, status = 'mapped' WHERE id = ?",
+            (fmt, staging_path, rows_normalized, rows_normalized, json.dumps(sorted(fields_seen)), json.dumps(preview_rows), import_id)
+        )
+        db.commit()
+        return jsonify({'status': 'mapped', 'rows_normalized': rows_normalized, 'total_rows': rows_normalized,
+                         'detected_fields': sorted(fields_seen), 'suggested_mapping': suggested_mapping, 'preview_rows': preview_rows})
+
+    # ndjson -- true chunked, resumable normalize via a text-mode tell()/seek() cookie,
+    # reading strictly via f.readline() (never the file's own next()/for-loop iteration,
+    # which disables tell() -- see _import_records_from_csv's comment). This is safe and
+    # DST/encoding-correct across separate open() calls per Python's own io module docs,
+    # and never a manually-accumulated byte/character count, which breaks on CRLF line
+    # endings or multi-byte UTF-8 content once translated/decoded.
+    start_offset = imp['normalize_offset']
+    rows_this_call = 0
+    reached_eof = True
+    with open(imp['raw_path'], 'r', encoding='utf-8-sig', errors='replace') as f:
+        f.seek(start_offset)
+        with open(staging_path, 'a', encoding='utf-8') as out:
+            while rows_this_call < lines_per_call:
+                line = f.readline()
+                if not line:
+                    break
+                stripped = line.strip()
+                if stripped:
+                    try:
+                        rec = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        rows_this_call += 1
+                        continue
+                    if isinstance(rec, dict):
+                        fields_seen.update(rec.keys())
+                        if len(preview_rows) < 20:
+                            preview_rows.append(rec)
+                        out.write(json.dumps(rec, default=str) + '\n')
+                rows_this_call += 1
+            else:
+                reached_eof = False
+        new_offset = f.tell()
+
+    # Optimistic-concurrency guard: only advance if nobody else already did (two tabs
+    # racing the same import would otherwise both read the same start_offset and
+    # double-process the same byte range).
+    cur = db.execute(
+        "UPDATE imports SET format = 'ndjson', staging_path = ?, normalize_offset = ?, "
+        "rows_normalized = rows_normalized + ?, detected_fields_json = ?, "
+        "preview_rows_json = ?, status = ? WHERE id = ? AND normalize_offset = ?",
+        (staging_path, new_offset, rows_this_call, json.dumps(sorted(fields_seen)), json.dumps(preview_rows),
+         'mapped' if reached_eof else 'normalizing', import_id, start_offset)
+    )
+    db.commit()
+    if cur.rowcount == 0:
+        return jsonify({'error': 'This import is being processed by another request -- stop and re-check its status.'}), 409
+
+    if reached_eof:
+        os.remove(imp['raw_path'])
+        suggested_mapping = {k: IMPORT_FIELD_ALIASES[k.lower()] for k in fields_seen if k.lower() in IMPORT_FIELD_ALIASES}
+        return jsonify({'status': 'mapped', 'rows_normalized': imp['rows_normalized'] + rows_this_call, 'total_rows': imp['total_rows'],
+                         'detected_fields': sorted(fields_seen), 'suggested_mapping': suggested_mapping, 'preview_rows': preview_rows})
+    return jsonify({'status': 'normalizing', 'rows_normalized': imp['rows_normalized'] + rows_this_call, 'total_rows': imp['total_rows']})
+
+
+@app.route('/api/logs/import/<int:import_id>/preview', methods=['POST'])
+@login_required
+def api_logs_import_preview(import_id):
+    err = require_permission('logsearch.import.manage')
+    if err: return err
+    db = get_db()
+    imp = db.execute("SELECT * FROM imports WHERE id = ?", (import_id,)).fetchone()
+    if not imp:
+        return jsonify({'error': 'Import not found'}), 404
+    if not imp['staging_path']:
+        return jsonify({'error': 'This import has not finished the normalize step yet'}), 400
+    data = request.json or {}
+    mapping = data.get('mapping') or {}
+    if not isinstance(mapping, dict):
+        return jsonify({'error': 'mapping must be an object'}), 400
+    severity_value_map = data.get('severity_value_map')
+    if severity_value_map is not None and not isinstance(severity_value_map, dict):
+        return jsonify({'error': 'severity_value_map must be an object'}), 400
+    rows, errors, _next_offset, _eof = _import_apply_mapping(
+        import_id, mapping, data.get('timestamp_field'), data.get('timestamp_format'),
+        data.get('tz_choice'), data.get('tz_custom_minutes'), 50, severity_value_map
+    )
+    if rows is None:
+        return jsonify({'error': errors[0]['error_message']}), 400
+    return jsonify({'rows': rows, 'errors': errors, 'sampled': len(rows) + len(errors), 'parsed_ok': len(rows)})
+
+
+@app.route('/api/logs/import/<int:import_id>/commit', methods=['POST'])
+@login_required
+def api_logs_import_commit(import_id):
+    err = require_permission('logsearch.import.manage')
+    if err: return err
+    db = get_db()
+    imp = db.execute("SELECT * FROM imports WHERE id = ?", (import_id,)).fetchone()
+    if not imp:
+        return jsonify({'error': 'Import not found'}), 404
+    if imp['status'] == 'complete':
+        return jsonify({'status': 'complete', 'rows_imported': imp['rows_imported'], 'rows_failed': imp['rows_failed'], 'total_rows': imp['total_rows']})
+    if not imp['staging_path']:
+        return jsonify({'error': 'This import has not finished the normalize step yet'}), 400
+
+    data = request.json or {}
+    mapping = data.get('mapping') or {}
+    if not isinstance(mapping, dict):
+        return jsonify({'error': 'mapping must be an object'}), 400
+    for target in mapping.values():
+        if target not in IMPORT_TARGET_COLUMNS:
+            return jsonify({'error': f"mapping target '{target}' is not a recognized column"}), 400
+    severity_value_map = data.get('severity_value_map')
+    if severity_value_map is not None and not isinstance(severity_value_map, dict):
+        return jsonify({'error': 'severity_value_map must be an object'}), 400
+    timestamp_field = data.get('timestamp_field')
+    timestamp_format = data.get('timestamp_format')
+    tz_choice = data.get('tz_choice')
+    tz_custom_minutes = data.get('tz_custom_minutes')
+    if _resolve_import_tz_offset_minutes(tz_choice, tz_custom_minutes) is None:
+        return jsonify({'error': f"invalid timezone choice '{tz_choice}'"}), 400
+    # Always server-clamped -- never trust a client-supplied batch size to be reasonable
+    # (an unbounded chunk_rows would reintroduce the single-request-timeout risk this
+    # whole chunked design exists to avoid).
+    chunk_rows = min(max(int(data.get('chunk_rows', 5000) or 5000), 100), 20000)
+    start_offset = imp['commit_offset']
+
+    def _commit_chunk():
+        rows_local, errors_local = [], []
+        offset = start_offset
+        with open(imp['staging_path'], 'r', encoding='utf-8') as f:
+            f.seek(offset)
+            tz_offset = _resolve_import_tz_offset_minutes(tz_choice, tz_custom_minutes)
+            row_number = 0
+            eof = False
+            while row_number < chunk_rows:
+                line = f.readline()
+                if not line:
+                    eof = True
+                    break
+                row_number += 1
+                try:
+                    raw_obj = json.loads(line)
+                except json.JSONDecodeError:
+                    errors_local.append({'row_number': row_number, 'error_message': 'malformed staged JSON line', 'raw_line': line[:500]})
+                    continue
+                row, err = _map_and_parse_import_row(raw_obj, mapping, timestamp_field, timestamp_format, tz_offset, severity_value_map)
+                if err:
+                    errors_local.append({'row_number': row_number, 'error_message': err, 'raw_line': line[:500]})
+                    continue
+                row['import_id'] = import_id
+                rows_local.append(row)
+            new_off = f.tell()
+        return rows_local, errors_local, new_off, eof
+
+    rows, errors, next_offset, reached_eof = _commit_chunk()
+
+    if rows:
+        cols = list(IMPORT_TARGET_COLUMNS) + ['raw_json', 'import_id']
+        placeholders = ', '.join(['?'] * len(cols))
+        db.executemany(
+            f"INSERT INTO imported_logs ({', '.join(cols)}) VALUES ({placeholders})",
+            [[r.get(c) for c in cols] for r in rows]
+        )
+    for e in errors[:1000 - db.execute("SELECT COUNT(*) FROM import_errors WHERE import_id = ?", (import_id,)).fetchone()[0]] if errors else []:
+        db.execute(
+            "INSERT INTO import_errors (import_id, row_number, error_message, raw_line) VALUES (?, ?, ?, ?)",
+            (import_id, e.get('row_number'), e['error_message'], e.get('raw_line'))
+        )
+
+    cur = db.execute(
+        "UPDATE imports SET commit_offset = ?, rows_imported = rows_imported + ?, rows_failed = rows_failed + ?, "
+        "mapping_json = ?, status = ? WHERE id = ? AND commit_offset = ?",
+        (next_offset, len(rows), len(errors), json.dumps({
+            'mapping': mapping, 'timestamp_field': timestamp_field, 'timestamp_format': timestamp_format,
+            'tz_choice': tz_choice, 'tz_custom_minutes': tz_custom_minutes, 'severity_value_map': severity_value_map,
+        }), 'complete' if reached_eof else 'importing', import_id, start_offset)
+    )
+    if cur.rowcount == 0:
+        db.rollback()
+        return jsonify({'error': 'This import is being processed by another request -- stop and re-check its status.'}), 409
+    if reached_eof:
+        db.execute("UPDATE imports SET completed_at = CURRENT_TIMESTAMP WHERE id = ?", (import_id,))
+        try:
+            os.remove(imp['staging_path'])
+        except OSError:
+            pass
+    db.commit()
+    log_audit('log_import_commit', 'import', import_id, f"+{len(rows)} rows, +{len(errors)} errors, status={'complete' if reached_eof else 'importing'}")
+
+    total_imported = imp['rows_imported'] + len(rows)
+    total_failed = imp['rows_failed'] + len(errors)
+    return jsonify({'status': 'complete' if reached_eof else 'importing', 'rows_imported': total_imported,
+                     'rows_failed': total_failed, 'total_rows': imp['total_rows']})
+
+
+@app.route('/api/logs/import', methods=['GET'])
+@login_required
+def api_logs_import_list():
+    err = require_permission('logsearch.import.manage')
+    if err: return err
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, name, source_filename, status, total_rows, rows_normalized, rows_imported, rows_failed, "
+        "created_by, created_at, completed_at FROM imports ORDER BY id DESC"
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route('/api/logs/import/<int:import_id>', methods=['DELETE'])
+@login_required
+def api_logs_import_delete(import_id):
+    err = require_permission('logsearch.import.manage')
+    if err: return err
+    db = get_db()
+    imp = db.execute("SELECT * FROM imports WHERE id = ?", (import_id,)).fetchone()
+    if not imp:
+        return jsonify({'error': 'Import not found'}), 404
+    db.execute("DELETE FROM imported_logs WHERE import_id = ?", (import_id,))
+    db.execute("DELETE FROM import_errors WHERE import_id = ?", (import_id,))
+    db.execute("DELETE FROM imports WHERE id = ?", (import_id,))
+    db.commit()
+    for path in (imp['raw_path'], imp['staging_path']):
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    log_audit('log_import_delete', 'import', import_id, imp['name'] or imp['source_filename'])
+    return jsonify({'status': 'success'})
+
+
+@app.route('/api/logs/import-mapping-profiles', methods=['GET', 'POST'])
+@login_required
+def api_logs_import_mapping_profiles():
+    err = require_permission('logsearch.import.manage')
+    if err: return err
+    db = get_db()
+    if request.method == 'GET':
+        rows = db.execute(
+            "SELECT id, name, profile_json, created_by, created_at FROM import_mapping_profiles ORDER BY name COLLATE NOCASE"
+        ).fetchall()
+        return jsonify([dict(r) for r in rows])
+    data = request.json or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'name is required'}), 400
+    profile = data.get('profile')
+    if not isinstance(profile, dict):
+        return jsonify({'error': 'profile must be an object'}), 400
+    db.execute(
+        "INSERT INTO import_mapping_profiles (name, profile_json, created_by) VALUES (?, ?, ?)",
+        (name, json.dumps(profile), current_user.username)
+    )
+    db.commit()
+    log_audit('log_import_mapping_profile_create', 'import_mapping_profile', None, name)
+    return jsonify({'status': 'success'})
+
+
+@app.route('/api/logs/import-mapping-profiles/<int:pid>', methods=['DELETE'])
+@login_required
+def api_logs_import_mapping_profile_delete(pid):
+    err = require_permission('logsearch.import.manage')
+    if err: return err
+    db = get_db()
+    row = db.execute("SELECT name FROM import_mapping_profiles WHERE id = ?", (pid,)).fetchone()
+    if not row:
+        return jsonify({'error': 'Mapping profile not found'}), 404
+    db.execute("DELETE FROM import_mapping_profiles WHERE id = ?", (pid,))
+    db.commit()
+    log_audit('log_import_mapping_profile_delete', 'import_mapping_profile', pid, row['name'])
+    return jsonify({'status': 'success'})
+
+
+# Reaps an import an admin staged/started and then abandoned (closed the tab mid-wizard)
+# -- otherwise an orphaned raw/staging file sits on disk and the imports row stays stuck
+# forever, with only a manual DELETE to clean it up. 48h is generous (a real migration
+# session shouldn't take that long) without being trigger-happy on a legitimately slow
+# multi-file migration effort spread across a workday.
+def _cleanup_stale_imports(db):
+    stale = db.execute(
+        "SELECT id, raw_path, staging_path FROM imports WHERE status NOT IN ('complete', 'cancelled') "
+        "AND created_at < datetime('now', '-48 hours')"
+    ).fetchall()
+    if not stale:
+        return
+    for row in stale:
+        db.execute("DELETE FROM imported_logs WHERE import_id = ?", (row['id'],))
+        db.execute("DELETE FROM import_errors WHERE import_id = ?", (row['id'],))
+        db.execute("DELETE FROM imports WHERE id = ?", (row['id'],))
+        for path in (row['raw_path'], row['staging_path']):
+            if path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+    db.commit()
+
 
 # Small, hand-curated catalog of the built-in extractors api_ingest() always runs --
 # NOT derived dynamically, matching this file's own "duplicate a small catalog rather
@@ -7547,6 +8043,7 @@ def api_run_scheduled_playbooks():
     _run_due_case_created_playbooks(db)
     _run_due_case_stale_playbooks(db)
     _run_due_log_source_silent_alerts(db)
+    _cleanup_stale_imports(db)
     return jsonify({'status': 'success'})
 
 # Due isolation auto-reverts -- for each playbook_pending_reverts row past its revert_at,
@@ -11818,6 +12315,105 @@ def migrate_custom_parsers():
     except Exception:
         pass
 
+# Log Import (Phase 1) -- lets an admin bring a CSV/NDJSON/JSON-array export from another
+# SIEM (Splunk/QRadar/Elastic/etc.) into a dedicated table for historical Log Search,
+# without touching live_logs (the table detection/UEBA/retention are all tuned around).
+# `imports` tracks one row per uploaded file through upload -> normalize -> map -> commit;
+# `normalize_offset`/`commit_offset` double as optimistic-concurrency version tokens for
+# the two chunked, client-driven loops (see the /normalize and /commit routes) -- a
+# conditional UPDATE ... WHERE normalize_offset = ? (or commit_offset = ?) guards against
+# two tabs racing the same import.
+def migrate_log_imports():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS imports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            source_filename TEXT,
+            raw_path TEXT,
+            staging_path TEXT,
+            status TEXT NOT NULL DEFAULT 'uploaded',
+            format TEXT,
+            mapping_json TEXT,
+            total_rows INTEGER,
+            rows_normalized INTEGER NOT NULL DEFAULT 0,
+            rows_imported INTEGER NOT NULL DEFAULT 0,
+            rows_failed INTEGER NOT NULL DEFAULT 0,
+            normalize_offset INTEGER NOT NULL DEFAULT 0,
+            commit_offset INTEGER NOT NULL DEFAULT 0,
+            detected_fields_json TEXT,
+            preview_rows_json TEXT,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            completed_at DATETIME
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_imports_status ON imports(status, created_at)')
+        conn.execute('''CREATE TABLE IF NOT EXISTS import_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            import_id INTEGER NOT NULL,
+            row_number INTEGER,
+            error_message TEXT,
+            raw_line TEXT
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_import_errors_import ON import_errors(import_id)')
+        # Deliberately mirrors live_logs' own column shape (src/schema.sql) exactly, plus
+        # import_id and raw_json -- keeps a future Phase 2 Sigma-replay branch trivial to
+        # add (same column names Sigma's field resolution already expects) without
+        # committing to Phase 2's harder UEBA-replay design now.
+        conn.execute('''CREATE TABLE IF NOT EXISTS imported_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            import_id INTEGER NOT NULL,
+            timestamp DATETIME NOT NULL,
+            host TEXT, app TEXT, severity TEXT, event_id TEXT, username TEXT,
+            source_ip TEXT, destination_ip TEXT, message TEXT NOT NULL,
+            process_image TEXT, command_line TEXT, parent_image TEXT, parent_command_line TEXT,
+            original_file_name TEXT, raw_xml TEXT, file_hash TEXT, query_name TEXT,
+            raw_json TEXT
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_imported_logs_timestamp ON imported_logs(timestamp)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_imported_logs_import ON imported_logs(import_id)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_imported_logs_host ON imported_logs(host)')
+        conn.execute('''CREATE TABLE IF NOT EXISTS import_mapping_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            profile_json TEXT NOT NULL,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# Backfills the new logsearch.import.manage key onto every role that already holds the
+# sibling logsearch.droprules.manage permission -- adding a key to PERMISSION_REGISTRY
+# alone does nothing for an existing production install, since migrate_role_permissions()
+# only seeds default role permissions once, when the roles table starts empty (a fresh
+# install only). Same shape as migrate_case_templates_manage_permission (11282), including
+# the settings-flag idempotency guard, so an admin who deliberately revokes just this one
+# permission afterward doesn't have it silently re-added on the next deploy.
+def migrate_logsearch_import_permission():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+        seeded = conn.execute("SELECT value FROM settings WHERE key = 'logsearch_import_permission_seeded'").fetchone()
+        if seeded and seeded['value'] == '1':
+            conn.close()
+            return
+        role_ids = [r[0] for r in conn.execute(
+            "SELECT role_id FROM role_permissions WHERE permission_key = 'logsearch.droprules.manage'"
+        ).fetchall()]
+        conn.executemany(
+            "INSERT OR IGNORE INTO role_permissions (role_id, permission_key) VALUES (?, 'logsearch.import.manage')",
+            [(rid,) for rid in role_ids]
+        )
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('logsearch_import_permission_seeded', '1')")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_ioc_sightings_alert_id():
     # log_ref was always a free-text "alert_id=N, host=..." string (sigma_engine.py's
     # _record_ioc_sightings) -- fine for a human reading it, useless for a query. This
@@ -14388,7 +14984,7 @@ _LOG_BRANCH_SQL = """SELECT timestamp, severity, host, app, event_id, username, 
        NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
        process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
        NULL as occurrence_count, NULL as last_seen, id as item_id, NULL as entity_type,
-       NULL as status, NULL as assignee, file_hash, query_name, 0 as is_atomic_test
+       NULL as status, NULL as assignee, file_hash, query_name, 0 as is_atomic_test, NULL as import_id
 FROM live_logs"""
 
 _LOG_ARCHIVE_BRANCH_SQL = _LOG_BRANCH_SQL.replace("FROM live_logs", "FROM live_logs_archive")
@@ -14410,7 +15006,7 @@ _ALERT_BRANCH_SQL = """SELECT a.timestamp, a.severity,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
        a.occurrence_count as occurrence_count, a.last_seen as last_seen, a.id as item_id, NULL as entity_type,
        a.status as status, a.assignee as assignee, NULL as file_hash, NULL as query_name,
-       COALESCE(a.is_atomic_test, 0) as is_atomic_test
+       COALESCE(a.is_atomic_test, 0) as is_atomic_test, NULL as import_id
 FROM alerts a
 LEFT JOIN sigma_rules s ON a.rule_id = s.id"""
 
@@ -14419,7 +15015,7 @@ _ANOMALY_BRANCH_SQL = """SELECT timestamp, severity, hostname as host, 'UEBA Ano
        NULL as rule_id, 'ueba' as rule_source, NULL as log_event_id, NULL as log_app, raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
        NULL as occurrence_count, NULL as last_seen, id as item_id, entity_type,
-       NULL as status, NULL as assignee, NULL as file_hash, NULL as query_name, 0 as is_atomic_test
+       NULL as status, NULL as assignee, NULL as file_hash, NULL as query_name, 0 as is_atomic_test, NULL as import_id
 FROM events
 WHERE app_name = 'duckdb_ueba'"""
 
@@ -14447,8 +15043,21 @@ _COMMAND_BRANCH_SQL = """SELECT queued_at as timestamp,
        NULL as rule_id, 'edr_command' as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
        NULL as occurrence_count, completed_at as last_seen, id as item_id, NULL as entity_type,
-       status as status, NULL as assignee, NULL as file_hash, NULL as query_name, 0 as is_atomic_test
+       status as status, NULL as assignee, NULL as file_hash, NULL as query_name, 0 as is_atomic_test, NULL as import_id
 FROM agent_commands"""
+
+# Log Import (Phase 1) branch -- imported_logs.timestamp is already normalized to UTC at
+# insert time (see _map_and_parse_import_row), so this branch takes the same UTC-native
+# path _ALERT_BRANCH_SQL/_ANOMALY_BRANCH_SQL/_COMMAND_BRANCH_SQL already do in
+# _build_optimized_log_query/_build_normalized_log_union/_count_log_rows (all three
+# branch purely on `branch_type == 'log'`) -- no changes needed to those functions.
+_IMPORT_BRANCH_SQL = """SELECT il.timestamp, il.severity, il.host, il.app, il.event_id, il.username,
+       il.source_ip, il.destination_ip, il.message, 'import' as log_type,
+       NULL as rule_id, 'import' as rule_source, NULL as log_event_id, NULL as log_app, il.raw_json,
+       il.process_image, il.command_line, il.parent_image, il.parent_command_line, il.original_file_name, il.raw_xml,
+       NULL as occurrence_count, NULL as last_seen, il.id as item_id, NULL as entity_type,
+       NULL as status, NULL as assignee, il.file_hash, il.query_name, 0 as is_atomic_test, il.import_id
+FROM imported_logs il"""
 
 # The exact column order every LOG_TYPE_BRANCHES branch SELECTs in (all 4 must match,
 # positionally, for their UNION ALL to combine correctly) -- kept here so
@@ -14462,16 +15071,17 @@ _UNIFIED_LOG_COLUMNS = (
     'rule_id', 'rule_source', 'log_event_id', 'log_app', 'raw_json',
     'process_image', 'command_line', 'parent_image', 'parent_command_line', 'original_file_name', 'raw_xml',
     'occurrence_count', 'last_seen', 'item_id', 'entity_type',
-    'status', 'assignee', 'file_hash', 'query_name', 'is_atomic_test',
+    'status', 'assignee', 'file_hash', 'query_name', 'is_atomic_test', 'import_id',
 )
 
 # (log_type, branch_sql) pairs, in the same branch order as the historical flat unions.
 LOG_TYPE_BRANCHES = [
-    ('log', _LOG_BRANCH_SQL), ('alert', _ALERT_BRANCH_SQL), ('anomaly', _ANOMALY_BRANCH_SQL), ('command', _COMMAND_BRANCH_SQL)
+    ('log', _LOG_BRANCH_SQL), ('alert', _ALERT_BRANCH_SQL), ('anomaly', _ANOMALY_BRANCH_SQL),
+    ('command', _COMMAND_BRANCH_SQL), ('import', _IMPORT_BRANCH_SQL)
 ]
 LOG_TYPE_BRANCHES_WITH_ARCHIVE = [
     ('log', _LOG_BRANCH_SQL), ('log', _LOG_ARCHIVE_BRANCH_SQL), ('alert', _ALERT_BRANCH_SQL),
-    ('anomaly', _ANOMALY_BRANCH_SQL), ('command', _COMMAND_BRANCH_SQL)
+    ('anomaly', _ANOMALY_BRANCH_SQL), ('command', _COMMAND_BRANCH_SQL), ('import', _IMPORT_BRANCH_SQL)
 ]
 
 _RANGE_DELTAS = {
@@ -14516,7 +15126,166 @@ LOG_SEARCH_ALLOWED_FIELDS = [
     {'key': 'raw_xml', 'label': 'Raw XML'},
     {'key': 'file_hash', 'label': 'File Hash'},
     {'key': 'query_name', 'label': 'DNS Query'},
+    {'key': 'import_id', 'label': 'Import Batch'},
 ]
+
+# ---- Log Import (Phase 1) -- field-mapping, timestamp, and timezone catalogs ----
+
+# Auto-suggests a field mapping so a Splunk/Elastic/QRadar export needs near-zero manual
+# work for the common columns -- same idea as sigma_engine.py's _FIELD_COLUMN_ALIASES,
+# duplicated (not imported) per this file's established dual-definition convention, and
+# extended with timestamp-specific aliases that map doesn't need.
+IMPORT_FIELD_ALIASES = {
+    '_time': 'timestamp', '@timestamp': 'timestamp', 'timestamp': 'timestamp',
+    'event_time': 'timestamp', 'eventtime': 'timestamp', 'datetime': 'timestamp', 'date': 'timestamp',
+    'host': 'host', 'hostname': 'host', 'computername': 'host', 'computer': 'host',
+    'host.name': 'host', 'dvc': 'host', 'device_name': 'host',
+    'app': 'app', 'application': 'app', 'source': 'app', 'sourcetype': 'app', 'log.name': 'app',
+    'severity': 'severity', 'level': 'severity', 'priority': 'severity', 'event.severity': 'severity',
+    'event_id': 'event_id', 'eventid': 'event_id', 'event.code': 'event_id',
+    'username': 'username', 'user': 'username', 'user.name': 'username', 'accountname': 'username',
+    'source_ip': 'source_ip', 'src_ip': 'source_ip', 'srcip': 'source_ip',
+    'sourceaddress': 'source_ip', 'source.ip': 'source_ip', 'clientip': 'source_ip',
+    'destination_ip': 'destination_ip', 'dst_ip': 'destination_ip', 'dstip': 'destination_ip',
+    'destinationaddress': 'destination_ip', 'destination.ip': 'destination_ip',
+    'message': 'message', 'msg': 'message', 'event.original': 'message', '_raw': 'message',
+    'process': 'process_image', 'image': 'process_image', 'process.executable': 'process_image',
+    'commandline': 'command_line', 'command_line': 'command_line', 'process.command_line': 'command_line',
+}
+# The server-side whitelist every client-supplied mapping value is validated against
+# before it's ever used to build SQL -- see _map_and_parse_import_row. Never trust the
+# frontend <select> alone to constrain this: the mapping arrives as a JSON POST body,
+# which is fully client-controlled regardless of what the HTML offers, and a column name
+# can't be parameterized as a bind value -- it has to be interpolated as raw SQL text into
+# the INSERT statement.
+IMPORT_TARGET_COLUMNS = frozenset((
+    'timestamp', 'host', 'app', 'severity', 'event_id', 'username', 'source_ip',
+    'destination_ip', 'message', 'process_image', 'command_line', 'parent_image',
+    'parent_command_line', 'original_file_name', 'file_hash', 'query_name',
+))  # 'raw_xml' deliberately excluded -- nothing outside this app's own Windows/Sysmon
+    # ingestion path produces meaningful raw_xml, mapping a foreign field into it would
+    # be misleading, not useful.
+
+# Tried in order; first one that parses the WHOLE string wins. Kept intentionally small
+# (no python-dateutil dependency, matching this app's own "duplicate a small catalog,
+# don't add a dependency" convention) -- an admin-supplied custom strptime format string
+# is the escape hatch for anything not covered here, surfaced in the mapping UI, not
+# silently guessed.
+IMPORT_TIMESTAMP_FORMATS = [
+    '%Y-%m-%dT%H:%M:%S.%fZ', '%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%dT%H:%M:%S.%f%z', '%Y-%m-%dT%H:%M:%S%z',
+    '%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S',
+    '%m/%d/%Y %H:%M:%S', '%d/%m/%Y %H:%M:%S', '%b %d %H:%M:%S', '%Y-%m-%d',
+]
+
+def _parse_import_timestamp(value, fmt=None):
+    """Returns a naive datetime.datetime interpreted as whatever timezone the raw value
+    was in (conversion to UTC happens separately in _resolve_import_tz_offset_minutes,
+    once the admin's declared source timezone is known) -- or None if unparseable."""
+    import datetime as _dt
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    if fmt:
+        try:
+            return _dt.datetime.strptime(s, fmt)
+        except ValueError:
+            return None
+    # Epoch seconds/milliseconds: a bare (optionally signed) integer/float string.
+    # Magnitude decides which -- a 10-digit value is a plausible epoch-seconds timestamp
+    # for any date from 2001-2286; a 13-digit value is the equivalent in milliseconds.
+    # This range check is deliberately generous rather than exact, since real-world epoch
+    # exports vary in digit count near the boundaries.
+    try:
+        numeric = float(s)
+        if numeric > 1e12:
+            return _dt.datetime(1970, 1, 1) + _dt.timedelta(milliseconds=numeric)
+        if numeric > 1e8:
+            return _dt.datetime(1970, 1, 1) + _dt.timedelta(seconds=numeric)
+    except ValueError:
+        pass
+    for candidate_fmt in IMPORT_TIMESTAMP_FORMATS:
+        try:
+            return _dt.datetime.strptime(s, candidate_fmt)
+        except ValueError:
+            continue
+    return None
+
+# Timezone is resolved as a whitelisted CHOICE + a Python-side minute-offset integer,
+# applied via plain datetime arithmetic (timedelta) on the already-parsed datetime --
+# never interpolated into a SQL datetime()/'utc' modifier string. This closes off any
+# SQL-injection-adjacent surface from a client-supplied timezone value entirely, and is
+# simpler than round-tripping through SQLite for a conversion Python can do natively once
+# the value is already a datetime object.
+IMPORT_TZ_CHOICES = ('utc', 'server_local', 'custom')
+
+def _resolve_import_tz_offset_minutes(tz_choice, custom_minutes=None):
+    """Returns an integer minute offset following the standard signed-UTC-offset
+    convention (negative = behind UTC, e.g. "UTC-05:00" is -300; positive = ahead of
+    UTC, e.g. "UTC+05:30" is +330) -- the caller applies it as `utc = local - offset`
+    (see _map_and_parse_import_row), so -300 correctly ADDS 5 hours to reach UTC. Returns
+    None if tz_choice/custom_minutes is invalid -- caller must reject the request on
+    None, never silently default to 0 (UTC)."""
+    if tz_choice == 'utc':
+        return 0
+    if tz_choice == 'server_local':
+        # This server's own currently-configured offset (DST-aware for *right now* -- a
+        # documented, accepted Phase 1 simplification: a source timestamp from a
+        # different DST period than today could be off by an hour. Not worth a full tz
+        # database dependency for this pass; 'utc' or an explicit 'custom' offset
+        # sidesteps this entirely.)
+        import datetime as _dt
+        return int(_dt.datetime.now().astimezone().utcoffset().total_seconds() // 60)
+    if tz_choice == 'custom':
+        try:
+            minutes = int(custom_minutes)
+        except (TypeError, ValueError):
+            return None
+        return minutes if -720 <= minutes <= 840 else None  # UTC-12 .. UTC+14, real-world bound
+    return None
+
+def _map_and_parse_import_row(raw_obj, mapping, timestamp_field, timestamp_format, tz_offset_minutes, severity_value_map=None):
+    """Shared by /preview and /commit so the two routes can never drift apart. Returns
+    (row_dict_for_imported_logs_or_None, error_message_or_None). Re-validates every
+    `mapping` value is in IMPORT_TARGET_COLUMNS before use -- never trusts the client,
+    since `mapping` arrives as a client-controlled JSON body and its values become raw SQL
+    column names in the caller's INSERT statement. `severity_value_map` is an optional
+    {source_value: renamed_value} dict for the one field mapped to severity -- every
+    vendor uses a different severity vocabulary; this is a lightweight per-value rename,
+    not a general value-normalization system. A source value with no entry in the map
+    passes through unchanged (defaults to pass-through, never dropped)."""
+    import datetime as _dt
+    if not isinstance(raw_obj, dict):
+        return None, 'row is not a JSON object'
+    row = {col: None for col in IMPORT_TARGET_COLUMNS}
+    row['message'] = ''
+    unmapped = {}
+    for source_key, value in raw_obj.items():
+        target = mapping.get(source_key)
+        if not target:
+            unmapped[source_key] = value
+            continue
+        if target not in IMPORT_TARGET_COLUMNS:
+            return None, f"mapping target '{target}' is not a recognized column"
+        if target == 'severity' and severity_value_map and value is not None:
+            value = severity_value_map.get(str(value), value)
+        row[target] = value
+    if not (row.get('message') or '').strip() and unmapped:
+        # No field was explicitly mapped to Message -- fold every unmapped source field
+        # into it so nothing meaningful silently disappears from what's actually visible
+        # in Log Search (the full source object is still preserved in raw_json either way).
+        row['message'] = '; '.join(f'{k}={v}' for k, v in unmapped.items())[:4000]
+    raw_ts = raw_obj.get(timestamp_field) if timestamp_field else None
+    parsed = _parse_import_timestamp(raw_ts, timestamp_format)
+    if parsed is None:
+        return None, f"could not parse timestamp {raw_ts!r} from field '{timestamp_field}'"
+    utc_dt = parsed - _dt.timedelta(minutes=tz_offset_minutes)
+    row['timestamp'] = utc_dt.strftime('%Y-%m-%d %H:%M:%S')
+    row['raw_json'] = json.dumps(raw_obj, default=str)[:8000]
+    if not row['message']:
+        row['message'] = '(no message field mapped)'
+    return row, None
 
 # Sortable via the Log Search results table's clickable column headers -- restricted to
 # columns that exist with consistent meaning across all 3 UNIFIED_LOGS_SQL branches
@@ -17227,6 +17996,8 @@ migrate_ti_entities_confidence()
 migrate_ti_entities_references()
 migrate_yara_rule_tags()
 migrate_custom_parsers()
+migrate_log_imports()
+migrate_logsearch_import_permission()
 
 try:
     # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every
