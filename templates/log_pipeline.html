@@ -43,6 +43,9 @@
     {% endif %}
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'silentsources' else '' }}" id="tabBtnSilentsources" onclick="switchLogPipelineTab('silentsources')"><i class="fa-solid fa-volume-xmark me-1"></i>Silent Hosts</button></li>
     <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'parsers' else '' }}" id="tabBtnParsers" onclick="switchLogPipelineTab('parsers')"><i class="fa-solid fa-diagram-project me-1"></i>Parsers</button></li>
+    {% if has_permission('logsearch.import.manage') %}
+    <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'import' else '' }}" id="tabBtnImport" onclick="switchLogPipelineTab('import')"><i class="fa-solid fa-file-import me-1"></i>Import</button></li>
+    {% endif %}
 </ul>
 
 <!-- ============================= DROP RULES PANE ============================= -->
@@ -413,6 +416,189 @@
 </div>
 <!-- =========================== END PARSERS PANE =========================== -->
 
+<!-- ============================= IMPORT PANE ============================= -->
+{% if has_permission('logsearch.import.manage') %}
+<div id="paneImport" style="display: {{ 'block' if active_tab == 'import' else 'none' }};">
+<div class="row g-4 mb-4">
+    <div class="col-lg-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-body">
+                <h5 class="card-title text-light mb-3"><i class="fa-solid fa-file-import me-2"></i>Import Logs from Another SIEM</h5>
+                <p class="text-muted small mb-3">Bring a historical CSV/NDJSON/JSON export from another product (Splunk, QRadar, Elastic, etc.) into Log Search for investigation. Imported rows are searchable but never feed live detection rules or UEBA baselines.</p>
+
+                <div id="importWizard">
+                    <!-- STEP 1: UPLOAD -->
+                    <div id="importStep1" class="import-step">
+                        <label class="form-label small text-muted">File (CSV, NDJSON, or a JSON array) &mdash; CSV/JSON-array capped at 50MB/25MB (parsed in one pass); NDJSON up to 250MB (chunked)</label>
+                        <div class="row g-2 align-items-end">
+                            <div class="col-md-5">
+                                <input type="file" class="form-control form-control-sm bg-dark text-light border-secondary" id="importFileInput" accept=".csv,.json,.ndjson,.jsonl">
+                            </div>
+                            <div class="col-md-4">
+                                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="importNameInput" placeholder="Label (optional) -- e.g. Splunk Q1 2026 export">
+                            </div>
+                            <div class="col-md-3">
+                                <button class="btn btn-primary btn-sm w-100" onclick="importStartUpload()"><i class="fa-solid fa-upload me-1"></i>Upload</button>
+                            </div>
+                        </div>
+                        <div id="importUploadError" class="text-danger small mt-2" style="display:none;"></div>
+                    </div>
+
+                    <!-- STEP 2: READING/NORMALIZING -->
+                    <div id="importStep2" class="import-step" style="display:none;">
+                        <div class="d-flex justify-content-between mb-1">
+                            <span class="text-muted small">Reading and normalizing the file&hellip;</span>
+                            <span class="text-muted small" id="importNormalizeCount">0 / 0 rows</span>
+                        </div>
+                        <div class="progress" style="height: 10px;"><div class="progress-bar" id="importNormalizeBar" style="width:0%"></div></div>
+                        <div id="importNormalizeError" class="text-danger small mt-2" style="display:none;"></div>
+                    </div>
+
+                    <!-- STEP 3: MAP FIELDS -->
+                    <div id="importStep3" class="import-step" style="display:none;">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <span class="text-muted small fw-bold">Map Fields</span>
+                            <div class="d-flex gap-2 align-items-center">
+                                <select class="form-select form-select-sm bg-dark text-light border-secondary" id="importProfileSelect" style="width:220px;" onchange="importApplyMappingProfile()">
+                                    <option value="">Load a saved mapping profile&hellip;</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="table-responsive mb-3">
+                            <table class="table table-dark table-sm align-middle mb-0">
+                                <thead><tr><th>Source Field</th><th>Sample Value</th><th>Maps To</th></tr></thead>
+                                <tbody id="importMappingBody"></tbody>
+                            </table>
+                        </div>
+                        <div class="card bg-dark border-secondary mb-3">
+                            <div class="card-body py-2">
+                                <div class="row g-2 align-items-end">
+                                    <div class="col-md-3">
+                                        <label class="form-label small text-muted mb-1">Timestamp Field</label>
+                                        <select class="form-select form-select-sm bg-dark text-light border-secondary" id="importTsFieldSelect"></select>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label small text-muted mb-1">Format</label>
+                                        <select class="form-select form-select-sm bg-dark text-light border-secondary" id="importTsFormatSelect" onchange="importUpdateTsFormatCustom()">
+                                            <option value="">Auto-detect</option>
+                                            <option value="%Y-%m-%dT%H:%M:%S.%fZ">ISO 8601 (2026-01-15T10:00:00.000Z)</option>
+                                            <option value="%Y-%m-%d %H:%M:%S">2026-01-15 10:00:00</option>
+                                            <option value="%m/%d/%Y %H:%M:%S">01/15/2026 10:00:00</option>
+                                            <option value="%d/%m/%Y %H:%M:%S">15/01/2026 10:00:00</option>
+                                            <option value="__custom__">Custom format&hellip;</option>
+                                        </select>
+                                        <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mt-1" id="importTsFormatCustom" placeholder="e.g. %d-%b-%Y %H:%M:%S" style="display:none;">
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label small text-muted mb-1">Source Timezone <span class="text-danger">*</span></label>
+                                        <select class="form-select form-select-sm bg-dark text-light border-secondary" id="importTzChoiceSelect" onchange="importUpdateTzCustom()">
+                                            <option value="utc">UTC</option>
+                                            <option value="server_local">This server's local time</option>
+                                            <option value="custom">Custom fixed offset&hellip;</option>
+                                        </select>
+                                        <select class="form-select form-select-sm bg-dark text-light border-secondary mt-1" id="importTzCustomOffset" style="display:none;">
+                                            <option value="-720">UTC-12:00</option>
+                                            <option value="-660">UTC-11:00</option>
+                                            <option value="-600">UTC-10:00</option>
+                                            <option value="-540">UTC-09:00</option>
+                                            <option value="-480">UTC-08:00 (Pacific)</option>
+                                            <option value="-420">UTC-07:00 (Mountain)</option>
+                                            <option value="-360">UTC-06:00 (Central)</option>
+                                            <option value="-300">UTC-05:00 (Eastern)</option>
+                                            <option value="-240">UTC-04:00</option>
+                                            <option value="-180">UTC-03:00</option>
+                                            <option value="0">UTC+00:00</option>
+                                            <option value="60">UTC+01:00</option>
+                                            <option value="120">UTC+02:00</option>
+                                            <option value="180">UTC+03:00</option>
+                                            <option value="330">UTC+05:30 (India)</option>
+                                            <option value="480">UTC+08:00</option>
+                                            <option value="540">UTC+09:00</option>
+                                            <option value="600">UTC+10:00</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label small text-muted mb-1">Resolved preview</label>
+                                        <div class="form-control form-control-sm bg-dark text-light border-secondary" id="importTsPreview" style="min-height:31px;">&mdash;</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="importSeverityRenameCard" class="card bg-dark border-secondary mb-3" style="display:none;">
+                            <div class="card-body py-2">
+                                <div class="small text-muted mb-2">Severity values found in this file &mdash; optionally rename to match your own conventions (defaults to pass-through):</div>
+                                <div id="importSeverityRenameBody"></div>
+                            </div>
+                        </div>
+                        <div class="d-flex justify-content-between">
+                            <div>
+                                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary d-inline-block" id="importSaveProfileName" placeholder="Save this mapping as&hellip;" style="width:220px;">
+                                <button class="btn btn-outline-secondary btn-sm" onclick="importSaveMappingProfile()">Save</button>
+                            </div>
+                            <button class="btn btn-primary btn-sm" onclick="importGoToPreview()">Continue to Preview <i class="fa-solid fa-arrow-right ms-1"></i></button>
+                        </div>
+                    </div>
+
+                    <!-- STEP 4: PREVIEW -->
+                    <div id="importStep4" class="import-step" style="display:none;">
+                        <div id="importPreviewBanner" class="alert alert-secondary py-2 small"></div>
+                        <div class="table-responsive mb-3" style="max-height:320px; overflow-y:auto;">
+                            <table class="table table-dark table-sm mb-0">
+                                <thead><tr><th>Time (UTC)</th><th>Host</th><th>Severity</th><th>Message</th></tr></thead>
+                                <tbody id="importPreviewBody"></tbody>
+                            </table>
+                        </div>
+                        <div class="d-flex justify-content-between">
+                            <button class="btn btn-outline-secondary btn-sm" onclick="importGoToStep(3)"><i class="fa-solid fa-arrow-left me-1"></i>Back</button>
+                            <button class="btn btn-success btn-sm" onclick="importStartCommit()"><i class="fa-solid fa-check me-1"></i>Import</button>
+                        </div>
+                    </div>
+
+                    <!-- STEP 5: IMPORTING -->
+                    <div id="importStep5" class="import-step" style="display:none;">
+                        <div class="d-flex justify-content-between mb-1">
+                            <span class="text-muted small">Importing&hellip;</span>
+                            <span class="text-muted small" id="importCommitCount">0 / 0 rows</span>
+                        </div>
+                        <div class="progress" style="height: 10px;"><div class="progress-bar bg-success" id="importCommitBar" style="width:0%"></div></div>
+                        <div id="importCommitError" class="text-danger small mt-2" style="display:none;"></div>
+                    </div>
+
+                    <!-- STEP 6: DONE -->
+                    <div id="importStep6" class="import-step" style="display:none;">
+                        <div class="alert alert-success py-2 small" id="importDoneBanner"></div>
+                        <a href="#" class="btn btn-primary btn-sm" id="importDoneSearchLink" target="_blank"><i class="fa-solid fa-magnifying-glass me-1"></i>View in Log Search</a>
+                        <button class="btn btn-outline-secondary btn-sm" onclick="importResetWizard()"><i class="fa-solid fa-plus me-1"></i>Import Another File</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-4">
+    <div class="col-lg-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-body">
+                <h5 class="card-title text-light mb-3"><i class="fa-solid fa-clock-rotate-left me-2"></i>Import History</h5>
+                <div class="table-responsive">
+                    <table class="table table-dark table-sm table-hover align-middle mb-0">
+                        <thead>
+                            <tr><th>Name</th><th>File</th><th>Status</th><th>Rows</th><th>By</th><th>When</th><th></th></tr>
+                        </thead>
+                        <tbody id="importHistoryBody">
+                            <tr><td colspan="7" class="text-center text-muted py-3">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+</div>
+{% endif %}
+<!-- =========================== END IMPORT PANE =========================== -->
+
 <!-- ============================= CHANNELS PANE ============================= -->
 {% if has_permission('edr.agent.manage') %}
 <div id="paneChannels" style="display: {{ 'block' if active_tab == 'channels' else 'none' }};">
@@ -629,7 +815,7 @@ function loadIngestionHealth() {
 // both Drop Rules and Channels regardless of which pane is visible, and all
 // the underlying calls are cheap, so there's no lazy-load benefit worth the
 // "which tiles are stale" bookkeeping it would add.
-const LOG_PIPELINE_TABS = ['droprules', 'dns', 'channels', 'linuxchannels', 'silentsources', 'parsers'];
+const LOG_PIPELINE_TABS = ['droprules', 'dns', 'channels', 'linuxchannels', 'silentsources', 'parsers', 'import'];
 function logPipelineTabCap(t) { return t.charAt(0).toUpperCase() + t.slice(1); }
 function switchLogPipelineTab(tab) {
     if (!LOG_PIPELINE_TABS.includes(tab)) tab = 'droprules';
@@ -1673,6 +1859,393 @@ async function deleteCustomParser(id) {
 }
 
 // =====================================================================
+// LOG IMPORT (Phase 1) -- upload/normalize/map/preview/commit wizard
+// =====================================================================
+
+const IMPORT_TARGET_COLUMN_OPTIONS = [
+    {value: '', label: '-- Ignore --'},
+    {value: 'timestamp', label: 'Timestamp'},
+    {value: 'host', label: 'Host'},
+    {value: 'app', label: 'App / Source'},
+    {value: 'severity', label: 'Severity'},
+    {value: 'event_id', label: 'Event ID'},
+    {value: 'username', label: 'User'},
+    {value: 'source_ip', label: 'Source IP'},
+    {value: 'destination_ip', label: 'Destination IP'},
+    {value: 'message', label: 'Message'},
+    {value: 'process_image', label: 'Process Image'},
+    {value: 'command_line', label: 'Command Line'},
+    {value: 'parent_image', label: 'Parent Image'},
+    {value: 'parent_command_line', label: 'Parent Command Line'},
+    {value: 'original_file_name', label: 'Original File Name'},
+    {value: 'file_hash', label: 'File Hash'},
+    {value: 'query_name', label: 'DNS Query'},
+];
+
+let importState = {
+    id: null, totalRows: 0, rowsNormalized: 0, rowsImported: 0, rowsFailed: 0,
+    detectedFields: [], suggestedMapping: {}, previewRows: [], severityValues: [],
+};
+let importHistory = [];
+let importMappingProfiles = [];
+let importAbort = false;  // set true on a 409/fatal error to stop an in-flight loop
+
+function importGoToStep(n) {
+    for (let i = 1; i <= 6; i++) {
+        const el = document.getElementById('importStep' + i);
+        if (el) el.style.display = (i === n) ? 'block' : 'none';
+    }
+}
+
+function importResetWizard() {
+    importState = {id: null, totalRows: 0, rowsNormalized: 0, rowsImported: 0, rowsFailed: 0,
+                    detectedFields: [], suggestedMapping: {}, previewRows: [], severityValues: []};
+    importAbort = false;
+    document.getElementById('importFileInput').value = '';
+    document.getElementById('importNameInput').value = '';
+    document.getElementById('importUploadError').style.display = 'none';
+    importGoToStep(1);
+    loadImportHistory();
+}
+
+function importShowError(stepErrorId, message) {
+    const el = document.getElementById(stepErrorId);
+    if (el) { el.textContent = message; el.style.display = 'block'; }
+}
+
+// ---- Step 1: Upload ----
+function importStartUpload() {
+    const fileInput = document.getElementById('importFileInput');
+    const file = fileInput.files[0];
+    if (!file) { importShowError('importUploadError', 'Choose a file first.'); return; }
+    document.getElementById('importUploadError').style.display = 'none';
+    const form = new FormData();
+    form.append('file', file);
+    form.append('name', document.getElementById('importNameInput').value || '');
+    fetch('/api/logs/import/upload', {method: 'POST', body: form})
+        .then(async r => {
+            const d = await r.json();
+            if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+            return d;
+        })
+        .then(d => {
+            importState.id = d.import_id;
+            importState.totalRows = d.total_rows;
+            importGoToStep(2);
+            document.getElementById('importNormalizeCount').textContent = `0 / ${d.total_rows} rows`;
+            importAbort = false;
+            importRunNormalizeLoop();
+        })
+        .catch(err => importShowError('importUploadError', String(err.message || err)));
+}
+
+// ---- Step 2: Normalize (chunked client loop) ----
+function importRunNormalizeLoop() {
+    if (importAbort) return;
+    fetch(`/api/logs/import/${importState.id}/normalize`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({lines_per_call: 5000})
+    })
+        .then(async r => {
+            const d = await r.json();
+            if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+            return d;
+        })
+        .then(d => {
+            importState.rowsNormalized = d.rows_normalized;
+            const total = d.total_rows || importState.totalRows || 1;
+            const pct = Math.min(100, Math.round((d.rows_normalized / total) * 100));
+            document.getElementById('importNormalizeBar').style.width = pct + '%';
+            document.getElementById('importNormalizeCount').textContent = `${d.rows_normalized} / ${d.total_rows} rows`;
+            if (d.status === 'mapped') {
+                importState.detectedFields = d.detected_fields || [];
+                importState.suggestedMapping = d.suggested_mapping || {};
+                importState.previewRows = d.preview_rows || [];
+                importRenderMappingStep();
+                importGoToStep(3);
+            } else {
+                importRunNormalizeLoop();
+            }
+        })
+        .catch(err => {
+            importAbort = true;
+            importShowError('importNormalizeError', String(err.message || err));
+        });
+}
+
+// ---- Step 3: Map Fields ----
+function importSampleValueFor(field) {
+    for (const row of importState.previewRows) {
+        if (row[field] !== undefined && row[field] !== null && String(row[field]).trim() !== '') {
+            return String(row[field]);
+        }
+    }
+    return '';
+}
+
+function importRenderMappingStep() {
+    const body = document.getElementById('importMappingBody');
+    body.innerHTML = importState.detectedFields.map(field => {
+        const suggested = importState.suggestedMapping[field] || '';
+        const sample = importSampleValueFor(field);
+        const options = IMPORT_TARGET_COLUMN_OPTIONS.map(o =>
+            `<option value="${escAttr(o.value)}" ${o.value === suggested ? 'selected' : ''}>${escHtml(o.label)}</option>`
+        ).join('');
+        return `<tr>
+            <td class="font-monospace small">${escHtml(field)}</td>
+            <td class="text-muted small">${escHtml(sample.slice(0, 80))}</td>
+            <td><select class="form-select form-select-sm bg-dark text-light border-secondary import-map-select" data-field="${escAttr(field)}" onchange="importOnMappingChange()">${options}</select></td>
+        </tr>`;
+    }).join('');
+
+    const tsSelect = document.getElementById('importTsFieldSelect');
+    const suggestedTsField = Object.keys(importState.suggestedMapping).find(f => importState.suggestedMapping[f] === 'timestamp');
+    tsSelect.innerHTML = importState.detectedFields.map(f =>
+        `<option value="${escAttr(f)}" ${f === suggestedTsField ? 'selected' : ''}>${escHtml(f)}</option>`
+    ).join('');
+    tsSelect.onchange = importUpdateTsPreview;
+    document.getElementById('importTsFormatSelect').value = '';
+    document.getElementById('importTsFormatCustom').style.display = 'none';
+    document.getElementById('importTzChoiceSelect').value = 'utc';
+    document.getElementById('importTzCustomOffset').style.display = 'none';
+    importUpdateTsPreview();
+    importOnMappingChange();  // populates the severity-rename card if severity is already mapped
+}
+
+function importOnMappingChange() {
+    const severityField = Array.from(document.querySelectorAll('.import-map-select'))
+        .find(sel => sel.value === 'severity');
+    const card = document.getElementById('importSeverityRenameCard');
+    if (!severityField) { card.style.display = 'none'; return; }
+    const field = severityField.dataset.field;
+    const values = [...new Set(importState.previewRows.map(r => r[field]).filter(v => v !== undefined && v !== null && String(v).trim() !== ''))];
+    if (values.length === 0) { card.style.display = 'none'; return; }
+    card.style.display = 'block';
+    document.getElementById('importSeverityRenameBody').innerHTML = values.map(v => `
+        <div class="row g-2 align-items-center mb-1">
+            <div class="col-auto font-monospace small" style="width:160px;">${escHtml(String(v))}</div>
+            <div class="col-auto">&rarr;</div>
+            <div class="col-auto">
+                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary import-sev-rename" data-source-value="${escAttr(String(v))}" placeholder="${escAttr(String(v))}" style="width:160px;">
+            </div>
+        </div>`).join('');
+}
+
+function importUpdateTsFormatCustom() {
+    const sel = document.getElementById('importTsFormatSelect');
+    document.getElementById('importTsFormatCustom').style.display = (sel.value === '__custom__') ? 'block' : 'none';
+    importUpdateTsPreview();
+}
+
+function importUpdateTzCustom() {
+    document.getElementById('importTzCustomOffset').style.display =
+        (document.getElementById('importTzChoiceSelect').value === 'custom') ? 'block' : 'none';
+}
+
+function importUpdateTsPreview() {
+    const field = document.getElementById('importTsFieldSelect').value;
+    const sample = importSampleValueFor(field);
+    document.getElementById('importTsPreview').textContent = sample || '—';
+}
+
+function importCollectMapping() {
+    const mapping = {};
+    document.querySelectorAll('.import-map-select').forEach(sel => {
+        if (sel.value) mapping[sel.dataset.field] = sel.value;
+    });
+    return mapping;
+}
+
+function importCollectTimestampConfig() {
+    const formatSel = document.getElementById('importTsFormatSelect').value;
+    const timestamp_format = formatSel === '__custom__' ? (document.getElementById('importTsFormatCustom').value || null) : (formatSel || null);
+    const tz_choice = document.getElementById('importTzChoiceSelect').value;
+    const tz_custom_minutes = tz_choice === 'custom' ? parseInt(document.getElementById('importTzCustomOffset').value, 10) : null;
+    return {
+        timestamp_field: document.getElementById('importTsFieldSelect').value,
+        timestamp_format, tz_choice, tz_custom_minutes,
+    };
+}
+
+function importCollectSeverityValueMap() {
+    const map = {};
+    document.querySelectorAll('.import-sev-rename').forEach(input => {
+        if (input.value.trim()) map[input.dataset.sourceValue] = input.value.trim();
+    });
+    return Object.keys(map).length ? map : null;
+}
+
+function importBuildCommitPayload() {
+    return {
+        mapping: importCollectMapping(),
+        ...importCollectTimestampConfig(),
+        severity_value_map: importCollectSeverityValueMap(),
+    };
+}
+
+// ---- Step 4: Preview ----
+function importGoToPreview() {
+    const payload = importBuildCommitPayload();
+    if (!payload.timestamp_field) { alert('Pick a Timestamp Field first.'); return; }
+    fetch(`/api/logs/import/${importState.id}/preview`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    })
+        .then(async r => {
+            const d = await r.json();
+            if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+            return d;
+        })
+        .then(d => {
+            document.getElementById('importPreviewBanner').textContent =
+                `${d.parsed_ok} of ${d.sampled} sampled rows parsed cleanly` + (d.errors.length ? ` -- ${d.errors.length} sample error(s) shown below in the actual import.` : '.');
+            document.getElementById('importPreviewBody').innerHTML = d.rows.slice(0, 20).map(r => `
+                <tr>
+                    <td class="font-monospace small">${escHtml(r.timestamp || '')}</td>
+                    <td>${escHtml(r.host || '')}</td>
+                    <td>${escHtml(r.severity || '')}</td>
+                    <td class="small">${escHtml((r.message || '').slice(0, 140))}</td>
+                </tr>`).join('') || '<tr><td colspan="4" class="text-center text-muted py-2">No rows parsed in this sample.</td></tr>';
+            importGoToStep(4);
+        })
+        .catch(err => alert('Preview failed: ' + (err.message || err)));
+}
+
+// ---- Step 5: Commit (chunked client loop) ----
+function importStartCommit() {
+    importGoToStep(5);
+    document.getElementById('importCommitError').style.display = 'none';
+    importAbort = false;
+    importRunCommitLoop();
+}
+
+function importRunCommitLoop() {
+    if (importAbort) return;
+    const payload = {...importBuildCommitPayload(), chunk_rows: 5000};
+    fetch(`/api/logs/import/${importState.id}/commit`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    })
+        .then(async r => {
+            const d = await r.json();
+            if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+            return d;
+        })
+        .then(d => {
+            importState.rowsImported = d.rows_imported;
+            importState.rowsFailed = d.rows_failed;
+            const total = d.total_rows || importState.totalRows || 1;
+            const pct = Math.min(100, Math.round(((d.rows_imported + d.rows_failed) / total) * 100));
+            document.getElementById('importCommitBar').style.width = pct + '%';
+            document.getElementById('importCommitCount').textContent = `${d.rows_imported + d.rows_failed} / ${total} rows`;
+            if (d.status === 'complete') {
+                document.getElementById('importDoneBanner').textContent =
+                    `Done: ${d.rows_imported} row(s) imported, ${d.rows_failed} row(s) failed to parse.`;
+                const link = document.getElementById('importDoneSearchLink');
+                link.href = `/siem?tab=search&range=all&types=import&fieldKey=import_id&fieldVal=${importState.id}`;
+                importGoToStep(6);
+                loadImportHistory();
+            } else {
+                importRunCommitLoop();
+            }
+        })
+        .catch(err => {
+            importAbort = true;
+            importShowError('importCommitError', String(err.message || err));
+        });
+}
+
+// ---- Mapping profiles ----
+function loadImportMappingProfiles() {
+    fetch('/api/logs/import-mapping-profiles')
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(rows => {
+            importMappingProfiles = rows;
+            const sel = document.getElementById('importProfileSelect');
+            sel.innerHTML = '<option value="">Load a saved mapping profile&hellip;</option>' +
+                rows.map(p => `<option value="${p.id}">${escHtml(p.name)}</option>`).join('');
+        })
+        .catch(err => console.error('Error loading import mapping profiles:', err));
+}
+
+function importSaveMappingProfile() {
+    const name = document.getElementById('importSaveProfileName').value.trim();
+    if (!name) { alert('Name this mapping profile first.'); return; }
+    const profile = importBuildCommitPayload();
+    fetch('/api/logs/import-mapping-profiles', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name, profile})
+    })
+        .then(async r => {
+            const d = await r.json();
+            if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+            document.getElementById('importSaveProfileName').value = '';
+            loadImportMappingProfiles();
+        })
+        .catch(err => alert('Could not save mapping profile: ' + (err.message || err)));
+}
+
+function importApplyMappingProfile() {
+    const id = parseInt(document.getElementById('importProfileSelect').value, 10);
+    const profile = importMappingProfiles.find(p => p.id === id);
+    if (!profile) return;
+    let saved;
+    try { saved = JSON.parse(profile.profile_json); } catch (e) { return; }
+    document.querySelectorAll('.import-map-select').forEach(sel => {
+        if (saved.mapping && saved.mapping[sel.dataset.field]) sel.value = saved.mapping[sel.dataset.field];
+    });
+    if (saved.timestamp_field) document.getElementById('importTsFieldSelect').value = saved.timestamp_field;
+    if (saved.tz_choice) document.getElementById('importTzChoiceSelect').value = saved.tz_choice;
+    importUpdateTzCustom();
+    if (saved.tz_custom_minutes !== null && saved.tz_custom_minutes !== undefined) {
+        document.getElementById('importTzCustomOffset').value = String(saved.tz_custom_minutes);
+    }
+    importUpdateTsPreview();
+    importOnMappingChange();
+}
+
+// ---- Import History ----
+function loadImportHistory() {
+    fetch('/api/logs/import')
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(rows => { importHistory = rows; renderImportHistory(); })
+        .catch(err => renderLoadError('importHistoryBody', 7, 'Failed to load import history: ' + String(err.message || err)));
+}
+
+const IMPORT_STATUS_BADGE = {
+    uploaded: 'bg-secondary', normalizing: 'bg-info text-dark', mapped: 'bg-info text-dark',
+    importing: 'bg-primary', complete: 'bg-success', cancelled: 'bg-secondary',
+};
+
+function renderImportHistory() {
+    const body = document.getElementById('importHistoryBody');
+    if (!importHistory.length) {
+        body.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No imports yet.</td></tr>';
+        return;
+    }
+    body.innerHTML = importHistory.map(imp => {
+        const rowsLabel = imp.status === 'complete'
+            ? `${imp.rows_imported} imported, ${imp.rows_failed} failed`
+            : `${imp.rows_normalized || 0} / ${imp.total_rows || '?'} normalized`;
+        return `<tr>
+            <td>${escHtml(imp.name || '')}</td>
+            <td class="small text-muted">${escHtml(imp.source_filename || '')}</td>
+            <td><span class="badge ${IMPORT_STATUS_BADGE[imp.status] || 'bg-secondary'}">${escHtml(imp.status)}</span></td>
+            <td class="small">${escHtml(rowsLabel)}</td>
+            <td class="small text-muted">${escHtml(imp.created_by || '')}</td>
+            <td class="small text-muted">${escHtml(imp.created_at || '')}</td>
+            <td>
+                ${imp.status === 'complete' ? `<a href="/siem?tab=search&range=all&types=import&fieldKey=import_id&fieldVal=${imp.id}" target="_blank" class="btn btn-sm btn-outline-info me-1" title="View in Log Search"><i class="fa-solid fa-magnifying-glass"></i></a>` : ''}
+                <button class="btn btn-sm btn-outline-danger" title="Delete this import" onclick="deleteImport(${imp.id})"><i class="fa-solid fa-trash"></i></button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+async function deleteImport(id) {
+    if (!(await confirmDialog('Delete this import? All of its rows will be removed from Log Search.', {title: 'Delete import', danger: true, confirmLabel: 'Delete'}))) return;
+    fetch(`/api/logs/import/${id}`, {method: 'DELETE'})
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); loadImportHistory(); })
+        .catch(err => alert('Could not delete import: ' + (err.message || err)));
+}
+
+// =====================================================================
 // INIT
 // =====================================================================
 document.addEventListener("DOMContentLoaded", function() {
@@ -1703,6 +2276,10 @@ document.addEventListener("DOMContentLoaded", function() {
     loadParserHealth();
     loadCustomParsers();
     loadIngestionHealth();
+    if (document.getElementById('paneImport')) {
+        loadImportHistory();
+        loadImportMappingProfiles();
+    }
 });
 </script>
 {% endblock %}

@@ -10,6 +10,77 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-08
 
+### New: Log Import (Phase 1) — CSV/NDJSON/JSON-array import from other SIEMs
+
+Customers migrating off another SIEM (Splunk, QRadar, Elastic, Sentinel, etc.) can now
+bring their historical logs into a new "Import" tab on the Log Pipeline page. Scoped
+deliberately to a pure historical-search feature: imported rows land in a new
+`imported_logs` table (never `live_logs`, which detection/UEBA/retention are all tuned
+around) and never feed live Sigma detection or UEBA baselining — an opt-in "Replay
+Detection" action against a specific import is a documented, explicitly deferred Phase 2,
+not started until this phase ships and gets real use.
+
+**Wizard**: Upload → (chunked) Normalize → Map Fields → Preview → (chunked) Commit →
+Done. Field mapping is auto-suggested via a new `IMPORT_FIELD_ALIASES` table (the same
+"many vendor names, one canonical column" idea `sigma_engine.py`'s `_FIELD_COLUMN_ALIASES`
+already uses for Sigma field resolution) — a Splunk/Elastic/QRadar export needs near-zero
+manual remapping for the common fields. Timestamp timezone is a required, explicit choice
+(UTC / this server's local time / a custom fixed offset) — never inferred — matching the
+whole timezone-discipline thread from the two Log Search fixes earlier this same day. A
+lightweight per-value Severity rename (distinct values found → optional rename, defaults
+to pass-through) covers the "every vendor uses a different severity vocabulary" problem
+without a full value-normalization system.
+
+**No async job queue** (none exists anywhere in this codebase — confirmed zero
+`threading` usage in `app.py`, and gunicorn runs with no explicit `--timeout`, so a
+250MB file parsed synchronously in one request would risk the same worker-kill failure
+mode a large SQL insert already has to avoid). Instead both slow phases are
+client-driven and chunked: the browser calls `/normalize` and `/commit` repeatedly,
+each call bounded and comfortably inside any reasonable timeout, with the loop itself
+driving a real progress bar and getting a resumable operation for free. Both loops guard
+against two tabs racing the same import via an optimistic-concurrency conditional
+`UPDATE ... WHERE offset = ?` — a losing race gets a clean 409, never a silent
+double-insert.
+
+**A real bug caught by testing, not assumed**: the original design chunked CSV parsing
+the same way as NDJSON (a resumable byte-offset cookie via `f.tell()`/`f.seek()`). The
+very first fixture test against it raised a genuine `OSError: telling position disabled
+by next() call` — Python's io module explicitly disables `tell()` on a text file once
+its own `next()`/for-loop iteration has been used, which is exactly what
+`csv.reader`/`csv.DictReader` do internally. CSV (and JSON-array, which has the same
+"can't resume without a real streaming decoder" problem) are parsed in one single pass
+instead, with their own smaller upload-time size caps (50MB / 25MB) — NDJSON is the one
+format that gets true chunked resume, at a more generous 250MB cap.
+
+**Log Search integration reused, not rebuilt**: a new `import` branch slots directly
+into the `LOG_TYPE_BRANCHES` union architecture built for the Log Search timezone fixes
+above — since `imported_logs.timestamp` is normalized to UTC at insert time (Python
+`timedelta` arithmetic, never a client-influenced SQL expression — closes off a
+SQL-injection-adjacent surface the field-mapping step would otherwise open, since a
+mapping target has to be validated server-side against a fixed column whitelist before
+it can be interpolated into an `INSERT`'s column list), it needs **zero changes** to
+`_build_optimized_log_query`/`_build_normalized_log_union`/`_count_log_rows` — those
+functions already treat any non-`'log'` branch as UTC-native. A new `import_id` column
+threaded through `_UNIFIED_LOG_COLUMNS` and every existing branch (one line each) lets
+the wizard's "Done" screen deep-link Log Search filtered to exactly the rows from one
+import batch, with an explicit `range=all` so historical data — which by definition
+usually predates Log Search's default 24h window — doesn't land on an apparently-empty
+results page that reads as "the import silently failed."
+
+**Permission**: new `logsearch.import.manage` key, gated on every route including GETs
+(import history can carry sensitive customer-migration context in its labels/filenames
+— this repo has hit the "GET route shipping with only `@login_required`" bug class
+multiple times before, documented below). A new backfill migration grants it to any
+role that already holds the sibling `logsearch.droprules.manage` permission — adding a
+key to the permission registry alone does nothing for an *existing* production install,
+since the default-role seed only runs once, on a fresh install with an empty `roles`
+table.
+
+**Abandoned imports are reaped automatically**: a new `_cleanup_stale_imports` sweep
+(wired into the existing 30s scheduled-sweep endpoint, no new cron job) deletes any
+import still stuck mid-wizard more than 48 hours after creation — otherwise a closed
+browser tab mid-upload leaves an orphaned file on disk and a stuck history row forever.
+
 ### Log Search: fixed the mixed-clock `UNIFIED_LOGS_SQL` gap flagged below, plus a UTC/Local display toggle
 
 Follow-up to the "Bigger, deliberately NOT fixed" gap flagged right below this entry
