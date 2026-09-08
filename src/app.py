@@ -2758,13 +2758,13 @@ def _dns_server_config(db):
 @login_required
 def api_settings_dns_server():
     db = get_db()
+    err = require_permission('logsearch.droprules.manage')
+    if err: return err
     if request.method == 'GET':
         cfg = _dns_server_config(db)
         status_row = db.execute("SELECT value FROM settings WHERE key = 'dns_server_status'").fetchone()
         cfg['status'] = json.loads(status_row['value']) if status_row and status_row['value'] else None
         return jsonify(cfg)
-    err = require_permission('logsearch.droprules.manage')
-    if err: return err
     d = request.json or {}
     enabled = bool(d.get('enabled'))
     bind_ip = (d.get('bind_ip') or '').strip()
@@ -2796,6 +2796,8 @@ def api_settings_dns_server():
 @app.route('/api/settings/dns-server/interfaces', methods=['GET'])
 @login_required
 def api_settings_dns_server_interfaces():
+    err = require_permission('logsearch.droprules.manage')
+    if err: return err
     try:
         out = subprocess.run(['ip', '-o', '-4', 'addr', 'show'], capture_output=True, text=True, timeout=10)
         if out.returncode != 0:
@@ -2967,10 +2969,10 @@ def api_droprules_preview():
 @login_required
 def api_custom_parsers():
     db = get_db()
-    if request.method == 'GET':
-        return jsonify([dict(r) for r in db.execute("SELECT * FROM custom_parsers ORDER BY priority ASC, id ASC").fetchall()])
     err = require_permission('logsearch.droprules.manage')
     if err: return err
+    if request.method == 'GET':
+        return jsonify([dict(r) for r in db.execute("SELECT * FROM custom_parsers ORDER BY priority ASC, id ASC").fetchall()])
     d = request.get_json() or {}
     name = (d.get('name') or '').strip()
     pattern = d.get('pattern') or ''

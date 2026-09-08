@@ -10,6 +10,40 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-07
 
+### Bug-hunt pass: stored XSS, 3 missing permission gates, and 3 smaller correctness fixes
+
+An 8-angle multi-agent code review of this session's cumulative diff (everything since
+the last reviewed commit — DNS server, case IDs, EDR custom commands, SOC metrics, the
+changelog reflow and Vector race fixes) surfaced several real, independently-confirmed
+issues, all fixed in this same pass:
+
+- **Stored XSS** in the Dashboards DNS Activity widget's top-domains badges
+  (`templates/dashboards.html`, `renderDnsActivityWidget`): a DNS query name — fully
+  attacker-controlled, `src/dns_server.py` logs it verbatim with no label validation —
+  was interpolated into a double-quoted `onclick` attribute with only the single quote
+  escaped. A query name like `evil.com" onmouseover="alert(document.cookie)` (any
+  device on the monitored network can trigger one just by resolving it) broke out of
+  the attribute and injected arbitrary JS into an analyst's session on page view. Fixed
+  with a proper two-stage escape (JS-string-escape, then HTML-attribute-escape) and
+  verified end-to-end against the real function with the exact payload above.
+- **Three GET routes missing the permission check their own POST/PUT sibling already
+  had** — `/api/settings/dns-server`, `/api/settings/dns-server/interfaces`, and
+  `/api/custom-parsers` — the exact recurring bug class this repo has hit before (a
+  mutating route gated, its read-only sibling quietly shipped `@login_required`-only).
+  Any authenticated low-privilege role could read fleet-wide DNS forwarder config,
+  enumerate the appliance's network interfaces, or read every custom parser's regex
+  pattern. All three now require `logsearch.droprules.manage`, matching their siblings.
+- `src/dns_server.py`'s `_forward_query`: `sock` was referenced in a `finally` block
+  before being guaranteed bound — if `socket.socket()` itself raised (fd exhaustion
+  under load), the `finally` threw `NameError`, masking the real error and killing the
+  per-query worker thread instead of falling through to the next forwarder.
+- `templates/cases.html`'s `deleteCaseAttachment`: didn't check the response status, so
+  deleting an attachment on a case someone else had just closed (a real 403) silently
+  re-rendered the case as if nothing happened, attachment still present, no error shown.
+- `templates/agents.html`: the endpoints table's error-state colspan was hardcoded to
+  10 for an 11-column table (one column short) — cosmetic, but a real leftover mismatch
+  from an earlier column addition.
+
 ### Four more SOC metrics: False Positive Rate, SLA Compliance, Reopen Rate, Escalation Rate, Dwell Time
 
 Follow-up to the MTTD/MTTA/MTTI/MTTC/MTTR work below — added to the same "Case Metrics

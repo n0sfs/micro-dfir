@@ -1775,7 +1775,16 @@ function uploadCaseAttachment() {
 async function deleteCaseAttachment(aid, name) {
     if (!(await confirmDialog(`Delete attachment "${name}"? This cannot be undone.`, { title: 'Delete attachment', danger: true, confirmLabel: 'Delete' }))) return;
     fetch(`/api/cases/${activeCaseId}/attachments/${aid}`, { method: 'DELETE' })
-        .then(() => openCaseDetail(activeCaseId))
+        .then(r => r.json().then(data => ({ ok: r.ok, data })))
+        .then(({ ok, data }) => {
+            // fetch() only rejects on a network failure, not a non-2xx response (e.g.
+            // the case having been closed by someone else since this page loaded,
+            // 403 via _require_open_case) -- without this check that failure was
+            // silently swallowed: the reload below ran anyway, showing the attachment
+            // still present with no indication the delete never happened.
+            if (!ok) { toast(data.error || 'Failed to delete attachment.', 'danger'); return; }
+            openCaseDetail(activeCaseId);
+        })
         .catch(err => toast('Error deleting attachment: ' + err, 'danger'));
 }
 

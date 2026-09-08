@@ -408,8 +408,17 @@ function renderDnsActivityWidget(container, widgetId, config) {
                 ? ` · <span class="text-danger">${d.threat_intel_matches} matched known threat intel</span>`
                 : ' · <span class="text-muted">no threat-intel matches</span>');
         const domainsEl = container.querySelector('.widget-dns-domains');
+        // dm.domain is an attacker-controlled DNS query name (dns_server.py logs it
+        // verbatim, no label validation) landing inside a double-quoted onclick
+        // attribute around a single-quoted JS string literal -- needs BOTH escapes:
+        // JS-string-escape first (backslash, then quote), then HTML-attribute-escape
+        // the result, or a domain like `x" onmouseover="alert(1)` breaks out of the
+        // attribute entirely (the previous code only escaped the single quote).
+        const escOnclickArg = (s) => String(s)
+            .replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+            .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         domainsEl.innerHTML = d.top_domains.map(dm =>
-            `<span class="badge bg-secondary" title="${dm.count} quer${dm.count === 1 ? 'y' : 'ies'}" style="cursor:pointer;" onclick="pivotToLogSearch('query_name', '${dm.domain.replace(/'/g, "\\'")}')">${escHtml(dm.domain)} (${dm.count})</span>`
+            `<span class="badge bg-secondary" title="${dm.count} quer${dm.count === 1 ? 'y' : 'ies'}" style="cursor:pointer;" onclick="pivotToLogSearch('query_name', '${escOnclickArg(dm.domain)}')">${escHtml(dm.domain)} (${dm.count})</span>`
         ).join('');
     }).catch(err => {
         console.error('Error loading DNS activity:', err);
