@@ -9538,6 +9538,55 @@ def api_dashboard_case_stats():
         "FROM cases WHERE status = 'open'"
     ).fetchall()
     sla_breached = sum(1 for c in open_cases_for_sla if c['age_hours'] > _case_sla_hours_for(db, c['queue_id'], c['severity']))
+
+    # False Positive Rate: of alerts an analyst has actually triaged (status moved off
+    # the 'new' default), what share were marked false_positive. Untriaged alerts are
+    # excluded from the denominator -- counting them as "not false positive" would
+    # understate the rate for a backlog nobody's looked at yet.
+    fp_row = db.execute(
+        "SELECT SUM(CASE WHEN status = 'false_positive' THEN 1 ELSE 0 END) as fp_count, COUNT(*) as triaged_count "
+        "FROM alerts WHERE status != 'new' AND timestamp >= datetime('now', ?)",
+        (f'-{days} days',)
+    ).fetchone()
+    false_positive_rate_pct = round(fp_row['fp_count'] / fp_row['triaged_count'] * 100, 1) if fp_row['triaged_count'] else None
+
+    # SLA Compliance Rate: of cases actually CLOSED in-window, what share closed within
+    # their own per-queue/per-severity SLA target -- the historical complement to
+    # sla_breached_count above (which is a live snapshot of currently-open cases only).
+    closed_cases_for_sla = db.execute(
+        "SELECT queue_id, severity, (julianday(closed_at) - julianday(created_at)) * 24 as hours_to_close "
+        "FROM cases WHERE status = 'closed' AND closed_at IS NOT NULL AND closed_at >= datetime('now', ?)",
+        (f'-{days} days',)
+    ).fetchall()
+    if closed_cases_for_sla:
+        within_sla = sum(1 for c in closed_cases_for_sla if c['hours_to_close'] <= _case_sla_hours_for(db, c['queue_id'], c['severity']))
+        sla_compliance_pct = round(within_sla / len(closed_cases_for_sla) * 100, 1)
+    else:
+        sla_compliance_pct = None
+
+    # Reopen Rate: of cases ever closed at least once (currently closed, OR reopened at
+    # some point and possibly open again now), what share were ever reopened.
+    # reopened_count (migrate_case_reopen_tracking) was added specifically "for a future
+    # reopen-rate metric" -- this is that metric. Deliberately unwindowed, like
+    # open_count above -- a case reopened long ago still belongs in a lifetime rate.
+    reopen_stats = db.execute(
+        "SELECT COUNT(*) as ever_closed, SUM(CASE WHEN reopened_count > 0 THEN 1 ELSE 0 END) as reopened "
+        "FROM cases WHERE status = 'closed' OR reopened_count > 0"
+    ).fetchone()
+    reopen_rate_pct = round(reopen_stats['reopened'] / reopen_stats['ever_closed'] * 100, 1) if reopen_stats['ever_closed'] else None
+
+    # Escalation Rate: of alerts fired in-window, what share were ever linked into a
+    # case (case_items item_type='alert') -- "how often does an alert turn into a real
+    # investigation" vs. being triaged and closed at the alert level alone.
+    esc_row = db.execute(
+        "SELECT COUNT(*) as total_alerts, "
+        "(SELECT COUNT(DISTINCT a2.id) FROM alerts a2 JOIN case_items ci ON ci.item_type = 'alert' AND ci.item_id = CAST(a2.id AS TEXT) "
+        " WHERE a2.timestamp >= datetime('now', ?)) as escalated_alerts "
+        "FROM alerts WHERE timestamp >= datetime('now', ?)",
+        (f'-{days} days', f'-{days} days')
+    ).fetchone()
+    escalation_rate_pct = round(esc_row['escalated_alerts'] / esc_row['total_alerts'] * 100, 1) if esc_row['total_alerts'] else None
+
     return jsonify({
         'open_count': open_count,
         'closed_in_range_count': closed_in_range,
@@ -9546,6 +9595,10 @@ def api_dashboard_case_stats():
         'avg_mttd_seconds': round(avg_mttd_seconds, 1) if avg_mttd_seconds is not None else None,
         'avg_mtti_hours': round(avg_mtti_hours, 1) if avg_mtti_hours is not None else None,
         'avg_mttc_hours': round(avg_mttc_hours, 1) if avg_mttc_hours is not None else None,
+        'false_positive_rate_pct': false_positive_rate_pct,
+        'sla_compliance_pct': sla_compliance_pct,
+        'reopen_rate_pct': reopen_rate_pct,
+        'escalation_rate_pct': escalation_rate_pct,
         'sla_target_hours': sla_hours,
         'sla_hours_by_severity': _case_sla_hours_by_severity(db),
         'sla_breached_count': sla_breached,

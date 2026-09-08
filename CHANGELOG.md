@@ -10,6 +10,36 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-07
 
+### Four more SOC metrics: False Positive Rate, SLA Compliance, Reopen Rate, Escalation Rate, Dwell Time
+
+Follow-up to the MTTD/MTTA/MTTI/MTTC/MTTR work below — added to the same "Case Metrics
+& SLA" dashboard widget as a second "Additional SOC Metrics" row, all backed by data
+already in the schema, no new columns needed:
+- **False Positive Rate**: of alerts an analyst has actually triaged (`status` moved off
+  the `'new'` default), the share marked `false_positive`. Untriaged alerts excluded
+  from the denominator on purpose — counting an unlooked-at backlog as "not false
+  positive" would understate the real rate.
+- **SLA Compliance Rate**: of cases closed in the selected range, the share that closed
+  within their own per-queue/per-severity SLA target — the historical complement to the
+  existing `sla_breached_count` (a live snapshot of currently-open cases only).
+- **Reopen Rate**: of cases ever closed at least once, the share ever reopened
+  afterward. `cases.reopened_count` was added a few phases back specifically "for a
+  future reopen-rate metric" (its own code comment) — this is that metric, finally built.
+- **Escalation Rate**: of alerts fired in the range, the share ever linked into a case
+  (`case_items` with `item_type='alert'`) — how often an alert actually becomes a real
+  investigation instead of being triaged and closed at the alert level alone.
+- **Dwell Time**: MTTD + MTTC summed client-side from the two already-fetched values —
+  only shown when both have real data, since treating a missing one as zero would
+  understate it rather than honestly showing "—".
+
+Also fixed a real gap found while seeding demo data for these: adding a case asset as
+already-`'confirmed'` (the one-step path, vs. transitioning an existing `'suspected'`
+asset) never stamped `confirmed_at` — MTTC could never fire for that path. Fixed in the
+same pass. Live-verified end-to-end with a real (labeled) test case: added a confirmed
+asset, created a harmless throwaway file via a custom EDR command, quarantined it, then
+closed the case — all 5 lifecycle tiles and this round's False Positive/SLA/Reopen/
+Escalation/Dwell tiles populated with genuinely-computed (not fabricated) numbers.
+
 ### Case numbers, custom EDR commands from a case, and SOC lifecycle metrics (MTTD/MTTA/MTTI/MTTC/MTTR)
 
 Three small-to-medium fixes/additions in one pass. **Case numbers**: cases only ever

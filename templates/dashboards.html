@@ -1105,6 +1105,14 @@ function renderCaseStatsWidget(container, widgetId, config) {
             <div class="col" title="Mean Time to Investigate: from acknowledgment to the case's first benign/escalate determination."><div class="fs-5 fw-bold widget-mtti">&mdash;</div><div class="small text-muted">MTTI</div></div>
             <div class="col" title="Mean Time to Contain: from an asset being confirmed compromised to the first completed containment action (isolate/kill/quarantine) linked to that case."><div class="fs-5 fw-bold widget-mttc">&mdash;</div><div class="small text-muted">MTTC</div></div>
             <div class="col" title="Mean Time to Recover: from case creation to case closure."><div class="fs-5 fw-bold widget-avg-close">&mdash;</div><div class="small text-muted">MTTR</div></div>
+        </div>
+        <div class="small text-muted border-top pt-2 mb-1" style="border-color:var(--border)!important;">Additional SOC Metrics</div>
+        <div class="row g-2 text-center">
+            <div class="col" title="Of alerts an analyst has triaged (status moved off 'new'), the share marked false_positive."><div class="fs-5 fw-bold widget-fp-rate">&mdash;</div><div class="small text-muted">False Positive Rate</div></div>
+            <div class="col" title="Of cases closed in this range, the share that closed within their own SLA target."><div class="fs-5 fw-bold widget-sla-compliance">&mdash;</div><div class="small text-muted">SLA Compliance</div></div>
+            <div class="col" title="Of cases ever closed at least once, the share that were ever reopened afterward."><div class="fs-5 fw-bold widget-reopen-rate">&mdash;</div><div class="small text-muted">Reopen Rate</div></div>
+            <div class="col" title="Of alerts fired in this range, the share ever linked into a case -- how often an alert becomes a real investigation."><div class="fs-5 fw-bold widget-escalation-rate">&mdash;</div><div class="small text-muted">Escalation Rate</div></div>
+            <div class="col" title="Dwell Time: MTTD + MTTC combined -- first touch to fully contained. Only shown when both have data."><div class="fs-5 fw-bold widget-dwell-time">&mdash;</div><div class="small text-muted">Dwell Time</div></div>
         </div>`;
     loadCaseStatsInto(container, config);
 }
@@ -1114,6 +1122,10 @@ function secondsLabel(s) {
     if (s < 90) return `${Math.round(s)}s`;
     if (s < 5400) return `${Math.round(s / 60)}m`;
     return hoursLabel(s / 3600);
+}
+
+function pctLabel(p) {
+    return (p === null || p === undefined) ? '—' : `${p}%`;
 }
 
 function loadCaseStatsInto(container, config) {
@@ -1131,6 +1143,19 @@ function loadCaseStatsInto(container, config) {
         container.querySelector('.widget-mttd').innerText = secondsLabel(d.avg_mttd_seconds);
         container.querySelector('.widget-mtti').innerText = hoursLabel(d.avg_mtti_hours);
         container.querySelector('.widget-mttc').innerText = hoursLabel(d.avg_mttc_hours);
+        container.querySelector('.widget-fp-rate').innerText = pctLabel(d.false_positive_rate_pct);
+        container.querySelector('.widget-sla-compliance').innerText = pctLabel(d.sla_compliance_pct);
+        container.querySelector('.widget-reopen-rate').innerText = pctLabel(d.reopen_rate_pct);
+        container.querySelector('.widget-escalation-rate').innerText = pctLabel(d.escalation_rate_pct);
+        // Derived client-side from the two lifecycle metrics already fetched -- only
+        // shown when BOTH have real data, since summing a real value with a missing one
+        // (treated as 0) would understate dwell time rather than honestly show "—".
+        const dwellEl = container.querySelector('.widget-dwell-time');
+        if (d.avg_mttd_seconds !== null && d.avg_mttd_seconds !== undefined && d.avg_mttc_hours !== null && d.avg_mttc_hours !== undefined) {
+            dwellEl.innerText = secondsLabel(d.avg_mttd_seconds + d.avg_mttc_hours * 3600);
+        } else {
+            dwellEl.innerText = '—';
+        }
         container.querySelector('.widget-sla-display').innerText = d.sla_target_hours;
         container.querySelector('.widget-sla-input').value = d.sla_target_hours;
         const tiers = d.sla_hours_by_severity || {};
