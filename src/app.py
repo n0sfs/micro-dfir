@@ -14378,12 +14378,12 @@ def api_settings_sysmon_config():
 # Every branch is normalized to the same column shape so the existing filter/search
 # logic (built for live_logs alone) works unchanged against the union.
 #
-# Kept as individual fragments (rather than one flat unioned string) so
-# api_logs_search/export_logs_csv can push WHERE+ORDER BY+LIMIT into each branch
-# separately -- see _build_optimized_log_query()'s comment for why. api_logs_timeline
-# still wants the flat, all-branches-always-unioned shape (it aggregates via its own
-# GROUP BY, not subject to the same cost), so UNIFIED_LOGS_SQL/_WITH_ARCHIVE stay
-# defined below, just derived from these same fragments instead of duplicating them.
+# Kept as individual fragments (rather than one flat unioned string) so every real
+# caller (api_logs_search/export_logs_csv via _build_optimized_log_query,
+# api_logs_timeline via _build_normalized_log_union) can push WHERE (and, for the
+# former two, ORDER BY+LIMIT) into each branch separately, with the log/log_archive
+# branches' timestamp normalized to UTC before the branches are combined -- see
+# _build_optimized_log_query()'s comment for why per-branch beats a flat union.
 _LOG_BRANCH_SQL = """SELECT timestamp, severity, host, app, event_id, username, source_ip, destination_ip, message, 'log' as log_type,
        NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
        process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
@@ -14473,9 +14473,6 @@ LOG_TYPE_BRANCHES_WITH_ARCHIVE = [
     ('log', _LOG_BRANCH_SQL), ('log', _LOG_ARCHIVE_BRANCH_SQL), ('alert', _ALERT_BRANCH_SQL),
     ('anomaly', _ANOMALY_BRANCH_SQL), ('command', _COMMAND_BRANCH_SQL)
 ]
-
-UNIFIED_LOGS_SQL = "(\n" + "\nUNION ALL\n".join(sql for _, sql in LOG_TYPE_BRANCHES) + "\n) AS unified_logs"
-UNIFIED_LOGS_SQL_WITH_ARCHIVE = "(\n" + "\nUNION ALL\n".join(sql for _, sql in LOG_TYPE_BRANCHES_WITH_ARCHIVE) + "\n) AS unified_logs"
 
 _RANGE_DELTAS = {
     '5m': ('minutes', 5), '15m': ('minutes', 15), '30m': ('minutes', 30),
@@ -14765,10 +14762,12 @@ def _build_log_other_filters(args):
     if active_types:
         # log_type is one of 'log' / 'alert' / 'anomaly' / 'command' -- both the UEBA Timeline tab's
         # event-type checkboxes and Log Search's own Type filter drive this, same IN-list
-        # shape as the app/severity filters above. Kept even though api_logs_search/
-        # export_logs_csv also skip excluded branches entirely (see LOG_TYPE_BRANCHES) --
-        # this is what api_logs_timeline (which unions every branch unconditionally) relies
-        # on, and it's a harmless no-op redundancy for the other two callers.
+        # shape as the app/severity filters above. Every real caller (api_logs_search,
+        # export_logs_csv, api_logs_timeline) already skips an excluded branch entirely
+        # before it's ever unioned (see LOG_TYPE_BRANCHES) -- this condition is a harmless,
+        # always-true no-op for whichever branches actually make it into the query, kept
+        # so a future caller that unions branches unconditionally doesn't silently lose
+        # type filtering.
         conditions.append(f"log_type IN ({','.join(['?']*len(active_types))})")
         params.extend(active_types)
 
@@ -15057,9 +15056,39 @@ def _count_log_rows(db, branches, other_where_sql, other_where_params, time_args
         total += db.execute(f"SELECT COUNT(*) FROM ({branch_sql}) {where_clause}", params).fetchone()[0]
     return total
 
+# Same per-branch clock-aware filtering + UTC normalization as _build_optimized_log_query,
+# minus the LIMIT/cursor machinery -- for a full-aggregate GROUP BY query (the Log Volume
+# Over Time chart) that needs every matching row from every branch, not a top-K subset.
+# Every row leaving this union carries a genuinely comparable UTC `timestamp`, so bucketing
+# (strftime(...) applied by the caller) is correct regardless of which branch a row came
+# from -- this is what closes the gap api_logs_timeline used to have (it queried the flat,
+# unconverted UNIFIED_LOGS_SQL directly, mixing live_logs' local clock into the same
+# GROUP BY as alert/anomaly/command's UTC clock).
+def _build_normalized_log_union(branches, other_where_sql, other_where_params, time_args):
+    time_cond_local, time_params_local = _build_log_time_condition(time_args)
+    time_cond_utc, time_params_utc = _utc_branch_time_condition(time_args)
+    _other_cols = ", ".join(c for c in _UNIFIED_LOG_COLUMNS if c != 'timestamp')
+
+    per_branch_sql, all_params = [], []
+    for branch_type, branch_sql in branches:
+        is_local = branch_type == 'log'
+        time_cond, time_params = (time_cond_local, time_params_local) if is_local else (time_cond_utc, time_params_utc)
+        conditions = ([time_cond] if time_cond else []) + ([other_where_sql] if other_where_sql else [])
+        branch_where = (" WHERE " + " and ".join(conditions)) if conditions else ""
+        branch_params = list(time_params) + list(other_where_params)
+
+        inner = f"SELECT * FROM ({branch_sql}) {branch_where}"
+        if is_local:
+            per_branch_sql.append(f"SELECT datetime(timestamp, 'utc') as timestamp, {_other_cols} FROM ({inner})")
+        else:
+            per_branch_sql.append(f"SELECT * FROM ({inner})")
+        all_params.extend(branch_params)
+    merged = "(\n" + "\nUNION ALL\n".join(per_branch_sql) + "\n) AS unified_logs"
+    return merged, all_params
+
 # Shared by /api/logs/search and /api/logs/export's format=json path, so the two never
 # drift into different row shapes -- both consume the same sqlite3.Row list straight off
-# UNIFIED_LOGS_SQL/_WITH_ARCHIVE.
+# _build_optimized_log_query's per-branch-normalized union.
 def _build_log_response_rows(rows):
     from geoip import lookup_country
     logs = []
@@ -15247,7 +15276,11 @@ def api_logs_timeline():
     import datetime
     try:
         db = get_db()
-        where_clause, params = _build_log_filters(request.args)
+        other_where, other_params = _build_log_other_filters(request.args)
+        active_types = _active_log_types(request.args)
+        branches = LOG_TYPE_BRANCHES_WITH_ARCHIVE if request.args.get('include_archive') == '1' else LOG_TYPE_BRANCHES
+        if active_types:
+            branches = [(t, sql) for t, sql in branches if t in active_types]
         time_range = request.args.get('range', '24h')
 
         if time_range in ('5m', '15m', '30m', '1h'):
@@ -15276,9 +15309,18 @@ def api_logs_timeline():
             # 3d/7d/30d/all
             time_format = "strftime('%Y-%m-%d', timestamp)"
 
-        source_sql = UNIFIED_LOGS_SQL_WITH_ARCHIVE if request.args.get('include_archive') == '1' else UNIFIED_LOGS_SQL
-        query = f"SELECT {time_format} as t_bucket, COUNT(*) as count FROM {source_sql}{where_clause} GROUP BY t_bucket ORDER BY t_bucket ASC"
-        rows = db.execute(query, params).fetchall()
+        if branches:
+            # _build_normalized_log_union (not the flat UNIFIED_LOGS_SQL constant) --
+            # normalizes every branch's timestamp to UTC before bucketing, so a bucket
+            # never silently mixes live_logs' local clock with alert/anomaly/command's
+            # UTC clock the way this endpoint used to (see the CHANGELOG entry this
+            # follows up on). Bucket labels are therefore always UTC now, same as the
+            # Log Search table's own canonical value.
+            source_sql, params = _build_normalized_log_union(branches, other_where, other_params, request.args)
+            query = f"SELECT {time_format} as t_bucket, COUNT(*) as count FROM {source_sql} GROUP BY t_bucket ORDER BY t_bucket ASC"
+            rows = db.execute(query, params).fetchall()
+        else:
+            rows = []
 
         timeline = [{'time': r['t_bucket'], 'count': r['count']} for r in rows]
         return jsonify({'timeline': timeline})

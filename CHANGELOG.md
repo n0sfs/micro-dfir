@@ -44,12 +44,21 @@ header label reflects whichever mode is active. CSV/JSON export deliberately sta
 UTC-only regardless of the toggle — exports are meant to be an unambiguous, canonical
 record for another tool to consume, not a per-viewer display preference.
 
-**Deliberately still out of scope**: `api_logs_timeline` (the dashboard's log-volume
-chart, which uses the flat `UNIFIED_LOGS_SQL` constant directly for an aggregate
-bucketed query) was not touched — no natural "convert after limiting" point exists for
-a `GROUP BY` bucket query, and real production row-count evidence gathered this session
-shows its accuracy impact is minor (dominated by `live_logs`' own volume). Flagged as a
-possible future follow-up, not a regression from this pass.
+**Originally left out of scope, closed the same day** (see the entry above this one):
+`api_logs_timeline` (the "Log Volume Over Time" chart) still queried the flat, unconverted
+`UNIFIED_LOGS_SQL` constant directly, so its `GROUP BY` buckets could still silently mix
+`live_logs`' local clock with the UTC branches. Fixed by a new `_build_normalized_log_union()`
+helper (`src/app.py`) — the same per-branch clock-aware filtering + UTC normalization
+`_build_optimized_log_query` already does, minus the LIMIT/cursor machinery a full
+aggregate query doesn't need (a bucket has to see *every* matching row, not a top-K
+subset). `UNIFIED_LOGS_SQL`/`UNIFIED_LOGS_SQL_WITH_ARCHIVE` (now genuinely dead — nothing
+calls them any more) were deleted rather than left as an unused, misleading landmine.
+The chart's card title now reads "(UTC buckets)" so the axis labels aren't a mystery.
+5 new fixture tests cover: a log event and an alert 4 minutes apart landing in the
+correct, adjacent UTC-hour buckets (plus a negative control proving the old flat union
+really did misplace them, on a host with a non-UTC local clock); time-range filtering;
+branch exclusion; and the shared app/severity/field filters still applying inside the
+normalized union.
 
 ### Real pre-existing bug, found while live-verifying the timeline fix: `agent_commands.queued_at` is UTC, not local
 
