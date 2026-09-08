@@ -14118,7 +14118,13 @@ def agent_config():
     # dropped before the agent actually processed it (or the agent crashed mid-run), it
     # would otherwise sit "Sent" forever with no result and no way to retry. Requeue
     # anything that's been sent for more than 5 minutes without a reported result.
-    stale_cutoff = (datetime.datetime.now() - datetime.timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S')
+    # queued_at is UTC (schema DEFAULT CURRENT_TIMESTAMP, never overridden by any real
+    # INSERT INTO agent_commands -- confirmed directly against schema.sql) -- a
+    # local-time cutoff compared against it was systematically wrong by the server's
+    # UTC offset, e.g. on an EDT (UTC-4) host this made the 5-minute stale check
+    # effectively require ~4+ hours of real elapsed time before ever firing, since a
+    # local cutoff is always "earlier-looking" than any recent UTC-stored queued_at.
+    stale_cutoff = (datetime.datetime.utcnow() - datetime.timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S')
     db.execute(
         "UPDATE agent_commands SET status = 'pending' WHERE hostname = ? AND status = 'sent' AND queued_at < ?",
         (ua, stale_cutoff)
@@ -16780,12 +16786,17 @@ def api_agent_commands():
             conditions.append("status = ?")
             params.append(status_filter)
         if since_days is not None and since_days > 0:
-            # queued_at is written from Python's local datetime.now() at queue time (same
-            # convention as live_logs.timestamp/agent_polls.timestamp elsewhere in this
-            # app) -- datetime('now', ?) is SQLite's own UTC clock, so this mirrors
-            # _run_due_log_source_silent_alerts' fix rather than repeating that same
-            # non-UTC-server drift bug here.
-            cutoff = (datetime.now() - timedelta(days=since_days)).strftime('%Y-%m-%d %H:%M:%S')
+            # queued_at is UTC -- schema DEFAULT CURRENT_TIMESTAMP, and every real
+            # INSERT INTO agent_commands omits this column, so it's always that UTC
+            # default (confirmed directly against schema.sql and every call site; see
+            # _check_atomic_run_validation's own comment/datetime.utcnow() use for the
+            # same fact established independently elsewhere). This is genuinely
+            # different from completed_at, which IS set via local datetime.now() in
+            # api_agent_result -- the comment previously here claimed queued_at was
+            # also local (matching live_logs.timestamp's convention), which was wrong
+            # and made this filter systematically too wide by the server's UTC offset
+            # (e.g. "last 1 day" silently returning ~28h of history on an EDT host).
+            cutoff = (datetime.utcnow() - timedelta(days=since_days)).strftime('%Y-%m-%d %H:%M:%S')
             conditions.append("queued_at >= ?")
             params.append(cutoff)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""

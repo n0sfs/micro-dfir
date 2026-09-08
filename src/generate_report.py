@@ -707,16 +707,20 @@ def generate_case_report(case_id):
     #
     # The four item types (and case_events.ts) are on TWO different clocks, the same
     # recurring UTC-vs-local mismatch documented elsewhere in this codebase: alert
-    # (alerts.timestamp) and ueba_event (events.timestamp, confirmed written via
-    # SQLite's own datetime('now') even though ueba_engine.py's INSERT runs through a
-    # DuckDB connection -- DuckDB has no native datetime() function, so this specific
-    # write is forwarded to SQLite's engine on the attached table) and case_events.ts
-    # are all SQLite CURRENT_TIMESTAMP-style columns: UTC. command_result
-    # (agent_commands.queued_at) and fim_event (live_logs.timestamp) are both written
-    # from Python's local datetime.now() at insert time: local. Sorting the raw strings
-    # together without normalizing first put every UTC-sourced row several hours
-    # "ahead" of its true chronological position relative to local-sourced rows.
-    _UTC_ITEM_TYPES = ('alert', 'ueba_event')
+    # (alerts.timestamp), ueba_event (events.timestamp, confirmed written via SQLite's
+    # own datetime('now') even though ueba_engine.py's INSERT runs through a DuckDB
+    # connection -- DuckDB has no native datetime() function, so this specific write is
+    # forwarded to SQLite's engine on the attached table), case_events.ts, AND
+    # command_result (agent_commands.queued_at -- schema DEFAULT CURRENT_TIMESTAMP,
+    # confirmed every INSERT INTO agent_commands omits this column, so it's ALWAYS the
+    # UTC default, never a Python-local override; this is genuinely different from
+    # agent_commands.completed_at, which IS set via local datetime.now() in
+    # api_agent_result -- two columns on different clocks within the same table) are
+    # all UTC. Only fim_event (live_logs.timestamp, written from Python's local
+    # datetime.now() at insert time) is local. Sorting the raw strings together without
+    # normalizing first put every UTC-sourced row several hours "ahead" of its true
+    # chronological position relative to the one local-sourced item type.
+    _UTC_ITEM_TYPES = ('alert', 'ueba_event', 'command_result')
     timeline = []
     for it in items:
         raw_ts = it.get('timestamp') or ''

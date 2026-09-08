@@ -10,6 +10,42 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-08
 
+### Real pre-existing bug, found while live-verifying the timeline fix: `agent_commands.queued_at` is UTC, not local
+
+Caught by generating a real Case Report PDF right after deploying the round-2 timeline
+fix below and noticing two related timeline rows sitting ~4 hours apart. The fix
+itself had assumed `command_result` items (`agent_commands.queued_at`) were local,
+copying an existing-but-wrong comment from `api_agent_commands`'s GET handler. Checked
+directly against `schema.sql` and every real `INSERT INTO agent_commands` call site:
+`queued_at DATETIME DEFAULT CURRENT_TIMESTAMP` is never overridden anywhere, so it's
+always SQLite's own UTC default — genuinely different from `completed_at`, which *is*
+set via local `datetime.now()` in `api_agent_result`. Two real, live consequences of
+the wrong assumption, both fixed:
+- The Case Report timeline fix (below) needed `command_result` added to its UTC list —
+  fixed before this ever reached production.
+- `GET /api/agent/commands`'s `since_days` filter and `agent_checkins()`'s "requeue a
+  command stuck on 'sent' for >5 minutes" safety net both compared a **local** cutoff
+  against the UTC `queued_at` column. On this EDT (UTC-4) host, the `since_days` filter
+  silently returned a wider window than requested (~28h for "1 day"), and the stale-
+  command requeue effectively never fired within any reasonable time — a command stuck
+  after a dropped connection could sit `sent` for ~4+ hours before ever being retried,
+  not the intended 5 minutes. Both switched to `datetime.utcnow()`, verified with a
+  real fixture reproducing the exact failure this runner's own non-UTC clock exhibited
+  (the old cutoff logic missed a genuinely-10-minutes-stale row; the fixed one caught it).
+
+**Bigger, deliberately NOT fixed in this pass**: this same investigation found that
+`UNIFIED_LOGS_SQL` (the Log Search / unified-timeline view backing `_LOG_BRANCH_SQL` /
+`_ALERT_BRANCH_SQL` / `_ANOMALY_BRANCH_SQL` / `_COMMAND_BRANCH_SQL`) merges `timestamp`
+columns on two different clocks across its branches: `live_logs.timestamp` (local) sits
+in the same unified `timestamp` column as `alerts.timestamp`, `events.timestamp`, and
+`agent_commands.queued_at` (all UTC). This is a real, pre-existing architectural gap —
+likely affecting Log Search's chronological ordering and date-range filtering whenever
+log rows are merged with alert/anomaly/command rows — but Log Search is this
+appliance's most heavily-used feature, and fixing it properly means auditing every
+consumer of that unified `timestamp` column (sort order, range filters, exports), not
+a quick swap. Flagged for a dedicated follow-up rather than a hasty fix in the middle
+of an unrelated pass.
+
 ### Bug-hunt pass, round 2: the lower-priority findings from the earlier review
 
 Follow-up to the previous day's 8-angle review — went through the findings that were
