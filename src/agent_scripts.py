@@ -126,6 +126,52 @@ try {{
 }}
 """
 
+# Triage-scoped volatile-data capture, not full RAM acquisition: dumps ONE process's
+# memory (a PID an analyst already has in hand -- same "live PID just seen" precedent as
+# kill_process()), not the whole system. Uses comsvcs.dll's built-in MiniDump export
+# (rundll32.exe C:\Windows\System32\comsvcs.dll, MiniDump <pid> <path> full) -- no
+# third-party tool to bundle or download, since it's already present on every Windows box.
+# This is the exact same OS-native mechanism real-world credential-dumping TTPs use
+# against lsass.exe (see _is_suspicious_lsass_process_access() and its own comment
+# elsewhere in this codebase) -- pointed at an arbitrary suspicious process instead, for
+# legitimate triage. Expect it to be flagged/blocked by the endpoint's own AV/EDR when
+# targeting a protected process (lsass.exe, a PPL-protected service) -- that's a correct,
+# expected outcome of a defensive product using a known-abusable mechanism, not a bug.
+#
+# The dump itself (commonly tens to hundreds of MB, sometimes more) is deliberately left
+# on the endpoint's own disk, NOT transferred back through the agent command channel --
+# collect_file()'s own 40KB cap exists precisely because a single command's result has to
+# fit in a bounded JSON stdout blob (see collect_file()'s comment), and a memory dump is
+# routinely 1000x that size. What comes back here is metadata only (path, size, hash,
+# process identity) so the capture is recorded and hash-verifiable; an analyst retrieves
+# the actual .dmp out-of-band (RDP/PsExec/etc.) and can upload it as a case attachment --
+# which now hashes on upload and re-verifies on every download (see case_attachments) --
+# to cross-check it against the hash recorded here at capture time.
+def capture_process_memory(pid):
+    pid = int(pid)
+    return f"""$targetPid = {pid}
+try {{ $proc = Get-Process -Id $targetPid -ErrorAction Stop }}
+catch {{ "{{`"error`":`"no process with PID $targetPid`"}}"; exit }}
+$dir = "C:\\ProgramData\\MicroDFIR\\MemoryCaptures"
+if (-not (Test-Path $dir)) {{ New-Item -ItemType Directory -Path $dir -Force | Out-Null }}
+$stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+$safeName = ($proc.ProcessName -replace '[^a-zA-Z0-9_-]', '_')
+$outPath = Join-Path $dir "${{stamp}}_pid${{targetPid}}_${{safeName}}.dmp"
+$procImage = $proc.Path
+try {{
+    Start-Process -FilePath "rundll32.exe" -ArgumentList "C:\\Windows\\System32\\comsvcs.dll, MiniDump $targetPid `"$outPath`" full" -Wait -WindowStyle Hidden -ErrorAction Stop
+}} catch {{
+    $errMsg = $_.Exception.Message -replace '"', "'"
+    "{{`"error`":`"failed to launch dump: $errMsg`"}}"; exit
+}}
+if (-not (Test-Path $outPath) -or (Get-Item $outPath).Length -eq 0) {{
+    "{{`"error`":`"dump produced no output -- the process may be protected (PPL) or blocked by AV/EDR on this endpoint`"}}"; exit
+}}
+$size = (Get-Item $outPath).Length
+$hash = (Get-FileHash $outPath -Algorithm SHA256).Hash
+@{{ pid=$targetPid; process_name=$proc.ProcessName; process_image=$procImage; dump_path=$outPath; size_bytes=$size; sha256=$hash; captured_at=(Get-Date).ToString('yyyy-MM-dd HH:mm:ss') }} | ConvertTo-Json -Compress
+"""
+
 def _ps_hashset_literal(values):
     return ','.join("'" + v + "'" for v in values)
 
@@ -1077,6 +1123,7 @@ WINDOWS_TEMPLATES = {
     'persistence_sweep': (lambda params: _PROGRESS_SILENT + persistence_sweep(), []),
     'collect_file': (lambda params: _PROGRESS_SILENT + collect_file(params['path']), ['path']),
     'quarantine_file': (lambda params: _PROGRESS_SILENT + quarantine_file(params['path']), ['path']),
+    'capture_process_memory': (lambda params: _PROGRESS_SILENT + capture_process_memory(params['pid']), ['pid']),
     'collect_registry_key': (lambda params: _PROGRESS_SILENT + collect_registry_key(params['key_path']), ['key_path']),
     'kill_scheduled_task': (lambda params: _PROGRESS_SILENT + kill_scheduled_task(params['task_name']), ['task_name']),
     'collect_browser_artifacts': (lambda params: _PROGRESS_SILENT + collect_browser_artifacts(), []),

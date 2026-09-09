@@ -10,6 +10,31 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-09
 
+### New: triage-scoped process memory capture (Windows), closing part of the DFIR audit's Forensic Evidence Collection gap
+
+The lifecycle audit flagged zero volatile-data acquisition anywhere in the app as a
+first-order gap against NIST's "capture volatile data first" step. Full RAM/disk
+imaging was explicitly scoped out (already declined once for Volatility integration,
+per CHANGELOG history, as infrastructure-incompatible with a single-box SQLite
+appliance) in favor of something that actually fits: a new `capture_process_memory`
+EDR action dumps ONE process's memory (a PID an analyst already has, same as
+`kill_process`), via `comsvcs.dll`'s built-in `MiniDump` export — no third-party tool
+to bundle or download, since it's already on every Windows box. It's the same
+OS-native mechanism real credential-dumping TTPs use against `lsass.exe` (this app's
+own `_is_suspicious_lsass_process_access` heuristic exists because of it), so expect it
+to be flagged/blocked by the endpoint's own AV/EDR when targeting a protected process —
+a correct, expected outcome, not a bug.
+
+The dump itself (routinely 100s of MB) deliberately stays on the endpoint's own disk
+rather than trying to squeeze it through the agent command channel's 60,000-char stdout
+cap (`collect_file`'s own 40KB limit exists for exactly this reason) — what comes back
+is metadata only (path, size, SHA-256, process identity), hashed immediately for chain
+of custody. An analyst retrieves the actual `.dmp` out-of-band and can upload it as a
+case attachment, where it now hashes on upload and re-verifies on every download (see
+the case-attachment-hashing entry above) to cross-check against the hash recorded here
+at capture time. Windows-only for this pass — an honest scope cut, not an oversight;
+Linux/macOS equivalents (`gcore`, etc.) would need different mechanisms entirely.
+
 ### New: case Retrospective fields (Root Cause / Lessons Learned) + a case→Coverage gap link
 
 Two more items from the DFIR lifecycle audit's Post-Incident Activity findings, both
