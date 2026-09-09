@@ -10,6 +10,21 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-09
 
+### New: Readiness Scorecard dashboard widget
+
+The last lifecycle-audit item for now: a first-time evaluator (or an admin checking in
+periodically) had no single place to answer "are we actually ready" — EDR enrollment,
+detection rules, MITRE coverage, backup, retention, and asset inventory each already live
+on their own page, with nothing tying them into one checklist. New `chart_readiness_scorecard`
+widget (Dashboards, same registry every other widget uses) pulls seven already-existing
+facts into a green/amber checklist: agents active in the last 24h vs. total ever enrolled,
+enabled detection rules, the latest MITRE coverage snapshot, whether the DB backup ran in
+the last 48h, whether retention/archiving are configured, how many assets carry a real
+criticality, and how many real user accounts exist beyond the seed admin. Deliberately no
+new computation or tables — every number is read from where it already lives
+(`agent_polls`, `sigma_rules`, `coverage_snapshots`, `settings`, `assets`, `users`), same
+pure-aggregation spirit as the existing Compliance Coverage widget.
+
 ### New: cross-rule escalation now keys on username too, not just host
 
 `_escalate_host` (sigma_engine.py) already auto-cases a host when N distinct rules fire
