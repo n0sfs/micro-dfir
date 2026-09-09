@@ -1102,6 +1102,12 @@ function caseEventLabel(e) {
         playbook_action_approved: `<i class="fa-solid fa-check text-success me-1"></i>Approved: ${escHtml(e.detail)}`,
         playbook_action_rejected: `<i class="fa-solid fa-xmark text-danger me-1"></i>Rejected: ${escHtml(e.detail)}`,
         analysis: (e.detail || '').split('\n')[0] || 'Analysis',
+        // Pre-existing gap, not new to user-keyed escalation: this key was missing
+        // entirely, so a host-escalation note (_escalate_host, sigma_engine.py) already
+        // silently rendered as the bare word "escalation" with the actual detail text
+        // dropped -- fixed here for both the host and username escalation paths at once,
+        // since they share this exact event_type.
+        escalation: `<i class="fa-solid fa-triangle-exclamation text-warning me-1"></i>${escHtml(e.detail)}`,
         asset_added: `Asset added: <strong>${escHtml(e.detail)}</strong>`,
         asset_status_change: `Asset status changed: ${escHtml(e.detail)}`,
         asset_removed: `Asset removed: <strong>${escHtml(e.detail)}</strong>`,

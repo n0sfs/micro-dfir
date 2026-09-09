@@ -406,6 +406,48 @@ def _escalate_host(cursor, host, rule_count, window_minutes):
         _queue_case_created_playbooks(cursor, cid)
     cursor.execute("INSERT INTO alert_escalations (host, rule_count) VALUES (?, ?)", (host, rule_count))
 
+# Placeholder/service-account values that would otherwise turn "N distinct rules fired
+# against this username" into pure noise -- a shared SYSTEM/service account triggering
+# rules across many unrelated hosts is not a real single-user correlation signal. Same
+# exclusion set _resolve_dns_client_context (app.py) already uses for the same reason.
+_ESCALATION_USERNAME_PLACEHOLDERS = ('-', 'SYSTEM', 'LOCAL SERVICE', 'NETWORK SERVICE')
+
+# Same signal as _escalate_host, keyed on username instead of host -- case_assets (what
+# _escalate_host attaches a host to) has no username column, and identities (the
+# username-keyed table) has no host column either, so unlike the host path this can't
+# attach a case_assets row. The case itself, its title/description, and the escalation
+# case_event still carry the username -- consistent with how this app treats "user" as a
+# lighter-weight entity than "host" elsewhere (e.g. the identities watchlist has no host
+# equivalent). "Already tracked by an open case" is derived from case_items -> alerts
+# (a case's linked alerts' own username field), the only existing case<->username bridge.
+def _escalate_user(cursor, username, rule_count, window_minutes):
+    recent = cursor.execute(
+        "SELECT 1 FROM alert_escalations WHERE username = ? AND escalated_at >= datetime('now', ?)",
+        (username, f'-{window_minutes} minutes')
+    ).fetchone()
+    if recent:
+        return
+    detail = f"{rule_count} distinct rules fired against user '{username}' in the last {window_minutes} minutes."
+    open_case = cursor.execute(
+        "SELECT DISTINCT c.id FROM case_items ci JOIN alerts a ON ci.item_type = 'alert' AND ci.item_id = CAST(a.id AS TEXT) "
+        "JOIN cases c ON c.id = ci.case_id WHERE a.username = ? AND c.status = 'open' LIMIT 1",
+        (username,)
+    ).fetchone()
+    if open_case:
+        cursor.execute(
+            "INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'system', 'escalation', ?)",
+            (open_case['id'], detail)
+        )
+    else:
+        cursor.execute(
+            "INSERT INTO cases (title, status, description, created_by, tlp, pap) VALUES (?, 'open', ?, 'system:escalation', 'amber', 'amber')",
+            (f"Multiple rules fired against user '{username}'", detail)
+        )
+        cid = cursor.lastrowid
+        cursor.execute("INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'system', 'created', ?)", (cid, detail))
+        _queue_case_created_playbooks(cursor, cid)
+    cursor.execute("INSERT INTO alert_escalations (host, username, rule_count) VALUES ('', ?, ?)", (username, rule_count))
+
 # kind -> (rule-facing placeholder token, internal sentinel scalar, TEMP TABLE name, value builder).
 # The sentinel is deliberately alphanumeric-only (no underscores/percent) so pysigma's
 # SQLite backend compiles the field comparison as a plain `column='SENTINEL'` equality
@@ -776,7 +818,22 @@ def run_detection_cycle():
             _escalate_host(cursor, row['host'], row['rule_count'], esc_window)
         except Exception as e:
             print(f"[-] Escalation failed for host '{row['host']}': {e}")
-    if escalated_hosts:
+    # Same idea, keyed on username -- the placeholder/service-account exclusion happens
+    # in SQL here (not just relying on _escalate_user's own constant) so a SYSTEM-only
+    # cluster never even reaches rule_count >= threshold in the first place.
+    escalated_users = cursor.execute(
+        f"SELECT username, COUNT(DISTINCT rule_id) as rule_count FROM alerts "
+        f"WHERE effective_seen >= datetime('now', ?) AND username IS NOT NULL AND username != '' "
+        f"AND username NOT IN ({','.join('?' for _ in _ESCALATION_USERNAME_PLACEHOLDERS)}) "
+        f"GROUP BY username HAVING rule_count >= ?",
+        (f'-{esc_window} minutes', *_ESCALATION_USERNAME_PLACEHOLDERS, esc_threshold)
+    ).fetchall()
+    for row in escalated_users:
+        try:
+            _escalate_user(cursor, row['username'], row['rule_count'], esc_window)
+        except Exception as e:
+            print(f"[-] Escalation failed for user '{row['username']}': {e}")
+    if escalated_hosts or escalated_users:
         conn.commit()
     conn.close()
     json.dump({"last_id": current_max}, open(STATE_FILE, 'w'))

@@ -10,6 +10,26 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-09
 
+### New: cross-rule escalation now keys on username too, not just host
+
+`_escalate_host` (sigma_engine.py) already auto-cases a host when N distinct rules fire
+against it in a window; the lifecycle audit flagged that this had no equivalent for a
+username — several different rules firing against the same account across multiple hosts
+(exactly a credential-abuse or lateral-movement pattern) went completely uncorrelated.
+New `_escalate_user`, same signal keyed on `username` instead: SYSTEM/service-account
+values are excluded in the SQL itself (a shared account triggering rules across many
+hosts is noise, not a real single-user signal), and cooldown reuses the same
+`alert_escalations` table (a new nullable `username` column; `host` stays `''` for a
+user-type row rather than relaxing its `NOT NULL`, which SQLite can't do without a full
+table rebuild). `case_assets` has no username column, so unlike the host path this can't
+attach an asset row — "already tracked by an open case" is instead derived from a case's
+linked alerts' own username field, the same bridge `_case_implicated_usernames` uses.
+
+Found and fixed a real, unrelated pre-existing bug while wiring this up: `caseEventLabel`
+(cases.html) had no entry for the `'escalation'` event type at all, so a host-escalation
+note was silently rendering as the bare word "escalation" with its actual detail text
+dropped — fixed for both the host and username paths at once, since they share the type.
+
 ### New: urgency chips (fired-ago / unacknowledged) on the alert triage panel
 
 The last of today's smaller lifecycle-audit items: cases show "6.5d open, SLA breached"

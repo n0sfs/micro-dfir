@@ -10989,6 +10989,17 @@ def migrate_alert_escalations():
             rule_count INTEGER NOT NULL
         )''')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_alert_escalations_host ON alert_escalations(host, escalated_at)')
+        # A second escalation dimension (username, not just host) reuses this same
+        # cooldown table rather than a new one -- same concept, just keyed differently.
+        # `host` stays NOT NULL (a SQLite ALTER TABLE can't relax that without a full
+        # table rebuild), so a user-escalation row stores '' there instead of NULL --
+        # an empty string can never collide with a real hostname, and _escalate_host's
+        # own `WHERE host = ?` cooldown check is naturally scoped away from these rows
+        # (no real host is ever '').
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(alert_escalations)").fetchall()}
+        if 'username' not in cols:
+            conn.execute("ALTER TABLE alert_escalations ADD COLUMN username TEXT")
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_alert_escalations_username ON alert_escalations(username, escalated_at)')
         conn.commit()
         conn.close()
     except Exception:
