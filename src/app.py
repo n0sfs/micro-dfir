@@ -5338,6 +5338,16 @@ def api_mitre_coverage_history():
 # page's own data need. Point-in-time recompute only (see vuln_matching.py) -- no
 # snapshot history exists for vulnerability posture the way coverage_snapshots exists
 # for MITRE, so there is deliberately no trend chart on this tab.
+# A remediation status is an analyst's assertion, not a re-scan confirmation -- if the
+# software is genuinely upgraded, the finding stops matching on its own next scan (see
+# migrate_vulnerability_remediation's own comment) and vanishes from `findings` without
+# needing this table touched at all. 'accepted_risk'/'false_positive' are the two
+# outcomes a rescan could never resolve by itself.
+VULN_REMEDIATION_STATUSES = ('open', 'acknowledged', 'patched', 'accepted_risk', 'false_positive')
+# Statuses that still count as "needs action" for the coverage widget's open_count --
+# the other three are outcomes an analyst has already made a call on.
+VULN_REMEDIATION_OPEN_STATUSES = {'open', 'acknowledged'}
+
 @app.route('/api/vulnerabilities/coverage', methods=['GET'])
 @login_required
 def api_vulnerabilities_coverage():
@@ -5354,6 +5364,22 @@ def api_vulnerabilities_coverage():
                 severity_counts[sev] += 1
             findings.append({**m, 'hostname': host['hostname']})
     findings.sort(key=lambda f: (severity_order.get((f['severity'] or '').upper(), 9), -(f['cvss_score'] or 0)))
+    # This table stays small (bounded by real findings x hosts, not a growing log) --
+    # same "just pull it all into Python" convention vuln_matching.py itself already
+    # uses for cve_affected_products, cheaper than one lookup query per finding.
+    remediation = {
+        (r['hostname'], r['cve_id'], r['installed_name']): dict(r)
+        for r in db.execute("SELECT hostname, cve_id, installed_name, status, notes, updated_by, updated_at FROM vulnerability_remediation").fetchall()
+    }
+    open_count = 0
+    for f in findings:
+        rec = remediation.get((f['hostname'], f['cve_id'], f['installed_name']))
+        f['remediation_status'] = rec['status'] if rec else 'open'
+        f['remediation_notes'] = rec['notes'] if rec else None
+        f['remediation_updated_by'] = rec['updated_by'] if rec else None
+        f['remediation_updated_at'] = rec['updated_at'] if rec else None
+        if f['remediation_status'] in VULN_REMEDIATION_OPEN_STATUSES:
+            open_count += 1
     # Same fleet-total denominator generate_report.py's per-framework Compliance Report
     # uses -- agent_tokens is NOT reliable (most agents auth via the older shared-secret
     # path and never bind a row there; confirmed live, fixed in commit f4c1928).
@@ -5368,9 +5394,41 @@ def api_vulnerabilities_coverage():
         'coverage_pct': round(hosts_assessed / total_hosts * 100, 1) if total_hosts else None,
         'unique_cve_count': len({f['cve_id'] for f in findings}),
         'severity_counts': severity_counts,
+        'open_count': open_count,
         'findings': findings,
         'last_sync': status.get('last_sync'),
     })
+
+# Remediation status is set per (hostname, cve_id, installed_name) -- the same natural
+# identity correlate_software_vulnerabilities already dedups findings on internally, so
+# this always lines up with exactly one finding as shown on the Coverage page. No
+# permission gate beyond login, matching alert triage's own posture (PUT
+# /api/alerts/<id>) -- this is triage of an already-computed finding, not a mutation of
+# fleet config or detection logic.
+@app.route('/api/vulnerabilities/remediation', methods=['POST'])
+@login_required
+def api_vulnerabilities_remediation():
+    db = get_db()
+    d = request.json or {}
+    hostname = (d.get('hostname') or '').strip()
+    cve_id = (d.get('cve_id') or '').strip()
+    installed_name = (d.get('installed_name') or '').strip()
+    status = (d.get('status') or '').strip()
+    notes = (d.get('notes') or '').strip() or None
+    if not hostname or not cve_id or not installed_name:
+        return jsonify({'error': 'hostname, cve_id, and installed_name are required'}), 400
+    if status not in VULN_REMEDIATION_STATUSES:
+        return jsonify({'error': f"status must be one of {', '.join(VULN_REMEDIATION_STATUSES)}"}), 400
+    db.execute(
+        "INSERT INTO vulnerability_remediation (hostname, cve_id, installed_name, status, notes, updated_by, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+        "ON CONFLICT(hostname, cve_id, installed_name) DO UPDATE SET status = excluded.status, notes = excluded.notes, "
+        "updated_by = excluded.updated_by, updated_at = CURRENT_TIMESTAMP",
+        (hostname, cve_id, installed_name, status, notes, current_user.username)
+    )
+    db.commit()
+    log_audit('vulnerability_remediation_update', 'vulnerability', f"{hostname}:{cve_id}", f"status={status}")
+    return jsonify({'status': 'success'})
 
 @app.route('/api/rules/<int:rid>', methods=['GET', 'PUT', 'DELETE'])
 @login_required
@@ -13098,6 +13156,36 @@ def migrate_cve_affected_products_ranges():
     except Exception:
         pass
 
+# Vulnerability findings themselves are never stored as rows anywhere -- they're
+# recomputed fresh on every request from live software-inventory + CVE-feed matching
+# (see vuln_matching.py). This table stores only a STATUS OVERRIDE keyed by the same
+# natural identity correlate_software_vulnerabilities already dedups on internally
+# (installed_name, cve_id), plus hostname -- the read path (api_vulnerabilities_coverage)
+# looks this up and merges it into each freshly-computed finding, defaulting to 'open'
+# when no row exists. If the underlying software is actually upgraded, the finding stops
+# matching on its own on the next scan (the version falls outside the vulnerable range)
+# and simply disappears -- this table exists for the interim period between "an analyst
+# says it's handled" and a fresh scan confirming it, and for non-version outcomes
+# (accepted risk, false positive) that a rescan would never resolve on its own.
+def migrate_vulnerability_remediation():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS vulnerability_remediation (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hostname TEXT NOT NULL,
+            cve_id TEXT NOT NULL,
+            installed_name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            notes TEXT,
+            updated_by TEXT,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(hostname, cve_id, installed_name)
+        )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_ueba_entities():
     # UEBA originally modeled hosts only, with a fixed 'HIGH' severity and no way to
     # quiet a legitimately bursty entity. Adds: entity_type on events (host vs user,
@@ -18245,6 +18333,7 @@ migrate_cve_records()
 migrate_cve_kev_epss()
 migrate_cve_affected_products()
 migrate_cve_affected_products_ranges()
+migrate_vulnerability_remediation()
 migrate_audit_log()
 migrate_risk_scoring()
 migrate_anomaly_rules()

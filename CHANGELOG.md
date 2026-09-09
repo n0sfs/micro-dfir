@@ -10,6 +10,27 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-09
 
+### New: remediation status tracking on Coverage > Vulnerability findings
+
+Another small item from the lifecycle audit: Vulnerability Coverage was pure read-only
+reporting — no "mark patched," no way to record an analyst's call on a finding at all.
+Vulnerability findings themselves are never stored as rows (they're recomputed fresh
+every request from live software-inventory + CVE-feed matching), so this adds a small
+`vulnerability_remediation` table storing just a status override keyed on the same
+`(hostname, cve_id, installed_name)` identity `correlate_software_vulnerabilities`
+already dedups findings on internally — `GET /api/vulnerabilities/coverage` looks it up
+and merges it into each freshly-computed finding, defaulting to "Open" when no row
+exists.
+
+Five statuses: Open, Acknowledged, Patched, Accepted Risk, False Positive. If the
+software is genuinely upgraded, the finding stops matching on its own on the next scan
+(the new version falls outside the vulnerable range) and just disappears — this table
+exists for the interim before a rescan confirms it, and for the two outcomes (accepted
+risk, false positive) a rescan could never resolve by itself. The Coverage page's
+Vulnerability tab gets a Status column (inline select, saves immediately, same posture
+as alert triage — no extra permission gate) plus a new "Still Open" hero tile counting
+findings not yet marked patched/accepted/false-positive.
+
 ### New: real session revocation, a case-linked credential-revoke playbook action, and incident-triggered watchlisting
 
 Two more items from the lifecycle audit's Containment/Recovery findings, both real
