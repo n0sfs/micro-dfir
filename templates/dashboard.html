@@ -287,7 +287,11 @@
 </div>
 
 <!-- BULK TRIAGE BAR -- hidden until 1+ alert rows are checked -->
-<div id="bulkTriageBar" class="alert alert-dark border-secondary d-flex align-items-center gap-2 py-2 px-3 mb-2" style="display:none;">
+<!-- No d-flex class here: Bootstrap's utility classes set display with !important,
+     which would permanently win over the plain inline display:none/flex toggle
+     renderBulkTriageBar() does below -- align-items/gap only take effect once JS sets
+     display:flex itself, so they're harmless while the bar is hidden. -->
+<div id="bulkTriageBar" class="alert alert-dark border-secondary align-items-center gap-2 py-2 px-3 mb-2" style="display:none;">
     <span class="small text-muted"><span id="bulkTriageCount">0</span> alert(s) selected</span>
     <div class="ms-auto d-flex gap-2">
         <button class="btn btn-outline-danger btn-sm" onclick="bulkUpdateAlerts('false_positive')"><i class="fa-solid fa-ban me-1"></i>Mark False Positive</button>
