@@ -7074,7 +7074,7 @@ def api_case_attachments(cid):
     db = get_db()
     if request.method == 'GET':
         rows = db.execute(
-            "SELECT id, original_filename, content_type, file_size_bytes, description, uploaded_by, uploaded_at "
+            "SELECT id, original_filename, content_type, file_size_bytes, sha256, description, uploaded_by, uploaded_at "
             "FROM case_attachments WHERE case_id = ? ORDER BY id DESC", (cid,)
         ).fetchall()
         return jsonify([dict(r) for r in rows])
@@ -7092,6 +7092,15 @@ def api_case_attachments(cid):
         return jsonify({"error": "The uploaded file is empty"}), 400
     if size > CASE_ATTACHMENT_MAX_BYTES:
         return jsonify({"error": f"Attachments are capped at {CASE_ATTACHMENT_MAX_BYTES // (1024 * 1024)} MB"}), 400
+    # Hashed here, once, from the same stream about to be saved -- not a second read of
+    # the file after it's on disk. Chunked rather than a single f.read() so this stays
+    # cheap even at the 25MB cap.
+    import hashlib
+    hasher = hashlib.sha256()
+    for chunk in iter(lambda: f.stream.read(1024 * 1024), b''):
+        hasher.update(chunk)
+    sha256_hex = hasher.hexdigest()
+    f.seek(0)
     original_filename = secure_filename(f.filename) or 'attachment'
     # Stored under a random name, never the client-supplied one -- the same
     # never-trust-a-client-filename-as-a-path reasoning download_report()'s id-keyed
@@ -7105,13 +7114,13 @@ def api_case_attachments(cid):
     f.save(os.path.join(CASE_ATTACHMENTS_DIR, stored_filename))
     description = (request.form.get('description') or '').strip() or None
     cur = db.execute(
-        "INSERT INTO case_attachments (case_id, filename, original_filename, content_type, file_size_bytes, description, uploaded_by) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (cid, stored_filename, original_filename, f.content_type, size, description, current_user.username)
+        "INSERT INTO case_attachments (case_id, filename, original_filename, content_type, file_size_bytes, sha256, description, uploaded_by) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (cid, stored_filename, original_filename, f.content_type, size, sha256_hex, description, current_user.username)
     )
-    _log_case_event(db, cid, 'attachment_added', original_filename)
+    _log_case_event(db, cid, 'attachment_added', f"{original_filename} (SHA-256: {sha256_hex})")
     db.commit()
-    return jsonify({"status": "success", "id": cur.lastrowid})
+    return jsonify({"status": "success", "id": cur.lastrowid, "sha256": sha256_hex})
 
 # Deliberately unauthenticated-content-type-agnostic and always forced as an attachment
 # (never rendered inline) -- an uploaded file in a DFIR case may legitimately BE a
@@ -7125,10 +7134,29 @@ def api_case_attachment_download(cid, aid):
     from flask import send_from_directory
     db = get_db()
     row = db.execute(
-        "SELECT filename, original_filename FROM case_attachments WHERE id = ? AND case_id = ?", (aid, cid)
+        "SELECT filename, original_filename, sha256 FROM case_attachments WHERE id = ? AND case_id = ?", (aid, cid)
     ).fetchone()
-    if not row or not os.path.exists(os.path.join(CASE_ATTACHMENTS_DIR, row['filename'])):
+    file_path = os.path.join(CASE_ATTACHMENTS_DIR, row['filename']) if row else None
+    if not row or not os.path.exists(file_path):
         return jsonify({"error": "Attachment not found"}), 404
+    # Re-verify on every download, not just record at upload -- a stored hash that's
+    # never checked again isn't really a chain-of-custody control. Nothing blocks the
+    # download on a mismatch (a false positive here shouldn't lock an analyst out of
+    # evidence they need right now), but it's logged to the case timeline so a genuine
+    # on-disk change (corruption, tampering) leaves a real, visible trail. A NULL stored
+    # hash (an attachment from before this existed) is never treated as a mismatch.
+    if row['sha256']:
+        import hashlib
+        hasher = hashlib.sha256()
+        with open(file_path, 'rb') as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b''):
+                hasher.update(chunk)
+        if hasher.hexdigest() != row['sha256']:
+            _log_case_event(
+                db, cid, 'attachment_integrity_mismatch',
+                f"{row['original_filename']}: on-disk SHA-256 no longer matches the hash recorded at upload"
+            )
+            db.commit()
     return send_from_directory(CASE_ATTACHMENTS_DIR, row['filename'], as_attachment=True, download_name=row['original_filename'])
 
 @app.route('/api/cases/<int:cid>/attachments/<int:aid>', methods=['DELETE'])
@@ -11477,6 +11505,12 @@ def migrate_case_attachments():
         # via send_from_directory's download_name, same "never trust a client filename
         # as a filesystem path" reasoning download_report()'s id-keyed lookup already
         # documents for report PDFs.
+        # `sha256` is computed once at upload time (api_case_attachments) and re-checked
+        # on every download (api_case_attachment_download) -- every other EDR-collected
+        # artifact in this app is hashed at collection (collect_file/quarantine_file), but
+        # the one place an analyst deliberately attaches evidence to a case wasn't. Nullable
+        # so an attachment uploaded before this column existed doesn't look tampered with --
+        # a NULL hash just means "uploaded before hashing existed", not a mismatch.
         conn.execute('''CREATE TABLE IF NOT EXISTS case_attachments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             case_id INTEGER NOT NULL,
@@ -11484,10 +11518,14 @@ def migrate_case_attachments():
             original_filename TEXT NOT NULL,
             content_type TEXT,
             file_size_bytes INTEGER,
+            sha256 TEXT,
             description TEXT,
             uploaded_by TEXT,
             uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )''')
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(case_attachments)").fetchall()}
+        if 'sha256' not in cols:
+            conn.execute("ALTER TABLE case_attachments ADD COLUMN sha256 TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_case_attachments_case ON case_attachments(case_id)")
         conn.commit()
         conn.close()
