@@ -5234,6 +5234,38 @@ def _technique_tier_lookup(mitre_result):
                 }
     return tier
 
+# Closes a real, previously entirely-manual gap: nothing ever connected "this incident
+# happened" back to "did Coverage already know about this gap." Reuses the exact tier
+# lookup the Coverage page itself uses -- not a separate/looser approximation -- so a
+# technique reported here as weak always matches what the Coverage tab would show for it.
+def _case_coverage_gaps(db, cid):
+    rows = db.execute(
+        "SELECT DISTINCT a.mitre_techniques FROM case_items ci "
+        "JOIN alerts a ON ci.item_type = 'alert' AND ci.item_id = CAST(a.id AS TEXT) "
+        "WHERE ci.case_id = ? AND a.mitre_techniques IS NOT NULL AND a.mitre_techniques != ''",
+        (cid,)
+    ).fetchall()
+    technique_ids = set()
+    for r in rows:
+        for tid in (r['mitre_techniques'] or '').split(','):
+            tid = tid.strip()
+            if tid:
+                technique_ids.add(tid)
+    if not technique_ids:
+        return []
+    from mitre_attack import lookup as mitre_lookup, TACTIC_LABELS
+    rules = _get_rules_cache(db)
+    validated = _get_validated_technique_counts(db, 30)
+    tier_lookup = _technique_tier_lookup(_build_mitre_coverage(rules, validated, {}))
+    gaps = []
+    for tid in sorted(technique_ids):
+        info = tier_lookup.get(tid)
+        tier = info['tier'] if info else 'unmapped'
+        if tier in ('gap', 'inactive', 'unmapped'):
+            tname, tactic = mitre_lookup(tid)
+            gaps.append({'id': tid, 'name': tname, 'tactic_label': TACTIC_LABELS.get(tactic, tactic), 'tier': tier})
+    return gaps
+
 @app.route('/api/mitre/coverage', methods=['GET'])
 @login_required
 def api_mitre_coverage():
@@ -6603,6 +6635,8 @@ def api_case_detail(cid):
         status = data['status'].strip() if 'status' in data and data['status'] else case['status']
         assignee = data['assignee'].strip() if 'assignee' in data else (case['assignee'] or '')
         description = data['description'].strip() if 'description' in data else (case['description'] or '')
+        root_cause = data['root_cause'].strip() if 'root_cause' in data else (case['root_cause'] or '')
+        lessons_learned = data['lessons_learned'].strip() if 'lessons_learned' in data else (case['lessons_learned'] or '')
         # 'tlp' in data (not "and data['tlp']") -- an explicit empty string must actually
         # clear it back to not-set, not silently fall through to keeping the old value.
         tlp = data['tlp'].strip() if 'tlp' in data else case['tlp']
@@ -6683,8 +6717,8 @@ def api_case_detail(cid):
             queue_name = db.execute("SELECT name FROM case_queues WHERE id = ?", (queue_id,)).fetchone()['name'] if queue_id else '(none)'
             _log_case_event(db, cid, 'queue_change', queue_name)
         db.execute(
-            "UPDATE cases SET title = ?, status = ?, assignee = ?, description = ?, closed_at = ?, tlp = ?, pap = ?, severity = ?, workflow_state = ?, acknowledged_at = ?, sla_breach_notified_at = ?, queue_id = ?, last_closed_at = ?, reopened_count = ? WHERE id = ?",
-            (title, status, assignee, description, closed_at, tlp, pap, severity, workflow_state, acknowledged_at, sla_breach_notified_at, queue_id, last_closed_at, reopened_count, cid)
+            "UPDATE cases SET title = ?, status = ?, assignee = ?, description = ?, root_cause = ?, lessons_learned = ?, closed_at = ?, tlp = ?, pap = ?, severity = ?, workflow_state = ?, acknowledged_at = ?, sla_breach_notified_at = ?, queue_id = ?, last_closed_at = ?, reopened_count = ? WHERE id = ?",
+            (title, status, assignee, description, root_cause, lessons_learned, closed_at, tlp, pap, severity, workflow_state, acknowledged_at, sla_breach_notified_at, queue_id, last_closed_at, reopened_count, cid)
         )
         if status_changed:
             _run_playbooks_for_case(db, cid, 'status_changed', queue_id, tlp, status, severity)
@@ -6770,6 +6804,14 @@ def api_case_remove_item(cid, item_row_id):
 # hide activity on a host just because it's still only "suspected"). Each category is
 # capped so this stays fast; total_available is returned alongside so a cap never silently
 # reads as "nothing more happened."
+@app.route('/api/cases/<int:cid>/coverage-gaps', methods=['GET'])
+@login_required
+def api_case_coverage_gaps(cid):
+    db = get_db()
+    if not db.execute("SELECT 1 FROM cases WHERE id = ?", (cid,)).fetchone():
+        return jsonify({"error": "Case not found"}), 404
+    return jsonify({"gaps": _case_coverage_gaps(db, cid)})
+
 @app.route('/api/cases/<int:cid>/related-items', methods=['GET'])
 @login_required
 def api_case_related_items(cid):
@@ -11452,6 +11494,15 @@ def migrate_case_severity():
             conn.execute("ALTER TABLE cases ADD COLUMN sla_breach_notified_at DATETIME")
         if 'stale_notified_at' not in cols:
             conn.execute("ALTER TABLE cases ADD COLUMN stale_notified_at DATETIME")
+        # Nullable free-text retrospective fields -- see the Retrospective section of the
+        # case detail page. Nothing prompted capturing either before this (closing a case
+        # only ever changed status/workflow_state), the actual gap a DFIR lifecycle audit
+        # of this app flagged: every quantitative post-incident metric already existed
+        # (MTTD/MTTA/etc.), but nothing captured the qualitative half.
+        if 'root_cause' not in cols:
+            conn.execute("ALTER TABLE cases ADD COLUMN root_cause TEXT")
+        if 'lessons_learned' not in cols:
+            conn.execute("ALTER TABLE cases ADD COLUMN lessons_learned TEXT")
         conn.commit()
         conn.close()
     except Exception:
