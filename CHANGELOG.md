@@ -10,6 +10,29 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-09
 
+### DNS query logs now carry a real host, not just a source IP
+
+`dns_server.py` deliberately never attempted host attribution — DNS itself carries no
+identity, only a source IP — leaving every query in Log Search and the DNS Activity view
+attributed to an IP alone. A best-effort correlation helper (`_resolve_dns_client_context`)
+already existed for the dedicated DNS Activity view, but its only data source
+(`live_logs.source_ip` from some other log type) was essentially unpopulated, since
+nothing extracts a host's own local IP from Sysmon — only `destination_ip` ever gets
+extracted from Event ID 3.
+
+Fixed by adding a second, much denser correlation source that already exists and was
+going unused for this: `agent_polls`, which records an enrolled EDR agent's real source
+IP + hostname on every check-in (~8s cadence). `dns_server.py` now resolves host at
+*ingest* time (new `_resolve_dns_host()`, tried against other already-ingested logs from
+the same IP first, then `agent_polls` within a tight 15-minute window to avoid a stale
+DHCP-lease reassignment misattributing a query) and writes it straight into
+`live_logs.host` — meaning general Log Search picks it up for free through its existing
+generic SQL union, no query-time enrichment or template changes needed anywhere.
+`_resolve_dns_client_context` (app.py) gained the same `agent_polls` fallback, now used
+only to backfill host on pre-existing rows and to resolve username (still deliberately
+never attempted at ingest — a logged-in user at query time is a weaker inference than the
+device itself).
+
 ### UEBA Timeline: compact-by-default Filters column with expand/collapse
 
 The Timeline tab's Filters sidebar (Event Types, Time Range, Search, Apply/Refresh)

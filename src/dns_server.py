@@ -22,9 +22,14 @@ takes effect without needing a service restart. Every query is logged into live_
 as app='dns_server' via a batched background flush (never a per-query synchronous
 write -- this app's own established convention, see sigma_engine.py/ueba_engine.py's own
 batching discipline) with the client's real source_ip and the queried domain
-(query_name) -- host/username attribution is deliberately NOT attempted here (DNS itself
-carries no such identity), see app.py's _resolve_dns_client_context for the best-effort,
-clearly-labeled correlation done at read/display time instead.
+(query_name), plus a best-effort host attribution (see _resolve_dns_host below) resolved
+at flush time against other already-ingested logs from the same IP, then against EDR
+agent check-ins -- DNS itself carries no identity of its own, so this is always a
+correlation, never a guarantee, and "no match" is a normal outcome for a device this
+appliance has no other visibility into. Username attribution is deliberately NOT
+attempted here at all (a logged-in user at query time is a weaker, more error-prone
+inference than the device itself) -- see app.py's _resolve_dns_client_context for that
+one, done at read/display time instead.
 """
 import os
 import json
@@ -38,6 +43,44 @@ from dnslib import DNSRecord, QTYPE, RCODE
 
 DB_PATH = "/opt/micro-dfir/siem.db"
 CONFIG_POLL_INTERVAL = 10
+
+# Best-effort host attribution for a DNS query -- DNS itself carries no host identity,
+# only a source IP, so this correlates against OTHER already-ingested data from the same
+# IP. Two sources, tried in order:
+#   1. Any other live_logs row from the same IP that already carries a real host (Sysmon/
+#      EDR/auditd events routinely do) -- a long lookback is safe here since a real event
+#      is a point-in-time fact, not a lease.
+#   2. agent_polls, which records an enrolled EDR agent's real source IP + hostname on
+#      every check-in (~8s cadence while the agent is running, see README's network
+#      section) -- a much denser signal than waiting for some other log type to happen to
+#      populate host from the same IP, but a stale DHCP-lease reassignment would misattribute
+#      a query to a different device that inherited the IP, so this window is deliberately
+#      short relative to the live_logs one.
+# Mirrors app.py's _resolve_dns_client_context (used there for the DNS Activity view's
+# username-only enrichment on top of whatever host this already wrote) -- duplicated, not
+# imported, matching this app's own standalone-script convention (ueba_engine.py/
+# sigma_engine.py each keep their own DB reads rather than importing from app.py).
+DNS_HOST_LIVE_LOGS_LOOKBACK_HOURS = 48
+DNS_HOST_AGENT_POLL_LOOKBACK_MINUTES = 15
+
+def _resolve_dns_host(conn, ip, near_ts):
+    if not ip:
+        return None
+    row = conn.execute(
+        "SELECT host FROM live_logs WHERE source_ip = ? AND app != 'dns_server' "
+        "AND host IS NOT NULL AND host != '' AND timestamp <= ? AND timestamp >= datetime(?, ?) "
+        "ORDER BY timestamp DESC LIMIT 1",
+        (ip, near_ts, near_ts, f'-{DNS_HOST_LIVE_LOGS_LOOKBACK_HOURS} hours')
+    ).fetchone()
+    if row and row[0]:
+        return row[0]
+    row = conn.execute(
+        "SELECT user_agent FROM agent_polls WHERE ip_address = ? "
+        "AND timestamp <= ? AND timestamp >= datetime(?, ?) "
+        "ORDER BY timestamp DESC LIMIT 1",
+        (ip, near_ts, near_ts, f'-{DNS_HOST_AGENT_POLL_LOOKBACK_MINUTES} minutes')
+    ).fetchone()
+    return row[0] if row and row[0] else None
 FLUSH_INTERVAL = 2
 FLUSH_BATCH_MAX = 1000
 UPSTREAM_TIMEOUT = 3
@@ -145,9 +188,17 @@ def _flush_loop():
             continue
         conn = sqlite3.connect(DB_PATH, timeout=30)
         try:
+            # Resolve host once per unique source_ip in this batch, not once per query --
+            # a single busy device can easily account for dozens of rows in one 2s flush.
+            host_by_ip = {}
+            for item in batch:
+                ip = item['source_ip']
+                if ip not in host_by_ip:
+                    host_by_ip[ip] = _resolve_dns_host(conn, ip, item['timestamp'])
+                item['host'] = host_by_ip[ip]
             conn.executemany(
-                "INSERT INTO live_logs (timestamp, app, source_ip, query_name, event_id, message) "
-                "VALUES (:timestamp, :app, :source_ip, :query_name, :event_id, :message)",
+                "INSERT INTO live_logs (timestamp, app, source_ip, host, query_name, event_id, message) "
+                "VALUES (:timestamp, :app, :source_ip, :host, :query_name, :event_id, :message)",
                 batch
             )
             conn.commit()
