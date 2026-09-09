@@ -1114,6 +1114,33 @@ function termsFor(col) {
     return terms;
 }
 
+// Duplicated from cases.html's own hoursLabel/elapsedHours (same per-file convention
+// this app already uses elsewhere) -- alerts have no formal SLA target the way cases do
+// (case_sla_hours doesn't apply here), so this only ever shows elapsed time + whether
+// it's been acknowledged, not a breach comparison against a threshold that doesn't exist
+// for alerts. Gives the triage panel the same at-a-glance urgency signal the case header
+// already has, without inventing a whole alert-SLA config system for it.
+function hoursLabel(h) {
+    if (h === null || h === undefined) return '—';
+    if (h < 1) return `${Math.round(h * 60)}m`;
+    if (h < 48) return `${h.toFixed(1)}h`;
+    return `${(h / 24).toFixed(1)}d`;
+}
+
+function elapsedHours(fromTs, toTs) {
+    const from = new Date((fromTs || '').replace(' ', 'T') + 'Z').getTime();
+    const to = toTs ? new Date((toTs || '').replace(' ', 'T') + 'Z').getTime() : Date.now();
+    if (isNaN(from)) return null;
+    return Math.max(0, (to - from) / 3600000);
+}
+
+function renderAlertUrgencyChips(log) {
+    return `
+        <div><i class="fa-solid fa-stopwatch me-1 text-muted"></i>Fired ${hoursLabel(elapsedHours(log.time, null))} ago</div>
+        ${!log.acknowledged ? '<div class="text-warning"><i class="fa-solid fa-hourglass-half me-1"></i>Not yet acknowledged</div>' : ''}
+    `;
+}
+
 function severityBadgeClass(sev) {
     const s = (sev || '').toUpperCase();
     if (s === 'CRITICAL' || s === 'HIGH' || s === 'ALERT') return 'bg-danger';
@@ -1222,6 +1249,7 @@ function showLogDetail(idx) {
         ${viewRuleBtn}
         ${log.type === 'alert' ? `
         <label class="form-label small text-muted mb-1">Triage</label>
+        <div id="alertUrgencyChips" class="d-flex flex-wrap gap-3 small mb-2">${renderAlertUrgencyChips(log)}</div>
         <div class="d-flex align-items-end gap-2 mb-2 flex-wrap">
             <div>
                 <label class="form-label small text-muted mb-1">Status</label>
@@ -1378,6 +1406,11 @@ function saveTriage(aid) {
             const log = currentLogs.find(l => l.type === 'alert' && String(l.id) === String(aid));
             if (log) { log.status = payload.status; log.assignee = payload.assignee || null; log.acknowledged = 1; }
             renderLogsTableRows(currentLogs);
+            // The modal is still open on this same alert -- without this, "Not yet
+            // acknowledged" would keep showing stale until the modal is closed and
+            // reopened, even though the save that just ran IS the acknowledgement.
+            const chipsWrap = document.getElementById('alertUrgencyChips');
+            if (chipsWrap && log) chipsWrap.innerHTML = renderAlertUrgencyChips(log);
             const suggestWrap = document.getElementById('fpExclusionSuggest');
             if (suggestWrap) {
                 suggestWrap.innerHTML = (payload.status === 'false_positive' && log) ? renderFpExclusionSuggestion(log) : '';
