@@ -286,6 +286,17 @@
     </div>
 </div>
 
+<!-- BULK TRIAGE BAR -- hidden until 1+ alert rows are checked -->
+<div id="bulkTriageBar" class="alert alert-dark border-secondary d-flex align-items-center gap-2 py-2 px-3 mb-2" style="display:none;">
+    <span class="small text-muted"><span id="bulkTriageCount">0</span> alert(s) selected</span>
+    <div class="ms-auto d-flex gap-2">
+        <button class="btn btn-outline-danger btn-sm" onclick="bulkUpdateAlerts('false_positive')"><i class="fa-solid fa-ban me-1"></i>Mark False Positive</button>
+        <button class="btn btn-outline-success btn-sm" onclick="bulkUpdateAlerts('resolved')"><i class="fa-solid fa-check me-1"></i>Mark Resolved</button>
+        <button class="btn btn-outline-warning btn-sm" onclick="bulkUpdateAlerts('investigating')"><i class="fa-solid fa-magnifying-glass me-1"></i>Mark Investigating</button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="clearBulkSelection()">Clear</button>
+    </div>
+</div>
+
 <!-- LOGS TABLE -->
 <div class="card bg-dark border-secondary">
     <div class="card-body p-0">
@@ -1034,6 +1045,14 @@ window.loadDashboardData = function(opts) {
 
 let currentLogs = [];
 
+// Bulk triage -- an alert storm otherwise has to be worked one detail-modal click at a
+// time. Keyed by real alert id (not row index), so a selection made before a re-sort/
+// re-render (same underlying currentLogs, e.g. after a single saveTriage() call updates
+// one row in place) still reflects correctly; a genuinely fresh search (loadLogs()'s own
+// currentLogs reassignment) clears it, since stale ids from a different result set would
+// otherwise show a selection count with nothing actually checked on screen.
+let bulkSelectedAlertIds = new Set();
+
 // Server-side single source of truth for which fields Log Search's field-specific filter
 // can target -- the Field Manager modal's "Field" picker is built from this list only, so
 // a field added there can never silently fall back to searching `message` server-side.
@@ -1688,6 +1707,7 @@ window.loadLogs = function(opts) {
         })
         .then(data => {
             currentLogs = data.logs || [];
+            bulkSelectedAlertIds.clear();  // a fresh search invalidates any prior selection
             logsTotalMatchesCache = data.total_matches !== undefined ? data.total_matches : data.count;
             updateLogCountBadge();
             updateSearchStatsFromCurrentLogs();
@@ -1701,7 +1721,7 @@ window.loadLogs = function(opts) {
             // table with an explicit error when this is a real user-initiated/initial load,
             // which is the case that would otherwise be stuck on "Loading logs..." forever.
             if (!opts || !opts.auto) {
-                renderLoadError('logsTableBody', activeColumnDefs().length || 1, 'Failed to load logs.');
+                renderLoadError('logsTableBody', (activeColumnDefs().length || 1) + 1, 'Failed to load logs.');
             }
         });
 };
@@ -1882,7 +1902,8 @@ function applyColumnSelection() {
 function renderLogsTableHead() {
     let row = document.getElementById('logsTableHeadRow');
     if (!row) return;
-    row.innerHTML = activeColumnDefs().map(c => {
+    const selectHead = `<th style="width:28px;"><input type="checkbox" id="bulkSelectAllChk" onchange="toggleAllBulkSelect(this.checked)" title="Select all visible alerts"></th>`;
+    row.innerHTML = selectHead + activeColumnDefs().map(c => {
         const label = c.key === 'time' ? `Time (${logSearchDisplayTz === 'utc' ? 'UTC' : 'Local'})` : c.label;
         const sortCol = SORTABLE_LOG_COLUMNS[c.key];
         if (!sortCol) return `<th>${escHtml(label)}</th>`;
@@ -1897,14 +1918,78 @@ function renderLogsTableRows(logs) {
     if (!tbody) return;
     const cols = activeColumnDefs();
     if (!logs || logs.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="${cols.length || 1}" class="text-center text-muted py-3">No logs match current filters.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="${(cols.length || 1) + 1}" class="text-center text-muted py-3">No logs match current filters.</td></tr>`;
         return;
     }
-    tbody.innerHTML = logs.map((log, idx) => `
+    tbody.innerHTML = logs.map((log, idx) => {
+        const selCell = (log.type === 'alert' && log.id)
+            ? `<td onclick="event.stopPropagation();"><input type="checkbox" class="bulk-select-chk" ${bulkSelectedAlertIds.has(log.id) ? 'checked' : ''} onchange="toggleBulkSelect(${log.id}, this.checked)"></td>`
+            : `<td></td>`;
+        return `
         <tr onclick="showLogDetail(${idx})" style="cursor:pointer;" title="Click to view full details">
+            ${selCell}
             ${cols.map(c => `<td class="${c.cellClass || ''}"${c.cellStyle ? ` style="${c.cellStyle}"` : ''}>${renderCell(c.key, log, idx)}</td>`).join('')}
-        </tr>
-    `).join('');
+        </tr>`;
+    }).join('');
+    renderBulkTriageBar();
+}
+
+function toggleBulkSelect(alertId, checked) {
+    if (checked) bulkSelectedAlertIds.add(alertId);
+    else bulkSelectedAlertIds.delete(alertId);
+    renderBulkTriageBar();
+}
+
+function toggleAllBulkSelect(checked) {
+    for (const log of currentLogs) {
+        if (log.type === 'alert' && log.id) {
+            if (checked) bulkSelectedAlertIds.add(log.id);
+            else bulkSelectedAlertIds.delete(log.id);
+        }
+    }
+    renderLogsTableRows(currentLogs);
+}
+
+function clearBulkSelection() {
+    bulkSelectedAlertIds.clear();
+    renderLogsTableRows(currentLogs);
+}
+
+function renderBulkTriageBar() {
+    const bar = document.getElementById('bulkTriageBar');
+    if (!bar) return;
+    const n = bulkSelectedAlertIds.size;
+    bar.style.display = n > 0 ? 'flex' : 'none';
+    const countEl = document.getElementById('bulkTriageCount');
+    if (countEl) countEl.textContent = n;
+}
+
+// Reuses the existing single-alert PUT route (no dedicated bulk endpoint) -- each alert
+// is its own independent UPDATE, no shared state between them, so a parallel fan-out is
+// safe and the permission gate that route already has (login-only, matching every other
+// alert-triage action) applies identically per request either way.
+async function bulkUpdateAlerts(status) {
+    const ids = Array.from(bulkSelectedAlertIds);
+    if (!ids.length) return;
+    const labels = {false_positive: 'False Positive', resolved: 'Resolved', investigating: 'Investigating'};
+    if (!(await confirmDialog(`Mark ${ids.length} alert(s) as ${labels[status] || status}?`, {title: 'Bulk triage', confirmLabel: 'Apply'}))) return;
+    const results = await Promise.all(ids.map(id =>
+        fetch(`/api/alerts/${id}`, {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({status, acknowledged: true})
+        }).then(r => ({id, ok: r.ok}))
+    ));
+    const succeeded = results.filter(r => r.ok).map(r => r.id);
+    const failed = results.filter(r => !r.ok).length;
+    // Keep currentLogs consistent in place, same pattern saveTriage() already uses for a
+    // single alert, so the table reflects the change immediately without a full refetch.
+    for (const log of currentLogs) {
+        if (log.type === 'alert' && succeeded.includes(log.id)) { log.status = status; log.acknowledged = 1; }
+    }
+    bulkSelectedAlertIds.clear();
+    renderLogsTableRows(currentLogs);
+    if (failed) toast(`${succeeded.length} updated, ${failed} failed.`, 'warning');
+    else toast(`${succeeded.length} alert(s) marked ${labels[status] || status}.`, 'success');
 }
 
 function loadTimeline() {
