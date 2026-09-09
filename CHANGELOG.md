@@ -10,6 +10,25 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-09
 
+### New: SHA-256 hashing + integrity verification for case attachments
+
+From a DFIR-lifecycle gap audit: every EDR-collected artifact (`collect_file`,
+`quarantine_file`) is hashed at collection time, but the one place an analyst
+*deliberately* attaches evidence to a case — `case_attachments` — wasn't, making it the
+single biggest chain-of-custody gap in the app. Fixed: `api_case_attachments`'s upload
+route now hashes the file stream once (chunked, before it's saved, not a second read
+after) and stores the digest in a new nullable `sha256` column; the case Attachments
+table shows it (truncated, full value on hover). Nullable so a pre-existing attachment
+uploaded before this shipped reads as "not recorded," never as a false mismatch.
+
+Hashing something nobody ever re-checks isn't really a custody control, so
+`api_case_attachment_download` now re-hashes the on-disk file against the stored digest
+on *every* download and logs a new `attachment_integrity_mismatch` case-timeline event
+(red, distinct from routine notes) if they no longer match — corruption or tampering
+leaves a real, visible trail instead of silently going unnoticed. Non-blocking: a
+mismatch never prevents the download itself, since a false positive here shouldn't lock
+an analyst out of evidence they need right now.
+
 ### DNS query logs now carry a real host, not just a source IP
 
 `dns_server.py` deliberately never attempted host attribution — DNS itself carries no

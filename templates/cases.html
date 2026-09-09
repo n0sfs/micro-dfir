@@ -1069,6 +1069,7 @@ function caseEventLabel(e) {
         ioc_removed: `Indicator removed: <strong>${escHtml(e.detail)}</strong>`,
         attachment_added: `Attachment added: <strong>${escHtml(e.detail)}</strong>`,
         attachment_removed: `Attachment removed: <strong>${escHtml(e.detail)}</strong>`,
+        attachment_integrity_mismatch: `<i class="fa-solid fa-triangle-exclamation text-danger me-1"></i><strong class="text-danger">Integrity check failed:</strong> ${escHtml(e.detail)}`,
     };
     return map[e.event_type] || escHtml(e.event_type);
 }
@@ -1731,16 +1732,23 @@ function renderCaseAttachments(rows) {
     el.innerHTML = `
         <div class="table-responsive mb-2">
             <table class="table table-dark table-sm align-middle mb-0">
-                <thead><tr><th>File</th><th>Description</th><th>Size</th><th>Uploaded By</th><th>Uploaded At</th><th></th></tr></thead>
+                <thead><tr><th>File</th><th>SHA-256</th><th>Description</th><th>Size</th><th>Uploaded By</th><th>Uploaded At</th><th></th></tr></thead>
                 <tbody>${rows.map(caseAttachmentRow).join('')}</tbody>
             </table>
         </div>`;
 }
 
 function caseAttachmentRow(a) {
+    // Attachments from before hashing existed (see migrate_case_attachments) have no
+    // sha256 -- shown plainly as "not recorded" rather than blank, so it doesn't read as
+    // a missing/broken value on a genuinely old attachment.
+    const hashCell = a.sha256
+        ? `<code class="small" title="${escHtml(a.sha256)}" style="cursor:help;">${escHtml(a.sha256.slice(0, 12))}&hellip;</code>`
+        : `<span class="text-muted small">not recorded</span>`;
     return `
         <tr>
             <td class="small"><a href="/api/cases/${activeCaseId}/attachments/${a.id}/download"><i class="fa-solid fa-paperclip me-1"></i>${escHtml(a.original_filename)}</a></td>
+            <td>${hashCell}</td>
             <td class="small text-muted">${escHtml(a.description || '')}</td>
             <td class="small text-nowrap">${escHtml(formatAttachmentSize(a.file_size_bytes))}</td>
             <td class="small">${escHtml(a.uploaded_by || '')}</td>
