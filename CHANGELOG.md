@@ -10,6 +10,30 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-09
 
+### New: case Retrospective fields (Root Cause / Lessons Learned) + a case→Coverage gap link
+
+Two more items from the DFIR lifecycle audit's Post-Incident Activity findings, both
+real: every quantitative post-incident metric already existed (MTTD/MTTA/MTTI/MTTC/MTTR,
+FP rate, etc.) but nothing ever captured the qualitative half, and nothing connected "we
+just handled an incident" back to "did Coverage already know about the techniques
+involved."
+
+`cases` gains two nullable free-text columns, `root_cause`/`lessons_learned`, editable
+alongside Description and disabled once a case is closed (same as every other field —
+closing a case is meant to be the point where the record freezes). Since that means a
+retrospective note has to be written *before* closing or not through the UI at all,
+`saveCaseDetail()` adds a soft, dismissable prompt ("You're closing this case without a
+root cause or lessons learned note — continue anyway?") rather than a hard block — a
+false positive or a trivial case shouldn't be stuck on a mandatory write-up.
+
+New `_case_coverage_gaps()` (`app.py`) gathers the MITRE techniques implicated by a
+case's linked alerts (`alerts.mitre_techniques`, already stamped on every fired alert)
+and checks each one's current Coverage tier — reusing the exact same
+`_build_mitre_coverage`/`_technique_tier_lookup` the Coverage page itself uses, not a
+separate approximation. When any of them sit at `gap`/`inactive`/`unmapped`, the case
+detail page shows a small warning card naming them with a link straight to Coverage's
+MITRE tab — the case→gap-review link that was previously entirely manual.
+
 ### Settings > Database Backups now lists actual backup files, not just a count
 
 Started as a "backup has no restore path" item on the DFIR lifecycle audit — turned out
