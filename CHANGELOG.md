@@ -10,6 +10,18 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-09
 
+### New: urgency chips (fired-ago / unacknowledged) on the alert triage panel
+
+The last of today's smaller lifecycle-audit items: cases show "6.5d open, SLA breached"
+right at the top, but the alert triage panel — where triage actually happens — showed no
+urgency signal at all. Alerts have no formal SLA target the way cases do (`case_sla_hours`
+doesn't apply here), so this doesn't invent a breach threshold; it shows the same two
+honest, always-computable facts the case header already leads with: how long ago the
+alert fired (`hoursLabel`/`elapsedHours`, duplicated from cases.html's own implementation)
+and whether it's still unacknowledged. Refreshes in place immediately after a save — the
+save itself is what acknowledges the alert, so the modal's own "Not yet acknowledged" chip
+would otherwise keep showing stale until it's closed and reopened.
+
 ### New: bulk alert triage in Log Search
 
 An alert storm previously had to be worked one detail-modal click at a time — no way to
