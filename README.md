@@ -1,7 +1,9 @@
 # Enterprise Micro DFIR
 
 A Complete Edge Security Appliance integrating:
-1.  **SIEM:** Vector + SQLite + Log Pipeline UI
+1.  **SIEM:** Vector + SQLite + Log Pipeline UI — including a custom field-extraction
+    parser editor and a wizard for importing historical logs (CSV/NDJSON/JSON) from
+    other SIEMs, kept in their own searchable table, isolated from live detection
 2.  **EDR:** Custom Windows/Linux agents (remote response actions, live triage)
 3.  **UEBA:** DuckDB Behavioral Models
 4.  **SOAR:** Automated response playbooks, chained actions triggered by case lifecycle events (create/status/queue/assignee changes)
