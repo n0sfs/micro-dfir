@@ -114,6 +114,7 @@ PERMISSION_REGISTRY = [
     {'key': 'cases.delete', 'label': 'Delete cases', 'category': 'Cases'},
     {'key': 'cases.queues.manage', 'label': 'Manage case queues', 'category': 'Cases'},
     {'key': 'cases.templates.manage', 'label': 'Manage case templates & custom fields', 'category': 'Cases'},
+    {'key': 'cases.runbooks.manage', 'label': 'Manage IR runbooks & tabletop exercises', 'category': 'Cases'},
     {'key': 'logsearch.droprules.manage', 'label': 'Manage ingestion drop rules', 'category': 'Log Search'},
     {'key': 'logsearch.import.manage', 'label': 'Import external logs (CSV/JSON)', 'category': 'Log Search'},
     {'key': 'rules.manage', 'label': 'Manage detection rules', 'category': 'Detection Rules'},
@@ -1030,6 +1031,12 @@ def soar_page():
 @login_required
 def cases_page():
     return render_template('cases.html', current_user=current_user)
+
+@app.route('/runbooks')
+@login_required
+def runbooks_page():
+    active_tab = request.args.get('tab', 'library')
+    return render_template('runbooks.html', active_tab=active_tab, current_user=current_user)
 
 # The triage lifecycle sits alongside (not instead of) the older binary `acknowledged`
 # flag -- see migrate_alerts_triage(). 'new' is the schema DEFAULT so every alert starts
@@ -5845,7 +5852,7 @@ def download_report(history_id):
         return redirect(url_for('reports_page'))
     return send_from_directory('/opt/micro-dfir/reports', row['filename'], as_attachment=True)
 
-REPORT_TYPES = ('security', 'compliance', 'audit', 'vulnerability')
+REPORT_TYPES = ('security', 'compliance', 'audit', 'vulnerability', 'tabletop')
 
 @app.route('/reports/generate', methods=['POST'])
 @login_required
@@ -5901,7 +5908,7 @@ def api_report_history():
         r['file_exists'] = bool(r['filename']) and os.path.exists(os.path.join('/opt/micro-dfir/reports', r['filename']))
     return jsonify({'history': rows})
 
-REPORT_TYPE_EMAIL_LABELS = {'security': 'Security Summary', 'compliance': 'Compliance', 'audit': 'Audit Trail', 'vulnerability': 'Vulnerability'}
+REPORT_TYPE_EMAIL_LABELS = {'security': 'Security Summary', 'compliance': 'Compliance', 'audit': 'Audit Trail', 'vulnerability': 'Vulnerability', 'tabletop': 'Tabletop Exercise'}
 
 # On-demand send for an already-generated report -- distinct from run_report()'s own
 # auto-email-on-schedule step (generate_report.py), which only fires for
@@ -6025,7 +6032,7 @@ def report_branding_logo():
 # generate_report.py's own duplicated REPORT_BRANDING_DEFAULTS -- it has no Flask app
 # context and is invoked once at deploy time, not imported from here).
 REPORT_SCHEDULE_FREQUENCIES = ('off', 'daily', 'weekly', 'monthly')
-REPORT_SCHEDULE_DEFAULTS = {'security': 'monthly', 'compliance': 'off', 'audit': 'off', 'vulnerability': 'off', 'email_recipients': ''}
+REPORT_SCHEDULE_DEFAULTS = {'security': 'monthly', 'compliance': 'off', 'audit': 'off', 'vulnerability': 'off', 'tabletop': 'off', 'email_recipients': ''}
 REPORT_SCHEDULE_CRON = {
     'daily': '0 5 * * *',     # 05:00 daily -- lands before the day's first analyst shift
     'weekly': '0 6 * * 1',    # Monday 06:00 -- lands before the start of the work week
@@ -9338,6 +9345,167 @@ def api_case_template_detail(tid):
     log_audit('case_template_update', 'case_template', name)
     return jsonify({'status': 'success'})
 
+TABLETOP_EXERCISE_STATUSES = ('planned', 'completed', 'cancelled')
+
+def _runbook_steps_from_payload(d):
+    steps = []
+    for s in (d.get('steps') or []):
+        title = (s.get('title') or '').strip() if isinstance(s, dict) else ''
+        if title:
+            steps.append({'title': title, 'instructions': (s.get('instructions') or '').strip() if isinstance(s, dict) else ''})
+    return steps
+
+def _runbook_row_out(r):
+    d = dict(r)
+    d['steps'] = json.loads(d['steps']) if d.get('steps') else []
+    return d
+
+# Read access has no permission gate (same precedent as GET /api/case-templates) --
+# runbook/exercise content is operational IR documentation any logged-in analyst
+# should be able to read, not fleet-wide config or credentials.
+@app.route('/api/runbooks', methods=['GET', 'POST'])
+@login_required
+def api_runbooks():
+    db = get_db()
+    if request.method == 'GET':
+        rows = db.execute(
+            "SELECT r.*, "
+            "(SELECT COUNT(*) FROM tabletop_exercises te WHERE te.runbook_id = r.id) as exercise_count, "
+            "(SELECT MAX(COALESCE(te.completed_date, te.scheduled_date)) FROM tabletop_exercises te "
+            " WHERE te.runbook_id = r.id AND te.status = 'completed') as last_tested_date "
+            "FROM ir_runbooks r ORDER BY r.name"
+        ).fetchall()
+        return jsonify([_runbook_row_out(r) for r in rows])
+
+    err = require_permission('cases.runbooks.manage')
+    if err: return err
+    d = request.json or {}
+    name = (d.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'name is required'}), 400
+    steps = _runbook_steps_from_payload(d)
+    if db.execute("SELECT 1 FROM ir_runbooks WHERE name = ?", (name,)).fetchone():
+        return jsonify({'error': f'A runbook named "{name}" already exists'}), 400
+    cur = db.execute(
+        "INSERT INTO ir_runbooks (name, category, description, steps, owner, last_reviewed_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (name, (d.get('category') or '').strip(), (d.get('description') or '').strip(), json.dumps(steps),
+         (d.get('owner') or '').strip(), (d.get('last_reviewed_at') or '').strip() or None, current_user.username)
+    )
+    db.commit()
+    log_audit('runbook_create', 'ir_runbook', name)
+    return jsonify({'status': 'success', 'id': cur.lastrowid})
+
+@app.route('/api/runbooks/<int:rid>', methods=['PUT', 'DELETE'])
+@login_required
+def api_runbook_detail(rid):
+    err = require_permission('cases.runbooks.manage')
+    if err: return err
+    db = get_db()
+    existing = db.execute("SELECT name FROM ir_runbooks WHERE id = ?", (rid,)).fetchone()
+    if not existing:
+        return jsonify({'error': 'Runbook not found'}), 404
+
+    if request.method == 'DELETE':
+        # Preserve exercise history rather than cascading the delete -- a completed
+        # exercise's findings/action-items stay meaningful even after the runbook it
+        # tested is later retired or renamed away, same "don't rewrite history"
+        # principle as case_field_values having no FK back to its template.
+        db.execute("UPDATE tabletop_exercises SET runbook_id = NULL WHERE runbook_id = ?", (rid,))
+        db.execute("DELETE FROM ir_runbooks WHERE id = ?", (rid,))
+        db.commit()
+        log_audit('runbook_delete', 'ir_runbook', existing['name'])
+        return jsonify({'ok': 1})
+
+    d = request.json or {}
+    name = (d.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'name is required'}), 400
+    steps = _runbook_steps_from_payload(d)
+    if db.execute("SELECT 1 FROM ir_runbooks WHERE name = ? AND id != ?", (name, rid)).fetchone():
+        return jsonify({'error': f'A runbook named "{name}" already exists'}), 400
+    db.execute(
+        "UPDATE ir_runbooks SET name = ?, category = ?, description = ?, steps = ?, owner = ?, last_reviewed_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (name, (d.get('category') or '').strip(), (d.get('description') or '').strip(), json.dumps(steps),
+         (d.get('owner') or '').strip(), (d.get('last_reviewed_at') or '').strip() or None, rid)
+    )
+    db.commit()
+    log_audit('runbook_update', 'ir_runbook', name)
+    return jsonify({'status': 'success'})
+
+@app.route('/api/tabletop-exercises', methods=['GET', 'POST'])
+@login_required
+def api_tabletop_exercises():
+    db = get_db()
+    if request.method == 'GET':
+        rows = db.execute(
+            "SELECT te.*, r.name as runbook_name FROM tabletop_exercises te "
+            "LEFT JOIN ir_runbooks r ON r.id = te.runbook_id "
+            "ORDER BY COALESCE(te.completed_date, te.scheduled_date) DESC, te.id DESC"
+        ).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+    err = require_permission('cases.runbooks.manage')
+    if err: return err
+    d = request.json or {}
+    title = (d.get('title') or '').strip()
+    if not title:
+        return jsonify({'error': 'title is required'}), 400
+    status = d.get('status') or 'planned'
+    if status not in TABLETOP_EXERCISE_STATUSES:
+        return jsonify({'error': f"status must be one of {', '.join(TABLETOP_EXERCISE_STATUSES)}"}), 400
+    runbook_id = d.get('runbook_id') or None
+    if runbook_id and not db.execute("SELECT 1 FROM ir_runbooks WHERE id = ?", (runbook_id,)).fetchone():
+        return jsonify({'error': 'Selected runbook not found'}), 400
+    cur = db.execute(
+        "INSERT INTO tabletop_exercises (title, runbook_id, scenario, status, scheduled_date, completed_date, "
+        "facilitator, participants, findings, action_items, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (title, runbook_id, (d.get('scenario') or '').strip(), status,
+         (d.get('scheduled_date') or '').strip() or None, (d.get('completed_date') or '').strip() or None,
+         (d.get('facilitator') or '').strip(), (d.get('participants') or '').strip(),
+         (d.get('findings') or '').strip(), (d.get('action_items') or '').strip(), current_user.username)
+    )
+    db.commit()
+    log_audit('tabletop_exercise_create', 'tabletop_exercise', title)
+    return jsonify({'status': 'success', 'id': cur.lastrowid})
+
+@app.route('/api/tabletop-exercises/<int:eid>', methods=['PUT', 'DELETE'])
+@login_required
+def api_tabletop_exercise_detail(eid):
+    err = require_permission('cases.runbooks.manage')
+    if err: return err
+    db = get_db()
+    existing = db.execute("SELECT title FROM tabletop_exercises WHERE id = ?", (eid,)).fetchone()
+    if not existing:
+        return jsonify({'error': 'Exercise not found'}), 404
+
+    if request.method == 'DELETE':
+        db.execute("DELETE FROM tabletop_exercises WHERE id = ?", (eid,))
+        db.commit()
+        log_audit('tabletop_exercise_delete', 'tabletop_exercise', existing['title'])
+        return jsonify({'ok': 1})
+
+    d = request.json or {}
+    title = (d.get('title') or '').strip()
+    if not title:
+        return jsonify({'error': 'title is required'}), 400
+    status = d.get('status') or 'planned'
+    if status not in TABLETOP_EXERCISE_STATUSES:
+        return jsonify({'error': f"status must be one of {', '.join(TABLETOP_EXERCISE_STATUSES)}"}), 400
+    runbook_id = d.get('runbook_id') or None
+    if runbook_id and not db.execute("SELECT 1 FROM ir_runbooks WHERE id = ?", (runbook_id,)).fetchone():
+        return jsonify({'error': 'Selected runbook not found'}), 400
+    db.execute(
+        "UPDATE tabletop_exercises SET title = ?, runbook_id = ?, scenario = ?, status = ?, scheduled_date = ?, "
+        "completed_date = ?, facilitator = ?, participants = ?, findings = ?, action_items = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (title, runbook_id, (d.get('scenario') or '').strip(), status,
+         (d.get('scheduled_date') or '').strip() or None, (d.get('completed_date') or '').strip() or None,
+         (d.get('facilitator') or '').strip(), (d.get('participants') or '').strip(),
+         (d.get('findings') or '').strip(), (d.get('action_items') or '').strip(), eid)
+    )
+    db.commit()
+    log_audit('tabletop_exercise_update', 'tabletop_exercise', title)
+    return jsonify({'status': 'success'})
+
 UEBA_CONFIG_DEFAULTS = {
     'ueba_lookback_days': '30', 'ueba_stddev_multiplier': '3', 'ueba_min_baseline': '50',
     'ueba_min_days_observed': '4', 'ueba_new_ip_enabled': '1',
@@ -11552,6 +11720,48 @@ CASE_TEMPLATES_SEED = [
 
 CASE_TEMPLATE_FIELD_TYPES = {'text', 'dropdown', 'date', 'checkbox'}
 
+# Narrative IR procedures -- distinct from CASE_TEMPLATES_SEED above (a per-case task
+# checklist): a runbook is reference documentation ("how do we handle a ransomware
+# event"), read during an incident and rehearsed via a tabletop exercise, not applied
+# onto a case as tasks. Same growable-seed pattern (INSERT OR IGNORE, UNIQUE(name)).
+IR_RUNBOOKS_SEED = [
+    {'name': 'Ransomware Response', 'category': 'Ransomware',
+     'description': 'End-to-end procedure for a confirmed or suspected ransomware event, from first detection through recovery.',
+     'steps': [
+        {'title': 'Isolate affected hosts immediately', 'instructions': 'Network-isolate every host showing encryption activity, mass file renames, or a ransom note. Do not power off (preserves memory for forensics) unless isolation is not possible fast enough to stop spread.'},
+        {'title': 'Identify the ransomware family and entry point', 'instructions': 'Collect a sample of the ransom note and 1-2 encrypted files. Check EDR/Sysmon timeline for the initial access vector (phishing, RDP, exposed service, supply chain).'},
+        {'title': 'Determine blast radius', 'instructions': 'Identify every host and share touched, using EDR process/network activity and file-share audit logs. Check for lateral movement via the compromised credential(s).'},
+        {'title': 'Preserve evidence before remediation', 'instructions': 'Capture memory and disk images of at least one patient-zero host before reimaging. Hash and retain the ransom note and any dropped binaries.'},
+        {'title': 'Contain: disable compromised accounts and rotate credentials', 'instructions': 'Force password resets and revoke sessions for every account observed on affected hosts. Rotate any shared service-account credentials the attacker could have touched.'},
+        {'title': 'Assess backup integrity and recovery options', 'instructions': 'Verify the most recent clean backup predates initial compromise, not just encryption. Confirm backups were not themselves reachable/encrypted by the attacker.'},
+        {'title': 'Determine notification/legal obligations', 'instructions': 'Engage legal/compliance to assess breach-notification requirements (data exfiltration risk, regulated data involved, cyber insurance carrier notification deadlines).'},
+        {'title': 'Rebuild and restore from known-clean backups', 'instructions': 'Reimage affected hosts rather than clean in place. Restore data only after confirming backup integrity and that reinfection vectors are closed.'},
+        {'title': 'Document root cause and update detections', 'instructions': 'Capture the full timeline, entry point, and gaps exploited. Add/tune detections for the observed TTPs and IOCs.'},
+     ]},
+    {'name': 'Business Email Compromise (BEC)', 'category': 'Phishing / BEC',
+     'description': 'Response procedure for a compromised or spoofed executive/finance mailbox used for fraud (wire-transfer fraud, invoice fraud, credential theft).',
+     'steps': [
+        {'title': 'Confirm the compromise', 'instructions': 'Review mailbox sign-in logs for anomalous locations/IPs/devices, and mailbox audit logs for rule creation, forwarding, or delegate changes the user did not make.'},
+        {'title': 'Lock down the account immediately', 'instructions': 'Force a password reset, revoke all active sessions/tokens, and disable any OAuth app consents the attacker granted.'},
+        {'title': 'Remove attacker persistence', 'instructions': 'Delete any inbox rules, forwarding addresses, or delegate access added during the compromise window. Re-enable/verify MFA.'},
+        {'title': 'Identify what the attacker read or sent', 'instructions': 'Review sent-items and message-trace logs for the compromise window for fraudulent wire/payment requests, and for sensitive data the attacker may have accessed.'},
+        {'title': 'Alert finance/AP if a fraudulent payment request went out', 'instructions': 'If any invoice/wire-transfer email was sent from the compromised account, immediately notify finance and the recipient organization to attempt to halt or claw back any payment.'},
+        {'title': 'Notify affected recipients', 'instructions': 'Warn anyone who received a message from the compromised account during the incident window, especially anything requesting payment, credentials, or sensitive data.'},
+        {'title': 'Document root cause and close out', 'instructions': 'Identify how the account was compromised (phishing, credential reuse, MFA fatigue) and record the timeline and financial impact, if any.'},
+     ]},
+    {'name': 'Insider Threat Response', 'category': 'Insider Threat',
+     'description': 'Procedure for investigating suspected malicious or negligent insider activity -- data exfiltration, sabotage, or policy violation by an authorized user.',
+     'steps': [
+        {'title': 'Engage HR/Legal before taking any action', 'instructions': 'Insider cases carry employment and legal risk that other incident types do not -- confirm the investigative approach and evidentiary standard with HR/Legal before touching the account or device.'},
+        {'title': 'Scope the activity under investigation', 'instructions': 'Review UEBA anomaly history, DLP/file-access logs, and case-linked alerts for the user. Establish the specific behavior and time window in question.'},
+        {'title': 'Preserve evidence covertly where required', 'instructions': 'If the investigation is still confidential, avoid actions (account lockout, device seizure) that would tip off the subject before evidence is preserved, unless active data loss requires immediate action.'},
+        {'title': 'Assess whether immediate containment is needed', 'instructions': 'If active exfiltration or sabotage is in progress, weigh covert evidence preservation against the need to stop ongoing harm -- this determination should involve HR/Legal/management.'},
+        {'title': 'Review access scope and recent changes', 'instructions': 'Check what systems/data the user can reach, any recent permission changes, and any personal storage/cloud/USB activity in the audit trail.'},
+        {'title': 'Coordinate the resolution with HR/Legal/Management', 'instructions': 'Final actions (account suspension, device seizure, termination-related access removal) should be directed by HR/Legal, not initiated unilaterally by the SOC.'},
+        {'title': 'Document findings for the case record', 'instructions': 'Record findings factually and objectively -- this file may support an HR or legal proceeding.'},
+     ]},
+]
+
 def migrate_case_upgrade():
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
@@ -12177,6 +12387,75 @@ def migrate_case_templates_manage_permission():
             [(rid,) for rid in role_ids]
         )
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('case_templates_permission_seeded', '1')")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_ir_runbooks():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS ir_runbooks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            category TEXT,
+            description TEXT,
+            steps TEXT NOT NULL,
+            owner TEXT,
+            last_reviewed_at DATE,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME
+        )''')
+        for rb in IR_RUNBOOKS_SEED:
+            conn.execute(
+                "INSERT OR IGNORE INTO ir_runbooks (name, category, description, steps, owner, created_by) VALUES (?, ?, ?, ?, ?, 'system')",
+                (rb['name'], rb['category'], rb['description'], json.dumps(rb['steps']), rb.get('owner'))
+            )
+        conn.execute('''CREATE TABLE IF NOT EXISTS tabletop_exercises (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            runbook_id INTEGER,
+            scenario TEXT,
+            status TEXT NOT NULL DEFAULT 'planned',
+            scheduled_date DATE,
+            completed_date DATE,
+            facilitator TEXT,
+            participants TEXT,
+            findings TEXT,
+            action_items TEXT,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_tabletop_exercises_runbook ON tabletop_exercises(runbook_id)')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_runbooks_permission():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+        seeded = conn.execute("SELECT value FROM settings WHERE key = 'runbooks_permission_seeded'").fetchone()
+        if seeded and seeded['value'] == '1':
+            conn.close()
+            return
+        # Piggyback onto whatever role(s) an admin already trusted to manage case
+        # templates -- the closest sibling permission -- rather than leaving the new
+        # capability invisible to every existing custom role until someone notices and
+        # re-checks a box in Settings > Roles. Same pattern as
+        # migrate_case_templates_manage_permission().
+        role_ids = [r[0] for r in conn.execute(
+            "SELECT role_id FROM role_permissions WHERE permission_key = 'cases.templates.manage'"
+        ).fetchall()]
+        conn.executemany(
+            "INSERT OR IGNORE INTO role_permissions (role_id, permission_key) VALUES (?, 'cases.runbooks.manage')",
+            [(rid,) for rid in role_ids]
+        )
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('runbooks_permission_seeded', '1')")
         conn.commit()
         conn.close()
     except Exception:
@@ -18439,6 +18718,8 @@ migrate_yara_rule_tags()
 migrate_custom_parsers()
 migrate_log_imports()
 migrate_logsearch_import_permission()
+migrate_ir_runbooks()
+migrate_runbooks_permission()
 
 try:
     # Regenerates /etc/vector/vector.toml from current settings/drop_rules on every

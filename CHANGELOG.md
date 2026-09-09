@@ -10,6 +10,34 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-09
 
+### New: IR Runbooks & Tabletop Exercise tracking
+
+Closed the last item on the DFIR-lifecycle gap list: this app had no place to document
+incident-response procedures or record whether they'd ever actually been rehearsed — the
+Post-Incident Activity / Preparation phases had zero coverage. New top-level "IR Runbooks"
+nav item with two tabs. **Runbook Library**: a growable-seeded catalog of narrative IR
+procedures (distinct from the existing case-template task checklists — a runbook is
+reference documentation with real step-by-step instructions, read during an incident, not
+applied onto a case as tasks), seeded with three real starter runbooks (Ransomware
+Response, Business Email Compromise, Insider Threat Response), each with substantive
+step content. **Tabletop Exercises**: a log of practice drills — title, scenario, linked
+runbook, status (planned/completed/cancelled), facilitator/participants, and a
+findings/action-items retrospective (same free-text-pair shape as the case Retrospective
+fields shipped earlier this session). The exercises tab surfaces a live "Runbooks Never
+Tested" count so an untested procedure doesn't stay invisible.
+
+New `cases.runbooks.manage` permission (backfilled onto any role that already had
+`cases.templates.manage`, same pattern used for every prior permission-key addition); read
+access is ungated, matching the existing case-templates precedent, since this is
+operational documentation every analyst should be able to read. Deleting a runbook nulls
+out `tabletop_exercises.runbook_id` rather than cascading — a completed exercise's findings
+stay meaningful even after the runbook it tested is retired.
+
+New fifth report type: **Tabletop Exercise Report** (Reports page — type dropdown,
+schedule tab, all fully generic over `REPORT_TYPES` so no other code needed to change).
+Summarizes exercise activity in the selected window plus a current-state runbook coverage
+table (times tested / last tested, highlighting anything never rehearsed).
+
 ### New: Readiness Scorecard dashboard widget
 
 The last lifecycle-audit item for now: a first-time evaluator (or an admin checking in
