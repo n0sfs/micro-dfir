@@ -6089,7 +6089,11 @@ def api_ueba_exclusions():
     entity_type = (data.get('entity_type') or '').strip()
     entity_id = (data.get('entity_id') or '').strip()
     description = (data.get('description') or '').strip()
-    if entity_type not in ('host', 'user'):
+    # 'destination_ip' lets an admin suppress a specific known-legitimate beaconing
+    # destination (a corporate VPN concentrator, a SaaS heartbeat endpoint) without
+    # suppressing all beaconing detection for the host that talks to it -- see the
+    # beaconing model in ueba_engine.py, the only consumer of this entity_type today.
+    if entity_type not in ('host', 'user', 'destination_ip'):
         return jsonify({"error": "Invalid entity type"}), 400
     if not entity_id:
         return jsonify({"error": "Entity ID is required"}), 400
@@ -9095,6 +9099,8 @@ UEBA_CONFIG_DEFAULTS = {
     'ueba_priority_enabled': '1', 'ueba_priority_window_days': '30', 'ueba_priority_half_life_hours': '24',
     'ueba_autocase_enabled': '0', 'ueba_autocase_threshold': '80', 'ueba_autocase_template_id': '',
     'ueba_autocase_cooldown_hours': '24',
+    'ueba_beaconing_enabled': '1', 'ueba_beaconing_lookback_hours': '24',
+    'ueba_beaconing_min_connections': '10', 'ueba_beaconing_cv_threshold': '0.15',
 }
 
 @app.route('/api/ueba/config', methods=['GET', 'POST'])
@@ -9111,7 +9117,8 @@ def api_ueba_config():
             "'ueba_convergence_enabled', 'ueba_convergence_min_indicators', 'ueba_convergence_window_hours', "
             "'ueba_sequence_chain_enabled', 'ueba_sequence_chain_window_hours', "
             "'ueba_priority_enabled', 'ueba_priority_window_days', 'ueba_priority_half_life_hours', "
-            "'ueba_autocase_enabled', 'ueba_autocase_threshold', 'ueba_autocase_template_id', 'ueba_autocase_cooldown_hours')"
+            "'ueba_autocase_enabled', 'ueba_autocase_threshold', 'ueba_autocase_template_id', 'ueba_autocase_cooldown_hours', "
+            "'ueba_beaconing_enabled', 'ueba_beaconing_lookback_hours', 'ueba_beaconing_min_connections', 'ueba_beaconing_cv_threshold')"
         ).fetchall()
         cfg = {**UEBA_CONFIG_DEFAULTS, **{r['key']: r['value'] for r in rows}}
         return jsonify({
@@ -9138,6 +9145,10 @@ def api_ueba_config():
             'autocase_threshold': int(cfg['ueba_autocase_threshold']),
             'autocase_template_id': int(cfg['ueba_autocase_template_id']) if str(cfg['ueba_autocase_template_id']) not in ('', 'None') else None,
             'autocase_cooldown_hours': int(cfg['ueba_autocase_cooldown_hours']),
+            'beaconing_enabled': str(cfg['ueba_beaconing_enabled']) not in ('0', 'false', 'False'),
+            'beaconing_lookback_hours': int(cfg['ueba_beaconing_lookback_hours']),
+            'beaconing_min_connections': int(cfg['ueba_beaconing_min_connections']),
+            'beaconing_cv_threshold': float(cfg['ueba_beaconing_cv_threshold']),
         })
 
     err = require_permission('ueba.config.manage')
@@ -9169,6 +9180,10 @@ def api_ueba_config():
         autocase_template_id = data.get('autocase_template_id')
         autocase_template_id = int(autocase_template_id) if autocase_template_id not in (None, '') else None
         autocase_cooldown_hours = int(data.get('autocase_cooldown_hours'))
+        beaconing_enabled = bool(data.get('beaconing_enabled'))
+        beaconing_lookback_hours = int(data.get('beaconing_lookback_hours'))
+        beaconing_min_connections = int(data.get('beaconing_min_connections'))
+        beaconing_cv_threshold = float(data.get('beaconing_cv_threshold'))
         if not (1 <= lookback_days <= 365): raise ValueError('lookback_days must be 1-365')
         if not (0.5 <= stddev_multiplier <= 10): raise ValueError('stddev_multiplier must be 0.5-10')
         if not (0 <= min_baseline <= 1000000): raise ValueError('min_baseline must be 0-1000000')
@@ -9183,6 +9198,9 @@ def api_ueba_config():
         if not (1 <= autocase_cooldown_hours <= 8760): raise ValueError('autocase_cooldown_hours must be 1-8760')
         if autocase_template_id and not db.execute("SELECT 1 FROM case_templates WHERE id = ?", (autocase_template_id,)).fetchone():
             raise ValueError('Template not found')
+        if not (1 <= beaconing_lookback_hours <= 168): raise ValueError('beaconing_lookback_hours must be 1-168')
+        if not (2 <= beaconing_min_connections <= 10000): raise ValueError('beaconing_min_connections must be 2-10000')
+        if not (0 <= beaconing_cv_threshold <= 1): raise ValueError('beaconing_cv_threshold must be 0-1')
     except (TypeError, ValueError) as e:
         return jsonify({'error': str(e) or 'Invalid config values'}), 400
 
@@ -9209,6 +9227,10 @@ def api_ueba_config():
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_autocase_threshold', ?)", (str(autocase_threshold),))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_autocase_template_id', ?)", (str(autocase_template_id) if autocase_template_id else '',))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_autocase_cooldown_hours', ?)", (str(autocase_cooldown_hours),))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_beaconing_enabled', ?)", ('1' if beaconing_enabled else '0',))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_beaconing_lookback_hours', ?)", (str(beaconing_lookback_hours),))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_beaconing_min_connections', ?)", (str(beaconing_min_connections),))
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ueba_beaconing_cv_threshold', ?)", (str(beaconing_cv_threshold),))
     db.commit()
     return jsonify({'status': 'success'})
 
@@ -9228,6 +9250,7 @@ RISK_SCORE_DEFAULTS = {
         'multi_signal_convergence': 30,
         'sequence_chain_progression': 15,
         'ioc_touch': 35,
+        'beaconing_detected': 20,
     },
     'tiers': {'low': 0, 'medium': 20, 'high': 50, 'critical': 100},
 }

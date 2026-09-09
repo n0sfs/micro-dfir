@@ -171,6 +171,7 @@
                         <option value="process_lineage">Suspicious Process Lineage</option>
                         <option value="off_hours_activity">Off-Hours Activity</option>
                         <option value="rare_process_population">Rare Process (Fleet-Wide)</option>
+                        <option value="beaconing_detected">Beaconing Detection</option>
                         <option value="multi_signal_convergence">Multi-Signal Convergence</option>
                         <option value="sequence_chain_progression">Sequence Chain Progression</option>
                     </select>
@@ -236,6 +237,18 @@
                         </div>
                         <input type="number" id="cfgRareProcessMaxHosts" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="50" step="1" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         <span class="text-muted small">host(s) or fewer <span class="text-muted">(independent of any single host's own baseline)</span></span>
+                    </div>
+                    <div class="form-check form-switch mt-2 d-flex align-items-center flex-wrap gap-2">
+                        <div>
+                            <input class="form-check-input" type="checkbox" id="cfgBeaconingEnabled" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
+                            <label class="form-check-label small" for="cfgBeaconingEnabled">Flag hosts with regular, beacon-like network connections to an external destination: at least</label>
+                        </div>
+                        <input type="number" id="cfgBeaconingMinConnections" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="2" max="10000" step="1" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
+                        <span class="text-muted small">connections within the last</span>
+                        <input type="number" id="cfgBeaconingLookbackHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="168" step="1" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
+                        <span class="text-muted small">hour(s), with a timing regularity (coefficient of variation) at or below</span>
+                        <input type="number" id="cfgBeaconingCvThreshold" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="0" max="1" step="0.01" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
+                        <span class="text-muted small">(0 = perfectly regular, 1 = highly irregular -- lower catches only very tight beacons; higher also flags loosely-timed automated software. Lookback hours × minimum connections is the longest mean beacon interval detectable at these settings -- widen the lookback to catch a slower, lower-and-slower beacon.)</span>
                     </div>
                     <div class="form-check form-switch mt-2 d-flex align-items-center flex-wrap gap-2">
                         <div>
@@ -336,6 +349,7 @@
                             <select id="ueExclType" class="form-select form-select-sm bg-dark text-light border-secondary">
                                 <option value="host">Host</option>
                                 <option value="user">User</option>
+                                <option value="destination_ip">Destination IP</option>
                             </select>
                         </div>
                         <div class="col-md-3">
@@ -1027,6 +1041,7 @@ const DYNAMIC_SCORING_FIELDS = [
         {k: 'process_lineage', label: 'Suspicious Process Lineage', desc: 'Added the first time a host is seen with a parent-to-child process relationship (e.g. an Office app spawning PowerShell) it hasn\'t had before, within the lookback window.'},
         {k: 'off_hours_activity', label: 'Off-Hours Activity', desc: 'Added when a host or user\'s activity at a given hour-of-day and day-of-week exceeds its own historical baseline for that specific hour/day combination (or an overall baseline, if there isn\'t enough same-hour-of-week history yet) -- a stable recurring pattern (e.g. always active Friday 11pm) is not penalized, only a genuine deviation from it.'},
         {k: 'rare_process_population', label: 'Rare Process (Peer-Tier or Fleet-Wide)', desc: 'Added when a host runs a process that\'s rare among its criticality-tier peers (when that tier has enough hosts to compare against), or across the whole fleet otherwise -- independent of that host\'s own baseline.'},
+        {k: 'beaconing_detected', label: 'Beaconing Detection', desc: 'Added when a host shows regular, low-variance network connections to an external destination -- the timing signature of automated C2 callbacks. A purely statistical/heuristic signal (regular automated software -- update checks, telemetry, cloud sync -- can look the same); the per-destination exclusion list is the intended way to suppress a known-legitimate regular destination once identified. Severity/points step up automatically for an especially tight or high-volume pattern.'},
         {k: 'multi_signal_convergence', label: 'Multi-Signal Convergence', desc: 'Added when an entity triggers several distinct signal types (a mix of alerts and/or UEBA indicators) within a short window -- corroboration across different detection mechanisms is a stronger signal than any one alone.'},
         {k: 'sequence_chain_progression', label: 'Sequence Chain Progression (per stage)', desc: 'Multiplied by (stage - 1) and added each time an entity progresses to a new stage of an admin-defined ordered Custom Alert Rule sequence (see Anomaly Tuning) -- reaching a later stage of a real attack chain is a stronger signal than reaching an earlier one, so this escalates rather than staying flat.'},
     ]},
@@ -1152,6 +1167,7 @@ const INSIGHTS_MODEL_LABELS = {
     new_process: 'New Process', new_destination_ip: 'New Destination IP',
     process_lineage: 'Suspicious Process Lineage', off_hours_activity: 'Off-Hours Activity',
     rare_process_population: 'Rare Process (Fleet-Wide)',
+    beaconing_detected: 'Beaconing Detection',
     multi_signal_convergence: 'Multi-Signal Convergence',
     sequence_chain_progression: 'Sequence Chain Progression',
 };
@@ -1310,6 +1326,10 @@ function loadUebaConfig() {
             document.getElementById('cfgOffHoursEnabled').checked = !!cfg.off_hours_enabled;
             document.getElementById('cfgRareProcessEnabled').checked = !!cfg.rare_process_enabled;
             document.getElementById('cfgRareProcessMaxHosts').value = cfg.rare_process_max_hosts;
+            document.getElementById('cfgBeaconingEnabled').checked = !!cfg.beaconing_enabled;
+            document.getElementById('cfgBeaconingMinConnections').value = cfg.beaconing_min_connections;
+            document.getElementById('cfgBeaconingLookbackHours').value = cfg.beaconing_lookback_hours;
+            document.getElementById('cfgBeaconingCvThreshold').value = cfg.beaconing_cv_threshold;
             document.getElementById('cfgConvergenceEnabled').checked = !!cfg.convergence_enabled;
             document.getElementById('cfgConvergenceMinIndicators').value = cfg.convergence_min_indicators;
             document.getElementById('cfgConvergenceWindowHours').value = cfg.convergence_window_hours;
@@ -1361,6 +1381,10 @@ function saveUebaConfig() {
         off_hours_enabled: document.getElementById('cfgOffHoursEnabled').checked,
         rare_process_enabled: document.getElementById('cfgRareProcessEnabled').checked,
         rare_process_max_hosts: parseInt(document.getElementById('cfgRareProcessMaxHosts').value, 10),
+        beaconing_enabled: document.getElementById('cfgBeaconingEnabled').checked,
+        beaconing_min_connections: parseInt(document.getElementById('cfgBeaconingMinConnections').value, 10),
+        beaconing_lookback_hours: parseInt(document.getElementById('cfgBeaconingLookbackHours').value, 10),
+        beaconing_cv_threshold: parseFloat(document.getElementById('cfgBeaconingCvThreshold').value),
         convergence_enabled: document.getElementById('cfgConvergenceEnabled').checked,
         convergence_min_indicators: parseInt(document.getElementById('cfgConvergenceMinIndicators').value, 10),
         convergence_window_hours: parseInt(document.getElementById('cfgConvergenceWindowHours').value, 10),
@@ -1398,6 +1422,9 @@ let baselineFilter = 'all';
 let baselineQ = '';
 
 function entityTypeBadge(t) {
+    if (t === 'destination_ip') {
+        return `<span class="badge bg-dark border border-secondary me-1" style="font-size:.65rem;"><i class="fa-solid fa-globe me-1"></i>Destination IP</span>`;
+    }
     const isUser = t === 'user';
     return `<span class="badge ${isUser ? 'bg-info text-dark' : 'bg-secondary'} me-1" style="font-size:.65rem;"><i class="fa-solid ${isUser ? 'fa-user' : 'fa-desktop'} me-1"></i>${isUser ? 'User' : 'Host'}</span>`;
 }

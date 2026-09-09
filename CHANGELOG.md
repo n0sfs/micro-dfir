@@ -10,6 +10,53 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-08
 
+### New: Beaconing Detection (UEBA) — network C2-callback regularity scoring
+
+Follow-up to reviewing Black Hills InfoSec's and Active Countermeasures' free tool
+catalogs. Active Countermeasures' RITA scores C2 beaconing by how *regular* repeated
+network connections are; this adds the same core idea — a new, standalone UEBA model,
+not a RITA/Zeek dependency — as `_run_beaconing_model()` in `src/ueba_engine.py`. For
+each `(host, destination_ip)` pair seen in Sysmon Event ID 3 (Network Connection) rows
+within a lookback window, excluding private/reserved destinations (a beacon calls
+*out*, by definition) and CDN/public-DNS ranges (reusing `warninglists.py`'s existing
+suppression utility, already used by the IOC-IP correlation rule), a DuckDB window
+function computes the coefficient of variation of inter-connection intervals — low
+variance is the signature of automated callback timing versus organic traffic.
+Confirmed real, meaningful data exists to build on: 46,390 Sysmon Event ID 3 rows/day
+in this instance alone.
+
+A real bug was caught by the fixture tests, not assumed: same-wall-clock-second
+duplicate timestamps (Sysmon's own ingestion timestamp is second-precision only) were
+initially dropping out of the *displayed* connection count, not just the variance
+calculation — fixed by decoupling `conn_count` (every real connection) from the CV
+computation (which correctly excludes zero-delta pairs as noise). A second issue caught
+during design review: a flat 40-point/High-severity score would have tied this
+purely-statistical, admittedly-imperfect indicator with `alert_critical` — the single
+highest-weighted signal in the whole priority-scoring system. Rebalanced to a
+20-point base tier (25 for an especially tight or high-volume pattern), calibrated
+against the closest real analogues (`new_destination_ip`=15, `process_lineage`=25).
+
+New per-destination-IP exclusion type (`ueba_exclusions.entity_type` now also accepts
+`'destination_ip'`, alongside the existing `host`/`user`) so an admin can suppress a
+specific known-legitimate regular destination (a VPN concentrator, a SaaS heartbeat)
+without suppressing all beaconing detection for the host that talks to it. New
+`ueba_beaconing_*` config (enabled/lookback hours/min connections/CV threshold) in the
+usual dual-definition shape (`app.py` + `ueba_engine.py`), with real bounds validation.
+
+**Also reviewed this session**: our existing Atomic Testing feature turned out to
+already be well ahead of Active Countermeasures' "Threat Simulator" (which is actually
+just a single jittered beacon-generator tool, not a broad technique library) — ours
+live-fetches the real upstream Atomic Red Team repo, executes real techniques via the
+EDR agent queue, and auto-validates against Sigma/alerts with a documented distinction
+from Coverage's weaker "any alert fired" tier. Their beacon-generator's own
+interval+jitter parameterization is a good reference for the deferred Phase 2 —
+a companion EDR-agent-queued "Beacon Simulator" to validate this detector against a
+real, controlled, known-beacon pattern, not started here. Threat-intel feed coverage
+was also checked against BHIS's OSINT tooling: this app already supports 17 feed types
+(ThreatFox, URLhaus, MISP, OTX, SSLBL, Spamhaus DROP, and more) plus a generic TAXII 2.x
+client, well ahead of what BHIS's recon-focused tools (which target an org's *own*
+exposure, not attacker infrastructure) would add.
+
 ### New: Log Import (Phase 1) — CSV/NDJSON/JSON-array import from other SIEMs
 
 Customers migrating off another SIEM (Splunk, QRadar, Elastic, Sentinel, etc.) can now
