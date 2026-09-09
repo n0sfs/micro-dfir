@@ -224,6 +224,7 @@
             <div class="col-6 col-md-3 text-center"><div class="fs-3 fw-bold" id="vulnHostsAssessed">—</div><div class="text-muted small">Hosts</div></div>
             <div class="col-6 col-md-3 text-center"><div class="fs-3 fw-bold" id="vulnCveCount">—</div><div class="text-muted small">Unique CVEs</div></div>
             <div class="col-6 col-md-3 text-center"><div class="fs-3 fw-bold" id="vulnLastSync">—</div><div class="text-muted small">CVE Data Synced</div></div>
+            <div class="col-6 col-md-3 text-center"><div class="fs-3 fw-bold text-warning" id="vulnOpenCount">—</div><div class="text-muted small">Still Open</div></div>
         </div>
         <div class="d-flex gap-2 flex-wrap" id="vulnSeverityChips"></div>
     </div>
@@ -233,8 +234,8 @@
     <div class="card-body">
         <div class="table-responsive">
             <table class="table table-dark table-hover table-sm align-middle">
-                <thead><tr><th>Severity</th><th>CVE</th><th>CVSS</th><th>Host</th><th>Installed App</th><th>Version</th></tr></thead>
-                <tbody id="vulnFindingsBody"><tr><td colspan="6" class="text-center text-muted py-4">Loading…</td></tr></tbody>
+                <thead><tr><th>Severity</th><th>CVE</th><th>CVSS</th><th>Host</th><th>Installed App</th><th>Version</th><th>Status</th><th>Notes</th></tr></thead>
+                <tbody id="vulnFindingsBody"><tr><td colspan="8" class="text-center text-muted py-4">Loading…</td></tr></tbody>
             </table>
         </div>
     </div>
@@ -244,6 +245,12 @@
 <script>
 function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// For embedding a value inside a single-quoted inline JS string literal (onchange="...")
+// -- HTML-escaping alone (escHtml) isn't the right escape for this context.
+function escJs(s) {
+    return String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
 // A loader's initial "Loading..." table state has no failure counterpart today -- a
@@ -873,7 +880,7 @@ function renderComplianceAuditTrail(trail) {
 // for vulnerability posture the way coverage_snapshots exists for MITRE)
 // =====================================================================
 function loadVulnerabilityTab() {
-    document.getElementById('vulnFindingsBody').innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">Loading…</td></tr>';
+    document.getElementById('vulnFindingsBody').innerHTML = '<tr><td colspan="8" class="text-center text-muted py-4">Loading…</td></tr>';
     fetch('/api/vulnerabilities/coverage').then(r => {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
@@ -881,7 +888,7 @@ function loadVulnerabilityTab() {
         renderVulnerabilityHero(d);
         renderVulnerabilityFindings(d.findings);
     }).catch(err => {
-        renderLoadError('vulnFindingsBody', 6, 'Error loading vulnerability data.');
+        renderLoadError('vulnFindingsBody', 8, 'Error loading vulnerability data.');
         console.error('Error loading vulnerability coverage:', err);
     });
 }
@@ -891,27 +898,55 @@ function renderVulnerabilityHero(d) {
     document.getElementById('vulnHostsAssessed').textContent = `${d.hosts_assessed}/${d.total_hosts}`;
     document.getElementById('vulnCveCount').textContent = d.unique_cve_count;
     document.getElementById('vulnLastSync').textContent = d.last_sync || 'Never';
+    document.getElementById('vulnOpenCount').textContent = (d.open_count != null ? d.open_count : '—');
     const sevOrder = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
     document.getElementById('vulnSeverityChips').innerHTML = sevOrder.map(s => `
         <div class="cov-chip"><span class="num">${(d.severity_counts && d.severity_counts[s]) || 0}</span><span class="lbl">${s.charAt(0) + s.slice(1).toLowerCase()}</span></div>
     `).join('');
 }
 
+// Status is analyst triage of an already-computed finding (same posture as alert
+// triage) -- no confirm dialog, saves immediately on change, matching this app's
+// established inline-select convention. Keyed on (hostname, cve_id, installed_name),
+// the same natural identity the backend already dedups findings on.
+const VULN_REMEDIATION_STATUS_LABELS = {open: 'Open', acknowledged: 'Acknowledged', patched: 'Patched', accepted_risk: 'Accepted Risk', false_positive: 'False Positive'};
+
 function renderVulnerabilityFindings(findings) {
     const body = document.getElementById('vulnFindingsBody');
     if (!findings.length) {
-        body.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">No known CVE matches against currently-assessed hosts.</td></tr>';
+        body.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-4">No known CVE matches against currently-assessed hosts.</td></tr>';
         return;
     }
-    body.innerHTML = findings.map(f => `
-        <tr>
+    body.innerHTML = findings.map((f, i) => `
+        <tr class="${f.remediation_status && f.remediation_status !== 'open' && f.remediation_status !== 'acknowledged' ? 'opacity-50' : ''}">
             <td><span class="badge ${CVE_SEVERITY_BADGE[(f.severity || '').toUpperCase()] || 'bg-secondary'}">${escHtml((f.severity || 'unknown').toUpperCase())}</span></td>
             <td>${escHtml(f.cve_id)}</td>
             <td>${f.cvss_score != null ? f.cvss_score : '—'}</td>
             <td>${escHtml(f.hostname)}</td>
             <td class="text-truncate" style="max-width:220px;" title="${escHtml(f.installed_name || '')}">${escHtml(f.installed_name || '')}</td>
             <td>${escHtml(f.installed_version || '')}</td>
+            <td>
+                <select class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;"
+                        onchange="saveVulnRemediation('${escJs(f.hostname)}', '${escJs(f.cve_id)}', '${escJs(f.installed_name)}', this.value, ${i})">
+                    ${Object.entries(VULN_REMEDIATION_STATUS_LABELS).map(([v, l]) => `<option value="${v}" ${f.remediation_status === v ? 'selected' : ''}>${l}</option>`).join('')}
+                </select>
+            </td>
+            <td class="small text-muted" style="max-width:160px;">
+                ${f.remediation_notes ? `<span class="text-truncate d-inline-block" style="max-width:140px;" title="${escHtml(f.remediation_notes)}">${escHtml(f.remediation_notes)}</span>` : ''}
+                ${f.remediation_updated_by ? `<div class="text-truncate" style="font-size:.7rem;" title="${escHtml(f.remediation_updated_at || '')}">by ${escHtml(f.remediation_updated_by)}</div>` : ''}
+            </td>
         </tr>`).join('');
+}
+
+function saveVulnRemediation(hostname, cveId, installedName, status, rowIndex) {
+    fetch('/api/vulnerabilities/remediation', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({hostname, cve_id: cveId, installed_name: installedName, status})
+    }).then(r => r.json().then(d => ({ok: r.ok, d}))).then(({ok, d}) => {
+        if (!ok) { toast(d.error || 'Failed to save.', 'danger'); return; }
+        toast(`${VULN_REMEDIATION_STATUS_LABELS[status] || status} saved.`, 'success');
+        loadVulnerabilityTab();
+    }).catch(err => toast('Error saving: ' + err, 'danger'));
 }
 
 // =====================================================================
