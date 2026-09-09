@@ -10491,6 +10491,69 @@ def api_dashboard_vulnerability_summary():
         'last_sync': status.get('last_sync'),
     })
 
+# A first-time evaluator has no single place to answer "are we actually ready" --
+# EDR enrollment, detection rules, MITRE coverage, backup, retention, and asset
+# inventory each already live on their own page, but nothing ties them into one
+# checklist. Deliberately no new tables/computation for this: every signal here is an
+# existing fact pulled from where it already lives (agent_polls, sigma_rules, the daily
+# coverage_snapshots row, the settings table, assets, users) -- a pure aggregation, same
+# spirit as the Compliance Coverage widget composing two already-existing endpoints
+# rather than inventing a third.
+@app.route('/api/dashboards/readiness', methods=['GET'])
+@login_required
+def api_dashboard_readiness():
+    db = get_db()
+    # Any host that's EVER checked in vs. one that's checked in inside the last 24h --
+    # an onboarded-but-now-stale agent is a materially different problem than "never
+    # enrolled," same "checked in at all" vs "checked in recently" distinction the
+    # Agents page's own status badges already draw.
+    agent_rows = db.execute(
+        "SELECT MAX(timestamp) as last_seen FROM agent_polls GROUP BY user_agent"
+    ).fetchall()
+    total_agents = len(agent_rows)
+    active_agents = 0
+    for r in agent_rows:
+        if not r['last_seen']:
+            continue
+        try:
+            if (datetime.now() - datetime.strptime(r['last_seen'], '%Y-%m-%d %H:%M:%S')).total_seconds() < 86400:
+                active_agents += 1
+        except (TypeError, ValueError):
+            pass
+
+    rule_counts = db.execute("SELECT COUNT(*) as total, SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) as enabled FROM sigma_rules").fetchone()
+
+    # The daily cron-computed snapshot (coverage_snapshot.py), not a live recompute --
+    # this endpoint is a cheap aggregation, not the place to redo MITRE coverage's own
+    # real work; today's snapshot always exists by the time anyone loads a dashboard
+    # (update.sh records one immediately post-deploy, not just via the nightly cron).
+    snap = db.execute("SELECT coverage_pct, snapshot_date FROM coverage_snapshots ORDER BY snapshot_date DESC LIMIT 1").fetchone()
+
+    settings_map = {r[0]: r[1] for r in db.execute(
+        "SELECT key, value FROM settings WHERE key IN ('db_backup_last_run', 'log_retention_days', 'log_archive_days')"
+    ).fetchall()}
+    last_backup = settings_map.get('db_backup_last_run')
+    backup_recent = False
+    if last_backup:
+        try:
+            backup_recent = (datetime.now() - datetime.strptime(last_backup, '%Y-%m-%d %H:%M:%S')).total_seconds() < 172800  # 48h
+        except (TypeError, ValueError):
+            pass
+
+    assets_tracked = db.execute("SELECT COUNT(*) c FROM assets WHERE criticality IS NOT NULL AND criticality != ''").fetchone()['c']
+    user_count = db.execute("SELECT COUNT(*) c FROM users").fetchone()['c']
+
+    return jsonify({
+        'agents': {'total': total_agents, 'active_24h': active_agents},
+        'rules': {'total': rule_counts['total'] or 0, 'enabled': rule_counts['enabled'] or 0},
+        'mitre_coverage_pct': round(snap['coverage_pct'], 1) if snap else None,
+        'backup': {'last_run': last_backup, 'recent': backup_recent},
+        'retention_configured': bool(settings_map.get('log_retention_days')),
+        'archiving_configured': bool(settings_map.get('log_archive_days')),
+        'assets_tracked': assets_tracked,
+        'user_count': user_count,
+    })
+
 @app.route('/api/settings/case-sla', methods=['GET', 'POST'])
 @login_required
 def api_case_sla_config():
