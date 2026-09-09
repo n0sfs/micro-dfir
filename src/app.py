@@ -2826,20 +2826,44 @@ def api_settings_dns_server_interfaces():
 # a stale DHCP-lease reassignment (a different device inheriting an old IP) can't keep
 # attributing queries to the wrong host indefinitely; "no match yet" is a normal, expected
 # outcome for a device this appliance has no other visibility into, not a bug.
+#
+# Host is now normally already resolved at ingest time (dns_server.py's own
+# _resolve_dns_host, same two-source logic mirrored below) -- this function still exists
+# for two things: username (never attempted at ingest, see dns_server.py's own docstring
+# for why) and backfilling host on any row ingested before that fix shipped.
 DNS_CLIENT_CONTEXT_LOOKBACK_HOURS = 48
+DNS_AGENT_POLL_LOOKBACK_MINUTES = 15
 
-def _resolve_dns_client_context(db, ip, near_ts):
+def _resolve_dns_client_context(db, ip, near_ts, known_host=None):
     if not ip:
         return None, None
+    if known_host:
+        row = db.execute(
+            "SELECT username FROM live_logs WHERE source_ip = ? AND app != 'dns_server' "
+            "AND username IS NOT NULL AND username != '' AND timestamp <= ? AND timestamp >= datetime(?, ?) "
+            "ORDER BY timestamp DESC LIMIT 1",
+            (ip, near_ts, near_ts, f'-{DNS_CLIENT_CONTEXT_LOOKBACK_HOURS} hours')
+        ).fetchone()
+        username = row['username'] if row and row['username'] not in (None, '', '-', 'SYSTEM') else None
+        return known_host, username
     row = db.execute(
         "SELECT host, username FROM live_logs WHERE source_ip = ? AND app != 'dns_server' "
         "AND host IS NOT NULL AND host != '' AND timestamp <= ? AND timestamp >= datetime(?, ?) "
         "ORDER BY timestamp DESC LIMIT 1",
         (ip, near_ts, near_ts, f'-{DNS_CLIENT_CONTEXT_LOOKBACK_HOURS} hours')
     ).fetchone()
-    if not row:
-        return None, None
-    return row['host'], (row['username'] if row['username'] not in (None, '', '-', 'SYSTEM') else None)
+    if row:
+        return row['host'], (row['username'] if row['username'] not in (None, '', '-', 'SYSTEM') else None)
+    # No live_logs match -- fall back to EDR agent check-ins, same source/window
+    # dns_server.py's own ingest-time resolution uses. Only reached for a row ingested
+    # before that fix shipped (or a device with no other visibility at all).
+    poll = db.execute(
+        "SELECT user_agent as host FROM agent_polls WHERE ip_address = ? "
+        "AND timestamp <= ? AND timestamp >= datetime(?, ?) "
+        "ORDER BY timestamp DESC LIMIT 1",
+        (ip, near_ts, near_ts, f'-{DNS_AGENT_POLL_LOOKBACK_MINUTES} minutes')
+    ).fetchone()
+    return (poll['host'], None) if poll and poll['host'] else (None, None)
 
 # Paginated DNS query browsing (Log Pipeline's DNS Activity view) -- each row enriched
 # with the best-effort host/user correlation above. Capped page size since the host/user
@@ -2861,13 +2885,13 @@ def api_dns_activity():
         where += " AND query_name LIKE ?"
         params.append(f'%{q}%')
     rows = db.execute(
-        f"SELECT id, timestamp, source_ip, query_name, event_id as qtype, message FROM live_logs "
+        f"SELECT id, timestamp, source_ip, host, query_name, event_id as qtype, message FROM live_logs "
         f"WHERE {where} ORDER BY timestamp DESC LIMIT ?",
         params + [limit]
     ).fetchall()
     out = []
     for r in rows:
-        host, username = _resolve_dns_client_context(db, r['source_ip'], r['timestamp'])
+        host, username = _resolve_dns_client_context(db, r['source_ip'], r['timestamp'], known_host=r['host'])
         out.append({
             'id': r['id'], 'timestamp': r['timestamp'], 'source_ip': r['source_ip'],
             'host': host, 'username': username, 'query_name': r['query_name'],
