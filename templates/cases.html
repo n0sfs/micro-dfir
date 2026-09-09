@@ -504,6 +504,7 @@ const CASE_EDR_ACTIONS = [
       confirm: (h, v) => `Kill every process matching "${v}" on ${h}? This cannot be undone.` },
     { value: 'quarantine_file', label: 'Quarantine File', permission: 'edr.command.basic', needsParams: 'path', paramLabel: 'File path',
       confirm: (h, v) => `Quarantine ${v} on ${h}?` },
+    { value: 'capture_process_memory', label: 'Capture Process Memory', permission: 'edr.command.advanced', needsParams: 'pid', paramLabel: 'PID to dump', osOnly: 'windows' },
     { value: 'collect_file', label: 'Collect File', permission: 'edr.command.advanced', needsParams: 'path', paramLabel: 'File path' },
     { value: 'collect_registry_key', label: 'Registry Key', permission: 'edr.command.advanced', needsParams: 'key_path', paramLabel: 'Registry key path', osOnly: 'windows' },
     { value: 'kill_scheduled_task', label: 'Kill Scheduled Task', permission: 'edr.command.basic', needsParams: 'task_name', paramLabel: 'Task name', osOnly: 'windows',

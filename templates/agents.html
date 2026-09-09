@@ -1377,6 +1377,7 @@ const CONSOLE_ACTION_DISPLAY = {
         collect_dns_arp: 'Collect-DNS-ARP (DNS client cache + ARP/neighbor table)',
         check_process_injection_indicators: 'Check-Process-Injection-Indicators (processes with no backing file, unsigned binaries -- informational, not a verdict)',
         quarantine_file: 'Quarantine-File (move to a locked-down folder, deny execute -- contain, not just collect)',
+        capture_process_memory: 'Capture-Process-Memory (full memory dump of one PID via comsvcs.dll MiniDump -- dump stays on the endpoint, hash/metadata returned)',
         collect_registry_key: 'Collect-Registry-Key (arbitrary key -- values + subkeys, not just the fixed Run-key checks)',
         kill_scheduled_task: 'Kill-Scheduled-Task (Unregister-ScheduledTask -- remove a specific persistence mechanism found via Persistence Sweep)',
         kill_process_by_name: 'Kill-Process-By-Name (terminates every process whose name or path matches, not just one live PID)',
@@ -1431,6 +1432,7 @@ const CONSOLE_DROPDOWN_ACTIONS = [
     { value: 'kill_process_by_name', label: 'Kill Process by Name/Path', permission: 'edr.command.advanced', needsParams: true },
     { value: 'collect_file', label: 'Collect File', permission: 'edr.command.advanced', needsParams: true },
     { value: 'quarantine_file', label: 'Quarantine File', permission: 'edr.command.basic', needsParams: true },
+    { value: 'capture_process_memory', label: 'Capture Process Memory', permission: 'edr.command.advanced', needsParams: true, osOnly: 'windows' },
     { value: 'collect_registry_key', label: 'Registry Key', permission: 'edr.command.advanced', needsParams: true, osOnly: 'windows' },
     { value: 'kill_scheduled_task', label: 'Kill Scheduled Task', permission: 'edr.command.basic', needsParams: true, osOnly: 'windows' },
     { value: 'collect_triage', label: 'Triage Collection', permission: 'edr.command.basic' },
@@ -1794,6 +1796,13 @@ function consoleShowParamForm(label) {
                 <input type="text" id="paramTaskName" class="form-control bg-dark text-light border-secondary" placeholder="EvilTask" onkeydown="if(event.key==='Enter') submitKillScheduledTask()">
                 <button class="btn btn-outline-danger" onclick="submitKillScheduledTask()">Run</button>
             </div>`;
+    } else if (label === 'capture_process_memory') {
+        wrap.innerHTML = `
+            <label class="form-label small text-muted mb-1">PID to dump (full memory, via comsvcs.dll's MiniDump -- may be blocked by the endpoint's own AV/EDR on a protected process like lsass.exe; the dump stays on the endpoint's disk, retrieve it out-of-band and attach it to a case to hash-verify)</label>
+            <div class="input-group input-group-sm">
+                <input type="text" id="paramMemPid" class="form-control bg-dark text-light border-secondary" placeholder="1234" onkeydown="if(event.key==='Enter') submitCaptureProcessMemory()">
+                <button class="btn btn-outline-primary" onclick="submitCaptureProcessMemory()">Run</button>
+            </div>`;
     } else if (label === 'kill_process_by_name') {
         wrap.innerHTML = `
             <label class="form-label small text-muted mb-1">Process name or path substring (kills every match, case-insensitive)</label>
@@ -1827,6 +1836,13 @@ async function submitQuarantineFile() {
     if (!path) return;
     if (!(await confirmDialog(`Quarantine "${path}" on ${consoleSelectedHost}? The file will be moved out of place and locked down. This cannot be undone from here.`, {title: 'Quarantine file', danger: true, confirmLabel: 'Quarantine'}))) return;
     queueConsoleCommand(consoleSelectedHost, 'quarantine_file', {path}, `Quarantine-File "${path}"`);
+    document.getElementById('consoleParamForm').style.display = 'none';
+}
+
+function submitCaptureProcessMemory() {
+    const pid = (document.getElementById('paramMemPid').value || '').trim();
+    if (!/^\d+$/.test(pid)) { toast('PID must be a number.', 'warning'); return; }
+    queueConsoleCommand(consoleSelectedHost, 'capture_process_memory', {pid}, `Capture-Process-Memory -Id ${pid}`);
     document.getElementById('consoleParamForm').style.display = 'none';
 }
 
