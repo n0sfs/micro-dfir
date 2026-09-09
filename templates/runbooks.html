@@ -425,7 +425,11 @@ async function deleteExercise(id, title) {
     fetch(`/api/tabletop-exercises/${id}`, { method: 'DELETE' }).then(r => r.json()).then(d => {
         if (d.error) { toast(d.error, 'danger'); return; }
         toast('Exercise deleted.', 'success');
+        // A deleted exercise can change a runbook's exercise_count/last_tested_date --
+        // refresh runbookData too, or the "Runbooks Never Tested" stat and the Library
+        // tab's own "Tested Nx" text go stale until a full page reload.
         loadExercises();
+        loadRunbooks();
     }).catch(() => toast('Delete failed.', 'danger'));
 }
 
