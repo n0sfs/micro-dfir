@@ -757,8 +757,53 @@ def generate_case_report(case_id):
     safe_title = ''.join(c if c.isalnum() or c in ' -_' else '' for c in case['title'])[:60].strip() or f"Case_{case_id}"
     return _render_and_write('report_template_case.html', context, f"{safe_title.replace(' ', '_')}_{_report_filename('Case')}")
 
+def generate_tabletop_report(days=30):
+    conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
+    cutoff = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+
+    exercises = [dict(r) for r in cursor.execute(
+        "SELECT te.*, r.name as runbook_name FROM tabletop_exercises te "
+        "LEFT JOIN ir_runbooks r ON r.id = te.runbook_id "
+        "WHERE COALESCE(te.completed_date, te.scheduled_date, te.created_at) >= ? "
+        "ORDER BY COALESCE(te.completed_date, te.scheduled_date, te.created_at) DESC",
+        (cutoff,)
+    ).fetchall()]
+
+    status_counts = {'planned': 0, 'completed': 0, 'cancelled': 0}
+    for e in exercises:
+        if e['status'] in status_counts:
+            status_counts[e['status']] += 1
+
+    # Runbook library coverage is a current-state snapshot, not time-windowed -- "has
+    # this procedure ever been rehearsed" doesn't reset every reporting period the way
+    # exercise activity in the window does.
+    runbooks = [dict(r) for r in cursor.execute(
+        "SELECT r.id, r.name, r.category, r.last_reviewed_at, "
+        "(SELECT COUNT(*) FROM tabletop_exercises te WHERE te.runbook_id = r.id) as exercise_count, "
+        "(SELECT MAX(COALESCE(te.completed_date, te.scheduled_date)) FROM tabletop_exercises te "
+        " WHERE te.runbook_id = r.id AND te.status = 'completed') as last_tested_date "
+        "FROM ir_runbooks r ORDER BY r.name"
+    ).fetchall()]
+    never_tested = [r for r in runbooks if not r['exercise_count']]
+
+    context = {
+        "date_generated": datetime.now().strftime("%B %d, %Y"),
+        "report_title": "Tabletop Exercise Report",
+        "report_subtitle": f"Last {days} days",
+        "report_days": days,
+        "branding": _branding_context(conn),
+        "exercises": exercises,
+        "status_counts": status_counts,
+        "runbooks": runbooks,
+        "never_tested": never_tested,
+        "runbook_count": len(runbooks),
+    }
+    conn.close()
+    return _render_and_write('report_template_tabletop.html', context, _report_filename('Tabletop'))
+
 REPORT_GENERATORS = {
     'security': generate_security_report,
+    'tabletop': generate_tabletop_report,
     # 'compliance' is handled by its own explicit branch in run_report() (needs to pass
     # framework_key through), same as 'case' -- not listed here to avoid two dispatch
     # paths for the same type.

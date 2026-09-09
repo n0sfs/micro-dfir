@@ -1,0 +1,66 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8">{% include "_report_styles.html" %}</head><body>
+    {% include "_report_branding_header.html" %}
+    <h2>Executive Summary</h2>
+    <div>
+        <div class="metric-box"><div class="metric-value">{{ exercises|length }}</div><div>Exercises This Period</div></div>
+        <div class="metric-box"><div class="metric-value">{{ status_counts.completed }}</div><div>Completed</div></div>
+        <div class="metric-box"><div class="metric-value">{{ never_tested|length }} / {{ runbook_count }}</div><div>Runbooks Never Tested</div></div>
+    </div>
+    <p style="margin-top:15px; font-size:9pt; color:#666;">This report summarizes tabletop exercise activity over the last {{ report_days }} days, and the current state of the IR runbook library's rehearsal coverage. It is an operational readiness snapshot of this deployment, not an independent audit.</p>
+
+    <h2 class="section-title">Exercises This Period</h2>
+    {% if exercises %}
+    <table>
+        <thead><tr><th>Title</th><th>Runbook Tested</th><th>Status</th><th>Scheduled</th><th>Completed</th><th>Facilitator</th></tr></thead>
+        <tbody>
+        {% for e in exercises %}
+            <tr>
+                <td>{{ e.title }}</td>
+                <td>{{ e.runbook_name or '(none)' }}</td>
+                <td><span class="badge" style="background:{{ '#28a745' if e.status == 'completed' else ('#6c757d' if e.status == 'cancelled' else '#0dcaf0') }};">{{ e.status }}</span></td>
+                <td>{{ e.scheduled_date or '' }}</td>
+                <td>{{ e.completed_date or '' }}</td>
+                <td>{{ e.facilitator or '' }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<p>No tabletop exercises were logged in this period.</p>{% endif %}
+
+    <h2 class="section-title">Findings &amp; Action Items</h2>
+    {% set completed_with_findings = exercises|selectattr('status', 'equalto', 'completed')|list %}
+    {% if completed_with_findings %}
+    <table>
+        <thead><tr><th>Title</th><th>Findings / Gaps</th><th>Action Items</th></tr></thead>
+        <tbody>
+        {% for e in completed_with_findings %}
+            <tr>
+                <td>{{ e.title }}</td>
+                <td>{{ e.findings or '(none recorded)' }}</td>
+                <td>{{ e.action_items or '(none recorded)' }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<p>No completed exercises with recorded findings in this period.</p>{% endif %}
+
+    <h2 class="section-title">Runbook Library Coverage</h2>
+    <p style="font-size:9pt; color:#666;">Whether each documented IR procedure has ever actually been rehearsed via a tabletop exercise -- a runbook that has never been tested is untested readiness, not confirmed readiness.</p>
+    {% if runbooks %}
+    <table>
+        <thead><tr><th>Runbook</th><th>Category</th><th>Times Tested</th><th>Last Tested</th></tr></thead>
+        <tbody>
+        {% for r in runbooks %}
+            <tr{% if not r.exercise_count %} class="sensitive-row"{% endif %}>
+                <td>{{ r.name }}</td>
+                <td>{{ r.category or '' }}</td>
+                <td>{{ r.exercise_count }}</td>
+                <td>{{ r.last_tested_date or 'Never' }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<p>No runbooks are defined in the library yet.</p>{% endif %}
+
+    {% include "_report_branding_footer.html" %}
+</body></html>

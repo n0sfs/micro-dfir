@@ -51,6 +51,7 @@
                     <option value="compliance">Compliance Report</option>
                     <option value="audit">Audit Trail Report</option>
                     <option value="vulnerability">Vulnerability Report</option>
+                    <option value="tabletop">Tabletop Exercise Report</option>
                 </select>
                 <select name="framework" id="reportFrameworkSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto; display:none;" title="Narrow the Compliance Report to one framework instead of the all-frameworks survey">
                     <option value="">All Frameworks</option>
@@ -163,6 +164,11 @@
                         <option value="off">Off</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
                     </select>
                 </div>
+                <div class="col-6"><label class="form-label small text-muted mb-1" for="reportScheduleTabletop">Tabletop Exercise Report</label>
+                    <select data-report-type="tabletop" id="reportScheduleTabletop" class="form-select form-select-sm bg-dark text-light border-secondary" {{ '' if has_permission('settings.reports.manage') else 'disabled' }}>
+                        <option value="off">Off</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
+                    </select>
+                </div>
             </div>
             <div class="mb-2" style="max-width:520px;">
                 <label class="form-label small text-muted mb-1" for="reportScheduleRecipients">Email Recipients <span class="text-muted">(comma-separated, optional)</span></label>
@@ -220,7 +226,7 @@ function switchReportsTab(tab) {
     window.history.replaceState({}, '', url);
 }
 
-const REPORT_TYPE_LABELS = { security: 'Security Summary', compliance: 'Compliance Report', audit: 'Audit Trail Report', vulnerability: 'Vulnerability Report' };
+const REPORT_TYPE_LABELS = { security: 'Security Summary', compliance: 'Compliance Report', audit: 'Audit Trail Report', vulnerability: 'Vulnerability Report', tabletop: 'Tabletop Exercise Report' };
 
 // The framework select only means anything for report_type=compliance -- hidden (and
 // its value ignored server-side via COMPLIANCE_FRAMEWORKS validation regardless) for
