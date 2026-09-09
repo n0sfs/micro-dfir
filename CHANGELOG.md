@@ -10,6 +10,23 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-09
 
+### Settings > Database Backups now lists actual backup files, not just a count
+
+Started as a "backup has no restore path" item on the DFIR lifecycle audit — turned out
+to be wrong. `restore_db.sh` already exists at the repo root and is genuinely
+well-built: gzip integrity check before touching the live DB, a confirmation prompt, a
+pre-restore safety copy, and a post-restore `PRAGMA integrity_check` with automatic
+rollback if it fails. It's deliberately kept CLI/root-only rather than a Settings
+button (documented in its own header, and already referenced in Settings' own copy) —
+restoring a database is exactly the kind of rare, destructive action that should stay a
+manual, confirmed step. What was real and worth fixing: an admin had no way to see
+*which* backups actually exist without SSHing in first. `GET /api/settings/db-backup`
+now returns the real file list (name/size/timestamp, newest first), rendered as a small
+table with a ready-to-copy restore command for the most recent one. Also closed a
+pre-existing permission-gate gap while touching this route: the GET branch had no
+server-side check even though POST did and the UI panel is admin-only — any logged-in
+user could previously read backup existence/count directly via the API.
+
 ### New: SHA-256 hashing + integrity verification for case attachments
 
 From a DFIR-lifecycle gap audit: every EDR-collected artifact (`collect_file`,
