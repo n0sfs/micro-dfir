@@ -13,6 +13,18 @@
 .insights-mode-btn.active-filter{background-color:var(--accent); border-color:var(--accent); color:#fff;}
 .insight-hist-bar{height:6px; background:var(--accent); border-radius:3px; opacity:.75;}
 .insight-tow-cell{width:100%; aspect-ratio:1; border-radius:2px; background:var(--bg-inset);}
+/* Timeline filters column: same collapse/expand idea as the app's own sidebar
+   (base.html's .sidebar-collapsed), scoped to this one column -- starts collapsed by
+   default (see the localStorage restore in the init script below) so the results table
+   gets the room, with a one-click expand when a filter actually needs changing. Only
+   forces a narrow fixed width at the lg+ breakpoint where the two columns sit
+   side-by-side; on a stacked mobile layout, collapsing just hides the controls instead
+   of leaving an oddly-narrow full-width strip. */
+@media (min-width: 992px) {
+    #tlFiltersCol.tl-collapsed{flex:0 0 56px; max-width:56px; width:56px; padding-left:.5rem !important; padding-right:.5rem !important;}
+    #tlFiltersCol.tl-collapsed ~ #tlResultsCol{flex:1 1 auto; max-width:100%;}
+}
+#tlFiltersCol.tl-collapsed #tlFiltersBody, #tlFiltersCol.tl-collapsed #tlFiltersLabel{display:none;}
 </style>
 
 <div class="row g-3 mb-4">
@@ -37,8 +49,12 @@
     <!-- Timeline pane (merged Anomaly Detections + the event-type/time filters) -->
     <div id="paneTimeline">
         <div class="row g-0">
-            <div class="col-12 col-lg-3 border-end border-secondary p-3">
-                <h6 class="text-muted text-uppercase small mb-3" style="letter-spacing:.05em;"><i class="fa-solid fa-filter me-1"></i>Filters</h6>
+            <div class="col-12 col-lg-3 border-end border-secondary p-3 tl-collapsed" id="tlFiltersCol">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h6 class="text-muted text-uppercase small mb-0" style="letter-spacing:.05em;"><i class="fa-solid fa-filter me-1"></i><span id="tlFiltersLabel">Filters</span></h6>
+                    <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" id="tlFiltersToggleBtn" onclick="toggleTimelineFilters()" title="Expand filters"><i class="fa-solid fa-angles-right"></i></button>
+                </div>
+                <div id="tlFiltersBody">
                 <div class="mb-3">
                     <label class="form-label small text-muted mb-1">Event Types</label>
                     <div class="form-check">
@@ -81,8 +97,9 @@
                     <input type="text" id="tlSearch" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Host, user, message…" onkeydown="if(event.key==='Enter'){timelineLimit=300; loadTimeline();}">
                 </div>
                 <button class="btn btn-outline-secondary btn-sm w-100" onclick="timelineLimit=300; loadTimeline();"><i class="fa-solid fa-rotate me-1"></i> Apply / Refresh</button>
+                </div>
             </div>
-            <div class="col-12 col-lg-9">
+            <div class="col-12 col-lg-9" id="tlResultsCol">
                 <div class="card-body py-2 px-3 border-bottom border-secondary">
                     <span class="text-muted small" id="timelineCountNote"><i class="fa-solid fa-circle-info me-1"></i>Most recent events first, across everything selected on the left.</span>
                 </div>
@@ -796,6 +813,22 @@ function timelineDetailCell(ev) {
     const recur = ev.occurrence_count > 1
         ? ` <span class="badge bg-secondary" title="Recurred ${ev.occurrence_count} times, last at ${escHtml(ev.last_seen || '')}">&times;${ev.occurrence_count}</span>` : '';
     return headline + recur;
+}
+
+// Same collapse/expand idea as base.html's sidebar toggle, scoped to just this one
+// column -- starts collapsed (see the localStorage restore in the init script at the
+// bottom of this file) so the results table gets the room by default, expanding only
+// when a filter actually needs changing.
+function toggleTimelineFilters() {
+    const col = document.getElementById('tlFiltersCol');
+    if (!col) return;
+    const collapsed = col.classList.toggle('tl-collapsed');
+    const btn = document.getElementById('tlFiltersToggleBtn');
+    if (btn) {
+        btn.title = collapsed ? 'Expand filters' : 'Collapse filters';
+        btn.querySelector('i').className = collapsed ? 'fa-solid fa-angles-right' : 'fa-solid fa-angles-left';
+    }
+    try { localStorage.setItem('microdfir_ueba_timeline_filters_collapsed', collapsed ? '1' : '0'); } catch (e) {}
 }
 
 function loadTimeline() {
@@ -2026,6 +2059,22 @@ if (_uebaUrlHost) document.getElementById('tlSearch').value = _uebaUrlHost;
 // default active pane -- instead of matching nothing.
 const _uebaUrlTab = _uebaUrlParams.get('tab');
 if (_uebaUrlTab && UEBA_TABS.includes(_uebaUrlTab)) switchUebaTab(_uebaUrlTab);
+
+// The Timeline filters column ships collapsed by default (server-rendered with the
+// tl-collapsed class already on it) -- expand it back out if this viewer had
+// previously opted into keeping it open, same restore-before-other-init-runs
+// reasoning base.html's own sidebar-collapsed restore uses.
+try {
+    if (localStorage.getItem('microdfir_ueba_timeline_filters_collapsed') === '0') {
+        const col = document.getElementById('tlFiltersCol');
+        const btn = document.getElementById('tlFiltersToggleBtn');
+        if (col) col.classList.remove('tl-collapsed');
+        if (btn) {
+            btn.title = 'Collapse filters';
+            btn.querySelector('i').className = 'fa-solid fa-angles-left';
+        }
+    }
+} catch (e) {}
 
 onAnomalyRuleSourceChange();
 loadTimeline();

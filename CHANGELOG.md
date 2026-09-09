@@ -8,6 +8,18 @@ a new feature, a real architectural decision, an incident and its fix. Routine p
 fixes don't need their own line; group them into the feature they support. Newest first.
 Full commit-level detail is always available via `git log`.
 
+## 2026-09-09
+
+### UEBA Timeline: compact-by-default Filters column with expand/collapse
+
+The Timeline tab's Filters sidebar (Event Types, Time Range, Search, Apply/Refresh)
+now ships collapsed by default — a narrow strip with just a filter icon and a toggle
+button, giving the results table the room instead. Same collapse/expand mechanism
+`base.html`'s sidebar toggle already uses (a body/column class swap + `localStorage`
+persistence, restored before the rest of the page's init logic runs to avoid a
+flash-of-wrong-state), scoped to just this one column via `#tlFiltersCol`/
+`toggleTimelineFilters()` in `templates/ueba.html`.
+
 ## 2026-09-08
 
 ### New: Beaconing Detection (UEBA) — network C2-callback regularity scoring
