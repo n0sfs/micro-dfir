@@ -690,7 +690,8 @@ const CASE_ACTION_LABELS = {
     collect_triage: 'Collect triage bundle from confirmed hosts (EDR)',
     quarantine_file: 'Quarantine a file on confirmed hosts (EDR)',
     kill_scheduled_task: 'Remove a scheduled task on confirmed hosts (EDR, Windows only)',
-    kill_process_by_name: 'Kill matching processes on confirmed hosts (EDR)'
+    kill_process_by_name: 'Kill matching processes on confirmed hosts (EDR)',
+    revoke_user_credentials: 'Revoke credentials for implicated app accounts'
 };
 const ALERT_ACTION_LABELS = {
     send_email: 'Send email', send_webhook: 'Send webhook', send_slack: 'Send Slack message',
@@ -705,7 +706,7 @@ function actionLabelsForTrigger(triggerEvent) {
 // for these in the editor, matching PLAYBOOK_ACTION_TYPES_ALWAYS_GATED server-side
 // (which re-forces it regardless of what's submitted, so this is a UI hint, not the
 // actual enforcement point).
-const ACTION_TYPES_ALWAYS_GATED = ['isolate_host', 'restore_network', 'collect_triage', 'quarantine_file', 'kill_scheduled_task', 'kill_process_by_name'];
+const ACTION_TYPES_ALWAYS_GATED = ['isolate_host', 'restore_network', 'collect_triage', 'quarantine_file', 'kill_scheduled_task', 'kill_process_by_name', 'revoke_user_credentials'];
 
 // Actions catalog (Actions tab) -- descriptions authored here, but the actual ROW LIST
 // is driven by the real CASE_ACTION_LABELS/ALERT_ACTION_LABELS below rather than a
@@ -727,6 +728,7 @@ const ACTION_DESCRIPTIONS = {
     quarantine_file: 'Quarantines an admin-typed file path on every Case Asset marked Confirmed compromised.',
     kill_scheduled_task: 'Removes an admin-typed Windows scheduled task on every Case Asset marked Confirmed compromised (Windows hosts only -- others are skipped).',
     kill_process_by_name: 'Kills every process whose name or full path/command line contains an admin-typed pattern, on every Case Asset marked Confirmed compromised.',
+    revoke_user_credentials: 'Sets a random password and forces a change on every app account (Settings &gt; Users) matching a username implicated by this case\'s linked alerts -- and revokes any of that account\'s already-logged-in sessions immediately, not just future logins. No params: targets are derived from the case, not admin-typed.',
     create_case: 'Creates a case from the triggering alert (title/severity carried over) and links it, cascading into any matching "Case created" playbooks.',
     set_alert_status: 'Sets the triggering alert\'s triage status directly (also marks it acknowledged) -- the lightweight alternative to create_case for auto-suppressing known-benign patterns without spinning up a full case.',
     assign_alert: 'Assigns the triggering alert to a specific analyst (or clears the assignee).',
@@ -1469,6 +1471,8 @@ function actionParamsFieldsHtml(seq, actionType, params) {
         case 'kill_process_by_name':
             return `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_pattern" placeholder="Process name or path substring, e.g. mimikatz" value="${escHtml(params.pattern || '')}">
                 <div class="small text-muted mt-1">Kills every process whose name or full path/command line contains this text (case-insensitive) on every Case Asset marked <strong>Confirmed</strong> compromised. Broader blast radius than a single PID -- always requires approval.</div>`;
+        case 'revoke_user_credentials':
+            return `<div class="small text-muted">No params -- targets every username on this case's linked alerts that matches a real app account (Settings &gt; Users), not an admin-typed value. Sets a random password (never shown/logged anywhere), forces a change, and revokes any already-logged-in session for that account immediately. Always requires approval.</div>`;
         case 'create_case':
             return `<div class="small text-muted">No params -- creates a new case from the triggering alert (title/severity carried over) and links it, then runs any matching "Case created" playbooks against it.</div>`;
         case 'set_alert_status':

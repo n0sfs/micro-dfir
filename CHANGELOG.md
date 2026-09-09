@@ -10,6 +10,47 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-09
 
+### New: real session revocation, a case-linked credential-revoke playbook action, and incident-triggered watchlisting
+
+Two more items from the lifecycle audit's Containment/Recovery findings, both real
+gaps closed by one shared piece of new infrastructure.
+
+**The infrastructure**: this app's session cookie (Flask-Login) carried only a user id
+— `load_user()` never re-checked anything password-derived on each request, so
+changing a `password_hash` never actually invalidated an already-logged-in browser
+session. The "Force password reset and revoke active sessions" line on the
+Compromised Account case template was, until now, only ever half-true. Fixed with a
+new `users.session_version` column: stamped into the session cookie at login, compared
+on every request in `load_user()`. Bumping it (admin reset, self-service change, or the
+new revoke action below) makes every *other* outstanding session fail that check on its
+very next request — a real, working "log out everywhere else." Self-service password
+change re-stamps its own session so that one tab stays logged in; every other session
+for that account does not.
+
+**⚠️ One-time effect of this deploy**: every session active *before* this update has no
+`session_version` stamped in its cookie at all, which the new check treats as a
+mismatch — expect to have to log back in once, on every open tab, right after this
+deploys. A one-time inconvenience, not a bug.
+
+**New `revoke_user_credentials` playbook action** (always-approval-gated, like
+`isolate_host`): targets every username implicated by a case's linked alerts that
+matches a real app account — most endpoint usernames won't (they're Windows/Linux
+account names, not app logins), which is the expected common case, not an error. Sets a
+random password (never returned, logged, or stored anywhere — recovery is the existing,
+separate admin reset flow once the account owner is ready), forces a change, and bumps
+`session_version`. New shared helper `_case_implicated_usernames()` (also used to
+de-duplicate `related-items`' own username derivation) is the only bridge from a case to
+a real identity today, since `case_assets` is host-only and `identities` has no host
+column.
+
+**Incident-triggered watchlisting**: closing a case that has at least one Case Asset
+marked `confirmed` compromised now auto-adds its implicated usernames to the existing
+insider-threat watchlist (`identities.watched`) — logged to the case timeline
+(`user_watchlisted`), never fabricating a new `identities` row for a username with no
+existing entry. Closes "nothing connects a resolved incident back to heightened
+monitoring," the same real, previously-manual gap `_case_coverage_gaps` closed for
+detection tuning earlier today.
+
 ### New: triage-scoped process memory capture (Windows), closing part of the DFIR audit's Forensic Evidence Collection gap
 
 The lifecycle audit flagged zero volatile-data acquisition anywhere in the app as a

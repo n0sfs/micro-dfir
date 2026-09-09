@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from werkzeug.utils import secure_filename
 from werkzeug.security import check_password_hash
-from flask import Flask, render_template, request, jsonify, g, redirect, url_for, flash
+from flask import Flask, render_template, request, jsonify, g, redirect, url_for, flash, session
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from yara_scanner import scan_file
 from taxii_client import sync_one as ti_sync_one
@@ -176,8 +176,18 @@ app.jinja_env.globals['current_role_label'] = current_role_label
 def load_user(user_id):
     db = get_db()
     u = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-    if u: return User(u['id'], u['username'], u['role'], u['must_change_password'])
-    return None
+    if not u:
+        return None
+    # session['sv'] is stamped at login (see login()) with the user's session_version at
+    # that moment. Bumping session_version in the DB (password reset, self-service change,
+    # or a case-linked credential revocation) makes every OTHER outstanding session's
+    # stored 'sv' stop matching on its very next request -- Flask-Login treats a None
+    # return here as "not authenticated", forcing a real re-login. This is the only
+    # session-revocation mechanism that exists: the cookie itself carries just a user id,
+    # and load_user never otherwise re-checks anything password-derived.
+    if session.get('sv') != u['session_version']:
+        return None
+    return User(u['id'], u['username'], u['role'], u['must_change_password'])
 
 def get_db():
     db = getattr(g, '_database', None)
@@ -429,6 +439,7 @@ def login():
         user = get_db().execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
         if user and check_password_hash(user['password_hash'], request.form['password']):
             login_user(User(user['id'], user['username'], user['role'], user['must_change_password']))
+            session['sv'] = user['session_version']
             log_audit('login_success', 'user', user['username'])
             return redirect(url_for('home'))
         # current_user is still anonymous here -- target_id records what was *typed*,
@@ -464,9 +475,15 @@ def change_password():
             flash('New password must be different from your current password.', 'danger')
         else:
             from werkzeug.security import generate_password_hash
-            db.execute("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?",
+            db.execute("UPDATE users SET password_hash = ?, must_change_password = 0, session_version = session_version + 1 WHERE id = ?",
                        (generate_password_hash(new_pw), current_user.id))
             db.commit()
+            # Standard "changing your password logs out every OTHER session" behavior --
+            # re-stamp this session's own 'sv' to the new value so THIS request/browser
+            # stays logged in (load_user's check would otherwise fail it on the very next
+            # request too, immediately after the user who just typed the new password).
+            new_version = db.execute("SELECT session_version FROM users WHERE id = ?", (current_user.id,)).fetchone()['session_version']
+            session['sv'] = new_version
             log_audit('password_changed', 'user', current_user.username)
             flash('Password updated.', 'success')
             return redirect(url_for('home'))
@@ -6674,6 +6691,11 @@ def api_case_detail(cid):
             # told us what workflow_state they want.
             if 'workflow_state' not in data:
                 workflow_state = 'resolved'
+            # Closing the loop the DFIR lifecycle audit flagged: a just-handled incident
+            # never fed back into heightened monitoring for the accounts it involved.
+            newly_watched = _watchlist_case_implicated_users(db, cid)
+            if newly_watched:
+                _log_case_event(db, cid, 'user_watchlisted', ', '.join(newly_watched))
         elif status == 'open':
             # A genuine reopen (was closed, now isn't) preserves its close timestamp in
             # last_closed_at and counts it, rather than nulling closed_at outright --
@@ -6812,6 +6834,49 @@ def api_case_coverage_gaps(cid):
         return jsonify({"error": "Case not found"}), 404
     return jsonify({"gaps": _case_coverage_gaps(db, cid)})
 
+# The only existing bridge from a case to a real user identity: case_assets is host-only
+# (no username column), and identities has no host column, so a linked alert's own
+# username field is the one place a case ever touches an actual account. Shared by
+# related-items (informational, wants every username including placeholders) and by the
+# credential-revocation/watchlist features below (which layer their own placeholder
+# filtering on top rather than baking it in here, so this stays the same all-usernames
+# result related-items has always returned).
+def _case_implicated_usernames(db, cid):
+    return sorted({r['username'] for r in db.execute(
+        "SELECT DISTINCT a.username FROM case_items ci JOIN alerts a ON ci.item_type = 'alert' AND CAST(a.id AS TEXT) = ci.item_id "
+        "WHERE ci.case_id = ? AND a.username IS NOT NULL AND a.username != ''", (cid,)
+    ).fetchall()})
+
+# Closes a real, previously entirely-manual link: the insider-threat watchlist
+# (identities.watched) exists but nothing ever added anyone to it automatically. Fires
+# only at the moment a case actually closes AND has at least one Case Asset an analyst
+# has explicitly marked 'confirmed' compromised -- the same deliberate, analyst-judged
+# signal isolate_host/quarantine_file/etc. already require before acting, not "any case
+# that happened to close." Only watches an EXISTING identities row (never fabricates one
+# with blank department/privileged metadata just because a username showed up on an
+# alert) -- an unmatched username is silently skipped, same posture
+# revoke_user_credentials takes toward users with no matching `users` row.
+def _watchlist_case_implicated_users(db, cid):
+    has_confirmed = db.execute(
+        "SELECT 1 FROM case_assets WHERE case_id = ? AND compromise_status = 'confirmed' LIMIT 1", (cid,)
+    ).fetchone()
+    if not has_confirmed:
+        return []
+    candidates = [u for u in _case_implicated_usernames(db, cid) if u not in ('-', 'SYSTEM', 'LOCAL SERVICE', 'NETWORK SERVICE')]
+    if not candidates:
+        return []
+    rows = db.execute(
+        f"SELECT username FROM identities WHERE watched = 0 AND username IN ({','.join('?' for _ in candidates)})",
+        candidates
+    ).fetchall()
+    watched = [r['username'] for r in rows]
+    for username in watched:
+        db.execute(
+            "UPDATE identities SET watched = 1, watch_reason = ?, watched_at = CURRENT_TIMESTAMP, watched_by = ? WHERE username = ?",
+            (f"Confirmed compromise on case #{cid}", 'system:case_close', username)
+        )
+    return watched
+
 @app.route('/api/cases/<int:cid>/related-items', methods=['GET'])
 @login_required
 def api_case_related_items(cid):
@@ -6821,10 +6886,7 @@ def api_case_related_items(cid):
         return jsonify({"error": "Case not found"}), 404
 
     hosts = sorted({r['host'] for r in db.execute("SELECT DISTINCT host FROM case_assets WHERE case_id = ?", (cid,)).fetchall()})
-    usernames = sorted({r['username'] for r in db.execute(
-        "SELECT DISTINCT a.username FROM case_items ci JOIN alerts a ON ci.item_type = 'alert' AND CAST(a.id AS TEXT) = ci.item_id "
-        "WHERE ci.case_id = ? AND a.username IS NOT NULL AND a.username != ''", (cid,)
-    ).fetchall()})
+    usernames = _case_implicated_usernames(db, cid)
 
     row = db.execute("SELECT value FROM settings WHERE key = 'related_items_window_hours'").fetchone()
     try:
@@ -7438,18 +7500,20 @@ def api_case_analyze(cid):
 
 # ---- Playbooks (SOAR) ----
 PLAYBOOK_TRIGGERS = ('case_created', 'status_changed', 'queue_changed', 'assignee_changed', 'scheduled', 'alert_created', 'sla_breached', 'asset_confirmed', 'severity_changed', 'case_stale')
-PLAYBOOK_ACTION_TYPES = ('apply_template', 'add_task', 'add_note', 'set_queue', 'analyze_entity', 'send_email', 'send_webhook', 'send_slack', 'custom_webhook', 'isolate_host', 'restore_network', 'collect_triage', 'quarantine_file', 'kill_scheduled_task', 'kill_process_by_name')
+PLAYBOOK_ACTION_TYPES = ('apply_template', 'add_task', 'add_note', 'set_queue', 'analyze_entity', 'send_email', 'send_webhook', 'send_slack', 'custom_webhook', 'isolate_host', 'restore_network', 'collect_triage', 'quarantine_file', 'kill_scheduled_task', 'kill_process_by_name', 'revoke_user_credentials')
 # alert_created playbooks are alert-scoped (no case_id exists yet -- see soar_alerts.py)
 # and get their own small, non-destructive action set instead of the case-scoped one
 # above; create_case is the bridge into the full case-scoped arsenal.
 ALERT_ACTION_TYPES = soar_alerts.PLAYBOOK_ALERT_ACTION_TYPES
 PLAYBOOK_APPROVAL_STATUSES = ('pending', 'approved', 'rejected')
-# These 5 are every Tier 1 EDR action offered as a playbook step -- each has real,
+# These are every Tier 1 EDR action offered as a playbook step -- each has real,
 # physical consequences on a real endpoint (cuts/restores network access, quarantines
-# or deletes something, pulls a forensic bundle). requires_approval is forced to 1 for
-# all of them at save time (see api_playbooks/api_playbook_detail below), never left to
-# the editor's checkbox, so there's no way to configure any of them to run unattended.
-PLAYBOOK_ACTION_TYPES_ALWAYS_GATED = {'isolate_host', 'restore_network', 'collect_triage', 'quarantine_file', 'kill_scheduled_task', 'kill_process_by_name'}
+# or deletes something, pulls a forensic bundle) -- plus revoke_user_credentials, which
+# has real consequences for a real person's account access even though it never touches
+# an endpoint. requires_approval is forced to 1 for all of them at save time (see
+# api_playbooks/api_playbook_detail below), never left to the editor's checkbox, so
+# there's no way to configure any of them to run unattended.
+PLAYBOOK_ACTION_TYPES_ALWAYS_GATED = {'isolate_host', 'restore_network', 'collect_triage', 'quarantine_file', 'kill_scheduled_task', 'kill_process_by_name', 'revoke_user_credentials'}
 
 def _valid_action_types_for_trigger(trigger_event):
     return ALERT_ACTION_TYPES if trigger_event == 'alert_created' else PLAYBOOK_ACTION_TYPES
@@ -7780,6 +7844,41 @@ def _run_playbook_action(db, cid, action_type, params, dry_run=False):
         if unsupported:
             detail += f" (skipped {len(unsupported)} unsupported: {', '.join(unsupported)})"
         return detail
+
+    if action_type == 'revoke_user_credentials':
+        # No params, same reasoning as isolate_host: a reusable playbook can't be
+        # authored against one specific username ahead of time. case_assets has no
+        # username column and identities has no host column, so the only existing
+        # bridge from a case to a real account is a linked alert's own username field
+        # (_case_implicated_usernames) -- placeholder values filtered the same way
+        # _resolve_dns_client_context already does elsewhere in this file. Most
+        # endpoint usernames won't match any row in this app's own `users` table at
+        # all (they're Windows/Linux account names, not app logins) -- that's the
+        # expected, common case, not an error.
+        candidates = [u for u in _case_implicated_usernames(db, cid) if u not in ('-', 'SYSTEM', 'LOCAL SERVICE', 'NETWORK SERVICE')]
+        targets = [dict(r) for r in db.execute(
+            f"SELECT id, username FROM users WHERE username IN ({','.join('?' for _ in candidates)})", candidates
+        ).fetchall()] if candidates else []
+        if not targets:
+            return "no case-implicated username matches an app account on this appliance, skipped"
+        if dry_run:
+            return f"would revoke credentials for {len(targets)} app account(s): {', '.join(t['username'] for t in targets)}"
+        import secrets
+        from werkzeug.security import generate_password_hash
+        for t in targets:
+            # A random password, never returned/logged anywhere -- the point is that
+            # NOBODY (including whoever approved this) knows it, so the account is
+            # genuinely locked out rather than just due for a change. Recovery is the
+            # existing, separate admin reset flow (Settings > Users) once the account
+            # owner is ready to regain access -- deliberately not reused here, so a
+            # revoke can never accidentally double as a "here's your new password."
+            random_password = secrets.token_urlsafe(24)
+            db.execute(
+                "UPDATE users SET password_hash = ?, must_change_password = 1, session_version = session_version + 1 WHERE id = ?",
+                (generate_password_hash(random_password), t['id'])
+            )
+        usernames = [t['username'] for t in targets]
+        return f"revoked credentials for {len(targets)} app account(s): {', '.join(usernames)}"
 
     return f"unknown action type '{action_type}', skipped"
 
@@ -11863,6 +11962,24 @@ def migrate_users_must_change_password():
         cols = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if 'must_change_password' not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0")
+            conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# The session cookie here (Flask-Login) carries only a user id -- load_user() never
+# otherwise re-checks anything password-derived, so changing password_hash alone does
+# NOT invalidate an already-logged-in session (confirmed directly: no SESSION_COOKIE_*
+# config, no server-side session store, nothing else reads this column on every request).
+# session_version, stamped into the session cookie at login and compared on every
+# request in load_user(), is what actually makes "revoke this session" a real, working
+# action instead of only ever affecting the next login.
+def migrate_users_session_version():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if 'session_version' not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0")
             conn.commit()
         conn.close()
     except Exception:
@@ -16939,7 +17056,10 @@ def api_settings_users():
             new_password = generate_password_hash(raw_password)
             must_change = 1 if data.get('force_change') else 0
             target_user = db.execute("SELECT username FROM users WHERE id = ?", (user_id,)).fetchone()
-            db.execute("UPDATE users SET password_hash = ?, must_change_password = ? WHERE id = ?", (new_password, must_change, user_id))
+            # session_version bump invalidates any session already logged in with the old
+            # password -- an admin-issued reset should kick out a stale/possibly-hijacked
+            # session, not just change what a future login needs (see load_user()).
+            db.execute("UPDATE users SET password_hash = ?, must_change_password = ?, session_version = session_version + 1 WHERE id = ?", (new_password, must_change, user_id))
             db.commit()
             log_audit('user_password_reset', 'user', target_user['username'] if target_user else user_id)
             return jsonify({'status': 'success'})
@@ -18095,6 +18215,7 @@ migrate_case_attachments()
 migrate_dashboards()
 migrate_role_casing()
 migrate_users_must_change_password()
+migrate_users_session_version()
 migrate_role_permissions()
 migrate_case_templates_manage_permission()
 migrate_role_default_dashboard()
