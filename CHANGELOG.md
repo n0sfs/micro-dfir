@@ -10,6 +10,19 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-09
 
+### New: bulk alert triage in Log Search
+
+An alert storm previously had to be worked one detail-modal click at a time — no way to
+select several alerts and apply one triage action to all of them. Log Search's results
+table gains a checkbox column (alert-type rows only; log/anomaly/command/import rows get
+a blank cell, since bulk triage only makes sense for something with triage semantics) and
+a select-all header checkbox. Selecting 1+ shows a bulk-action bar with Mark False
+Positive / Mark Resolved / Mark Investigating, each firing a parallel fan-out to the
+existing single-alert `PUT /api/alerts/<id>` route (no new backend endpoint — each alert
+is its own independent update, so a client-side `Promise.all` is exactly as safe as a
+server-side loop would be, without adding new surface). Selection is keyed by real alert
+id so it survives an in-place row re-render, but clears on a genuinely fresh search.
+
 ### New: remediation status tracking on Coverage > Vulnerability findings
 
 Another small item from the lifecycle audit: Vulnerability Coverage was pure read-only
