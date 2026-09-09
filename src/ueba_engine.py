@@ -1,4 +1,5 @@
 import copy, os, json, sqlite3, duckdb, math
+from warninglists import filter_warninglisted_ips
 DB_PATH = "/opt/micro-dfir/siem.db"
 # Mirrors app.py's _PRIORITY_TIERS['critical'] (0-10 normalized priority_score scale,
 # fixed by construction, not admin-configurable) -- duplicated here since this standalone
@@ -18,6 +19,8 @@ UEBA_DEFAULTS = {
     'ueba_priority_enabled': 1, 'ueba_priority_window_days': 30, 'ueba_priority_half_life_hours': 24,
     'ueba_autocase_enabled': 0, 'ueba_autocase_threshold': 80, 'ueba_autocase_template_id': None,
     'ueba_autocase_cooldown_hours': 24,
+    'ueba_beaconing_enabled': 1, 'ueba_beaconing_lookback_hours': 24,
+    'ueba_beaconing_min_connections': 10, 'ueba_beaconing_cv_threshold': 0.15,
 }
 
 # The 3-way blend weights and normalization caps below are a scoring heuristic, not a
@@ -62,6 +65,7 @@ RISK_SCORE_DEFAULTS = {
         'multi_signal_convergence': 30,
         'sequence_chain_progression': 15,
         'ioc_touch': 35,
+        'beaconing_detected': 20,
     },
     'tiers': {'low': 0, 'medium': 20, 'high': 50, 'critical': 100},
 }
@@ -213,6 +217,10 @@ def get_ueba_config():
         'autocase_threshold': max(1, int(cfg['ueba_autocase_threshold'])),
         'autocase_template_id': int(cfg['ueba_autocase_template_id']) if str(cfg.get('ueba_autocase_template_id') or '') not in ('', 'None') else None,
         'autocase_cooldown_hours': max(1, int(cfg['ueba_autocase_cooldown_hours'])),
+        'beaconing_enabled': str(cfg['ueba_beaconing_enabled']) not in ('0', 'false', 'False'),
+        'beaconing_lookback_hours': max(1, min(168, int(cfg['ueba_beaconing_lookback_hours']))),
+        'beaconing_min_connections': max(2, int(cfg['ueba_beaconing_min_connections'])),
+        'beaconing_cv_threshold': max(0.0, min(1.0, float(cfg['ueba_beaconing_cv_threshold']))),
     }
 
 def _get_exclusions():
@@ -568,6 +576,79 @@ def _run_rare_process_population_model(con, cfg):
                          'host_count': host_count, 'population_basis': basis, 'population_size': population_size})
     return results
 
+# Beaconing detection -- scores how REGULAR (low time-variance) repeated connections
+# between a host and an external destination are, the same core idea RITA (Real
+# Intelligence Threat Analytics) uses to surface C2 callback patterns: a low
+# coefficient of variation (stddev/mean of inter-connection intervals) is the
+# signature of automated beacon timing, as opposed to the high-variance intervals
+# organic human/application traffic produces. Grouped by (host, destination_ip) from
+# Sysmon Event ID 3 (Network Connection) rows -- the only source live_logs.destination_ip
+# is actually populated from today.
+#
+# A beacon by definition calls OUT -- private/reserved destinations (RFC1918 + loopback
+# + link-local) are excluded by construction, not left for the admin exclusion list to
+# discover one internal host at a time.
+_PRIVATE_IP_REGEX = r'^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.|169\.254\.|0\.)'
+
+def _run_beaconing_model(con, cfg):
+    if not cfg['beaconing_enabled']:
+        return []
+    # conn_count is computed from the FULL conns CTE (every matching connection),
+    # decoupled from the CV computation below -- Sysmon's own ingestion timestamp is
+    # second-precision only (agents/micro_agent_windows.py's own
+    # TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')), so two connections landing in the
+    # same wall-clock second (burst retries, a very tight beacon interval) produce a
+    # delta_seconds of 0. Those pairs are correctly excluded from the variance
+    # calculation (a 0-delta is noise, not signal) but must never silently shrink the
+    # displayed connection count -- an analyst reading "12 connections" in the alert
+    # message needs to see the real count, not an artifact of the delta filtering.
+    query = f"""
+    WITH conns AS (
+        SELECT host, destination_ip, CAST(timestamp AS TIMESTAMP) as ts
+        FROM siem.live_logs
+        WHERE app = 'Sysmon' AND event_id = '3'
+          AND CAST(timestamp AS TIMESTAMP) >= CURRENT_TIMESTAMP - INTERVAL {cfg['beaconing_lookback_hours']} HOUR
+          AND destination_ip IS NOT NULL AND destination_ip NOT IN ('', '-')
+          AND NOT regexp_matches(destination_ip, '{_PRIVATE_IP_REGEX}')
+    ), pair_counts AS (
+        SELECT host, destination_ip, COUNT(*) as conn_count, MIN(ts) as first_seen, MAX(ts) as last_seen
+        FROM conns GROUP BY host, destination_ip
+    ), deltas AS (
+        SELECT host, destination_ip, ts,
+               epoch(ts) - epoch(LAG(ts) OVER (PARTITION BY host, destination_ip ORDER BY ts)) as delta_seconds
+        FROM conns
+    ), pair_stats AS (
+        SELECT host, destination_ip, AVG(delta_seconds) as avg_interval, STDDEV(delta_seconds) as stddev_interval
+        FROM deltas WHERE delta_seconds IS NOT NULL AND delta_seconds > 0
+        GROUP BY host, destination_ip
+    )
+    SELECT c.host, c.destination_ip, c.conn_count, c.first_seen, c.last_seen,
+           s.avg_interval, s.stddev_interval, s.stddev_interval / NULLIF(s.avg_interval, 0) as cv
+    FROM pair_counts c JOIN pair_stats s ON s.host = c.host AND s.destination_ip = c.destination_ip
+    WHERE c.conn_count >= {cfg['beaconing_min_connections']} AND s.avg_interval > 0
+      AND (s.stddev_interval / NULLIF(s.avg_interval, 0)) <= {cfg['beaconing_cv_threshold']}
+    """
+    results = []
+    for host, dest_ip, conn_count, first_seen, last_seen, avg_interval, stddev_interval, cv in con.execute(query).fetchall():
+        results.append({'host': host, 'destination_ip': dest_ip, 'conn_count': conn_count,
+                         'avg_interval': round(avg_interval, 1), 'cv': round(cv, 3),
+                         'first_seen': str(first_seen), 'last_seen': str(last_seen)})
+    return results
+
+# A flat high point value would tie a purely statistical, self-acknowledged-imperfect
+# indicator with alert_critical -- the single highest-weighted signal in the whole
+# priority-scoring system (PRIORITY_PEAK_CAP is pinned to it). Calibrated instead
+# against the closest real analogues: new_destination_ip=15 (a related "first contact"
+# signal) and process_lineage=25/ioc_touch=35 (higher-confidence patterns). Tiered up
+# for an extreme signal (very low CV or a large, sustained connection count) --
+# mirrors _severity_for()'s existing "scale with how extreme the anomaly is" convention,
+# applied to this model's own two axes instead of a single ratio.
+def _beaconing_severity_and_points(cv, conn_count, cfg, risk_cfg):
+    base = risk_cfg['points']['beaconing_detected']
+    if cv <= cfg['beaconing_cv_threshold'] / 2 or conn_count >= cfg['beaconing_min_connections'] * 3:
+        return 'High', base + 5
+    return 'Medium', base
+
 def run_ueba_models():
     try:
         cfg = get_ueba_config()
@@ -584,6 +665,7 @@ def run_ueba_models():
         lineage_hits = _run_process_lineage_model(con, cfg)
         off_hours_hits = _run_off_hours_model(con, cfg)
         rare_process_hits = _run_rare_process_population_model(con, cfg)
+        beaconing_hits = _run_beaconing_model(con, cfg)
         con.close()
     except Exception as e:
         print(f"[-] UEBA model run failed: {e}")
@@ -597,8 +679,22 @@ def run_ueba_models():
     lineage_hits = [h for h in lineage_hits if ('host', h['host']) not in excluded]
     off_hours_hits = [h for h in off_hours_hits if (h['entity_type'], h['entity_id']) not in excluded]
     rare_process_hits = [h for h in rare_process_hits if ('host', h['host']) not in excluded]
+    beaconing_hits = [h for h in beaconing_hits
+                       if ('host', h['host']) not in excluded and ('destination_ip', h['destination_ip']) not in excluded]
 
     conn = sqlite3.connect(DB_PATH, timeout=30)
+
+    # CDN/public-DNS suppression, applied BEFORE scoring -- filter_warninglisted_ips is
+    # the same ready-made MISP-style suppression utility sigma_engine.py's IOC-IP
+    # correlation already uses to avoid firing on transient CDN/public-DNS matches,
+    # exactly the class of false positive (cloud sync, telemetry, SaaS heartbeats
+    # hitting well-known CDN ranges) a regularity-only model would otherwise flood on.
+    if beaconing_hits:
+        try:
+            surviving_ips = set(filter_warninglisted_ips(conn, [h['destination_ip'] for h in beaconing_hits]))
+            beaconing_hits = [h for h in beaconing_hits if h['destination_ip'] in surviving_ips]
+        except Exception as e:
+            print(f"[-] Beaconing warninglist filter failed (non-fatal, hits kept unfiltered): {e}")
 
     # Snapshot every modeled entity (not just the ones currently anomalous) so the
     # baseline-visibility view can show what "normal" looks like — best-effort: an
@@ -722,6 +818,21 @@ def run_ueba_models():
             conn.execute(
                 "INSERT INTO risk_score_events (entity_type, entity_id, indicator, points, detail, source_table, source_id, rule_id) VALUES (?,?,?,?,?,?,?,?)",
                 ('host', h['host'], 'rare_process_population', risk_cfg['points']['rare_process_population'], message, 'events', None, None)
+            )
+        for h in beaconing_hits:
+            severity, points = _beaconing_severity_and_points(h['cv'], h['conn_count'], cfg, risk_cfg)
+            message = (f"{h['host']} (host) is showing regular, beacon-like network connections to {h['destination_ip']}: "
+                       f"{h['conn_count']} connections over the lookback window, averaging one every "
+                       f"{h['avg_interval']:.0f}s (coefficient of variation: {h['cv']:.3f} -- low variance is the "
+                       f"signature of automated C2 callback timing rather than organic traffic).")
+            conn.execute(
+                "INSERT INTO events (timestamp, hostname, entity_type, app_name, severity, message, raw_json) "
+                "VALUES (datetime('now'), ?, 'host', 'duckdb_ueba', ?, ?, ?)",
+                (h['host'], severity, message, json.dumps({**h, 'detection_type': 'beaconing_detected'}))
+            )
+            conn.execute(
+                "INSERT INTO risk_score_events (entity_type, entity_id, indicator, points, detail, source_table, source_id, rule_id) VALUES (?,?,?,?,?,?,?,?)",
+                ('host', h['host'], 'beaconing_detected', points, message, 'events', None, None)
             )
         conn.commit()
     except Exception as e:
