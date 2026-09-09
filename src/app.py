@@ -14537,20 +14537,40 @@ def api_settings_db_backup():
 
     import backup_db
     if request.method == 'GET':
+        # Read-only, but still gated -- this route's response now includes real backup
+        # filenames (which encode exact backup timestamps), and the panel that renders it
+        # is already admin-only in the template (settings.html's `{% if
+        # has_permission('settings.system.manage') %}` wrapping this whole section). The
+        # route itself had no matching server-side check before this -- any logged-in
+        # user could already see backup_count/last_run directly via the API even though
+        # the UI hid it from them; closing that gap now rather than widening it further
+        # by also exposing the file list to the same ungated route.
+        err = require_permission('settings.system.manage')
+        if err: return err
         days_row = db.execute("SELECT value FROM settings WHERE key = 'db_backup_retention_days'").fetchone()
         last_row = db.execute("SELECT value FROM settings WHERE key = 'db_backup_last_run'").fetchone()
         size_row = db.execute("SELECT value FROM settings WHERE key = 'db_backup_last_size_bytes'").fetchone()
         days = int(days_row['value']) if days_row and days_row['value'] else DEFAULT_DB_BACKUP_RETENTION_DAYS
-        backup_count = 0
+        backups = []
         try:
-            backup_count = len([f for f in os.listdir(backup_db.BACKUP_DIR) if f.startswith('siem_') and f.endswith('.db.gz')])
+            for fname in os.listdir(backup_db.BACKUP_DIR):
+                if not (fname.startswith('siem_') and fname.endswith('.db.gz')):
+                    continue
+                fpath = os.path.join(backup_db.BACKUP_DIR, fname)
+                backups.append({
+                    'filename': fname,
+                    'size_bytes': os.path.getsize(fpath),
+                    'created_at': datetime.fromtimestamp(os.path.getmtime(fpath)).strftime('%Y-%m-%d %H:%M:%S'),
+                })
+            backups.sort(key=lambda b: b['created_at'], reverse=True)
         except OSError:
             pass  # backup directory doesn't exist yet -- no backups have run
         return jsonify({
             'retention_days': days,
             'last_run': last_row['value'] if last_row and last_row['value'] else None,
             'last_size_bytes': int(size_row['value']) if size_row and size_row['value'] else None,
-            'backup_count': backup_count,
+            'backup_count': len(backups),
+            'backups': backups,
         })
 
     err = require_permission('settings.system.manage')

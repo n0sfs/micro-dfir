@@ -313,6 +313,7 @@
                 </div>
             </div>
             <div class="small text-muted" id="dbBackupStatus"></div>
+            <div id="dbBackupList" class="mt-2"></div>
         </div>
     </div>
     {% endif %}
@@ -1407,6 +1408,30 @@ function renderDbBackupStatus(data) {
     const last = data.last_run ? `Last backup: ${data.last_run}` : 'No backup has run yet (runs nightly at 2 AM).';
     const size = data.last_size_bytes ? ` (${(data.last_size_bytes / 1024 / 1024).toFixed(1)} MB)` : '';
     el.innerText = `${last}${size}. ${data.backup_count || 0} backup(s) currently retained.`;
+    renderDbBackupList(data.backups || []);
+}
+
+// Read-only -- see the panel's own intro text and restore_db.sh's header comment for why
+// restoring stays a manual, confirmed CLI step rather than a button here. This just
+// answers "what backups do I actually have" without needing an SSH session first, and
+// gives the exact restore command (with a real filename, not a placeholder) to copy.
+function renderDbBackupList(backups) {
+    const el = document.getElementById('dbBackupList');
+    if (!backups.length) { el.innerHTML = ''; return; }
+    const rows = backups.map(b => `
+        <tr>
+            <td class="small text-nowrap">${escHtml(b.created_at)}</td>
+            <td class="small"><code>${escHtml(b.filename)}</code></td>
+            <td class="small text-nowrap">${(b.size_bytes / 1024 / 1024).toFixed(1)} MB</td>
+        </tr>`).join('');
+    el.innerHTML = `
+        <div class="table-responsive" style="max-height:220px; overflow-y:auto;">
+            <table class="table table-dark table-sm mb-2">
+                <thead><tr><th>Created</th><th>File</th><th>Size</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>
+        <div class="small text-muted">To restore the most recent one: <code>sudo bash restore_db.sh /opt/micro-dfir/backups/${escHtml(backups[0].filename)}</code></div>`;
 }
 
 function runDbBackupNow() {
