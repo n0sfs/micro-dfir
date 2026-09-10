@@ -1196,7 +1196,8 @@ def api_ti_analyzers():
 # read/write in the enrichment_api_keys settings blob, so adding a new keyed analyzer
 # means adding its settings_key here too.
 ENRICHMENT_SETTINGS_KEYS = ('abuseipdb_api_key', 'virustotal_api_key', 'urlhaus_api_key',
-                             'ipqualityscore_api_key', 'censys_api_key', 'urlscan_api_key')
+                             'ipqualityscore_api_key', 'censys_api_key', 'urlscan_api_key',
+                             'malwarebazaar_api_key', 'filescan_api_key', 'hybrid_analysis_api_key')
 
 @app.route('/api/settings/enrichment', methods=['GET', 'POST'])
 @login_required
@@ -1308,6 +1309,18 @@ def _overall_enrichment_tier(results):
 # not assumed), so "submit now, check back in a few seconds" is a client-driven
 # repeated-fetch loop against GET /api/sandbox/<id>/status, the same shape Log
 # Import's chunked normalize/commit steps already established.
+#
+# Three sources, one dispatch table -- keeps api_sandbox_submit/api_sandbox_status
+# generic over 'source' instead of growing a third copy of the same if/elif chain.
+# A file submission always references an existing case attachment (attachment_id),
+# never a fresh multipart upload through this route -- case_attachments already owns
+# upload validation/storage/hashing, no reason to duplicate that here.
+SANDBOX_SOURCE_CATALOG = {
+    'urlscan': {'label': 'urlscan.io', 'settings_key': 'urlscan_api_key', 'supports_url': True, 'supports_file': False},
+    'filescan': {'label': 'filescan.io', 'settings_key': 'filescan_api_key', 'supports_url': True, 'supports_file': True},
+    'hybrid_analysis': {'label': 'Hybrid Analysis', 'settings_key': 'hybrid_analysis_api_key', 'supports_url': True, 'supports_file': True},
+}
+
 
 @app.route('/api/sandbox/submit', methods=['POST'])
 @login_required
@@ -1318,39 +1331,64 @@ def api_sandbox_submit():
     db = get_db()
     d = request.json or {}
     submission_type = (d.get('type') or '').strip()
+    source = (d.get('source') or 'urlscan').strip()
     case_id = d.get('case_id')
 
-    if submission_type == 'file':
-        # Schema-ready (attachment_id column exists), not wired -- see the sandbox/
-        # detonation plan for why (filescan.io's docs are unverifiable without a live
-        # key). A clear "not yet available" beats a silent no-op or a confusing
-        # generic error.
-        return jsonify({'error': 'File sandbox submission is not available yet -- only URL detonation (urlscan.io) is wired up so far.'}), 501
-    if submission_type != 'url':
-        return jsonify({'error': "type must be 'url' (file sandboxing is not available yet)"}), 400
+    catalog = SANDBOX_SOURCE_CATALOG.get(source)
+    if not catalog:
+        return jsonify({'error': f"Unknown sandbox source '{source}'."}), 400
+    if submission_type not in ('url', 'file'):
+        return jsonify({'error': "type must be 'url' or 'file'"}), 400
+    if submission_type == 'url' and not catalog['supports_url']:
+        return jsonify({'error': f"{catalog['label']} does not support URL submissions."}), 400
+    if submission_type == 'file' and not catalog['supports_file']:
+        return jsonify({'error': f"{catalog['label']} does not support file submissions."}), 400
 
-    url = (d.get('value') or '').strip()
-    if not url:
-        return jsonify({'error': 'value (the URL to submit) is required'}), 400
     visibility = (d.get('visibility') or 'private').strip()
     if visibility not in ('private', 'public', 'unlisted'):
         visibility = 'private'
 
+    value, attachment_id, file_path, file_name = None, None, None, None
+    if submission_type == 'url':
+        value = (d.get('value') or '').strip()
+        if not value:
+            return jsonify({'error': 'value (the URL to submit) is required'}), 400
+    else:
+        attachment_id = d.get('attachment_id')
+        if not attachment_id or not case_id:
+            return jsonify({'error': 'A file submission requires case_id and attachment_id -- upload the file to the case as an attachment first.'}), 400
+        att = db.execute(
+            "SELECT filename, original_filename FROM case_attachments WHERE id = ? AND case_id = ?", (attachment_id, case_id)
+        ).fetchone()
+        if not att:
+            return jsonify({'error': 'Attachment not found for this case.'}), 404
+        file_path = os.path.join(CASE_ATTACHMENTS_DIR, att['filename'])
+        if not os.path.exists(file_path):
+            return jsonify({'error': 'The attachment file is missing on disk.'}), 404
+        file_name = att['original_filename']
+
     key_row = db.execute("SELECT value FROM settings WHERE key = 'enrichment_api_keys'").fetchone()
     api_keys = json.loads(key_row['value']) if key_row and key_row['value'] else {}
-    api_key = api_keys.get('urlscan_api_key')
+    api_key = api_keys.get(catalog['settings_key'])
 
-    out = sandbox.urlscan_submit(url, api_key, visibility)
+    if source == 'urlscan':
+        out = sandbox.urlscan_submit(value, api_key, visibility)
+    elif source == 'filescan':
+        out = sandbox.filescan_submit(api_key, file_path=file_path, file_name=file_name, url=value, is_private=(visibility == 'private'))
+    else:
+        out = sandbox.hybrid_analysis_submit(api_key, file_path=file_path, file_name=file_name, url=value, is_private=(visibility == 'private'))
+
     if not out['ok']:
         return jsonify({'error': out['error']}), 400
 
+    job_id = out.get('job_id') or out.get('scan_id')
     cur = db.execute(
-        "INSERT INTO sandbox_submissions (source, submission_type, value, visibility, external_job_id, status, report_url, case_id, submitted_by) "
-        "VALUES ('urlscan', 'url', ?, ?, ?, 'pending', ?, ?, ?)",
-        (url, visibility, out['job_id'], out.get('report_url'), case_id, current_user.username)
+        "INSERT INTO sandbox_submissions (source, submission_type, value, attachment_id, visibility, external_job_id, status, report_url, case_id, submitted_by) "
+        "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
+        (source, submission_type, value, attachment_id, visibility, job_id, out.get('report_url'), case_id, current_user.username)
     )
     db.commit()
-    log_audit('sandbox_submit', 'sandbox_submission', str(cur.lastrowid), f"urlscan ({visibility}): {url}")
+    log_audit('sandbox_submit', 'sandbox_submission', str(cur.lastrowid), f"{source} ({visibility}): {value or file_name}")
     return jsonify({'status': 'success', 'id': cur.lastrowid})
 
 
@@ -1362,14 +1400,21 @@ def api_sandbox_status(sid):
     row = db.execute("SELECT * FROM sandbox_submissions WHERE id = ?", (sid,)).fetchone()
     if not row:
         return jsonify({'error': 'Submission not found'}), 404
-    if row['status'] != 'pending' or row['source'] != 'urlscan':
+    catalog = SANDBOX_SOURCE_CATALOG.get(row['source'])
+    if row['status'] != 'pending' or not catalog:
         return jsonify(dict(row))
 
     key_row = db.execute("SELECT value FROM settings WHERE key = 'enrichment_api_keys'").fetchone()
     api_keys = json.loads(key_row['value']) if key_row and key_row['value'] else {}
-    api_key = api_keys.get('urlscan_api_key')
+    api_key = api_keys.get(catalog['settings_key'])
 
-    out = sandbox.urlscan_poll(row['external_job_id'], api_key)
+    if row['source'] == 'urlscan':
+        out = sandbox.urlscan_poll(row['external_job_id'], api_key)
+    elif row['source'] == 'filescan':
+        out = sandbox.filescan_poll(row['external_job_id'], api_key)
+    else:
+        out = sandbox.hybrid_analysis_poll(row['external_job_id'], api_key)
+
     if out['status'] == 'pending':
         return jsonify(dict(row))
     if out['status'] == 'error':

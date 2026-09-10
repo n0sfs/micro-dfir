@@ -2434,8 +2434,55 @@ function caseAttachmentRow(a) {
             <td class="small text-nowrap">${escHtml(formatAttachmentSize(a.file_size_bytes))}</td>
             <td class="small">${escHtml(a.uploaded_by || '')}</td>
             <td class="small text-muted text-nowrap">${escHtml(a.uploaded_at || '')}</td>
-            <td class="text-end"><button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete attachment" onclick="deleteCaseAttachment(${a.id}, '${escJs(a.original_filename)}')" ${activeCaseClosed ? 'disabled' : ''}><i class="fa-solid fa-trash"></i></button></td>
-        </tr>`;
+            <td class="text-end text-nowrap">
+                <select id="attSandboxSource${a.id}" class="form-select form-select-sm bg-dark text-light border-secondary d-inline-block me-1" style="width:auto;" title="Sandbox source -- urlscan.io doesn't support files, only URLs">
+                    <option value="filescan">filescan.io</option>
+                    <option value="hybrid_analysis">Hybrid Analysis</option>
+                </select>
+                <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2 me-1" title="Submit this file to the selected sandbox for detonation" onclick="detonateCaseAttachment(${a.id})"><i class="fa-solid fa-flask-vial"></i></button>
+                <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete attachment" onclick="deleteCaseAttachment(${a.id}, '${escJs(a.original_filename)}')" ${activeCaseClosed ? 'disabled' : ''}><i class="fa-solid fa-trash"></i></button>
+            </td>
+        </tr>
+        <tr id="attSandboxResultRow${a.id}" style="display:none;"><td colspan="7" class="small"><div id="attSandboxResult${a.id}"></div></td></tr>`;
+}
+
+// File detonation via filescan.io/Hybrid Analysis -- always submits an already-uploaded
+// case attachment (never a fresh multipart upload through this path), so this route
+// reuses case_attachments' own upload/storage/hashing rather than duplicating it.
+// urlscan.io is deliberately excluded from the source select above -- URL-only.
+function detonateCaseAttachment(attachmentId) {
+    const sourceSel = document.getElementById(`attSandboxSource${attachmentId}`);
+    const source = sourceSel ? sourceSel.value : 'filescan';
+    const resultRow = document.getElementById(`attSandboxResultRow${attachmentId}`);
+    const cell = document.getElementById(`attSandboxResult${attachmentId}`);
+    resultRow.style.display = '';
+    cell.innerHTML = '<span class="text-muted">Submitting&hellip;</span>';
+    fetch('/api/sandbox/submit', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({type: 'file', source, visibility: 'private', case_id: activeCaseId, attachment_id: attachmentId})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (!ok) { cell.innerHTML = `<span class="text-danger small">${escHtml(data.error || 'Failed to submit.')}</span>`; return; }
+        cell.innerHTML = '<span class="text-muted">Sandboxing&hellip; (file detonation can take a few minutes)</span>';
+        pollAttachmentSandbox(attachmentId, data.id);
+    }).catch(err => { cell.innerHTML = '<span class="text-danger small">Error</span>'; console.error(err); });
+}
+
+function pollAttachmentSandbox(attachmentId, submissionId) {
+    const cell = document.getElementById(`attSandboxResult${attachmentId}`);
+    fetch(`/api/sandbox/${submissionId}/status`).then(r => r.json()).then(sub => {
+        if (!cell) return; // row no longer on screen (e.g. attachments list reloaded elsewhere)
+        if (sub.status === 'pending') {
+            setTimeout(() => pollAttachmentSandbox(attachmentId, submissionId), 5000);
+            return;
+        }
+        if (sub.status === 'error') {
+            cell.innerHTML = `<span class="text-danger small">Sandbox error: ${escHtml(sub.summary || 'Unknown error')}</span>`;
+            return;
+        }
+        const badgeMap = {malicious: 'bg-danger', suspicious: 'bg-warning text-dark', clean: 'bg-success'};
+        cell.innerHTML = `<span class="badge ${badgeMap[sub.verdict] || 'bg-secondary'}">${escHtml(sub.verdict || 'unknown')}</span> ${escHtml(sub.summary || '')}` +
+            (sub.report_url ? ` <a href="${escHtml(sub.report_url)}" target="_blank" rel="noopener">View report</a>` : '');
+    }).catch(err => { if (cell) cell.innerHTML = '<span class="text-danger small">Error checking sandbox status</span>'; console.error(err); });
 }
 
 function uploadCaseAttachment() {

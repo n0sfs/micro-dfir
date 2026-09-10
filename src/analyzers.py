@@ -119,6 +119,42 @@ def _urlhaus(value, api_key=None, ioc_type=None):
         return {'ok': False, 'verdict': 'error', 'summary': str(e), 'raw': {}}
 
 
+# MalwareBazaar -- same abuse.ch family/Auth-Key convention as URLhaus above, but a
+# genuinely different capability: this is an on-demand "is this ONE specific hash a
+# known malware sample" lookup against MalwareBazaar's full database, complementing
+# (not duplicating) the app's existing MalwareBazaar *feed*
+# (taxii_client.sync_malwarebazaar), which only ever pulls the last N "recent samples"
+# into the local IOC set -- a hash from an older sample, or one a triage/memory capture
+# just surfaced, won't be in that feed's slice but is still reachable here. Confirmed
+# live against bazaar.abuse.ch/api/'s own current docs (base URL, query=get_info,
+# Auth-Key header, and the query_status vocabulary below), not from memory.
+def _malwarebazaar(value, api_key=None, ioc_type=None):
+    if not api_key:
+        return {'ok': False, 'verdict': 'unconfigured', 'summary': 'No MalwareBazaar Auth-Key configured.', 'raw': {}}
+    try:
+        res = requests.post("https://mb-api.abuse.ch/api/v1/", data={'query': 'get_info', 'hash': value},
+                             headers={'Auth-Key': api_key}, timeout=8)
+        res.raise_for_status()
+        result = res.json() or {}
+        status = result.get('query_status')
+        if status == 'hash_not_found':
+            return {'ok': True, 'verdict': 'clean', 'summary': 'No record in MalwareBazaar.', 'raw': result}
+        if status != 'ok':
+            return {'ok': True, 'verdict': 'info', 'summary': f'MalwareBazaar query status: {status}', 'raw': result}
+        # MalwareBazaar's own docs describe the match as a 'data' array with one entry
+        # per queried hash -- defensively handled as either a list or a bare dict in
+        # case that shape has drifted since, rather than assuming one or the other.
+        entries = result.get('data')
+        entry = (entries[0] if isinstance(entries, list) and entries else entries) or {}
+        signature = entry.get('signature') or 'Unknown malware family'
+        file_type = entry.get('file_type') or '?'
+        tags = entry.get('tags') or []
+        summary = f"Known malware sample: {signature} ({file_type})" + (f"; tags: {', '.join(tags[:5])}" if tags else '')
+        return {'ok': True, 'verdict': 'malicious', 'summary': summary, 'raw': result}
+    except Exception as e:
+        return {'ok': False, 'verdict': 'error', 'summary': str(e), 'raw': {}}
+
+
 # IPQualityScore -- proxy/VPN/Tor + fraud-score IP reputation, genuinely complementary
 # to AbuseIPDB (community-reported abuse) and Shodan InternetDB (exposed ports/CVEs):
 # neither of those does anonymization-infrastructure detection. Free tier is small
@@ -195,6 +231,8 @@ ANALYZERS = [
      'requires_key': True, 'settings_key': 'virustotal_api_key', 'run': _virustotal},
     {'key': 'urlhaus', 'label': 'URLhaus', 'ioc_types': ('domain', 'url'),
      'requires_key': True, 'settings_key': 'urlhaus_api_key', 'run': _urlhaus},
+    {'key': 'malwarebazaar', 'label': 'MalwareBazaar', 'ioc_types': ('hash',),
+     'requires_key': True, 'settings_key': 'malwarebazaar_api_key', 'run': _malwarebazaar},
     {'key': 'ipqualityscore', 'label': 'IPQualityScore', 'ioc_types': ('ip',),
      'requires_key': True, 'settings_key': 'ipqualityscore_api_key', 'run': _ipqualityscore,
      'auto_enrich_eligible': False},
@@ -268,7 +306,7 @@ def _tier_for(source, ioc_type, verdict):
     Returns None (no tier) for a verdict that isn't itself a finding worth tiering
     (clean/unconfigured/error) -- NULL there is more honest than inventing a category
     for "nothing to report"."""
-    if source == 'urlhaus':
+    if source in ('urlhaus', 'malwarebazaar'):
         return 'definite'
     if source == 'virustotal' and (ioc_type or '').lower() in ('hash', 'md5', 'sha1', 'sha256') and verdict == 'malicious':
         return 'definite'
