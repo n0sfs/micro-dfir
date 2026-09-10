@@ -10,6 +10,38 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-09
 
+### New: Beacon Simulator EDR test action (Beaconing Detection's deferred Phase 2)
+
+Closes the Phase 2 gap explicitly deferred when Beaconing Detection shipped: a way to
+validate the UEBA regularity model against a real, controlled beacon instead of trusting
+it on faith. New Windows-only `beacon_simulator` EDR console action (Agents page,
+`edr.command.advanced`): admin supplies a target IP/port, interval, jitter, and
+connection count; the agent writes a small detached child `.ps1` to
+`C:\ProgramData\MicroDFIR\BeaconSim\` and launches it via `Start-Process` (a real
+independent OS process, not a `Start-Job` pipe tied to the invoking script's lifetime),
+so a realistic multi-minute beacon run survives well past the agent's own 180s
+per-command timeout. Each iteration is a real `TcpClient.ConnectAsync` — the same signal
+Sysmon Event ID 3 (Network Connection) actually observes, which is the only data source
+`_run_beaconing_model` ever reads. The outer command returns immediately with the
+target/cadence and an estimated finish time; the child self-deletes when its loop
+completes. Bounds-validated server-side (port 1-65535, interval 5-3600s, jitter
+0-interval, count 3-100, and a hard interval×count ≤ 24h cap) so a typo can't leave an
+orphaned background process running for days.
+
+Deliberately Windows-only, not a Linux/macOS gap: the beaconing model itself only ever
+reads Sysmon data (a Windows-only source), so a Linux/macOS version would generate
+connections the detector can never see — it would validate nothing.
+
+Verified: 27 real Python fixture tests (every bounds rejection, the 24h-cap and
+jitter-equals-interval boundaries, script content, WINDOWS_TEMPLATES registration,
+confirmed absent from LINUX_TEMPLATES) + 11 Node vm-context tests for the console form's
+client-side validation and exact params shape. Both the outer and the generated inner
+script were parsed with PowerShell's own AST parser (`[Parser]::ParseFile`, zero errors)
+and then genuinely *executed* on a real Windows host: the outer command returned in
+under a second with valid JSON, the detached child was confirmed written to disk, and 15
+seconds later the child had completed its full 3-connection loop against `1.1.1.1:443`
+and self-deleted — real, observed, end-to-end behavior, not just a code read.
+
 ### New: IR Runbooks & Tabletop Exercise tracking
 
 Closed the last item on the DFIR-lifecycle gap list: this app had no place to document

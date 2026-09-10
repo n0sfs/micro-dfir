@@ -172,6 +172,78 @@ $hash = (Get-FileHash $outPath -Algorithm SHA256).Hash
 @{{ pid=$targetPid; process_name=$proc.ProcessName; process_image=$procImage; dump_path=$outPath; size_bytes=$size; sha256=$hash; captured_at=(Get-Date).ToString('yyyy-MM-dd HH:mm:ss') }} | ConvertTo-Json -Compress
 """
 
+# Validation tool for UEBA's Beaconing Detection model (see _run_beaconing_model in
+# ueba_engine.py) -- generates a real, jittered, periodic TCP connect pattern from this
+# host to an admin-chosen target, the same "known controlled beacon" idea as
+# activecm/threat-tools' beacon-simulator.py, so a SOC can confirm the detector actually
+# catches a real regularity pattern instead of trusting it on faith. Windows-only,
+# deliberately: the detector itself only ever reads Sysmon Event ID 3 (Network
+# Connection) rows, a Windows-only data source (see _run_beaconing_model's own comment)
+# -- a Linux/macOS version would generate connections the detector can never see, so it
+# would validate nothing. The run itself must survive well past this agent's own
+# SCRIPT_TIMEOUT_SECONDS (180s, see run_remote_script() in micro_agent_windows.py) for
+# any realistic beacon interval (the model's own default lookback is 24h), so this
+# builder only writes and detaches a background .ps1 (via Start-Process, a real
+# independent OS process, not a Start-Job pipe tied to this script's own lifetime) and
+# returns immediately -- it does not itself wait for the beacon run to finish.
+def beacon_simulator(target_ip, target_port, interval_seconds, jitter_seconds, count):
+    if not _IPV4_RE.match(target_ip):
+        raise ValueError(f"Invalid target IP address: {target_ip!r}")
+    try:
+        target_port = int(target_port)
+        interval_seconds = int(interval_seconds)
+        jitter_seconds = int(jitter_seconds)
+        count = int(count)
+    except (TypeError, ValueError):
+        raise ValueError("target_port, interval_seconds, jitter_seconds, and count must all be integers")
+    if not (1 <= target_port <= 65535):
+        raise ValueError("target_port must be 1-65535")
+    if not (5 <= interval_seconds <= 3600):
+        raise ValueError("interval_seconds must be 5-3600")
+    if not (0 <= jitter_seconds <= interval_seconds):
+        raise ValueError("jitter_seconds must be 0 and not exceed interval_seconds")
+    if not (3 <= count <= 100):
+        raise ValueError("count must be 3-100")
+    if interval_seconds * count > 86400:
+        raise ValueError("interval_seconds * count must not exceed 86400 seconds (24h) -- lower the count or interval")
+
+    # Every value below is already a Python-side literal (validated above), not a
+    # PowerShell variable that needs runtime interpolation -- so the child script's
+    # entire body can be written to disk via a non-interpolating single-quoted
+    # here-string (@'...'@) in the outer script, with no backtick-escaping of `$`/`{`/`}`
+    # needed between the two script layers, unlike a double-quoted here-string would need.
+    child_body = f"""$ip = '{target_ip}'
+$port = {target_port}
+$interval = {interval_seconds}
+$jitter = {jitter_seconds}
+$count = {count}
+for ($i = 0; $i -lt $count; $i++) {{
+    try {{
+        $client = New-Object System.Net.Sockets.TcpClient
+        $task = $client.ConnectAsync($ip, $port)
+        $task.Wait(3000) | Out-Null
+        $client.Close()
+    }} catch {{}}
+    if ($i -lt ($count - 1)) {{
+        $off = Get-Random -Minimum (-$jitter) -Maximum ($jitter + 1)
+        $sleepFor = [Math]::Max(1, $interval + $off)
+        Start-Sleep -Seconds $sleepFor
+    }}
+}}
+Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+"""
+    estimated_seconds = interval_seconds * (count - 1)
+    return f"""$dir = "C:\\ProgramData\\MicroDFIR\\BeaconSim"
+if (-not (Test-Path $dir)) {{ New-Item -ItemType Directory -Path $dir -Force | Out-Null }}
+$stamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
+$childScript = Join-Path $dir "beacon_$stamp.ps1"
+@'
+{child_body}
+'@ | Set-Content -Path $childScript -Encoding UTF8
+Start-Process -FilePath "powershell.exe" -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',"`"$childScript`"") -WindowStyle Hidden
+@{{ status = 'started'; target = '{target_ip}:{target_port}'; interval_seconds = {interval_seconds}; jitter_seconds = {jitter_seconds}; connection_count = {count}; estimated_finish = (Get-Date).AddSeconds({estimated_seconds}).ToString('yyyy-MM-dd HH:mm:ss') }} | ConvertTo-Json -Compress
+"""
+
 def _ps_hashset_literal(values):
     return ','.join("'" + v + "'" for v in values)
 
@@ -1124,6 +1196,7 @@ WINDOWS_TEMPLATES = {
     'collect_file': (lambda params: _PROGRESS_SILENT + collect_file(params['path']), ['path']),
     'quarantine_file': (lambda params: _PROGRESS_SILENT + quarantine_file(params['path']), ['path']),
     'capture_process_memory': (lambda params: _PROGRESS_SILENT + capture_process_memory(params['pid']), ['pid']),
+    'beacon_simulator': (lambda params: _PROGRESS_SILENT + beacon_simulator(params['target_ip'], params['target_port'], params['interval_seconds'], params['jitter_seconds'], params['count']), ['target_ip', 'target_port', 'interval_seconds', 'jitter_seconds', 'count']),
     'collect_registry_key': (lambda params: _PROGRESS_SILENT + collect_registry_key(params['key_path']), ['key_path']),
     'kill_scheduled_task': (lambda params: _PROGRESS_SILENT + kill_scheduled_task(params['task_name']), ['task_name']),
     'collect_browser_artifacts': (lambda params: _PROGRESS_SILENT + collect_browser_artifacts(), []),

@@ -1378,6 +1378,7 @@ const CONSOLE_ACTION_DISPLAY = {
         check_process_injection_indicators: 'Check-Process-Injection-Indicators (processes with no backing file, unsigned binaries -- informational, not a verdict)',
         quarantine_file: 'Quarantine-File (move to a locked-down folder, deny execute -- contain, not just collect)',
         capture_process_memory: 'Capture-Process-Memory (full memory dump of one PID via comsvcs.dll MiniDump -- dump stays on the endpoint, hash/metadata returned)',
+        beacon_simulator: 'Beacon-Simulator (generates a real, jittered periodic TCP connection pattern to a chosen target -- validates that UEBA\'s Beaconing Detection model actually catches it; runs detached in the background, does not block this console)',
         collect_registry_key: 'Collect-Registry-Key (arbitrary key -- values + subkeys, not just the fixed Run-key checks)',
         kill_scheduled_task: 'Kill-Scheduled-Task (Unregister-ScheduledTask -- remove a specific persistence mechanism found via Persistence Sweep)',
         kill_process_by_name: 'Kill-Process-By-Name (terminates every process whose name or path matches, not just one live PID)',
@@ -1433,6 +1434,7 @@ const CONSOLE_DROPDOWN_ACTIONS = [
     { value: 'collect_file', label: 'Collect File', permission: 'edr.command.advanced', needsParams: true },
     { value: 'quarantine_file', label: 'Quarantine File', permission: 'edr.command.basic', needsParams: true },
     { value: 'capture_process_memory', label: 'Capture Process Memory', permission: 'edr.command.advanced', needsParams: true, osOnly: 'windows' },
+    { value: 'beacon_simulator', label: 'Beacon Simulator (test)', permission: 'edr.command.advanced', needsParams: true, osOnly: 'windows' },
     { value: 'collect_registry_key', label: 'Registry Key', permission: 'edr.command.advanced', needsParams: true, osOnly: 'windows' },
     { value: 'kill_scheduled_task', label: 'Kill Scheduled Task', permission: 'edr.command.basic', needsParams: true, osOnly: 'windows' },
     { value: 'collect_triage', label: 'Triage Collection', permission: 'edr.command.basic' },
@@ -1810,6 +1812,17 @@ function consoleShowParamForm(label) {
                 <input type="text" id="paramKillPattern" class="form-control bg-dark text-light border-secondary" placeholder="mimikatz" onkeydown="if(event.key==='Enter') submitKillProcessByName()">
                 <button class="btn btn-outline-danger" onclick="submitKillProcessByName()">Run</button>
             </div>`;
+    } else if (label === 'beacon_simulator') {
+        wrap.innerHTML = `
+            <label class="form-label small text-muted mb-1">Generates a real, jittered periodic TCP connection pattern to a chosen target -- point it at something reachable (a connection that actually completes logs more reliably than one that times out). Runs detached in the background and self-deletes when done; UEBA's next scheduled run (default 24h lookback) is what will actually flag it.</label>
+            <div class="row g-2">
+                <div class="col-6"><input type="text" id="paramBeaconIp" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Target IP (e.g. 1.1.1.1)"></div>
+                <div class="col-6"><input type="number" id="paramBeaconPort" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Port (e.g. 443)" min="1" max="65535"></div>
+                <div class="col-4"><input type="number" id="paramBeaconInterval" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Interval (s)" min="5" max="3600" value="60"></div>
+                <div class="col-4"><input type="number" id="paramBeaconJitter" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Jitter (s)" min="0" max="3600" value="3"></div>
+                <div class="col-4"><input type="number" id="paramBeaconCount" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Count" min="3" max="100" value="15"></div>
+            </div>
+            <button class="btn btn-sm btn-outline-primary mt-2" onclick="submitBeaconSimulator()">Run</button>`;
     } else {
         return;
     }
@@ -1866,6 +1879,23 @@ async function submitKillProcessByName() {
     if (!pattern) return;
     if (!(await confirmDialog(`Kill every process on ${consoleSelectedHost} whose name or path contains "${pattern}"? This can match more than one process and cannot be undone.`, {title: 'Kill matching processes', danger: true, confirmLabel: 'Kill All Matching'}))) return;
     queueConsoleCommand(consoleSelectedHost, 'kill_process_by_name', {pattern}, `Kill-Process-By-Name "${pattern}"`);
+    document.getElementById('consoleParamForm').style.display = 'none';
+}
+
+function submitBeaconSimulator() {
+    const ip = (document.getElementById('paramBeaconIp').value || '').trim();
+    const port = parseInt(document.getElementById('paramBeaconPort').value, 10);
+    const interval = parseInt(document.getElementById('paramBeaconInterval').value, 10);
+    const jitter = parseInt(document.getElementById('paramBeaconJitter').value, 10);
+    const count = parseInt(document.getElementById('paramBeaconCount').value, 10);
+    if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(ip)) { toast('Enter a valid target IPv4 address.', 'warning'); return; }
+    if (!(port >= 1 && port <= 65535)) { toast('Port must be 1-65535.', 'warning'); return; }
+    if (!(interval >= 5 && interval <= 3600)) { toast('Interval must be 5-3600 seconds.', 'warning'); return; }
+    if (!(jitter >= 0 && jitter <= interval)) { toast('Jitter must be 0 and not exceed the interval.', 'warning'); return; }
+    if (!(count >= 3 && count <= 100)) { toast('Count must be 3-100.', 'warning'); return; }
+    queueConsoleCommand(consoleSelectedHost, 'beacon_simulator',
+        {target_ip: ip, target_port: port, interval_seconds: interval, jitter_seconds: jitter, count: count},
+        `Beacon-Simulator -Target ${ip}:${port} -Interval ${interval}s -Jitter ${jitter}s -Count ${count}`);
     document.getElementById('consoleParamForm').style.display = 'none';
 }
 
