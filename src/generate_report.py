@@ -38,6 +38,7 @@ SCA_CHECK_FRAMEWORKS = {
     'bitlocker_enabled': ['hipaa', 'pci_dss', 'nist_800_53', 'gdpr', 'iso_27001', 'soc2'],
     'windows_update_service': ['cis_controls', 'nist_800_53', 'pci_dss'],
     'account_lockout': ['pci_dss', 'hipaa', 'nist_800_53', 'cis_controls', 'iso_27001', 'soc2', 'gdpr'],
+    'audit_policy_compliance': ['pci_dss', 'hipaa', 'nist_800_53', 'nist_csf', 'cis_controls', 'iso_27001', 'soc2'],
     'ssh_root_login': ['cis_controls', 'nist_800_53', 'pci_dss', 'soc2'],
     'ssh_password_auth': ['cis_controls', 'nist_800_53', 'pci_dss', 'soc2'],
     'firewall_active': ['pci_dss', 'cis_controls', 'nist_800_53', 'nist_csf', 'iso_27001', 'soc2'],

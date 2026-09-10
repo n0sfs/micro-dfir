@@ -1060,6 +1060,46 @@ try {
     AddCheck 'account_lockout' 'Account lockout policy configured (threshold > 0)' $(if ($pass) { 'pass' } else { 'fail' }) "Threshold=$threshold"
 } catch { AddCheck 'account_lockout' 'Account lockout policy configured (threshold > 0)' 'error' "$_" }
 
+try {
+    # The same 12 subcategories reconcile_windows_audit_policy() (micro_agent_windows.py)
+    # pushes via `auditpol /set` -- duplicated here rather than shared, matching this
+    # repo's own "small catalogs are duplicated per file, not shared via import"
+    # convention (this script's text is built server-side and shipped as a standalone
+    # string, so it has no access to that file's Python list at all). auditpol has never
+    # had a read-back path anywhere in this app until now -- only /set calls existed --
+    # so this is the first time "what's actually in effect" gets compared against "what
+    # this appliance expects", closing the drift-detection gap a GPO refresh (or manual
+    # tampering) could otherwise silently reintroduce with no visibility.
+    $auditSubcats = @('Logon','Logoff','Special Logon','Kerberos Authentication Service','Kerberos Service Ticket Operations','Credential Validation','User Account Management','Security Group Management','Process Creation','Audit Policy Change','Security State Change','Other Object Access Events')
+    # auditpol is a native console exe, not a cmdlet -- it never throws a PowerShell
+    # exception on failure (e.g. insufficient privilege), it just writes an error to its
+    # own output and returns a non-zero exit code. Without this explicit check, a failed
+    # call's empty/error output would silently parse as zero matching rows, which the
+    # loop below would then misreport as "all 12 subcategories drifted" (status 'fail')
+    # instead of "could not determine" (status 'error') -- confirmed live: running this
+    # unelevated reproduced exactly that false-fail.
+    $auditRaw = auditpol /get /category:* /r 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "auditpol /get failed (exit $LASTEXITCODE): $($auditRaw -join ' ')" }
+    $auditCsv = $auditRaw | ConvertFrom-Csv
+    if (-not $auditCsv -or @($auditCsv).Count -eq 0) { throw "auditpol /get returned no parseable rows" }
+    # GPO-sourced Advanced Audit Policy only applies to domain-joined hosts -- included as
+    # a diagnostic hint (not a gate on whether this check runs at all) since drift on a
+    # non-domain host points at something else (manual tampering, a failed local push).
+    $domainJoined = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).PartOfDomain
+    $drifted = @()
+    foreach ($subcat in $auditSubcats) {
+        $row = $auditCsv | Where-Object { $_.Subcategory -eq $subcat } | Select-Object -First 1
+        $setting = if ($row) { $row.'Inclusion Setting' } else { 'Not Found' }
+        if ($setting -ne 'Success and Failure') { $drifted += "$subcat=$setting" }
+    }
+    $domainNote = if ($null -eq $domainJoined) { 'unknown' } elseif ($domainJoined) { 'yes -- a domain GPO refresh may be the cause' } else { 'no' }
+    if ($drifted.Count -eq 0) {
+        AddCheck 'audit_policy_compliance' "Advanced Audit Policy matches this appliance's expected baseline (Success and Failure, 12 subcategories)" 'pass' "All 12 subcategories enabled. Domain-joined: $domainNote."
+    } else {
+        AddCheck 'audit_policy_compliance' "Advanced Audit Policy matches this appliance's expected baseline (Success and Failure, 12 subcategories)" 'fail' "$($drifted.Count) subcategory(s) drifted from expected: $($drifted -join '; '). Domain-joined: $domainNote. Events this appliance depends on for detection may be silently missing."
+    }
+} catch { AddCheck 'audit_policy_compliance' "Advanced Audit Policy matches this appliance's expected baseline (Success and Failure, 12 subcategories)" 'error' "$_" }
+
 $passed = @($results | Where-Object { $_.status -eq 'pass' }).Count
 $failed = @($results | Where-Object { $_.status -eq 'fail' }).Count
 $errored = @($results | Where-Object { $_.status -eq 'error' }).Count
