@@ -1445,6 +1445,11 @@ function actionParamsFieldsHtml(seq, actionType, params) {
             <div class="small text-muted mt-1">Manage available custom actions via "Manage Custom Actions" above.</div>`;
         case 'isolate_host':
             return `<div class="small text-muted mb-2">Isolates every Case Asset marked <strong>Confirmed</strong> compromised when this action runs. Always requires approval.</div>
+                <div class="form-check form-switch mb-2">
+                    <input class="form-check-input" type="checkbox" role="switch" id="pbActParam_${seq}_auto_triage_before_isolate" ${params.auto_triage_before_isolate ? 'checked' : ''}>
+                    <label class="form-check-label small" for="pbActParam_${seq}_auto_triage_before_isolate">Collect a triage bundle from each host before isolating it</label>
+                </div>
+                <div class="small text-muted mb-2">Order of volatility: queues collect_triage ahead of isolate_host on the same host, so process/network state is captured before containment cuts it off.</div>
                 <label class="form-label small mb-1">Auto-restore network after (hours, optional)</label>
                 <input type="number" min="1" max="720" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_auto_revert_hours" value="${params.auto_revert_hours || ''}" placeholder="Leave blank to require manual restore">
                 <div class="small text-muted mt-1">When set, a restore_network approval is auto-queued once this many hours have passed -- still requires a human to approve it, same as every gated action.</div>`;
@@ -1565,6 +1570,8 @@ function collectActionRow(row) {
         case 'isolate_host': {
             const hrs = parseInt(getVal('auto_revert_hours'), 10);
             if (hrs > 0) params.auto_revert_hours = hrs;
+            const triageEl = document.getElementById(`pbActParam_${seq}_auto_triage_before_isolate`);
+            if (triageEl && triageEl.checked) params.auto_triage_before_isolate = true;
             break;
         }
         case 'set_alert_status': params.status = getVal('status'); break;

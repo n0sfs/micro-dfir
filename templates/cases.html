@@ -1298,6 +1298,7 @@ function caseEventLabel(e) {
         attachment_added: `Attachment added: <strong>${escHtml(e.detail)}</strong>`,
         attachment_removed: `Attachment removed: <strong>${escHtml(e.detail)}</strong>`,
         attachment_integrity_mismatch: `<i class="fa-solid fa-triangle-exclamation text-danger me-1"></i><strong class="text-danger">Integrity check failed:</strong> ${escHtml(e.detail)}`,
+        attachment_downloaded: `<i class="fa-solid fa-download text-muted me-1"></i>Attachment downloaded: <strong>${escHtml(e.detail)}</strong>`,
         user_watchlisted: `<i class="fa-solid fa-eye text-warning me-1"></i>Added to the insider-threat watchlist (confirmed compromise on this case): <strong>${escHtml(e.detail)}</strong>`,
     };
     return map[e.event_type] || escHtml(e.event_type);
