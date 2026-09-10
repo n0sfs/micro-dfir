@@ -1190,6 +1190,62 @@ function addRelatedItem(itemType, itemId) {
     }).catch(err => toast('Error adding item: ' + err, 'danger'));
 }
 
+// A chronological RECONSTRUCTION of what happened (alerts/UEBA/FIM merged), distinct
+// from the case_events audit-log Timeline tab above and from Related Items (a 24h
+// "what's new to add" suggestion feed, excluding anything already linked) -- this shows
+// everything, regardless of link status, over the case's own lifetime.
+const FORENSIC_SOURCE_LABELS = { alert: ['Alert', 'bg-danger'], ueba: ['UEBA', 'bg-warning text-dark'], fim: ['FIM/EDR', 'bg-info text-dark'] };
+let forensicTimelineCursor = null;
+
+function loadForensicTimeline(cid, append) {
+    const url = `/api/cases/${cid}/forensic-timeline` + (append && forensicTimelineCursor ? `?before_ts=${encodeURIComponent(forensicTimelineCursor)}` : '');
+    fetch(url).then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(data => {
+        if (cid !== activeCaseId) return; // stale response from a since-navigated-away case
+        renderForensicTimeline(data, !!append);
+    }).catch(err => {
+        console.error('Error loading forensic timeline:', err);
+        const el = document.getElementById('forensicTimelineBody');
+        if (el && !append) el.innerHTML = '<p class="text-danger small mb-0"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load forensic timeline.</p>';
+    });
+}
+
+function forensicTimelineRow(e) {
+    const [label, cls] = FORENSIC_SOURCE_LABELS[e.source] || [e.source, 'bg-secondary'];
+    return `<div class="d-flex justify-content-between align-items-start border border-secondary rounded p-2 mb-2">
+        <div>
+            <span class="badge ${cls} me-1">${label}</span>
+            <span class="badge ${severityBadgeClass(e.severity)} me-2">${escHtml((e.severity || '').toUpperCase())}</span>
+            ${e.label ? `<strong>${escHtml(e.label)}</strong> ` : ''}
+            <span class="text-muted small">${escHtml(e.host || '')}${e.username ? ' · ' + escHtml(e.username) : ''} · ${escHtml(e.ts)}</span><br>
+            <span class="small">${escHtml((e.message || '').slice(0, 200))}</span>
+        </div>
+        ${e.host ? `<a href="/ueba?tab=timeline&host=${encodeURIComponent('host:' + e.host)}" class="btn btn-sm btn-outline-info py-0 px-2 ms-2" title="View this host's activity on the UEBA Timeline"><i class="fa-solid fa-timeline"></i></a>` : ''}
+    </div>`;
+}
+
+function renderForensicTimeline(data, append) {
+    const el = document.getElementById('forensicTimelineBody');
+    const moreBtn = document.getElementById('forensicTimelineMoreBtn');
+    if (!el) return;
+    if (!data.hosts.length && !data.usernames.length) {
+        el.innerHTML = '<p class="text-muted small mb-0">Add a Case Asset above to see a forensic timeline for its hosts.</p>';
+        if (moreBtn) moreBtn.style.display = 'none';
+        return;
+    }
+    if (!data.events.length && !append) {
+        el.innerHTML = '<p class="text-muted small mb-0">No alert/UEBA/FIM activity found across this case\'s tracked hosts.</p>';
+        if (moreBtn) moreBtn.style.display = 'none';
+        return;
+    }
+    const rowsHtml = data.events.map(forensicTimelineRow).join('');
+    el.innerHTML = append ? el.innerHTML + rowsHtml : rowsHtml;
+    forensicTimelineCursor = data.events.length ? data.events[data.events.length - 1].ts : forensicTimelineCursor;
+    if (moreBtn) moreBtn.style.display = data.has_more ? '' : 'none';
+}
+
 // Every case is otherwise a fully isolated island -- surfaces other cases sharing a
 // host (case_assets), an indicator (case_iocs), or a threat entity (ti_relationships)
 // with this one, so two analysts independently opening cases on the same host don't
@@ -1262,6 +1318,29 @@ function caseFieldInput(f, isClosed) {
     return `<div class="col-md-6"><label class="form-label small text-muted mb-1">${escHtml(f.label)}</label>${control}</div>`;
 }
 
+// Small, fixed catalog (NIST 800-61 Post-Incident-Activity-inspired) -- deliberately
+// hardcoded here, not admin-configurable, matching this file's own established
+// small-catalog-not-a-generic-mechanism convention (e.g. RELATED_ITEM_LABELS above).
+// Stored server-side as one JSON {key: text} dict in cases.pir_notes -- kept separate
+// from the existing free-text root_cause/lessons_learned fields (not a migration of
+// them), so nothing an analyst already wrote is hidden or lost.
+const PIR_SECTIONS = [
+    {key: 'detection_response', label: 'Detection & Response Effectiveness', placeholder: 'How was this detected? Were there delays in detection or response? What worked well?'},
+    {key: 'gaps_identified', label: 'Gaps Identified', placeholder: 'What controls, monitoring, or process were missing or failed?'},
+    {key: 'recommended_improvements', label: 'Recommended Improvements', placeholder: 'What should change going forward?'},
+];
+
+function pirNotes(c, isClosed) {
+    let parsed = {};
+    try { parsed = c.pir_notes ? JSON.parse(c.pir_notes) : {}; } catch (e) { parsed = {}; }
+    return PIR_SECTIONS.map(s => `
+        <div class="col-md-4">
+            <label class="form-label small text-muted mb-1">${escHtml(s.label)}</label>
+            <textarea id="pirNote_${s.key}" class="form-control bg-dark text-light border-secondary" rows="3" placeholder="${escHtml(s.placeholder)}" ${isClosed ? 'disabled' : ''}>${escHtml(parsed[s.key] || '')}</textarea>
+        </div>
+    `).join('');
+}
+
 function caseEventLabel(e) {
     const map = {
         created: 'Case created',
@@ -1299,6 +1378,7 @@ function caseEventLabel(e) {
         attachment_removed: `Attachment removed: <strong>${escHtml(e.detail)}</strong>`,
         attachment_integrity_mismatch: `<i class="fa-solid fa-triangle-exclamation text-danger me-1"></i><strong class="text-danger">Integrity check failed:</strong> ${escHtml(e.detail)}`,
         attachment_downloaded: `<i class="fa-solid fa-download text-muted me-1"></i>Attachment downloaded: <strong>${escHtml(e.detail)}</strong>`,
+        pir_updated: `<i class="fa-solid fa-magnifying-glass-chart text-info me-1"></i>${escHtml(e.detail)}`,
         user_watchlisted: `<i class="fa-solid fa-eye text-warning me-1"></i>Added to the insider-threat watchlist (confirmed compromise on this case): <strong>${escHtml(e.detail)}</strong>`,
     };
     return map[e.event_type] || escHtml(e.event_type);
@@ -1632,6 +1712,7 @@ function loadAndRenderCaseDetail(cid) {
             { key: 'analyze', label: 'Analyze', icon: 'fa-magnifying-glass-chart' },
             { key: 'report', label: 'Report', icon: 'fa-file-pdf' },
             { key: 'timeline', label: 'Timeline', icon: 'fa-clock-rotate-left' },
+            { key: 'forensic', label: 'Forensic Timeline', icon: 'fa-timeline' },
         ];
         document.getElementById('caseDetailBody').innerHTML = `
             <div class="card bg-dark border-secondary mb-3">
@@ -1693,6 +1774,18 @@ function loadAndRenderCaseDetail(cid) {
                         <div class="col-md-6">
                             <label class="form-label small text-muted mb-1">Lessons Learned</label>
                             <textarea id="editCaseLessonsLearned" class="form-control bg-dark text-light border-secondary" rows="2" placeholder="What went well? What would you do differently?" ${isClosed ? 'disabled' : ''}>${escHtml(c.lessons_learned || '')}</textarea>
+                        </div>
+                        <div class="col-12">
+                            <div class="small text-muted mb-2 mt-2">Post-Incident Review</div>
+                        </div>
+                        ${pirNotes(c, isClosed)}
+                        <div class="col-12">
+                            <label class="form-label small text-muted mb-1">Follow-up Actions</label>
+                            <div class="d-flex gap-2">
+                                <input type="text" id="pirFollowupInput" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="A concrete follow-up action..." onkeyup="if(event.key === 'Enter') addPirFollowupAction()" ${isClosed ? 'disabled' : ''}>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addPirFollowupAction()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-plus"></i> Add as task</button>
+                            </div>
+                            <div class="small text-muted mt-1">Adds a real, trackable task on this case (see the Tasks tab) -- a follow-up action here is only worth something if it's actually tracked to done.</div>
                         </div>
                     </div>
                     <button type="button" class="btn btn-sm btn-outline-primary" onclick="saveCaseDetail()"><i class="fa-solid fa-floppy-disk me-1"></i>Save</button>
@@ -1925,6 +2018,16 @@ function loadAndRenderCaseDetail(cid) {
                     </div>
                 </div>
             </div>
+
+            <div id="caseTabPane-forensic" class="case-tab-pane" style="display:none;">
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-header border-secondary">Forensic Timeline <span class="text-muted small">— a chronological reconstruction of alerts/UEBA/FIM activity across this case's tracked hosts, not a log of changes to the case itself (see Timeline for that)</span></div>
+                    <div class="card-body">
+                        <div id="forensicTimelineBody"><p class="text-muted small mb-0">Loading&hellip;</p></div>
+                        <button type="button" id="forensicTimelineMoreBtn" class="btn btn-sm btn-outline-secondary mt-2" style="display:none;" onclick="loadForensicTimeline(activeCaseId, true)">Load More</button>
+                    </div>
+                </div>
+            </div>
         `;
         populateTlpPapSelect('editCaseTlp', TLP_VALUES, c.tlp);
         populateQueueSelect('editCaseQueue', c.queue_id);
@@ -1934,6 +2037,7 @@ function loadAndRenderCaseDetail(cid) {
         loadCaseCoverageGaps(c.id);
         loadRelatedCases(c.id);
         loadCaseAttachments(c.id);
+        loadForensicTimeline(c.id);
         initEdrResponseCard();
         showDetailView();
         // Live-ish SLA/TTA chips -- re-render just that strip every 30s while the case
@@ -1961,6 +2065,11 @@ async function saveCaseDetail() {
     const status = statusWorkflow === 'closed' ? 'closed' : 'open';
     const rootCause = document.getElementById('editCaseRootCause').value.trim();
     const lessonsLearned = document.getElementById('editCaseLessonsLearned').value.trim();
+    const pirNotesObj = {};
+    PIR_SECTIONS.forEach(s => {
+        const el = document.getElementById(`pirNote_${s.key}`);
+        if (el && el.value.trim()) pirNotesObj[s.key] = el.value.trim();
+    });
     // Closed cases go read-only (every field above gets disabled) -- a retrospective
     // note added AFTER closing means reopening the case just to write it, so this is
     // the last real chance to ask. Soft nudge, not a hard block: a false positive or a
@@ -1979,6 +2088,7 @@ async function saveCaseDetail() {
         description: document.getElementById('editCaseDescription').value.trim(),
         root_cause: rootCause,
         lessons_learned: lessonsLearned,
+        pir_notes: Object.keys(pirNotesObj).length ? JSON.stringify(pirNotesObj) : '',
         tlp: document.getElementById('editCaseTlp').value,
         severity: document.getElementById('editCaseSeverity').value,
         workflow_state: statusWorkflow === 'closed' ? 'resolved' : statusWorkflow,
@@ -2056,6 +2166,23 @@ function addCaseTask() {
         method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title})
     }).then(r => r.json()).then(() => { input.value = ''; openCaseDetail(activeCaseId); loadCases(); })
       .catch(err => toast('Error adding task: ' + err, 'danger'));
+}
+
+// A follow-up action IS a case_task -- posts straight to the existing, unmodified task
+// route rather than inventing a parallel "PIR action" storage/tracking concept, so it
+// shows up wherever tasks already show up (count, list, completion) for free.
+function addPirFollowupAction() {
+    const input = document.getElementById('pirFollowupInput');
+    const title = input.value.trim();
+    if (!title) return;
+    fetch(`/api/cases/${activeCaseId}/tasks`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title})
+    }).then(r => r.json()).then(() => {
+        input.value = '';
+        toast('Added as a task -- see the Tasks tab.', 'success');
+        openCaseDetail(activeCaseId);
+        loadCases();
+    }).catch(err => toast('Error adding follow-up action: ' + err, 'danger'));
 }
 
 function toggleCaseTask(tid, currentStatus) {

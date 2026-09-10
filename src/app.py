@@ -6794,6 +6794,7 @@ def api_case_detail(cid):
         description = data['description'].strip() if 'description' in data else (case['description'] or '')
         root_cause = data['root_cause'].strip() if 'root_cause' in data else (case['root_cause'] or '')
         lessons_learned = data['lessons_learned'].strip() if 'lessons_learned' in data else (case['lessons_learned'] or '')
+        pir_notes = data['pir_notes'].strip() if 'pir_notes' in data else (case['pir_notes'] or '')
         # 'tlp' in data (not "and data['tlp']") -- an explicit empty string must actually
         # clear it back to not-set, not silently fall through to keeping the old value.
         tlp = data['tlp'].strip() if 'tlp' in data else case['tlp']
@@ -6878,9 +6879,17 @@ def api_case_detail(cid):
         if queue_changed:
             queue_name = db.execute("SELECT name FROM case_queues WHERE id = ?", (queue_id,)).fetchone()['name'] if queue_id else '(none)'
             _log_case_event(db, cid, 'queue_change', queue_name)
+        # Retrospective-field edits (root cause, lessons learned, structured PIR notes)
+        # were previously silent -- no case_event at all, for any of the three -- which
+        # is the other half of the "no audit trail on the review itself" gap the DFIR
+        # lifecycle review flagged. One combined event covers all three since they're
+        # edited together in the same UI block and a save rarely touches just one.
+        if (root_cause != (case['root_cause'] or '') or lessons_learned != (case['lessons_learned'] or '')
+                or pir_notes != (case['pir_notes'] or '')):
+            _log_case_event(db, cid, 'pir_updated', 'Post-incident review updated')
         db.execute(
-            "UPDATE cases SET title = ?, status = ?, assignee = ?, description = ?, root_cause = ?, lessons_learned = ?, closed_at = ?, tlp = ?, pap = ?, severity = ?, workflow_state = ?, acknowledged_at = ?, sla_breach_notified_at = ?, queue_id = ?, last_closed_at = ?, reopened_count = ? WHERE id = ?",
-            (title, status, assignee, description, root_cause, lessons_learned, closed_at, tlp, pap, severity, workflow_state, acknowledged_at, sla_breach_notified_at, queue_id, last_closed_at, reopened_count, cid)
+            "UPDATE cases SET title = ?, status = ?, assignee = ?, description = ?, root_cause = ?, lessons_learned = ?, pir_notes = ?, closed_at = ?, tlp = ?, pap = ?, severity = ?, workflow_state = ?, acknowledged_at = ?, sla_breach_notified_at = ?, queue_id = ?, last_closed_at = ?, reopened_count = ? WHERE id = ?",
+            (title, status, assignee, description, root_cause, lessons_learned, pir_notes, closed_at, tlp, pap, severity, workflow_state, acknowledged_at, sla_breach_notified_at, queue_id, last_closed_at, reopened_count, cid)
         )
         if status_changed:
             _run_playbooks_for_case(db, cid, 'status_changed', queue_id, tlp, status, severity)
@@ -7103,6 +7112,100 @@ def api_case_related_items(cid):
         result['fim_events_total'] = len(fim_rows)
         result['fim_events'] = [dict(r) for r in fim_rows[:CAP]]
 
+    return jsonify(result)
+
+# A chronological RECONSTRUCTION of what actually happened across every host this case
+# tracks (alerts/UEBA/FIM merged, no window-suggestion cap, nothing excluded just
+# because it's already linked) -- distinct from both the case_events audit-log Timeline
+# tab (who changed what on the CASE, not what the ATTACKER did) and related-items above
+# (a 24h "what's new to add" suggestion feed, not a reconstruction). Shares
+# related-items' exact host/username scoping and per-source column shapes on purpose --
+# same evidence, different lens.
+@app.route('/api/cases/<int:cid>/forensic-timeline', methods=['GET'])
+@login_required
+def api_case_forensic_timeline(cid):
+    db = get_db()
+    case = db.execute("SELECT id, created_at FROM cases WHERE id = ?", (cid,)).fetchone()
+    if not case:
+        return jsonify({"error": "Case not found"}), 404
+
+    hosts = sorted({r['host'] for r in db.execute("SELECT DISTINCT host FROM case_assets WHERE case_id = ?", (cid,)).fetchall()})
+    usernames = _case_implicated_usernames(db, cid)
+
+    try:
+        hours_before = max(0, min(int(request.args.get('hours_before', 0)), 24 * 365))
+    except (TypeError, ValueError):
+        hours_before = 0
+    try:
+        limit = max(50, min(int(request.args.get('limit', 300)), 1000))
+    except (TypeError, ValueError):
+        limit = 300
+    before_ts = request.args.get('before_ts') or None
+
+    # Defaults to the case's own lifetime (created_at forward), not a fixed lookback --
+    # a forensic reconstruction should cover the investigation period itself, widened
+    # backward on request (e.g. to catch pre-incident recon) rather than a fixed window.
+    since = f"datetime('{case['created_at']}', '-{hours_before} hours')" if hours_before else f"'{case['created_at']}'"
+
+    result = {'hosts': hosts, 'usernames': usernames, 'events': [], 'has_more': False}
+    if not hosts and not usernames:
+        return jsonify(result)
+
+    SRC_CAP = 1000  # per-source bound before merge/sort -- see related-items' own CAP precedent
+    events = []
+
+    if hosts or usernames:
+        conds, params = [], []
+        if hosts:
+            conds.append(f"a.host IN ({','.join('?' for _ in hosts)})")
+            params.extend(hosts)
+        if usernames:
+            conds.append(f"a.username IN ({','.join('?' for _ in usernames)})")
+            params.extend(usernames)
+        alert_rows = db.execute(
+            "SELECT a.id, a.timestamp as ts, a.severity, a.host, a.username, a.source_ip, "
+            "COALESCE(s.title, a.rule_name, 'Custom/YARA Rule') as label, a.message "
+            "FROM alerts a LEFT JOIN sigma_rules s ON a.rule_id = s.id "
+            f"WHERE ({' OR '.join(conds)}) AND a.effective_seen >= {since} "
+            f"ORDER BY a.timestamp DESC LIMIT {SRC_CAP}",
+            params
+        ).fetchall()
+        events.extend({**dict(r), 'source': 'alert'} for r in alert_rows)
+
+    if hosts:
+        host_ph = ','.join('?' for _ in hosts)
+        ueba_host_rows = db.execute(
+            "SELECT id, timestamp as ts, severity, hostname as host, NULL as username, message FROM events "
+            f"WHERE app_name = 'duckdb_ueba' AND entity_type = 'host' AND hostname IN ({host_ph}) "
+            f"AND timestamp >= {since} ORDER BY timestamp DESC LIMIT {SRC_CAP}",
+            hosts
+        ).fetchall()
+        events.extend({**dict(r), 'source': 'ueba'} for r in ueba_host_rows)
+    if usernames:
+        user_ph = ','.join('?' for _ in usernames)
+        ueba_user_rows = db.execute(
+            "SELECT id, timestamp as ts, severity, NULL as host, hostname as username, message FROM events "
+            f"WHERE app_name = 'duckdb_ueba' AND entity_type = 'user' AND hostname IN ({user_ph}) "
+            f"AND timestamp >= {since} ORDER BY timestamp DESC LIMIT {SRC_CAP}",
+            usernames
+        ).fetchall()
+        events.extend({**dict(r), 'source': 'ueba'} for r in ueba_user_rows)
+
+    if hosts:
+        host_ph = ','.join('?' for _ in hosts)
+        fim_rows = db.execute(
+            "SELECT id, timestamp as ts, severity, host, username, message FROM live_logs "
+            f"WHERE app = 'FIM' AND host IN ({host_ph}) AND timestamp >= {since} "
+            f"ORDER BY timestamp DESC LIMIT {SRC_CAP}",
+            hosts
+        ).fetchall()
+        events.extend({**dict(r), 'source': 'fim'} for r in fim_rows)
+
+    events.sort(key=lambda e: e['ts'], reverse=True)
+    if before_ts:
+        events = [e for e in events if e['ts'] < before_ts]
+    result['has_more'] = len(events) > limit
+    result['events'] = events[:limit]
     return jsonify(result)
 
 # Every case is otherwise a fully isolated island -- no route/table/UI anywhere
@@ -12047,6 +12150,13 @@ def migrate_case_severity():
             conn.execute("ALTER TABLE cases ADD COLUMN root_cause TEXT")
         if 'lessons_learned' not in cols:
             conn.execute("ALTER TABLE cases ADD COLUMN lessons_learned TEXT")
+        # Structured post-incident review -- a JSON {section_key: text} dict for a small,
+        # fixed NIST 800-61 Post-Incident-Activity-inspired section catalog (PIR_SECTIONS
+        # in cases.html). Kept separate from the free-text root_cause/lessons_learned
+        # above (not a migration of them) -- both stay visible/editable as-is, so nothing
+        # an analyst already wrote is hidden or lost.
+        if 'pir_notes' not in cols:
+            conn.execute("ALTER TABLE cases ADD COLUMN pir_notes TEXT")
         conn.commit()
         conn.close()
     except Exception:
