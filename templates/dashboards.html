@@ -337,7 +337,14 @@ function renderAlertTrendWidget(container, widgetId, config) {
                 borderColor: c.accent, backgroundColor: c.accent + '26',
                 borderWidth: 2, fill: true, tension: 0.25, pointRadius: 2,
             }] },
-            options: baseLineOptions(c, {logScale: isLog}),
+            options: {
+                ...baseLineOptions(c, {logScale: isLog}),
+                onHover: (evt, elements) => { evt.native.target.style.cursor = elements.length ? 'pointer' : 'default'; },
+                onClick: (evt, elements, chart) => {
+                    if (!elements.length) return;
+                    pivotToLogSearchBucket(chart.data.labels[elements[0].index]);
+                },
+            },
         });
     }).catch(err => {
         console.error('Error loading alert trend:', err);
@@ -510,7 +517,14 @@ function renderRiskTrendWidget(container, widgetId, config) {
                 borderColor: c.warning, backgroundColor: c.warning + '26',
                 borderWidth: 2, fill: true, tension: 0.25, pointRadius: 2,
             }] },
-            options: baseLineOptions(c, {logScale: isLog}),
+            options: {
+                ...baseLineOptions(c, {logScale: isLog}),
+                onHover: (evt, elements) => { evt.native.target.style.cursor = elements.length ? 'pointer' : 'default'; },
+                onClick: (evt, elements, chart) => {
+                    if (!elements.length) return;
+                    pivotToLogSearchBucket(chart.data.labels[elements[0].index]);
+                },
+            },
         });
     }).catch(err => {
         console.error('Error loading risk trend:', err);
