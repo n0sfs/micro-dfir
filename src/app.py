@@ -907,10 +907,17 @@ def api_ingest():
                     from geoip import lookup_country
                     country_code, country_name = lookup_country(sip)
                     ins_cur = db.execute(
-                        "INSERT INTO alerts (timestamp, rule_name, severity, host, message, username, source_ip, occurrence_count, last_seen, country_code, country_name) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
-                        (ts, triggered_rule, alert_sev, hst, msg, usr, sip, ts, country_code, country_name)
+                        "INSERT INTO alerts (timestamp, rule_name, severity, host, message, username, source_ip, occurrence_count, last_seen, country_code, country_name, file_hash) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+                        (ts, triggered_rule, alert_sev, hst, msg, usr, sip, ts, country_code, country_name, file_hash)
                     )
                     new_alert_id = ins_cur.lastrowid
+                    # See analyzers.auto_enrich_and_score_alert's own docstring. This
+                    # path has no destination_ip extracted at the top-level log/alert
+                    # fields (only proc.get('destination_ip'), which isn't in scope by
+                    # this name here) -- pass None rather than guessing at a field this
+                    # path was never wired to carry.
+                    import analyzers
+                    analyzers.auto_enrich_and_score_alert(db, new_alert_id, hst, sip, None, file_hash, alert_sev)
                     # Same "only a brand-new alert notifies" rule as sigma_engine.py's path --
                     # a re-firing heuristic within the dedup window hits the `existing` branch
                     # above instead. This runs inline in the ingest request; run_playbooks_for_alert
@@ -1219,7 +1226,7 @@ def api_enrichment_settings():
 @app.route('/api/ti/enrich', methods=['POST'])
 @login_required
 def api_ti_enrich():
-    from analyzers import applicable_analyzers, ENRICHMENT_CACHE_TTL_HOURS
+    from analyzers import applicable_analyzers, ENRICHMENT_CACHE_TTL_HOURS, _tier_for
     d = request.get_json() or {}
     value = (d.get('value') or '').strip()
     ioc_type = (d.get('ioc_type') or '').strip()
@@ -1241,24 +1248,26 @@ def api_ti_enrich():
     results = []
     for a in analyzers:
         cached = db.execute(
-            "SELECT verdict, summary, fetched_at FROM enrichment_results WHERE value = ? AND source = ? "
+            "SELECT verdict, summary, tier, fetched_at FROM enrichment_results WHERE value = ? AND source = ? "
             "AND fetched_at >= datetime('now', ?)",
             (value, a['key'], f'-{ENRICHMENT_CACHE_TTL_HOURS} hours')
         ).fetchone()
         if cached:
             results.append({'source': a['label'], 'verdict': cached['verdict'], 'summary': cached['summary'],
-                             'cached': True, 'fetched_at': cached['fetched_at']})
+                             'tier': cached['tier'], 'cached': True, 'fetched_at': cached['fetched_at']})
             continue
         api_key = api_keys.get(a['settings_key']) if a.get('requires_key') else None
         out = a['run'](value, api_key, ioc_type)
+        tier = _tier_for(a['key'], ioc_type, out['verdict'])
         db.execute(
-            "INSERT INTO enrichment_results (value, source, verdict, summary, raw_json, fetched_at) VALUES (?, ?, ?, ?, ?, datetime('now')) "
-            "ON CONFLICT(value, source) DO UPDATE SET verdict=excluded.verdict, summary=excluded.summary, raw_json=excluded.raw_json, fetched_at=excluded.fetched_at",
-            (value, a['key'], out['verdict'], out['summary'], json.dumps(out.get('raw') or {}))
+            "INSERT INTO enrichment_results (value, source, verdict, summary, raw_json, tier, fetched_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now')) "
+            "ON CONFLICT(value, source) DO UPDATE SET verdict=excluded.verdict, summary=excluded.summary, raw_json=excluded.raw_json, tier=excluded.tier, fetched_at=excluded.fetched_at",
+            (value, a['key'], out['verdict'], out['summary'], json.dumps(out.get('raw') or {}), tier)
         )
         db.commit()
-        results.append({'source': a['label'], 'verdict': out['verdict'], 'summary': out['summary'], 'cached': False})
-    return jsonify({'results': results, 'overall_verdict': _overall_enrichment_verdict(results)})
+        results.append({'source': a['label'], 'verdict': out['verdict'], 'summary': out['summary'], 'tier': tier, 'cached': False})
+    return jsonify({'results': results, 'overall_verdict': _overall_enrichment_verdict(results),
+                     'overall_tier': _overall_enrichment_tier(results)})
 
 # IntelOwl-style aggregated verdict: worst-case wins across every source that actually
 # returned a real signal. 'unconfigured'/'error' aren't signals about the IOC itself
@@ -1275,6 +1284,18 @@ def _overall_enrichment_verdict(results):
     if not real:
         return 'unknown'
     return max(real, key=lambda v: _ENRICHMENT_VERDICT_RANK[v])
+
+# Reports the strongest KIND of evidence behind a result set, not just the strongest
+# verdict word -- a mixed set (say, one 'heuristic' malicious from AbuseIPDB and one
+# 'definite' malicious from URLhaus) should read as "definite" overall, since that's
+# the stronger claim an analyst can actually act on with confidence.
+_ENRICHMENT_TIER_RANK = {'definite': 2, 'heuristic': 1}
+
+def _overall_enrichment_tier(results):
+    real = [r.get('tier') for r in results if r.get('tier') in _ENRICHMENT_TIER_RANK]
+    if not real:
+        return None
+    return max(real, key=lambda t: _ENRICHMENT_TIER_RANK[t])
 
 
 # ==========================================
@@ -1454,6 +1475,24 @@ def _yara_file_description(full_path, content=None):
     a = _YARA_AUTHOR_RE.search(content)
     author = a.group(1).replace('\\"', '"').strip() if a else None
     return f"{desc} (by {author})" if author else desc
+
+# A match's evidentiary weight is whatever the RULE AUTHOR encoded -- a signature-
+# confirmed-family rule and a loose one-string heuristic look identical without this,
+# since File Scan previously surfaced only the rule name. Capped (5 distinct matched
+# identifiers, 2 instances each) to keep one scan result bounded regardless of how
+# broad a rule's own string set is -- mirrors this codebase's established "-First N"
+# bounding convention elsewhere (e.g. list_processes(), collect_triage()).
+def _yara_match_evidence(m):
+    strings = []
+    for s in m.strings[:5]:
+        for inst in s.instances[:2]:
+            # matched_data is raw bytes -- decoded for a readable preview (this is for
+            # a human reviewing evidence in the UI, not an exact byte-for-byte
+            # artifact), not base64'd, unlike collect_file's 40KB-capped raw-bytes path
+            # which exists for an entirely different purpose (exact reproduction).
+            preview = inst.matched_data[:64].decode('utf-8', errors='replace')
+            strings.append({'identifier': s.identifier, 'offset': inst.offset, 'preview': preview})
+    return {'tags': list(m.tags), 'strings': strings}
 
 def _yara_resolve_path(relpath):
     """Resolves a user-supplied relative path against YARA_RULES_DIR, rejecting
@@ -1655,7 +1694,9 @@ def threat_intel():
                         compiled_rules += 1
                         rule_matches = rule.match(data=file_data)
                         for m in rule_matches:
-                            matches.append({"rule": m.rule, "file": file.filename})
+                            evidence = _yara_match_evidence(m)
+                            matches.append({"rule": m.rule, "file": file.filename,
+                                             "tags": evidence['tags'], "strings": evidence['strings']})
                     except Exception:
                         pass # Skip broken community rules
 
@@ -7679,7 +7720,7 @@ def _run_case_analysis(db, cid, entity_type, entity_id):
     score = score_row['score'] if score_row and score_row['score'] is not None else 0
     tier = _risk_tier(score, risk_cfg['tiers'])
 
-    from analyzers import applicable_analyzers, ENRICHMENT_CACHE_TTL_HOURS
+    from analyzers import applicable_analyzers, ENRICHMENT_CACHE_TTL_HOURS, _tier_for
     key_row = db.execute("SELECT value FROM settings WHERE key = 'enrichment_api_keys'").fetchone()
     api_keys = json.loads(key_row['value']) if key_row and key_row['value'] else {}
     ip_analyzers = applicable_analyzers('ip')
@@ -7688,20 +7729,23 @@ def _run_case_analysis(db, cid, entity_type, entity_id):
         parts = []
         for a in ip_analyzers:
             cached = db.execute(
-                "SELECT verdict, summary FROM enrichment_results WHERE value = ? AND source = ? AND fetched_at >= datetime('now', ?)",
+                "SELECT verdict, summary, tier FROM enrichment_results WHERE value = ? AND source = ? AND fetched_at >= datetime('now', ?)",
                 (ip, a['key'], f'-{ENRICHMENT_CACHE_TTL_HOURS} hours')
             ).fetchone()
             if cached:
-                parts.append(f"{a['label']}: {cached['summary']}")
+                tier_note = ' [confirmed]' if cached['tier'] == 'definite' else ''
+                parts.append(f"{a['label']}: {cached['summary']}{tier_note}")
                 continue
             api_key = api_keys.get(a['settings_key']) if a.get('requires_key') else None
-            out = a['run'](ip, api_key)
+            out = a['run'](ip, api_key, 'ip')
+            tier = _tier_for(a['key'], 'ip', out['verdict'])
             db.execute(
-                "INSERT INTO enrichment_results (value, source, verdict, summary, raw_json, fetched_at) VALUES (?, ?, ?, ?, ?, datetime('now')) "
-                "ON CONFLICT(value, source) DO UPDATE SET verdict=excluded.verdict, summary=excluded.summary, raw_json=excluded.raw_json, fetched_at=excluded.fetched_at",
-                (ip, a['key'], out['verdict'], out['summary'], json.dumps(out.get('raw') or {}))
+                "INSERT INTO enrichment_results (value, source, verdict, summary, raw_json, tier, fetched_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now')) "
+                "ON CONFLICT(value, source) DO UPDATE SET verdict=excluded.verdict, summary=excluded.summary, raw_json=excluded.raw_json, tier=excluded.tier, fetched_at=excluded.fetched_at",
+                (ip, a['key'], out['verdict'], out['summary'], json.dumps(out.get('raw') or {}), tier)
             )
-            parts.append(f"{a['label']}: {out['summary']}")
+            tier_note = ' [confirmed]' if tier == 'definite' else ''
+            parts.append(f"{a['label']}: {out['summary']}{tier_note}")
         enrichment_lines.append(f"{ip} — {'; '.join(parts) if parts else 'no analyzers applicable'}")
 
     label = 'Host' if entity_type == 'host' else 'User'
@@ -11715,6 +11759,26 @@ def migrate_alerts_mitre_column():
     except Exception:
         pass
 
+def migrate_alerts_verdict_columns():
+    # Closes a real DFIR-SME-review gap: alerts had no way to carry the file hash a
+    # matched log row actually had (sigma_engine.py computes one into pending_alerts but
+    # discards it before the INSERT -- confirmed directly), and no per-alert confidence
+    # signal distinct from UEBA's own entity-level (host/user) risk score. See
+    # analyzers.auto_enrich_and_score_alert(), the single writer of confidence_score/tier.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(alerts)").fetchall()}
+        if 'file_hash' not in cols:
+            conn.execute("ALTER TABLE alerts ADD COLUMN file_hash TEXT")
+        if 'confidence_score' not in cols:
+            conn.execute("ALTER TABLE alerts ADD COLUMN confidence_score INTEGER")
+        if 'confidence_tier' not in cols:
+            conn.execute("ALTER TABLE alerts ADD COLUMN confidence_tier TEXT")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_sigma_rules_columns():
     # sigma_rules originally had no provenance columns — rules bulk-imported from SigmaHQ
     # and rules hand-written in the editor were indistinguishable. ALTER TABLE catches
@@ -13460,6 +13524,15 @@ def migrate_enrichment_results():
             fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(value, source)
         )''')
+        # Distinguishes a curated-feed exact match ('definite', e.g. URLhaus, or a VT
+        # hash lookup where real AV engines flagged the exact file) from a
+        # reputation-score heuristic ('heuristic', e.g. AbuseIPDB's community score, or
+        # VT's IP/domain reputation) -- see analyzers._tier_for(). Existing rows predate
+        # this and stay NULL; they're re-tiered the next time that value is looked up
+        # again (results are cached only 24h, so this self-heals quickly).
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(enrichment_results)").fetchall()}
+        if 'tier' not in cols:
+            conn.execute("ALTER TABLE enrichment_results ADD COLUMN tier TEXT")
         conn.commit()
         conn.close()
     except Exception:
@@ -15944,7 +16017,8 @@ _LOG_BRANCH_SQL = """SELECT timestamp, severity, host, app, event_id, username, 
        NULL as rule_id, NULL as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
        process_image, command_line, parent_image, parent_command_line, original_file_name, raw_xml,
        NULL as occurrence_count, NULL as last_seen, id as item_id, NULL as entity_type,
-       NULL as status, NULL as assignee, file_hash, query_name, 0 as is_atomic_test, NULL as import_id
+       NULL as status, NULL as assignee, file_hash, query_name, 0 as is_atomic_test, NULL as import_id,
+       NULL as confidence_score, NULL as confidence_tier
 FROM live_logs"""
 
 _LOG_ARCHIVE_BRANCH_SQL = _LOG_BRANCH_SQL.replace("FROM live_logs", "FROM live_logs_archive")
@@ -15966,7 +16040,8 @@ _ALERT_BRANCH_SQL = """SELECT a.timestamp, a.severity,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
        a.occurrence_count as occurrence_count, a.last_seen as last_seen, a.id as item_id, NULL as entity_type,
        a.status as status, a.assignee as assignee, NULL as file_hash, NULL as query_name,
-       COALESCE(a.is_atomic_test, 0) as is_atomic_test, a.import_id as import_id
+       COALESCE(a.is_atomic_test, 0) as is_atomic_test, a.import_id as import_id,
+       a.confidence_score as confidence_score, a.confidence_tier as confidence_tier
 FROM alerts a
 LEFT JOIN sigma_rules s ON a.rule_id = s.id"""
 
@@ -15975,7 +16050,8 @@ _ANOMALY_BRANCH_SQL = """SELECT timestamp, severity, hostname as host, 'UEBA Ano
        NULL as rule_id, 'ueba' as rule_source, NULL as log_event_id, NULL as log_app, raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
        NULL as occurrence_count, NULL as last_seen, id as item_id, entity_type,
-       NULL as status, NULL as assignee, NULL as file_hash, NULL as query_name, 0 as is_atomic_test, NULL as import_id
+       NULL as status, NULL as assignee, NULL as file_hash, NULL as query_name, 0 as is_atomic_test, NULL as import_id,
+       NULL as confidence_score, NULL as confidence_tier
 FROM events
 WHERE app_name = 'duckdb_ueba'"""
 
@@ -16003,7 +16079,8 @@ _COMMAND_BRANCH_SQL = """SELECT queued_at as timestamp,
        NULL as rule_id, 'edr_command' as rule_source, NULL as log_event_id, NULL as log_app, NULL as raw_json,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
        NULL as occurrence_count, completed_at as last_seen, id as item_id, NULL as entity_type,
-       status as status, NULL as assignee, NULL as file_hash, NULL as query_name, 0 as is_atomic_test, NULL as import_id
+       status as status, NULL as assignee, NULL as file_hash, NULL as query_name, 0 as is_atomic_test, NULL as import_id,
+       NULL as confidence_score, NULL as confidence_tier
 FROM agent_commands"""
 
 # Log Import (Phase 1) branch -- imported_logs.timestamp is already normalized to UTC at
@@ -16016,7 +16093,8 @@ _IMPORT_BRANCH_SQL = """SELECT il.timestamp, il.severity, il.host, il.app, il.ev
        NULL as rule_id, 'import' as rule_source, NULL as log_event_id, NULL as log_app, il.raw_json,
        il.process_image, il.command_line, il.parent_image, il.parent_command_line, il.original_file_name, il.raw_xml,
        NULL as occurrence_count, NULL as last_seen, il.id as item_id, NULL as entity_type,
-       NULL as status, NULL as assignee, il.file_hash, il.query_name, 0 as is_atomic_test, il.import_id
+       NULL as status, NULL as assignee, il.file_hash, il.query_name, 0 as is_atomic_test, il.import_id,
+       NULL as confidence_score, NULL as confidence_tier
 FROM imported_logs il"""
 
 # The exact column order every LOG_TYPE_BRANCHES branch SELECTs in (all 4 must match,
@@ -16032,6 +16110,7 @@ _UNIFIED_LOG_COLUMNS = (
     'process_image', 'command_line', 'parent_image', 'parent_command_line', 'original_file_name', 'raw_xml',
     'occurrence_count', 'last_seen', 'item_id', 'entity_type',
     'status', 'assignee', 'file_hash', 'query_name', 'is_atomic_test', 'import_id',
+    'confidence_score', 'confidence_tier',
 )
 
 # (log_type, branch_sql) pairs, in the same branch order as the historical flat unions.
@@ -18948,6 +19027,7 @@ migrate_log_search_indexes()
 migrate_alerts_triage()
 migrate_alerts_geoip_columns()
 migrate_alerts_mitre_column()
+migrate_alerts_verdict_columns()
 migrate_saved_searches()
 migrate_warninglists()
 migrate_ioc_sightings()

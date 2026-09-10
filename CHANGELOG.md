@@ -10,6 +10,50 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-10
 
+### Suspicious-to-malicious verdict signals: auto-enrichment, YARA evidence, confidence tiering, per-alert score
+
+Follow-up to a direct question: when an alert fires, what actually says "definitively
+malicious" vs. "just suspicious"? A code-grounded review found the curated-feed IOC
+Sigma rule and URLhaus already gave a real DEFINITE signal automatically, but VT/
+AbuseIPDB lookups were on-demand only, YARA matches showed only a rule name, and there
+was no per-alert confidence distinct from UEBA's entity-level risk score. Closes all
+four gaps, reusing `src/analyzers.py`'s existing VT/AbuseIPDB/URLhaus/Shodan pipeline
+rather than a new detection engine:
+
+- **Auto-enrichment on new Critical/High alerts** — `analyzers.auto_enrich_and_score_alert()`
+  runs once, right after a new alert is inserted (both `sigma_engine.py`'s detection
+  cycle and `app.py`'s heuristic ingest path), checking source/destination IP and file
+  hash (new `alerts.file_hash` column — previously computed but discarded before the
+  INSERT) against whichever of VT/AbuseIPDB/URLhaus are configured. Gated to Critical/
+  High severity plus a new daily API-call budget (`settings` counter, resets daily) --
+  the one real gap the review flagged: no throttle beyond the existing 24h cache, and
+  VT's free tier is rate-limited. Severity casing genuinely differs between the two
+  call sites (sigma_engine.py's Title-Case vs. api_ingest's ALL-CAPS) — the gate
+  compares case-insensitively.
+- **Confidence/evidence tier on `enrichment_results`** — new `tier` column
+  distinguishing a curated-feed exact match ('definite': URLhaus, or a VirusTotal HASH
+  lookup where real AV engines flagged the exact file) from a reputation-score
+  heuristic ('heuristic': AbuseIPDB's community score, VT's own IP/domain reputation).
+  Quick IOC Lookup and Case Analyze now show a "Confirmed" vs "Heuristic" badge
+  alongside the verdict badge.
+- **YARA match evidence** — File Scan (the live match-producing path;
+  `yara_scanner.py`'s separate `/api/yara/scan` route was confirmed dead/unused) now
+  surfaces each match's real tags and up to 5 matched-string identifiers with byte
+  offset + a readable preview, not just the rule name. Verified against a real
+  `yara.compile()`/`match()` run, not just eyeballed.
+- **Per-alert composite confidence score** — new `alerts.confidence_score`/
+  `confidence_tier` columns, computed once at alert-creation time: +40 for a linked
+  `ioc_sightings` row (already alert-linked, no new plumbing), +35 for a definite-tier
+  malicious enrichment match, +20 heuristic-malicious, +10 suspicious — mapped to
+  confirmed/high/medium/low. Runs for every alert regardless of severity (cheap,
+  local-only) using whatever enrichment data already exists, even from an unrelated
+  earlier lookup. A new badge renders next to severity in Log Search/alert views, and
+  a new opt-in "Confidence" column joins the existing Status/Assignee ones.
+- Fixed a real Windows-only encoding bug in `tools/check_template.py` hit live while
+  verifying this pass: `node --check`'s stdin write defaulted to the OS locale codepage
+  (cp1252), which can't encode genuine non-ASCII characters some templates contain —
+  now explicit `encoding='utf-8'`.
+
 ### New EDR actions: targeted firewall block, Windows Defender scans
 
 Follow-up to a direct question about EDR coverage: neither a Defender scan nor any
