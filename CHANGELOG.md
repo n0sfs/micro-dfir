@@ -10,6 +10,34 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-10
 
+### Per-template case number prefixes (e.g. INC-2026-014)
+
+Direct request: cases only ever showed the raw `#<id>` primary key, and case templates
+only carried a task checklist even though the underlying schema already has room for
+more (custom typed fields exist there too). This adds an optional, per-template
+"Prefix" (e.g. `INC`, `PHISH`) that drives a real formatted case number on any case
+created from that template — a genuinely bigger scope than a plain title prefix, chosen
+directly over the simpler options after asking.
+
+- **`case_templates.prefix`** (nullable `TEXT`) — set in the same modal (SOAR > Case
+  Templates) that already edits Name/Description/Tasks/Custom Fields, validated as
+  1-10 uppercase letters/digits/hyphens (`CASE_TEMPLATE_PREFIX_RE`).
+- **`cases.case_number`** (nullable `TEXT`) + new `case_number_counters(prefix, year)`
+  table — `_generate_case_number()` atomically allocates the next sequence via one
+  `INSERT ... ON CONFLICT(prefix, year) DO UPDATE SET next_seq = next_seq + 1`
+  statement (safe against two concurrent case-creation requests racing into the same
+  number), formatted `PREFIX-YYYY-NNN`. The counter is scoped to `(prefix, year)`, so
+  it resets to 1 automatically each new calendar year with no separate reset job, and
+  multiple templates sharing a prefix correctly share one numbering series.
+- A case created from a template **without** a prefix set gets no `case_number` — it
+  keeps showing the existing plain `#<id>` exactly as before; a case created with no
+  template at all is unaffected either way. Nothing retroactive: existing cases stay
+  `#<id>` forever unless manually re-triaged under a template (not built — case number
+  is stamped once, at creation, matching how template application itself already works).
+- Case list rows and the case detail header now show `case_number` when present (via a
+  small `caseNumberLabel()` fallback helper), and the New Case modal's template picker
+  shows the prefix inline (`"Phishing Investigation (7 tasks, PHISH-#)"`).
+
 ### Second/third sandbox sources (filescan.io, Hybrid Analysis) + MalwareBazaar hash analyzer
 
 Follow-up to a "what else is out there" research pass (filescan.io, VirusTotal, and

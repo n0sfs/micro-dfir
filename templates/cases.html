@@ -390,6 +390,13 @@ function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// A case only has a case_number when it was created from a template with a prefix
+// configured (see app.py's _generate_case_number) -- every other case falls back to
+// the plain #<id> convention this app always used, unchanged.
+function caseNumberLabel(c) {
+    return c.case_number ? escHtml(c.case_number) : `#${c.id}`;
+}
+
 // A loader's initial "Loading..." table state has no failure counterpart today -- a
 // non-2xx response (still a resolved fetch()) leaves it stuck showing "Loading..."
 // forever with no visible sign anything went wrong. This renders an explicit, retriable
@@ -951,7 +958,7 @@ function loadCaseTemplates() {
         caseTemplates = templates || [];
         const sel = document.getElementById('newCaseTemplate');
         sel.innerHTML = '<option value="">None — start with an empty task list</option>' +
-            caseTemplates.map(t => `<option value="${t.id}">${escHtml(t.name)} (${t.tasks.length} tasks)</option>`).join('');
+            caseTemplates.map(t => `<option value="${t.id}">${escHtml(t.name)} (${t.tasks.length} tasks${t.prefix ? `, ${escHtml(t.prefix)}-#` : ''})</option>`).join('');
     }).catch(err => console.error('Error loading case templates:', err));
 }
 
@@ -1045,7 +1052,7 @@ function renderCases() {
     }
     tbody.innerHTML = rows.map(c => `
         <tr style="cursor:pointer;" onclick="openCaseDetail(${c.id})">
-            <td class="ps-3 fw-bold"><span class="text-muted small fw-normal me-1">#${c.id}</span>${escHtml(c.title)}</td>
+            <td class="ps-3 fw-bold"><span class="text-muted small fw-normal me-1">${caseNumberLabel(c)}</span>${escHtml(c.title)}</td>
             <td>${caseSeverityBadge(c.severity)}</td>
             <td>${caseStatusBadge(c.status)}</td>
             <td class="small">${c.queue_name ? `<span class="badge bg-secondary">${escHtml(c.queue_name)}</span>` : '<span class="text-muted">—</span>'}</td>
@@ -1749,7 +1756,7 @@ function loadAndRenderCaseDetail(cid) {
         if (!c || c.error) { toast((c && c.error) || 'Case not found.', 'danger'); backToList(); return; }
         const isClosed = c.status === 'closed';
         activeCaseClosed = isClosed;
-        document.getElementById('caseDetailTitleHeading').innerHTML = `<i class="fa-solid fa-folder-open me-2"></i>${escHtml(c.title)} <span class="text-muted" style="font-size:.6em;font-weight:normal;">#${c.id}</span>`;
+        document.getElementById('caseDetailTitleHeading').innerHTML = `<i class="fa-solid fa-folder-open me-2"></i>${escHtml(c.title)} <span class="text-muted" style="font-size:.6em;font-weight:normal;">${caseNumberLabel(c)}</span>`;
         // Everything besides the case-info form used to sit in a narrow col-lg-5 right
         // column stacked 11 cards deep -- moved into tabs below the info card instead
         // (same cards, same element IDs, same load/init calls) so the view doesn't turn

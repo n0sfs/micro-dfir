@@ -6828,7 +6828,7 @@ def api_cases():
     db = get_db()
     if request.method == 'GET':
         rows = db.execute(
-            "SELECT c.id, c.title, c.status, c.severity, c.workflow_state, c.assignee, c.description, c.created_by, c.created_at, c.closed_at, c.acknowledged_at, c.tlp, c.pap, "
+            "SELECT c.id, c.case_number, c.title, c.status, c.severity, c.workflow_state, c.assignee, c.description, c.created_by, c.created_at, c.closed_at, c.acknowledged_at, c.tlp, c.pap, "
             "c.queue_id, q.name as queue_name, "
             "COUNT(DISTINCT ci.id) as item_count, "
             "COUNT(DISTINCT ct.id) as task_count, "
@@ -6873,10 +6873,13 @@ def api_cases():
         queue_name = db.execute("SELECT name FROM case_queues WHERE id = ?", (queue_id,)).fetchone()['name']
         _log_case_event(db, cid, 'queue_change', queue_name)
 
-    # Optional template: bulk-create its task list on the new case.
+    # Optional template: bulk-create its task list on the new case, and -- if the
+    # template has a prefix configured -- allocate a formatted case number (e.g.
+    # 'INC-2026-014') distinct from the raw id. A template with no prefix set leaves
+    # case_number NULL; that case keeps showing the existing #<id> convention.
     template_id = data.get('template_id')
     if template_id:
-        tpl = db.execute("SELECT name, tasks FROM case_templates WHERE id = ?", (template_id,)).fetchone()
+        tpl = db.execute("SELECT name, tasks, prefix FROM case_templates WHERE id = ?", (template_id,)).fetchone()
         if tpl:
             tasks = json.loads(tpl['tasks'])
             db.executemany(
@@ -6885,6 +6888,9 @@ def api_cases():
             )
             _seed_case_template_fields(db, cid, template_id)
             _log_case_event(db, cid, 'template_applied', tpl['name'])
+            if tpl['prefix']:
+                case_number = _generate_case_number(db, tpl['prefix'])
+                db.execute("UPDATE cases SET case_number = ? WHERE id = ?", (case_number, cid))
 
     _run_playbooks_for_case(db, cid, 'case_created', queue_id, tlp, 'open', severity)
     if queue_id:
@@ -9661,7 +9667,7 @@ def _case_template_fields_out(db, template_id):
 def api_case_templates():
     db = get_db()
     if request.method == 'GET':
-        rows = db.execute("SELECT id, name, description, tasks FROM case_templates ORDER BY name").fetchall()
+        rows = db.execute("SELECT id, name, description, tasks, prefix FROM case_templates ORDER BY name").fetchall()
         out = []
         for r in rows:
             d = dict(r)
@@ -9676,8 +9682,11 @@ def api_case_templates():
     name = (d.get('name') or '').strip()
     tasks = [t.strip() for t in (d.get('tasks') or []) if isinstance(t, str) and t.strip()]
     fields = d.get('fields') or []
+    prefix = (d.get('prefix') or '').strip().upper() or None
     if not name:
         return jsonify({'error': 'name is required'}), 400
+    if prefix and not CASE_TEMPLATE_PREFIX_RE.match(prefix):
+        return jsonify({'error': 'prefix must be 1-10 characters, letters/digits/hyphens only, starting with a letter or digit'}), 400
     for f in fields:
         if f.get('field_type') not in CASE_TEMPLATE_FIELD_TYPES:
             return jsonify({'error': f"invalid field_type: {f.get('field_type')}"}), 400
@@ -9686,8 +9695,8 @@ def api_case_templates():
     if db.execute("SELECT 1 FROM case_templates WHERE name = ?", (name,)).fetchone():
         return jsonify({'error': f'A template named "{name}" already exists'}), 400
     cur = db.execute(
-        "INSERT INTO case_templates (name, description, tasks, created_by) VALUES (?, ?, ?, ?)",
-        (name, (d.get('description') or '').strip(), json.dumps(tasks), current_user.username)
+        "INSERT INTO case_templates (name, description, tasks, prefix, created_by) VALUES (?, ?, ?, ?, ?)",
+        (name, (d.get('description') or '').strip(), json.dumps(tasks), prefix, current_user.username)
     )
     tid = cur.lastrowid
     for i, f in enumerate(fields):
@@ -9721,8 +9730,11 @@ def api_case_template_detail(tid):
     name = (d.get('name') or '').strip()
     tasks = [t.strip() for t in (d.get('tasks') or []) if isinstance(t, str) and t.strip()]
     fields = d.get('fields') or []
+    prefix = (d.get('prefix') or '').strip().upper() or None
     if not name:
         return jsonify({'error': 'name is required'}), 400
+    if prefix and not CASE_TEMPLATE_PREFIX_RE.match(prefix):
+        return jsonify({'error': 'prefix must be 1-10 characters, letters/digits/hyphens only, starting with a letter or digit'}), 400
     for f in fields:
         if f.get('field_type') not in CASE_TEMPLATE_FIELD_TYPES:
             return jsonify({'error': f"invalid field_type: {f.get('field_type')}"}), 400
@@ -9731,8 +9743,8 @@ def api_case_template_detail(tid):
     if db.execute("SELECT 1 FROM case_templates WHERE name = ? AND id != ?", (name, tid)).fetchone():
         return jsonify({'error': f'A template named "{name}" already exists'}), 400
     db.execute(
-        "UPDATE case_templates SET name = ?, description = ?, tasks = ? WHERE id = ?",
-        (name, (d.get('description') or '').strip(), json.dumps(tasks), tid)
+        "UPDATE case_templates SET name = ?, description = ?, tasks = ?, prefix = ? WHERE id = ?",
+        (name, (d.get('description') or '').strip(), json.dumps(tasks), prefix, tid)
     )
     db.execute("DELETE FROM case_template_fields WHERE template_id = ?", (tid,))
     for i, f in enumerate(fields):
@@ -12271,6 +12283,59 @@ def migrate_case_template_fields():
         conn.close()
     except Exception:
         pass
+
+# Optional per-template prefix (e.g. 'INC', 'PHISH') that drives an auto-generated,
+# human-readable case number (PREFIX-YYYY-NNN) on any case created from that template --
+# distinct from the raw cases.id primary key, which stays exactly as-is (never reused/
+# renumbered). A template with no prefix set produces no case_number; those cases keep
+# showing the existing #<id> convention, unchanged.
+def migrate_case_numbering():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.row_factory = sqlite3.Row
+        ct_cols = {row[1] for row in conn.execute("PRAGMA table_info(case_templates)").fetchall()}
+        if 'prefix' not in ct_cols:
+            conn.execute("ALTER TABLE case_templates ADD COLUMN prefix TEXT")
+        c_cols = {row[1] for row in conn.execute("PRAGMA table_info(cases)").fetchall()}
+        if 'case_number' not in c_cols:
+            conn.execute("ALTER TABLE cases ADD COLUMN case_number TEXT")
+        # (prefix, year) is the PRIMARY KEY -- the counter resets to a fresh row (so a
+        # fresh count from 1) automatically each new calendar year, no separate reset
+        # job needed.
+        conn.execute('''CREATE TABLE IF NOT EXISTS case_number_counters (
+            prefix TEXT NOT NULL,
+            year INTEGER NOT NULL,
+            next_seq INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (prefix, year)
+        )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# Short, admin-typed identifiers only (e.g. 'INC', 'PHISH', 'MAL-IR') -- this becomes
+# the leading segment of every case number generated from the owning template, so it's
+# validated tightly up front rather than trusted as free text embedded into a
+# user-facing identifier.
+CASE_TEMPLATE_PREFIX_RE = re.compile(r'^[A-Z0-9][A-Z0-9-]{0,9}$')
+
+def _generate_case_number(db, prefix):
+    """Atomically allocates the next sequence number for `prefix` within the current
+    calendar year and returns the formatted case number, e.g. 'INC-2026-014'. The
+    INSERT .. ON CONFLICT DO UPDATE is one single atomic statement, so two concurrent
+    case-creation requests (different gunicorn workers) can't race into issuing the
+    same number -- SQLite serializes the two writes, the second sees the first's
+    already-incremented row."""
+    year = datetime.now().year
+    db.execute(
+        "INSERT INTO case_number_counters (prefix, year, next_seq) VALUES (?, ?, 1) "
+        "ON CONFLICT(prefix, year) DO UPDATE SET next_seq = next_seq + 1",
+        (prefix, year)
+    )
+    seq = db.execute(
+        "SELECT next_seq FROM case_number_counters WHERE prefix = ? AND year = ?", (prefix, year)
+    ).fetchone()['next_seq']
+    return f"{prefix}-{year}-{seq:03d}"
 
 # Mirrors Exabeam Case Manager's queue model (per the session's own research pass):
 # a queue is just a named group cases get manually routed into/between, with a
@@ -19162,6 +19227,7 @@ migrate_identities_watchlist()
 migrate_cases()
 migrate_case_upgrade()
 migrate_case_template_fields()
+migrate_case_numbering()
 migrate_case_queues()
 migrate_case_assets()
 migrate_case_severity()
