@@ -10,6 +10,44 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-10
 
+### Second/third sandbox sources (filescan.io, Hybrid Analysis) + MalwareBazaar hash analyzer
+
+Follow-up to a "what else is out there" research pass (filescan.io, VirusTotal, and
+other free tools). Two real findings changed scope from the original plan: filescan.io's
+docs page is still JS-rendered/unfetchable, but its official open-source Python client
+(`filescanio/fsio-cli`) has real endpoint/header code that's directly readable — no live
+key needed to verify the wire shape, unlike the earlier deferral assumed. And OTX Pulses
++ MalwareBazaar were already both fully-built threat-intel *feeds* in this codebase
+(bulk "recent samples" sync) — nothing to add there. What *was* a real gap: an on-demand
+"check this one specific hash" lookup, which a bulk feed's recent-only slice can't cover.
+
+- **`src/sandbox.py`** gains `filescan_submit`/`filescan_poll` and
+  `hybrid_analysis_submit`/`hybrid_analysis_poll`, both file- and URL-capable (unlike
+  urlscan.io, URL-only) — endpoints/auth verified against each service's own open-source
+  reference client source (`filescanio/fsio-cli`, `dark0pcodes/hybrid_analysis_api`), not
+  from memory. Real, documented tradeoffs worth knowing before using either: filescan.io's
+  free community tier is confirmed **public-only** (no private option at all, unlike
+  urlscan's 50/day private quota); a brand-new Hybrid Analysis API key starts at
+  "restricted" privilege and needs a one-time manual vetting request (in Hybrid
+  Analysis's own UI) before it can submit anything — surfaced as a specific error on a
+  403, not a generic failure.
+- **`/api/sandbox/submit`/`/api/sandbox/<id>/status`** now dispatch through a
+  `SANDBOX_SOURCE_CATALOG` keyed by source (urlscan/filescan/hybrid_analysis), each
+  declaring whether it supports URL and/or file submissions — rejects a URL-only source
+  asked to detonate a file (or vice versa) with a clear error instead of a confusing one.
+  File submissions always reference an *existing* case attachment (`attachment_id`) —
+  reuses `case_attachments`' own upload/validation/hashing rather than adding a second
+  upload path.
+- **Case detail's Attachments tab** gets a per-file "Detonate" action (source picker:
+  filescan.io or Hybrid Analysis — urlscan.io is excluded, URL-only) with the same
+  client-driven poll-until-done pattern already used for URL indicators.
+- **Threat Intel's Sandbox tab** gets a 3-row API-key table (one per source) and a
+  Source dropdown on the submit form; Recent Submissions gets a Source column.
+- **New `analyzers._malwarebazaar`** — an on-demand hash lookup against MalwareBazaar's
+  full database (`query=get_info`, same `Auth-Key` convention as the already-integrated
+  URLhaus), registered with `ioc_types=('hash',)` and tiered `'definite'` in
+  `_tier_for()` (same curated-abuse.ch-database confidence as a URLhaus hit) — genuinely
+  complements the existing MalwareBazaar *feed* rather than duplicating it.
 ### Sandbox/detonation: urlscan.io URL sandboxing, IPQualityScore + Censys enrichment
 
 Follow-up to the verdict-signals work above: this app could say a URL/IP *looked* bad

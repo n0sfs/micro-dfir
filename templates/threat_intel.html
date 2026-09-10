@@ -579,36 +579,70 @@
             <div class="mb-3">
                 <h6 class="text-info mb-2"><i class="fa-solid fa-flask-vial me-1"></i>Detonate a URL</h6>
                 <p class="text-muted small">
-                    Submits a URL to <a href="https://urlscan.io" target="_blank" rel="noopener">urlscan.io</a> for a
-                    real sandboxed-browser visit -- screenshot, every network request, TLS certificate chain, and a
-                    verdict. <strong>Private</strong> scans aren't indexed/searchable (50/day free quota);
-                    <strong>Public</strong> scans get a much larger quota but are visible to anyone on urlscan.io's
-                    own site -- pick Public only for something genuinely low-stakes.
+                    Submits a URL to a real sandbox for detonation. <strong>urlscan.io</strong> is a sandboxed-browser
+                    visit (screenshot, network requests, TLS chain, URL only); <strong>filescan.io</strong> and
+                    <strong>Hybrid Analysis</strong> also run full file execution analysis (file detonation is
+                    submitted from a case's Attachments tab, not here). Visibility note: urlscan.io's Private tier
+                    genuinely isn't indexed/searchable (50/day free quota; Public gets a much larger quota but is
+                    visible to anyone on urlscan.io's own site). <strong>filescan.io's free community tier is
+                    public-only regardless of this setting.</strong> Hybrid Analysis's "Private" only opts the
+                    analysis out of third-party intel-sharing partners, not full privacy. Pick Public/a public-tier
+                    source only for something genuinely low-stakes.
                 </p>
                 {% if has_permission('threatintel.manage') %}
-                <div class="row g-2 align-items-end mb-3">
-                    <div class="col-md-6">
-                        <label class="form-label small text-muted mb-1">urlscan.io API Key</label>
-                        <input type="password" id="sandboxApiKeyInput" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Not configured">
-                    </div>
-                    <div class="col-md-3">
-                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="saveSandboxApiKey()" title="Save key"><i class="fa-solid fa-floppy-disk me-1"></i>Save Key</button>
-                    </div>
+                <div class="table-responsive mb-3">
+                    <table class="table table-dark table-sm align-middle mb-0">
+                        <thead><tr><th>Source</th><th>Capability</th><th>Key</th></tr></thead>
+                        <tbody>
+                            <tr>
+                                <td><strong>urlscan.io</strong></td>
+                                <td class="text-muted small">URL only</td>
+                                <td><div class="d-flex gap-1 align-items-center">
+                                    <input type="password" id="sandboxApiKeyInput_urlscan" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:220px;" placeholder="Not configured">
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="saveSandboxApiKey('urlscan')" title="Save key"><i class="fa-solid fa-floppy-disk"></i></button>
+                                </div></td>
+                            </tr>
+                            <tr>
+                                <td><strong>filescan.io</strong></td>
+                                <td class="text-muted small">URL + file &mdash; free tier is public-only</td>
+                                <td><div class="d-flex gap-1 align-items-center">
+                                    <input type="password" id="sandboxApiKeyInput_filescan" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:220px;" placeholder="Not configured">
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="saveSandboxApiKey('filescan')" title="Save key"><i class="fa-solid fa-floppy-disk"></i></button>
+                                </div></td>
+                            </tr>
+                            <tr>
+                                <td><strong>Hybrid Analysis</strong></td>
+                                <td class="text-muted small">URL + file &mdash; a new key needs a one-time vetting request (approved in your Hybrid Analysis account) before it can submit anything</td>
+                                <td><div class="d-flex gap-1 align-items-center">
+                                    <input type="password" id="sandboxApiKeyInput_hybrid_analysis" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:220px;" placeholder="Not configured">
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="saveSandboxApiKey('hybrid_analysis')" title="Save key"><i class="fa-solid fa-floppy-disk"></i></button>
+                                </div></td>
+                            </tr>
+                        </tbody>
+                    </table>
                 </div>
                 {% endif %}
                 <div class="row g-2 align-items-end">
-                    <div class="col-md-6">
+                    <div class="col-md-5">
                         <label class="form-label small text-muted mb-1">URL</label>
                         <input type="text" id="sandboxUrlInput" class="form-control bg-dark text-light border-secondary" placeholder="https://example.com/suspicious-link">
                     </div>
                     <div class="col-md-3">
+                        <label class="form-label small text-muted mb-1">Sandbox</label>
+                        <select id="sandboxSource" class="form-select bg-dark text-light border-secondary">
+                            <option value="urlscan" selected>urlscan.io</option>
+                            <option value="filescan">filescan.io</option>
+                            <option value="hybrid_analysis">Hybrid Analysis</option>
+                        </select>
+                    </div>
+                    <div class="col-md-2">
                         <label class="form-label small text-muted mb-1">Visibility</label>
                         <select id="sandboxVisibility" class="form-select bg-dark text-light border-secondary">
                             <option value="private" selected>Private (default)</option>
                             <option value="public">Public</option>
                         </select>
                     </div>
-                    <div class="col-md-3">
+                    <div class="col-md-2">
                         <button type="button" class="btn btn-outline-info w-100" onclick="submitSandboxUrl()"><i class="fa-solid fa-paper-plane me-1"></i>Submit</button>
                     </div>
                 </div>
@@ -618,8 +652,8 @@
             <h6 class="text-info mb-2">Recent Submissions</h6>
             <div class="table-responsive">
                 <table class="table table-dark table-sm align-middle mb-0">
-                    <thead><tr><th>Submitted</th><th>Type</th><th>Value</th><th>Visibility</th><th>Status</th><th></th></tr></thead>
-                    <tbody id="sandboxSubmissionsBody"><tr><td colspan="6" class="text-center text-muted py-3">Loading&hellip;</td></tr></tbody>
+                    <thead><tr><th>Submitted</th><th>Source</th><th>Type</th><th>Value</th><th>Visibility</th><th>Status</th><th></th></tr></thead>
+                    <tbody id="sandboxSubmissionsBody"><tr><td colspan="7" class="text-center text-muted py-3">Loading&hellip;</td></tr></tbody>
                 </table>
             </div>
         </div>
@@ -2396,7 +2430,12 @@ function enrichTierBadge(tier) {
     return '';
 }
 
-// ---- Sandbox / detonation (urlscan.io) ----
+// ---- Sandbox / detonation (urlscan.io, filescan.io, Hybrid Analysis) ----
+
+// Mirrors app.py's SANDBOX_SOURCE_CATALOG -- label + settings key per source, so the
+// key-save table and the submission rows' source badge both read from one place
+// rather than three separate hardcoded strings drifting apart.
+const SANDBOX_SOURCE_LABELS = {urlscan: 'urlscan.io', filescan: 'filescan.io', hybrid_analysis: 'Hybrid Analysis'};
 
 function sandboxStatusBadge(sub) {
     if (sub.status === 'pending') return '<span class="badge bg-info text-dark"><i class="fa-solid fa-spinner fa-spin me-1"></i>Pending</span>';
@@ -2414,11 +2453,12 @@ function sandboxSubmissionRow(sub) {
     const screenshot = sub.screenshot_url ? `<br><img src="${escAttr(sub.screenshot_url)}" style="max-width:200px; border:1px solid #444;" class="mt-1">` : '';
     return `<tr id="sandboxRow${sub.id}">
         <td class="small text-nowrap">${escHtml(sub.submitted_at || '')}</td>
+        <td class="small">${escHtml(SANDBOX_SOURCE_LABELS[sub.source] || sub.source)}</td>
         <td><span class="badge bg-secondary">${escHtml(sub.submission_type)}</span></td>
         <td>${valueCell}${screenshot}</td>
         <td class="small">${escHtml(sub.visibility || '')}</td>
         <td>${sandboxStatusBadge(sub)}${reportLink}${sub.status === 'error' ? ` <span class="text-danger small">${escHtml(sub.summary || '')}</span>` : ''}</td>
-        <td><button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove this record (the report stays on urlscan.io)" onclick="deleteSandboxSubmission(${sub.id})"><i class="fa-solid fa-xmark"></i></button></td>
+        <td><button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove this record (the report stays on the sandbox provider's own site)" onclick="deleteSandboxSubmission(${sub.id})"><i class="fa-solid fa-xmark"></i></button></td>
     </tr>`;
 }
 
@@ -2426,38 +2466,46 @@ function renderSandboxSubmissions(rows) {
     const tbody = document.getElementById('sandboxSubmissionsBody');
     if (!tbody) return;
     if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">No sandbox submissions yet.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No sandbox submissions yet.</td></tr>';
         return;
     }
     tbody.innerHTML = rows.map(sandboxSubmissionRow).join('');
     rows.filter(r => r.status === 'pending').forEach(r => pollSandboxSubmission(r.id));
 }
 
-// urlscan.io isn't a registered analyzer (analyzers.py's ANALYZERS list) -- it's a
-// sandbox/detonation source, so it never appears in the analyzers table's own key-save
-// UI. Reuses the same /api/settings/enrichment route (urlscan_api_key is already part
-// of ENRICHMENT_SETTINGS_KEYS) with the same masked-placeholder convention.
-function loadSandboxApiKey() {
-    const input = document.getElementById('sandboxApiKeyInput');
-    if (!input) return; // non-admin, section not rendered
+// None of the 3 sandbox sources are registered analyzers (analyzers.py's ANALYZERS
+// list) -- they never appear in the Live Enrichment Sources table's own key-save UI.
+// Reuses the same /api/settings/enrichment route (each source's *_api_key is already
+// part of ENRICHMENT_SETTINGS_KEYS) with the same masked-placeholder convention, one
+// input per source rather than one swapping field.
+const SANDBOX_SETTINGS_KEY = {urlscan: 'urlscan_api_key', filescan: 'filescan_api_key', hybrid_analysis: 'hybrid_analysis_api_key'};
+
+function loadSandboxApiKeys() {
+    const anyInput = document.getElementById('sandboxApiKeyInput_urlscan');
+    if (!anyInput) return; // non-admin, section not rendered
     fetch('/api/settings/enrichment').then(r => r.json()).then(data => {
-        input.value = data.urlscan_api_key || '';
-        input.placeholder = data.urlscan_api_key ? '' : 'Not configured';
-    }).catch(err => console.error('Error loading urlscan.io key:', err));
+        Object.entries(SANDBOX_SETTINGS_KEY).forEach(([source, settingsKey]) => {
+            const input = document.getElementById(`sandboxApiKeyInput_${source}`);
+            if (!input) return;
+            input.value = data[settingsKey] || '';
+            input.placeholder = data[settingsKey] ? '' : 'Not configured';
+        });
+    }).catch(err => console.error('Error loading sandbox API keys:', err));
 }
 
-async function saveSandboxApiKey() {
-    const input = document.getElementById('sandboxApiKeyInput');
-    if (!input) return;
+async function saveSandboxApiKey(source) {
+    const input = document.getElementById(`sandboxApiKeyInput_${source}`);
+    const settingsKey = SANDBOX_SETTINGS_KEY[source];
+    if (!input || !settingsKey) return;
     try {
         const res = await fetch('/api/settings/enrichment', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({urlscan_api_key: input.value})
+            body: JSON.stringify({[settingsKey]: input.value})
         });
         const data = await res.json();
         if (!res.ok) { toast(data.error || 'Failed to save key.', 'danger'); return; }
         toast('Key saved.', 'success');
-        loadSandboxApiKey();
+        loadSandboxApiKeys();
     } catch (e) {
         toast('Error saving key: ' + e, 'danger');
     }
@@ -2467,7 +2515,7 @@ function loadSandboxSubmissions() {
     fetch('/api/sandbox').then(r => r.json()).then(rows => renderSandboxSubmissions(rows || []))
         .catch(err => {
             console.error('Error loading sandbox submissions:', err);
-            renderLoadError('sandboxSubmissionsBody', 6, 'Failed to load sandbox submissions.');
+            renderLoadError('sandboxSubmissionsBody', 7, 'Failed to load sandbox submissions.');
         });
 }
 
@@ -2492,6 +2540,7 @@ function pollSandboxSubmission(id) {
 async function submitSandboxUrl(prefillUrl, caseId) {
     const urlInput = document.getElementById('sandboxUrlInput');
     const visSelect = document.getElementById('sandboxVisibility');
+    const sourceSelect = document.getElementById('sandboxSource');
     const msgEl = document.getElementById('sandboxSubmitMsg');
     const url = (typeof prefillUrl === 'string' ? prefillUrl : urlInput.value).trim();
     if (!url) { msgEl.className = 'small mt-2 text-danger'; msgEl.innerText = 'Enter a URL to submit.'; msgEl.style.display = 'block'; return; }
@@ -2499,7 +2548,7 @@ async function submitSandboxUrl(prefillUrl, caseId) {
     msgEl.innerText = 'Submitting...';
     msgEl.style.display = 'block';
     try {
-        const body = {type: 'url', value: url, visibility: visSelect.value};
+        const body = {type: 'url', value: url, visibility: visSelect.value, source: sourceSelect ? sourceSelect.value : 'urlscan'};
         if (caseId) body.case_id = caseId;
         const res = await fetch('/api/sandbox/submit', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
         const data = await res.json();
@@ -2555,7 +2604,7 @@ async function runIocEnrich() {
 
 // Maps each key-requiring analyzer (analyzers.py's ANALYZERS) to the settings blob's
 // key name -- rather than changing /api/settings/enrichment's shape per caller.
-const ANALYZER_SETTINGS_KEY = { abuseipdb: 'abuseipdb_api_key', virustotal: 'virustotal_api_key', urlhaus: 'urlhaus_api_key', ipqualityscore: 'ipqualityscore_api_key', censys: 'censys_api_key' };
+const ANALYZER_SETTINGS_KEY = { abuseipdb: 'abuseipdb_api_key', virustotal: 'virustotal_api_key', urlhaus: 'urlhaus_api_key', malwarebazaar: 'malwarebazaar_api_key', ipqualityscore: 'ipqualityscore_api_key', censys: 'censys_api_key' };
 
 async function saveAnalyzerKey(analyzerKey) {
     const input = document.getElementById(`analyzerKeyInput_${analyzerKey}`);
@@ -4258,6 +4307,6 @@ loadCveRecords();
 loadAtomicTests();
 loadAtomicRuns();
 loadSandboxSubmissions();
-loadSandboxApiKey();
+loadSandboxApiKeys();
 </script>
 {% endblock %}
