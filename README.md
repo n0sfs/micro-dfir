@@ -5,10 +5,14 @@ A Complete Edge Security Appliance integrating:
     parser editor and a wizard for importing historical logs (CSV/NDJSON/JSON) from
     other SIEMs, kept in their own searchable table, isolated from live detection
 2.  **EDR:** Custom Windows/Linux agents (remote response actions, live triage)
-3.  **UEBA:** DuckDB Behavioral Models
+3.  **UEBA:** DuckDB Behavioral Models — volume/rarity-based anomaly detection plus
+    beacon/C2-callback regularity scoring (coefficient-of-variation on Sysmon network
+    connections)
 4.  **SOAR:** Automated response playbooks, chained actions triggered by case lifecycle events (create/status/queue/assignee changes)
 5.  **Threat Intel:** TAXII 2.1 STIX Caching & ThreatFox Integration
 6.  **Coverage:** MITRE ATT&CK, compliance framework, and fleet vulnerability coverage in one place — a shared gap/inactive/active/validated tier model applied across all three
+7.  **IR Runbooks:** A documented-procedure library paired with tabletop-exercise
+    tracking — what's been rehearsed, what hasn't, and a dedicated PDF report
 
 ## Deployment
 `sudo bash install.sh`
@@ -34,7 +38,7 @@ reinstall needed.
 ## Access control
 
 Access is governed by named permissions, not a fixed rank ladder — a role is
-just a set of permission keys drawn from a ~21-key registry spanning every
+just a set of permission keys drawn from a ~23-key registry spanning every
 gated app area (Cases, Log Search, Detection Rules, UEBA, Threat Intel,
 EDR/Agents, SOAR, Settings). Admins manage roles from Settings > Security >
 User Groups: view what each role can access, edit any role's permissions, or
