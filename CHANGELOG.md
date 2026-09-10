@@ -10,6 +10,20 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-09
 
+### Nav cleanup: fold IR Runbooks into Cases as a sibling tab
+
+The left sidebar had grown to 11 top-level items; IR Runbooks (added earlier this
+session) was Cases-adjacent content sitting in its own slot for no strong reason, unlike
+every other item (SIEM, EDR, UEBA, Threat Intel, SOAR, Log Pipeline), which represents a
+genuinely distinct workflow this app has deliberately kept separate. Folded IR Runbooks
+into Cases as a flattened 3-tab page (Cases | Runbook Library | Tabletop Exercises) —
+`templates/runbooks.html` deleted, its markup/JS merged into `templates/cases.html`
+(duplicate `escHtml`/`renderLoadError` dropped in favor of Cases' own copies,
+`switchRunbookTab` replaced by a unified `switchCasesTab`). `cases_page()` now accepts
+`?tab=`; the old `/runbooks` route redirects to `/cases?tab=library` (or `?tab=exercises`)
+so existing bookmarks/links keep working instead of hitting a dead page. Sidebar is back
+to 10 items.
+
 ### New: Click-through drill-down on the two dashboard trend charts
 
 Closes the gap explicitly left open when 3 other dashboard charts got click-through

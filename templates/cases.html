@@ -11,86 +11,129 @@
     <div class="page-header d-flex justify-content-between align-items-start flex-wrap gap-2">
         <div>
             <h2><i class="fa-solid fa-folder-open me-2"></i>Cases</h2>
-            <p>Group related alerts and UEBA anomalies together while you work an incident.</p>
+            <p>Group related alerts and UEBA anomalies together, and reference IR runbooks and tabletop exercise history alongside them.</p>
         </div>
-        <div class="d-flex gap-2">
+    </div>
+
+    <ul class="nav nav-tabs border-secondary mb-3" id="casesTabs">
+        <li class="nav-item"><button type="button" class="nav-link active" id="tabBtnCases" onclick="switchCasesTab('cases')"><i class="fa-solid fa-folder-open me-1"></i>Cases</button></li>
+        <li class="nav-item"><button type="button" class="nav-link" id="tabBtnLibrary" onclick="switchCasesTab('library')"><i class="fa-solid fa-book me-1"></i>Runbook Library</button></li>
+        <li class="nav-item"><button type="button" class="nav-link" id="tabBtnExercises" onclick="switchCasesTab('exercises')"><i class="fa-solid fa-users-viewfinder me-1"></i>Tabletop Exercises</button></li>
+    </ul>
+
+    <!-- Cases pane -->
+    <div id="paneCases">
+        <div class="d-flex justify-content-end mb-3">
             <button type="button" class="btn btn-outline-primary" onclick="showNewCaseModal()"><i class="fa-solid fa-plus me-1"></i>New Case</button>
         </div>
-    </div>
 
-    <div class="row g-3 mb-3">
-        <div class="col-6 col-lg-3">
-            <div class="stat-tile">
-                <div class="stat-label">Open Cases</div>
-                <div class="stat-value" id="caseStatOpen">&hellip;</div>
-            </div>
-        </div>
-        <div class="col-6 col-lg-3">
-            <div class="stat-tile">
-                <div class="stat-label">SLA Breaches</div>
-                <div class="stat-value" id="caseStatSlaBreaches" style="color:var(--bs-danger, #dc3545);">&hellip;</div>
-            </div>
-        </div>
-        <div class="col-6 col-lg-3">
-            <div class="stat-tile">
-                <div class="stat-label">Closed (30d)</div>
-                <div class="stat-value" id="caseStatClosed">&hellip;</div>
-            </div>
-        </div>
-        <div class="col-6 col-lg-3">
-            <div class="stat-tile">
-                <div class="stat-label">Avg Time to Close</div>
-                <div class="stat-value" id="caseStatAvgClose" style="font-size:1.3rem;">&hellip;</div>
-            </div>
-        </div>
-    </div>
-
-    <div class="card bg-dark border-secondary">
-        <div class="card-header border-secondary d-flex justify-content-between align-items-center flex-wrap gap-2">
-            <span><i class="fa-solid fa-list me-2"></i>All Cases</span>
-            <div class="d-flex align-items-center gap-2 flex-wrap">
-                <div class="form-check form-switch mb-0">
-                    <input class="form-check-input" type="checkbox" id="myQueuesOnlyToggle" onchange="renderCases()">
-                    <label class="form-check-label small" for="myQueuesOnlyToggle">My queues only</label>
-                </div>
-                <select id="queueFilterSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:180px;" onchange="renderCases()">
-                    <option value="">All queues</option>
-                </select>
-                <div class="btn-group btn-group-sm" role="group">
-                    <button type="button" class="btn btn-outline-secondary active" id="caseFilterAll" onclick="setCaseFilter('all')">All</button>
-                    <button type="button" class="btn btn-outline-secondary" id="caseFilterOpen" onclick="setCaseFilter('open')">Open</button>
-                    <button type="button" class="btn btn-outline-secondary" id="caseFilterClosed" onclick="setCaseFilter('closed')">Closed</button>
+        <div class="row g-3 mb-3">
+            <div class="col-6 col-lg-3">
+                <div class="stat-tile">
+                    <div class="stat-label">Open Cases</div>
+                    <div class="stat-value" id="caseStatOpen">&hellip;</div>
                 </div>
             </div>
+            <div class="col-6 col-lg-3">
+                <div class="stat-tile">
+                    <div class="stat-label">SLA Breaches</div>
+                    <div class="stat-value" id="caseStatSlaBreaches" style="color:var(--bs-danger, #dc3545);">&hellip;</div>
+                </div>
+            </div>
+            <div class="col-6 col-lg-3">
+                <div class="stat-tile">
+                    <div class="stat-label">Closed (30d)</div>
+                    <div class="stat-value" id="caseStatClosed">&hellip;</div>
+                </div>
+            </div>
+            <div class="col-6 col-lg-3">
+                <div class="stat-tile">
+                    <div class="stat-label">Avg Time to Close</div>
+                    <div class="stat-value" id="caseStatAvgClose" style="font-size:1.3rem;">&hellip;</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card bg-dark border-secondary">
+            <div class="card-header border-secondary d-flex justify-content-between align-items-center flex-wrap gap-2">
+                <span><i class="fa-solid fa-list me-2"></i>All Cases</span>
+                <div class="d-flex align-items-center gap-2 flex-wrap">
+                    <div class="form-check form-switch mb-0">
+                        <input class="form-check-input" type="checkbox" id="myQueuesOnlyToggle" onchange="renderCases()">
+                        <label class="form-check-label small" for="myQueuesOnlyToggle">My queues only</label>
+                    </div>
+                    <select id="queueFilterSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:180px;" onchange="renderCases()">
+                        <option value="">All queues</option>
+                    </select>
+                    <div class="btn-group btn-group-sm" role="group">
+                        <button type="button" class="btn btn-outline-secondary active" id="caseFilterAll" onclick="setCaseFilter('all')">All</button>
+                        <button type="button" class="btn btn-outline-secondary" id="caseFilterOpen" onclick="setCaseFilter('open')">Open</button>
+                        <button type="button" class="btn btn-outline-secondary" id="caseFilterClosed" onclick="setCaseFilter('closed')">Closed</button>
+                    </div>
+                </div>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-dark table-hover mb-0 align-middle" id="casesTable">
+                    <thead>
+                        <tr>
+                            <th class="ps-3">Title</th>
+                            <th class="rule-th"><div class="th-inner"><span>Severity</span><div class="dropdown">
+                                <button type="button" class="th-icon-btn" id="filterBtnSeverity" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuSeverity" style="min-width:190px;"></div>
+                            </div></div></th>
+                            <th>Status</th>
+                            <th>Queue</th>
+                            <th class="rule-th"><div class="th-inner"><span>TLP</span><div class="dropdown">
+                                <button type="button" class="th-icon-btn" id="filterBtnTlp" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuTlp" style="min-width:190px;"></div>
+                            </div></div></th>
+                            <th class="rule-th"><div class="th-inner"><span>Assignee</span><div class="dropdown">
+                                <button type="button" class="th-icon-btn" id="filterBtnAssignee" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                                <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuAssignee" style="min-width:190px;"></div>
+                            </div></div></th>
+                            <th>Items</th>
+                            <th>Tasks</th>
+                            <th>Created</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="casesTableBody">
+                        <tr><td colspan="10" class="text-center text-muted py-4">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Runbook Library pane -->
+    <div id="paneLibrary" style="display:none;">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <p class="text-muted small mb-0">Reference procedures for common incident types &mdash; read during a real incident, rehearsed via a tabletop exercise.</p>
+            {% if has_permission('cases.runbooks.manage') %}
+            <button class="btn btn-sm btn-outline-success" onclick="openRunbookForm()"><i class="fa-solid fa-plus me-1"></i>New Runbook</button>
+            {% endif %}
+        </div>
+        <div id="runbookList" class="row g-3"><div class="col-12 text-center text-muted py-4">Loading&hellip;</div></div>
+    </div>
+
+    <!-- Tabletop Exercises pane -->
+    <div id="paneExercises" style="display:none;">
+        <div class="row g-3 mb-3">
+            <div class="col-6 col-lg-3"><div class="stat-tile"><div class="stat-label">Total Exercises</div><div class="stat-value" id="exStatTotal">&hellip;</div></div></div>
+            <div class="col-6 col-lg-3"><div class="stat-tile"><div class="stat-label">Completed</div><div class="stat-value" id="exStatCompleted">&hellip;</div></div></div>
+            <div class="col-6 col-lg-3"><div class="stat-tile"><div class="stat-label">Planned</div><div class="stat-value" id="exStatPlanned">&hellip;</div></div></div>
+            <div class="col-6 col-lg-3"><div class="stat-tile"><div class="stat-label">Runbooks Never Tested</div><div class="stat-value" id="exStatNeverTested">&hellip;</div></div></div>
+        </div>
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <p class="text-muted small mb-0">A log of practice drills &mdash; what was tested, what worked, what didn't.</p>
+            {% if has_permission('cases.runbooks.manage') %}
+            <button class="btn btn-sm btn-outline-success" onclick="openExerciseForm()"><i class="fa-solid fa-plus me-1"></i>Log Exercise</button>
+            {% endif %}
         </div>
         <div class="table-responsive">
-            <table class="table table-dark table-hover mb-0 align-middle" id="casesTable">
-                <thead>
-                    <tr>
-                        <th class="ps-3">Title</th>
-                        <th class="rule-th"><div class="th-inner"><span>Severity</span><div class="dropdown">
-                            <button type="button" class="th-icon-btn" id="filterBtnSeverity" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
-                            <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuSeverity" style="min-width:190px;"></div>
-                        </div></div></th>
-                        <th>Status</th>
-                        <th>Queue</th>
-                        <th class="rule-th"><div class="th-inner"><span>TLP</span><div class="dropdown">
-                            <button type="button" class="th-icon-btn" id="filterBtnTlp" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
-                            <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuTlp" style="min-width:190px;"></div>
-                        </div></div></th>
-                        <th class="rule-th"><div class="th-inner"><span>Assignee</span><div class="dropdown">
-                            <button type="button" class="th-icon-btn" id="filterBtnAssignee" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
-                            <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuAssignee" style="min-width:190px;"></div>
-                        </div></div></th>
-                        <th>Items</th>
-                        <th>Tasks</th>
-                        <th>Created</th>
-                        <th></th>
-                    </tr>
-                </thead>
-                <tbody id="casesTableBody">
-                    <tr><td colspan="10" class="text-center text-muted py-4">Loading…</td></tr>
-                </tbody>
+            <table class="table table-dark table-hover table-sm align-middle">
+                <thead><tr><th>Title</th><th>Runbook</th><th>Status</th><th>Scheduled</th><th>Completed</th><th>Facilitator</th><th class="text-end">Action</th></tr></thead>
+                <tbody id="exerciseTableBody"><tr><td colspan="7" class="text-center text-muted py-4">Loading&hellip;</td></tr></tbody>
             </table>
         </div>
     </div>
@@ -187,6 +230,137 @@
     </div>
 </div>
 
+<!-- Runbook view modal -->
+<div class="modal fade" id="runbookViewModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content bg-dark text-light border-secondary">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title" id="runbookViewTitle">Runbook</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="runbookViewBody"></div>
+        </div>
+    </div>
+</div>
+
+<!-- Runbook add/edit modal -->
+<div class="modal fade" id="runbookModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content bg-dark text-light border-secondary">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title" id="runbookModalTitle">New Runbook</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row g-2 mb-2">
+                    <div class="col-md-6">
+                        <label class="form-label small text-muted mb-1" for="rbName">Name</label>
+                        <input type="text" id="rbName" class="form-control form-control-sm bg-dark text-light border-secondary" maxlength="150">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted mb-1" for="rbCategory">Category</label>
+                        <input type="text" id="rbCategory" class="form-control form-control-sm bg-dark text-light border-secondary" list="rbCategoryOptions" maxlength="60">
+                        <datalist id="rbCategoryOptions">
+                            <option value="Ransomware"><option value="Phishing / BEC"><option value="Malware">
+                            <option value="Compromised Account"><option value="Insider Threat"><option value="Data Breach"><option value="DDoS">
+                        </datalist>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted mb-1" for="rbOwner">Owner</label>
+                        <input type="text" id="rbOwner" class="form-control form-control-sm bg-dark text-light border-secondary" maxlength="80">
+                    </div>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label small text-muted mb-1" for="rbDescription">Description</label>
+                    <textarea id="rbDescription" class="form-control form-control-sm bg-dark text-light border-secondary" rows="2"></textarea>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label small text-muted mb-1" for="rbLastReviewed">Last Reviewed</label>
+                    <input type="date" id="rbLastReviewed" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:200px;">
+                </div>
+                <hr class="border-secondary">
+                <label class="form-label small text-muted mb-1">Steps</label>
+                <div id="rbStepsList"></div>
+                <button type="button" class="btn btn-sm btn-outline-secondary mt-1" onclick="addRunbookStepRow()"><i class="fa-solid fa-plus me-1"></i>Add Step</button>
+            </div>
+            <div class="modal-footer border-secondary">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-success btn-sm" onclick="saveRunbook()">Save Runbook</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Exercise add/edit modal -->
+<div class="modal fade" id="exerciseModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content bg-dark text-light border-secondary">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title" id="exerciseModalTitle">Log Tabletop Exercise</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row g-2 mb-2">
+                    <div class="col-md-7">
+                        <label class="form-label small text-muted mb-1" for="exTitle">Title</label>
+                        <input type="text" id="exTitle" class="form-control form-control-sm bg-dark text-light border-secondary" maxlength="150">
+                    </div>
+                    <div class="col-md-5">
+                        <label class="form-label small text-muted mb-1" for="exRunbook">Runbook Tested</label>
+                        <select id="exRunbook" class="form-select form-select-sm bg-dark text-light border-secondary">
+                            <option value="">(none)</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label small text-muted mb-1" for="exScenario">Scenario</label>
+                    <textarea id="exScenario" class="form-control form-control-sm bg-dark text-light border-secondary" rows="2" placeholder="What situation was simulated?"></textarea>
+                </div>
+                <div class="row g-2 mb-2">
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted mb-1" for="exStatus">Status</label>
+                        <select id="exStatus" class="form-select form-select-sm bg-dark text-light border-secondary">
+                            <option value="planned">Planned</option>
+                            <option value="completed">Completed</option>
+                            <option value="cancelled">Cancelled</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted mb-1" for="exScheduledDate">Scheduled Date</label>
+                        <input type="date" id="exScheduledDate" class="form-control form-control-sm bg-dark text-light border-secondary">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted mb-1" for="exCompletedDate">Completed Date</label>
+                        <input type="date" id="exCompletedDate" class="form-control form-control-sm bg-dark text-light border-secondary">
+                    </div>
+                </div>
+                <div class="row g-2 mb-2">
+                    <div class="col-md-6">
+                        <label class="form-label small text-muted mb-1" for="exFacilitator">Facilitator</label>
+                        <input type="text" id="exFacilitator" class="form-control form-control-sm bg-dark text-light border-secondary" maxlength="80">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small text-muted mb-1" for="exParticipants">Participants</label>
+                        <input type="text" id="exParticipants" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Names/roles, comma-separated">
+                    </div>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label small text-muted mb-1" for="exFindings">Findings / Gaps Identified</label>
+                    <textarea id="exFindings" class="form-control form-control-sm bg-dark text-light border-secondary" rows="3" placeholder="What went well? What gaps did this exercise reveal?"></textarea>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label small text-muted mb-1" for="exActionItems">Action Items</label>
+                    <textarea id="exActionItems" class="form-control form-control-sm bg-dark text-light border-secondary" rows="3" placeholder="Follow-up work to close the gaps found"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer border-secondary">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-success btn-sm" onclick="saveExercise()">Save Exercise</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
 const CAN_DELETE_CASES = hasPermission('cases.delete');
 const CAN_EDR_RESPOND = hasPermission('edr.command.basic');
@@ -203,6 +377,14 @@ let newCaseModal;
 let caseSlaHours = 24;
 let knownAgentsByHost = {};
 let caseTimerInterval = null;
+const CASES_TABS = ['cases', 'library', 'exercises'];
+const CASES_TAB_KEY = 'microdfir_cases_active_tab';
+const CAN_MANAGE_RUNBOOKS = {{ 'true' if has_permission('cases.runbooks.manage') else 'false' }};
+const RUNBOOK_STATUS_BADGE = { planned: 'bg-info text-dark', completed: 'bg-success', cancelled: 'bg-secondary' };
+let runbookData = [];
+let exerciseData = [];
+let editingRunbookId = null;
+let editingExerciseId = null;
 
 function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1149,6 +1331,243 @@ function showDetailView() {
     document.getElementById('caseDetailView').style.display = '';
 }
 
+// Cases / Runbook Library / Tabletop Exercises tab strip (casesListView only -- hidden
+// entirely while a single case is open in caseDetailView, same as before this merge).
+function switchCasesTab(tab) {
+    if (!CASES_TABS.includes(tab)) tab = 'cases';
+    CASES_TABS.forEach(t => {
+        const cap = t.charAt(0).toUpperCase() + t.slice(1);
+        document.getElementById('tabBtn' + cap).classList.toggle('active', t === tab);
+        document.getElementById('pane' + cap).style.display = (t === tab) ? 'block' : 'none';
+    });
+    try { localStorage.setItem(CASES_TAB_KEY, tab); } catch (e) {}
+    const url = new URL(window.location);
+    url.searchParams.set('tab', tab);
+    window.history.replaceState({}, '', url);
+    if (tab === 'exercises' && !exerciseData.length) loadExercises();
+}
+
+function loadRunbooks() {
+    return fetch('/api/runbooks').then(r => { if (!r.ok) throw new Error('load failed'); return r.json(); }).then(data => {
+        runbookData = data || [];
+        renderRunbookList();
+        populateExerciseRunbookSelect();
+        updateExerciseStats();
+    }).catch(() => {
+        document.getElementById('runbookList').innerHTML = '<div class="col-12 text-center text-danger small py-3"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load runbooks. <a href="#" onclick="location.reload(); return false;">Reload</a></div>';
+    });
+}
+
+function renderRunbookList() {
+    const el = document.getElementById('runbookList');
+    if (!runbookData.length) {
+        el.innerHTML = '<div class="col-12 text-center text-muted py-4">No runbooks yet.</div>';
+        return;
+    }
+    el.innerHTML = runbookData.map(r => `
+        <div class="col-md-6 col-lg-4">
+            <div class="card bg-dark border-secondary h-100">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <h6 class="mb-1">${escHtml(r.name)}</h6>
+                        ${r.category ? `<span class="badge bg-secondary">${escHtml(r.category)}</span>` : ''}
+                    </div>
+                    <p class="small text-muted mb-2">${escHtml(r.description || '')}</p>
+                    <p class="small mb-1"><i class="fa-solid fa-list-check me-1 text-muted"></i>${r.steps.length} step${r.steps.length === 1 ? '' : 's'}</p>
+                    <p class="small mb-1"><i class="fa-solid fa-flask me-1 text-muted"></i>${r.exercise_count ? `Tested ${r.exercise_count}x, last ${escHtml(r.last_tested_date || 'n/a')}` : '<span class="text-warning">Never tested</span>'}</p>
+                    ${r.owner ? `<p class="small text-muted mb-1"><i class="fa-solid fa-user me-1"></i>${escHtml(r.owner)}</p>` : ''}
+                </div>
+                <div class="card-footer border-secondary bg-dark d-flex justify-content-between">
+                    <button class="btn btn-sm btn-outline-info" onclick="viewRunbook(${r.id})"><i class="fa-solid fa-eye me-1"></i>View</button>
+                    ${CAN_MANAGE_RUNBOOKS ? `<span>
+                        <button class="btn btn-sm btn-outline-secondary" onclick="openRunbookForm(${r.id})" title="Edit"><i class="fa-solid fa-pen"></i></button>
+                        <button class="btn btn-sm btn-outline-danger" onclick="deleteRunbook(${r.id}, '${escHtml(r.name).replace(/'/g, "\\'")}')" title="Delete"><i class="fa-solid fa-trash"></i></button>
+                    </span>` : ''}
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function viewRunbook(id) {
+    const r = runbookData.find(x => x.id === id);
+    if (!r) return;
+    const stepsHtml = r.steps.map(s => `<li class="mb-2"><strong>${escHtml(s.title)}</strong>${s.instructions ? `<br><span class="text-muted small">${escHtml(s.instructions)}</span>` : ''}</li>`).join('');
+    document.getElementById('runbookViewTitle').innerText = r.name;
+    document.getElementById('runbookViewBody').innerHTML = `<p class="text-muted">${escHtml(r.description || '')}</p><ol>${stepsHtml || '<li class="text-muted">No steps defined.</li>'}</ol>`;
+    new bootstrap.Modal(document.getElementById('runbookViewModal')).show();
+}
+
+function openRunbookForm(id) {
+    editingRunbookId = id || null;
+    const r = id ? runbookData.find(x => x.id === id) : null;
+    document.getElementById('runbookModalTitle').innerText = id ? 'Edit Runbook' : 'New Runbook';
+    document.getElementById('rbName').value = r ? r.name : '';
+    document.getElementById('rbCategory').value = r ? (r.category || '') : '';
+    document.getElementById('rbOwner').value = r ? (r.owner || '') : '';
+    document.getElementById('rbDescription').value = r ? (r.description || '') : '';
+    document.getElementById('rbLastReviewed').value = r ? (r.last_reviewed_at || '') : '';
+    document.getElementById('rbStepsList').innerHTML = '';
+    const steps = (r && r.steps.length) ? r.steps : [{title: '', instructions: ''}];
+    steps.forEach(s => addRunbookStepRow(s.title, s.instructions));
+    new bootstrap.Modal(document.getElementById('runbookModal')).show();
+}
+
+function addRunbookStepRow(title, instructions) {
+    const wrap = document.getElementById('rbStepsList');
+    const row = document.createElement('div');
+    row.className = 'border border-secondary rounded p-2 mb-2 step-row';
+    row.innerHTML = `
+        <div class="d-flex gap-2 mb-1">
+            <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary step-title" placeholder="Step title" value="${escHtml(title || '')}">
+            <button type="button" class="btn btn-sm btn-outline-danger" onclick="this.closest('.step-row').remove()"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <textarea class="form-control form-control-sm bg-dark text-light border-secondary step-instructions" rows="2" placeholder="Instructions">${escHtml(instructions || '')}</textarea>
+    `;
+    wrap.appendChild(row);
+}
+
+function saveRunbook() {
+    const name = document.getElementById('rbName').value.trim();
+    if (!name) { toast('Name is required.', 'danger'); return; }
+    const steps = Array.from(document.querySelectorAll('#rbStepsList .step-row')).map(row => ({
+        title: row.querySelector('.step-title').value.trim(),
+        instructions: row.querySelector('.step-instructions').value.trim(),
+    })).filter(s => s.title);
+    const payload = {
+        name, category: document.getElementById('rbCategory').value.trim(),
+        owner: document.getElementById('rbOwner').value.trim(),
+        description: document.getElementById('rbDescription').value.trim(),
+        last_reviewed_at: document.getElementById('rbLastReviewed').value || null,
+        steps,
+    };
+    const url = editingRunbookId ? `/api/runbooks/${editingRunbookId}` : '/api/runbooks';
+    const method = editingRunbookId ? 'PUT' : 'POST';
+    fetch(url, { method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) })
+        .then(r => r.json().then(d => ({ok: r.ok, d})))
+        .then(({ok, d}) => {
+            if (!ok) { toast(d.error || 'Save failed.', 'danger'); return; }
+            bootstrap.Modal.getInstance(document.getElementById('runbookModal')).hide();
+            toast('Runbook saved.', 'success');
+            loadRunbooks();
+        }).catch(() => toast('Save failed.', 'danger'));
+}
+
+async function deleteRunbook(id, name) {
+    if (!(await confirmDialog(`Delete runbook "${name}"? Any tabletop exercises that tested it will keep their history but no longer link to it.`, {title: 'Delete runbook', danger: true, confirmLabel: 'Delete'}))) return;
+    fetch(`/api/runbooks/${id}`, { method: 'DELETE' }).then(r => r.json()).then(d => {
+        if (d.error) { toast(d.error, 'danger'); return; }
+        toast('Runbook deleted.', 'success');
+        loadRunbooks();
+    }).catch(() => toast('Delete failed.', 'danger'));
+}
+
+function populateExerciseRunbookSelect() {
+    const sel = document.getElementById('exRunbook');
+    const current = sel.value;
+    sel.innerHTML = '<option value="">(none)</option>' + runbookData.map(r => `<option value="${r.id}">${escHtml(r.name)}</option>`).join('');
+    sel.value = current;
+}
+
+function loadExercises() {
+    return fetch('/api/tabletop-exercises').then(r => { if (!r.ok) throw new Error('load failed'); return r.json(); }).then(data => {
+        exerciseData = data || [];
+        renderExerciseTable();
+        updateExerciseStats();
+    }).catch(() => renderLoadError('exerciseTableBody', 7, 'Failed to load exercises.'));
+}
+
+function updateExerciseStats() {
+    document.getElementById('exStatTotal').innerText = exerciseData.length;
+    document.getElementById('exStatCompleted').innerText = exerciseData.filter(e => e.status === 'completed').length;
+    document.getElementById('exStatPlanned').innerText = exerciseData.filter(e => e.status === 'planned').length;
+    const neverTested = runbookData.filter(r => !r.exercise_count).length;
+    document.getElementById('exStatNeverTested').innerText = runbookData.length ? `${neverTested} / ${runbookData.length}` : '—';
+}
+
+function renderExerciseTable() {
+    const tbody = document.getElementById('exerciseTableBody');
+    if (!exerciseData.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">No tabletop exercises logged yet.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = exerciseData.map(e => `
+        <tr>
+            <td>${escHtml(e.title)}</td>
+            <td>${escHtml(e.runbook_name || '—')}</td>
+            <td><span class="badge ${RUNBOOK_STATUS_BADGE[e.status] || 'bg-secondary'}">${escHtml(e.status)}</span></td>
+            <td>${escHtml(e.scheduled_date || '')}</td>
+            <td>${escHtml(e.completed_date || '')}</td>
+            <td>${escHtml(e.facilitator || '')}</td>
+            <td class="text-end">
+                ${CAN_MANAGE_RUNBOOKS ? `
+                <button class="btn btn-sm btn-outline-secondary" onclick="openExerciseForm(${e.id})" title="Edit"><i class="fa-solid fa-pen"></i></button>
+                <button class="btn btn-sm btn-outline-danger" onclick="deleteExercise(${e.id}, '${escHtml(e.title).replace(/'/g, "\\'")}')" title="Delete"><i class="fa-solid fa-trash"></i></button>
+                ` : ''}
+            </td>
+        </tr>
+    `).join('');
+}
+
+function openExerciseForm(id) {
+    editingExerciseId = id || null;
+    const e = id ? exerciseData.find(x => x.id === id) : null;
+    document.getElementById('exerciseModalTitle').innerText = id ? 'Edit Exercise' : 'Log Tabletop Exercise';
+    document.getElementById('exTitle').value = e ? e.title : '';
+    populateExerciseRunbookSelect();
+    document.getElementById('exRunbook').value = e && e.runbook_id ? e.runbook_id : '';
+    document.getElementById('exScenario').value = e ? (e.scenario || '') : '';
+    document.getElementById('exStatus').value = e ? e.status : 'planned';
+    document.getElementById('exScheduledDate').value = e ? (e.scheduled_date || '') : '';
+    document.getElementById('exCompletedDate').value = e ? (e.completed_date || '') : '';
+    document.getElementById('exFacilitator').value = e ? (e.facilitator || '') : '';
+    document.getElementById('exParticipants').value = e ? (e.participants || '') : '';
+    document.getElementById('exFindings').value = e ? (e.findings || '') : '';
+    document.getElementById('exActionItems').value = e ? (e.action_items || '') : '';
+    new bootstrap.Modal(document.getElementById('exerciseModal')).show();
+}
+
+function saveExercise() {
+    const title = document.getElementById('exTitle').value.trim();
+    if (!title) { toast('Title is required.', 'danger'); return; }
+    const payload = {
+        title,
+        runbook_id: document.getElementById('exRunbook').value ? parseInt(document.getElementById('exRunbook').value, 10) : null,
+        scenario: document.getElementById('exScenario').value.trim(),
+        status: document.getElementById('exStatus').value,
+        scheduled_date: document.getElementById('exScheduledDate').value || null,
+        completed_date: document.getElementById('exCompletedDate').value || null,
+        facilitator: document.getElementById('exFacilitator').value.trim(),
+        participants: document.getElementById('exParticipants').value.trim(),
+        findings: document.getElementById('exFindings').value.trim(),
+        action_items: document.getElementById('exActionItems').value.trim(),
+    };
+    const url = editingExerciseId ? `/api/tabletop-exercises/${editingExerciseId}` : '/api/tabletop-exercises';
+    const method = editingExerciseId ? 'PUT' : 'POST';
+    fetch(url, { method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) })
+        .then(r => r.json().then(d => ({ok: r.ok, d})))
+        .then(({ok, d}) => {
+            if (!ok) { toast(d.error || 'Save failed.', 'danger'); return; }
+            bootstrap.Modal.getInstance(document.getElementById('exerciseModal')).hide();
+            toast('Exercise saved.', 'success');
+            loadExercises();
+            loadRunbooks();
+        }).catch(() => toast('Save failed.', 'danger'));
+}
+
+async function deleteExercise(id, title) {
+    if (!(await confirmDialog(`Delete exercise "${title}"? This cannot be undone.`, {title: 'Delete exercise', danger: true, confirmLabel: 'Delete'}))) return;
+    fetch(`/api/tabletop-exercises/${id}`, { method: 'DELETE' }).then(r => r.json()).then(d => {
+        if (d.error) { toast(d.error, 'danger'); return; }
+        toast('Exercise deleted.', 'success');
+        // A deleted exercise can change a runbook's exercise_count/last_tested_date --
+        // refresh runbookData too, or the "Runbooks Never Tested" stat and the Library
+        // tab's own "Tested Nx" text go stale until a full page reload.
+        loadExercises();
+        loadRunbooks();
+    }).catch(() => toast('Delete failed.', 'danger'));
+}
+
 // The case-detail tab strip is rebuilt from scratch on every case load (loadAndRenderCaseDetail
 // regenerates #caseDetailBody's whole innerHTML each time), so there's no state to persist
 // across cases -- always starts on the first tab (Tasks), matching the markup's own
@@ -1995,6 +2414,24 @@ function initFilterDropdowns() {
 
 document.addEventListener("DOMContentLoaded", function() {
     initFilterDropdowns();
+
+    // Runbook Library loads eagerly (cheap, and needed immediately if the saved/deep-linked
+    // tab is 'library') -- Tabletop Exercises stays lazy, loaded on first visit to that tab
+    // (see switchCasesTab), matching this page's established "load what's visible first" idiom.
+    loadRunbooks();
+
+    const queueParam = new URLSearchParams(window.location.search).get('queue');
+    const cidParam = new URLSearchParams(window.location.search).get('case');
+    let savedTab = '{{ active_tab }}';
+    // A queue/case deep link is always about the Cases tab specifically -- force it even
+    // if a stale localStorage value or the URL's own ?tab= says otherwise.
+    if (queueParam || cidParam) {
+        savedTab = 'cases';
+    } else if (!CASES_TABS.includes(savedTab)) {
+        try { savedTab = localStorage.getItem(CASES_TAB_KEY) || 'cases'; } catch (e) { savedTab = 'cases'; }
+    }
+    switchCasesTab(savedTab);
+
     // Queues load first (and are awaited) since the case-detail queue picker needs
     // allQueues populated before it can render -- relevant on a fresh page load that
     // deep-links straight into a case via /cases?case=<id>. SLA hours and known agents
@@ -2004,11 +2441,9 @@ document.addEventListener("DOMContentLoaded", function() {
         // Deep-link from the Dashboards "Open Cases by Queue" widget -- queueFilterSelect
         // is populated by loadCaseQueues() above, so its options exist by the time this
         // sets a value on it.
-        const queueParam = new URLSearchParams(window.location.search).get('queue');
         if (queueParam) document.getElementById('queueFilterSelect').value = queueParam;
         loadCases();
         loadCaseStatsTiles();
-        const cidParam = new URLSearchParams(window.location.search).get('case');
         if (cidParam) openCaseDetail(parseInt(cidParam, 10));
     });
 });
