@@ -331,9 +331,15 @@
                     <input type="text" id="ctDescription" class="form-control form-control-sm bg-dark text-light border-secondary">
                 </div>
                 <div class="mb-3">
-                    <label class="form-label small text-muted mb-1" for="ctPrefix">Case Number Prefix <span class="text-muted">(optional)</span></label>
-                    <input type="text" id="ctPrefix" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:200px;" placeholder="e.g. INC, PHISH" maxlength="10">
-                    <div class="form-text small">When set, every case created from this template gets an auto-generated case number like <code>PREFIX-2026-014</code> (sequential, resets each year) shown instead of the raw <code>#id</code>. Leave blank to keep the plain <code>#id</code> convention.</div>
+                    <label class="form-label small text-muted mb-1" for="ctNumberMode">Case Numbering <span class="text-muted">(optional)</span></label>
+                    <select id="ctNumberMode" class="form-select form-select-sm bg-dark text-light border-secondary mb-2" style="max-width:260px;" onchange="onCtNumberModeChange()">
+                        <option value="year">Year only (e.g. 2026-014)</option>
+                        <option value="custom" selected>Custom prefix&hellip;</option>
+                    </select>
+                    <div id="ctPrefixWrap">
+                        <input type="text" id="ctPrefix" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:200px;" placeholder="e.g. INC, PHISH" maxlength="10">
+                    </div>
+                    <div id="ctNumberModeHelp" class="form-text small">When a prefix is set, every case created from this template gets an auto-generated case number like <code>PREFIX-2026-014</code> (sequential, resets each year) shown instead of the raw <code>#id</code>. Leave the prefix blank to keep the plain <code>#id</code> convention -- or switch to "Year only" above for a number like <code>2026-014</code> with no template-specific text at all.</div>
                 </div>
 
                 <label class="form-label small text-muted mb-1">Tasks <span class="text-muted">(copied onto every case that applies this template)</span></label>
@@ -1011,7 +1017,7 @@ function renderCaseTemplatesTable() {
         <tr>
             <td class="ps-3 small">${escHtml(t.name)}</td>
             <td class="text-muted small">${escHtml(t.description || '')}</td>
-            <td class="small text-nowrap">${t.prefix ? `<code>${escHtml(t.prefix)}</code>` : '<span class="text-muted">&mdash;</span>'}</td>
+            <td class="small text-nowrap">${caseTemplateNumberingLabel(t)}</td>
             <td class="small text-nowrap">${t.tasks.length}</td>
             <td class="small text-nowrap">${t.fields.length}</td>
             <td class="text-end pe-3 text-nowrap">
@@ -1020,6 +1026,14 @@ function renderCaseTemplatesTable() {
             </td>
         </tr>
     `).join('');
+}
+
+// t.number_mode is always 'custom' or 'year' by the time it reaches the frontend --
+// api_case_templates' GET normalizes a legacy NULL row to 'custom' server-side, so
+// this never has to guess at a third state.
+function caseTemplateNumberingLabel(t) {
+    if (t.number_mode === 'year') return '<code>YYYY-#</code>';
+    return t.prefix ? `<code>${escHtml(t.prefix)}-YYYY-#</code>` : '<span class="text-muted">&mdash;</span>';
 }
 
 function addCaseTemplateTaskRow(title) {
@@ -1086,16 +1100,29 @@ function collectCaseTemplateFields() {
     }).filter(f => f.label);
 }
 
+// 'year' hides the free-text prefix field entirely (nothing to type -- the year IS
+// the whole prefix) and swaps the help text to match, mirroring
+// onCaseTemplateFieldTypeChange's own show/hide-by-mode pattern above.
+function onCtNumberModeChange() {
+    const isYear = document.getElementById('ctNumberMode').value === 'year';
+    document.getElementById('ctPrefixWrap').style.display = isYear ? 'none' : '';
+    document.getElementById('ctNumberModeHelp').innerHTML = isYear
+        ? 'Every case created from this template gets an auto-generated case number like <code>2026-014</code> (sequential, resets each year) shown instead of the raw <code>#id</code> -- no template-specific text, just the year.'
+        : 'When a prefix is set, every case created from this template gets an auto-generated case number like <code>PREFIX-2026-014</code> (sequential, resets each year) shown instead of the raw <code>#id</code>. Leave the prefix blank to keep the plain <code>#id</code> convention -- or switch to "Year only" above for a number like <code>2026-014</code> with no template-specific text at all.';
+}
+
 function showCaseTemplateModal() {
     document.getElementById('caseTemplateModalTitle').innerText = 'New Template';
     document.getElementById('ctId').value = '';
     document.getElementById('ctName').value = '';
     document.getElementById('ctDescription').value = '';
+    document.getElementById('ctNumberMode').value = 'custom';
     document.getElementById('ctPrefix').value = '';
     document.getElementById('ctError').style.display = 'none';
     document.getElementById('ctTasksList').innerHTML = '';
     document.getElementById('ctFieldsList').innerHTML = '';
     addCaseTemplateTaskRow('');
+    onCtNumberModeChange();
     if (!caseTemplateModal) caseTemplateModal = new bootstrap.Modal(document.getElementById('caseTemplateModal'));
     caseTemplateModal.show();
 }
@@ -1107,12 +1134,14 @@ function editCaseTemplate(tid) {
     document.getElementById('ctId').value = t.id;
     document.getElementById('ctName').value = t.name;
     document.getElementById('ctDescription').value = t.description || '';
+    document.getElementById('ctNumberMode').value = t.number_mode === 'year' ? 'year' : 'custom';
     document.getElementById('ctPrefix').value = t.prefix || '';
     document.getElementById('ctError').style.display = 'none';
     document.getElementById('ctTasksList').innerHTML = '';
     document.getElementById('ctFieldsList').innerHTML = '';
     (t.tasks.length ? t.tasks : ['']).forEach(addCaseTemplateTaskRow);
     t.fields.forEach(addCaseTemplateFieldRow);
+    onCtNumberModeChange();
     if (!caseTemplateModal) caseTemplateModal = new bootstrap.Modal(document.getElementById('caseTemplateModal'));
     caseTemplateModal.show();
 }
@@ -1124,6 +1153,7 @@ function saveCaseTemplate() {
     const payload = {
         name: document.getElementById('ctName').value.trim(),
         description: document.getElementById('ctDescription').value.trim(),
+        number_mode: document.getElementById('ctNumberMode').value,
         prefix: document.getElementById('ctPrefix').value.trim(),
         tasks: collectCaseTemplateTasks(),
         fields: collectCaseTemplateFields()
