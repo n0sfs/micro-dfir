@@ -10,6 +10,29 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-10
 
+### DFIR SME review, part 2: structured post-incident review, cross-host forensic timeline
+
+Follow-up to the same DFIR SME review's two larger findings, planned separately and now
+built: a post-incident review that produces tracked outcomes, and a chronological
+reconstruction of case activity across every tracked host (not just an audit log of
+changes to the case itself).
+
+- **Structured post-incident review** — `cases.pir_notes` (new JSON column) backs 3
+  fixed, NIST-800-61-Post-Incident-Activity-inspired sections (Detection & Response
+  Effectiveness / Gaps Identified / Recommended Improvements) rendered alongside the
+  existing Root Cause / Lessons Learned fields — both untouched, nothing an analyst
+  already wrote is hidden or migrated. A "Follow-up Actions" composer posts straight to
+  the existing case-tasks route, so a follow-up action is a real, trackable task from the
+  moment it's added, not more prose. Edits to any of the three retrospective fields now
+  log a `pir_updated` case-timeline event — previously silent.
+- **Cross-host forensic timeline** — new `GET /api/cases/<cid>/forensic-timeline` route
+  and case-detail tab, distinct from the existing Timeline (case_events audit log) and
+  Related Items (a 24h "what's new to add" suggestion feed that excludes anything already
+  linked). Merges alerts/UEBA/FIM activity across every host the case tracks (any
+  compromise status, not just confirmed) into one chronological list, defaulting to the
+  case's own lifetime with an optional `hours_before` to pull in pre-incident context,
+  paginated via a `before_ts` cursor.
+
 ### DFIR SME review: order-of-volatility, legal hold, evidence access logging
 
 Reviewed the actual EDR/case workflow against NIST 800-61 / SANS PICERL practice
