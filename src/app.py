@@ -1030,13 +1030,16 @@ def soar_page():
 @app.route('/cases')
 @login_required
 def cases_page():
-    return render_template('cases.html', current_user=current_user)
+    active_tab = request.args.get('tab', 'cases')
+    return render_template('cases.html', active_tab=active_tab, current_user=current_user)
 
+# IR Runbooks was folded into Cases as a sibling tab -- redirect old bookmarks/links
+# instead of rendering a dead page (runbooks.html no longer exists).
 @app.route('/runbooks')
 @login_required
 def runbooks_page():
-    active_tab = request.args.get('tab', 'library')
-    return render_template('runbooks.html', active_tab=active_tab, current_user=current_user)
+    tab = request.args.get('tab', 'library')
+    return redirect(url_for('cases_page', tab='exercises' if tab == 'exercises' else 'library'))
 
 # The triage lifecycle sits alongside (not instead of) the older binary `acknowledged`
 # flag -- see migrate_alerts_triage(). 'new' is the schema DEFAULT so every alert starts
