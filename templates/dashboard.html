@@ -1237,7 +1237,7 @@ function showLogDetail(idx) {
             ${isRecurring ? `<dt class="col-3">Last Seen</dt><dd class="col-9">${escHtml(log.last_seen)} <span class="badge bg-secondary">&times;${log.occurrence_count} occurrences</span></dd>` : ''}
             <dt class="col-3">Type</dt><dd class="col-9">${typeBadge(log.type)}${atomicTestBadge(log)}</dd>
             ${srcLabel ? `<dt class="col-3">Detection Source</dt><dd class="col-9"><span class="badge bg-secondary">${escHtml(srcLabel)}</span></dd>` : ''}
-            <dt class="col-3">Severity</dt><dd class="col-9"><span class="badge ${severityBadgeClass(log.severity)}">${escHtml((log.severity || '').toUpperCase())}</span></dd>
+            <dt class="col-3">Severity</dt><dd class="col-9"><span class="badge ${severityBadgeClass(log.severity)}">${escHtml((log.severity || '').toUpperCase())}</span>${log.type === 'alert' ? confidenceTierBadge(log.confidence_tier) : ''}</dd>
             <dt class="col-3">Host</dt><dd class="col-9">${pivotLinkHtml('host', log.host, highlightText(log.host, termsFor('host')))}</dd>
             <dt class="col-3">App / Rule</dt><dd class="col-9">${highlightText(log.app, termsFor('app'))}</dd>
             <dt class="col-3">Event ID</dt><dd class="col-9">${highlightText(log.event_id, termsFor('event_id'))}</dd>
@@ -1824,6 +1824,12 @@ const LOG_TABLE_COLUMNS = [
     // `status:new` or `assignee:alice` query) rather than reading a per-row badge.
     {key: 'status', label: 'Status', default: false},
     {key: 'assignee', label: 'Assignee', default: false},
+    // Also alert-only (NULL for every other row type) -- a per-alert composite
+    // confidence score distinct from severity (which is set by the rule author) and
+    // from UEBA's own entity-level risk score. Off by default for the same reason
+    // status/assignee are: the Severity column's badge is the common-case read, this
+    // is for when an analyst wants to sort/scan specifically by confidence.
+    {key: 'confidence', label: 'Confidence', default: false},
 ];
 
 // Only shown once an alert has moved off the 'new' default -- a badge on every single
@@ -1837,6 +1843,24 @@ function alertStatusBadge(status) {
     };
     const [cls, label] = STATUS_MAP[status] || ['bg-secondary', status];
     return ` <span class="badge ${cls}" style="font-size:.65rem;">${escHtml(label)}</span>`;
+}
+
+// Composite per-alert confidence (analyzers.auto_enrich_and_score_alert) -- distinct
+// from severity (set by the rule author, describes IMPACT) and from UEBA's own
+// entity-level risk score (a host/user behavioral trend, not a verdict on this specific
+// alert). Omitted entirely for a NULL tier -- absence of a corroborating signal isn't
+// itself a "low confidence" finding, just an unscored one, so no badge reads better
+// than a misleading gray "unscored" badge on every single alert row.
+function confidenceTierBadge(tier) {
+    const TIER_MAP = {
+        confirmed: ['bg-danger', 'Confirmed', 'A curated-feed exact match (or equivalent) backs this alert'],
+        high: ['bg-warning text-dark', 'High Confidence', 'Strong corroborating signal(s) found'],
+        medium: ['bg-info text-dark', 'Medium Confidence', 'Some corroborating signal found'],
+        low: ['bg-secondary', 'Low Confidence', 'Weak corroborating signal found'],
+    };
+    if (!tier || !TIER_MAP[tier]) return '';
+    const [cls, label, title] = TIER_MAP[tier];
+    return ` <span class="badge ${cls}" title="${escHtml(title)}">${escHtml(label)}</span>`;
 }
 
 // The server now sends every log.time value as genuine UTC ('YYYY-MM-DD HH:MM:SS', no
@@ -1881,6 +1905,7 @@ function renderCell(col, log, idx) {
         // for every row, not just the ones that have moved off the default.
         case 'status': rendered = log.type === 'alert' ? escHtml((log.status || 'new').replace('_', ' ')) : '<span class="text-muted">—</span>'; break;
         case 'assignee': rendered = log.assignee ? escHtml(log.assignee) : '<span class="text-muted">—</span>'; break;
+        case 'confidence': rendered = log.type === 'alert' ? (confidenceTierBadge(log.confidence_tier).trim() || '<span class="text-muted">—</span>') : '<span class="text-muted">—</span>'; break;
         default: rendered = highlightText(log[col], termsFor(col));
     }
     if (PIVOT_COLUMNS.has(col) && log[col]) {

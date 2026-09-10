@@ -6,6 +6,8 @@ one-shot "check this value" action, not a bulk pipeline. Callers cache results (
 app.py's enrichment_results table) so repeat lookups don't re-hit free-tier rate limits.
 """
 import base64
+import datetime
+import json
 import requests
 
 ENRICHMENT_CACHE_TTL_HOURS = 24
@@ -149,3 +151,161 @@ def applicable_analyzers(ioc_type):
     if not matched_types:
         return []
     return [a for a in ANALYZERS if matched_types & set(a['ioc_types'])]
+
+
+# ---------------------------------------------------------------------------
+# Auto-enrichment + per-alert composite confidence scoring.
+#
+# Closes a real gap a DFIR-SME-style review of this app's alert-to-verdict pipeline
+# found: the curated-feed IOC-correlation Sigma rule already runs automatically on
+# every alert (an exact match is a DEFINITE signal), but VT/AbuseIPDB/URLhaus
+# reputation lookups above were on-demand only -- an analyst had to manually paste a
+# hash/IP into Quick IOC Lookup. Everything below is called once, right after a NEW
+# alert is inserted, from both sigma_engine.py (a separate process) and app.py's
+# heuristic ingest path -- this module is the natural shared home since its functions
+# are already plain (value, api_key, ioc_type) -> dict with no Flask coupling, so both
+# processes can import it directly. `conn` is a plain sqlite3 Connection or Cursor
+# (both support .execute()); nothing here ever calls .commit() -- that stays the
+# caller's responsibility, matching sigma_engine.py's own established convention of
+# passing a bare cursor through helper functions.
+# ---------------------------------------------------------------------------
+
+# Auto-enrichment only fires for Critical/High severity -- keeps external API spend
+# proportional to what's actually worth spending it on. Lower-cased for comparison
+# since severity casing genuinely differs between the two alert-creation paths that
+# call this (sigma_engine.py's Title-Case 'Critical'/'High' vs. api_ingest's heuristic
+# path, which uses ALL-CAPS 'CRITICAL'/'HIGH' -- confirmed directly, not assumed).
+AUTO_ENRICH_SEVERITIES = ('critical', 'high')
+AUTO_ENRICH_DAILY_MAX_DEFAULT = 100
+
+# Composite-confidence point values -- deliberately small and explainable, not a real
+# ML model, matching this codebase's own established heuristic-scoring style (e.g.
+# agent_scripts.capture_top_suspicious_memory's process-suspicion heuristic).
+_CONFIDENCE_POINTS_IOC_SIGHTING = 40
+_CONFIDENCE_POINTS_DEFINITE_MALICIOUS = 35
+_CONFIDENCE_POINTS_HEURISTIC_MALICIOUS = 20
+_CONFIDENCE_POINTS_SUSPICIOUS = 10
+
+
+def _tier_for(source, ioc_type, verdict):
+    """Distinguishes a curated-feed exact match ('definite') from a reputation-score
+    heuristic ('heuristic') -- the crux of the "suspicious vs definitively malicious"
+    question this whole feature answers. URLhaus is always a literal blocklist hit when
+    it returns anything at all; a VirusTotal HASH lookup with verdict='malicious' means
+    real independent AV engines flagged this exact file, a materially stronger signal
+    than VT's own IP/domain reputation (which drifts, gets shared across tenants, etc).
+    Returns None (no tier) for a verdict that isn't itself a finding worth tiering
+    (clean/unconfigured/error) -- NULL there is more honest than inventing a category
+    for "nothing to report"."""
+    if source == 'urlhaus':
+        return 'definite'
+    if source == 'virustotal' and (ioc_type or '').lower() in ('hash', 'md5', 'sha1', 'sha256') and verdict == 'malicious':
+        return 'definite'
+    if verdict in ('malicious', 'suspicious', 'info'):
+        return 'heuristic'
+    return None
+
+
+def _auto_enrich_budget_ok(conn, daily_max):
+    """A plain settings-row JSON counter {date, count}, reset when the date rolls over
+    -- the one thing this app's own review flagged as missing (no throttle beyond the
+    24h cache, and VT's free tier is famously rate-limited). Soft budget, not a hard
+    security boundary: a small race between concurrent callers (e.g. two gunicorn
+    workers auto-enriching at once) is acceptable here, the same tradeoff this codebase
+    already takes for other once-ish-per-day counters elsewhere."""
+    today = datetime.date.today().isoformat()
+    row = conn.execute("SELECT value FROM settings WHERE key = 'auto_enrich_daily_budget'").fetchone()
+    try:
+        state = json.loads(row['value']) if row and row['value'] else {}
+    except (TypeError, ValueError):
+        state = {}
+    if state.get('date') != today:
+        state = {'date': today, 'count': 0}
+    if state['count'] >= daily_max:
+        return False
+    state['count'] += 1
+    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('auto_enrich_daily_budget', ?)", (json.dumps(state),))
+    return True
+
+
+def _enrich_value(conn, api_keys, value, ioc_type):
+    """One value through applicable_analyzers(), cache-then-run-then-write -- the same
+    shape app.py's /api/ti/enrich and _run_case_analysis already use, factored out here
+    so this module owns the pattern once rather than a third near-duplicate appearing."""
+    for a in applicable_analyzers(ioc_type):
+        cached = conn.execute(
+            "SELECT 1 FROM enrichment_results WHERE value = ? AND source = ? AND fetched_at >= datetime('now', ?)",
+            (value, a['key'], f'-{ENRICHMENT_CACHE_TTL_HOURS} hours')
+        ).fetchone()
+        if cached:
+            continue
+        api_key = api_keys.get(a['settings_key']) if a.get('requires_key') else None
+        out = a['run'](value, api_key, ioc_type)
+        tier = _tier_for(a['key'], ioc_type, out['verdict'])
+        conn.execute(
+            "INSERT INTO enrichment_results (value, source, verdict, summary, raw_json, tier, fetched_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now')) "
+            "ON CONFLICT(value, source) DO UPDATE SET verdict=excluded.verdict, summary=excluded.summary, raw_json=excluded.raw_json, tier=excluded.tier, fetched_at=excluded.fetched_at",
+            (value, a['key'], out['verdict'], out['summary'], json.dumps(out.get('raw') or {}), tier)
+        )
+
+
+def _score_alert_confidence(conn, alert_id, values):
+    """Cheap, local-only -- runs for every alert regardless of severity, using whatever
+    enrichment_results data exists (freshly fetched above, or already cached from an
+    earlier unrelated lookup). `values` are the source_ip/destination_ip/file_hash
+    strings actually present on this alert (any may be None)."""
+    points = 0
+    if conn.execute("SELECT 1 FROM ioc_sightings WHERE alert_id = ?", (alert_id,)).fetchone():
+        points += _CONFIDENCE_POINTS_IOC_SIGHTING
+    values = [v for v in values if v]
+    if values:
+        placeholders = ','.join('?' for _ in values)
+        rows = conn.execute(
+            f"SELECT verdict, tier FROM enrichment_results WHERE value IN ({placeholders}) "
+            f"AND fetched_at >= datetime('now', ?)",
+            (*values, f'-{ENRICHMENT_CACHE_TTL_HOURS} hours')
+        ).fetchall()
+        best = 0
+        for r in rows:
+            if r['tier'] == 'definite' and r['verdict'] == 'malicious':
+                best = max(best, _CONFIDENCE_POINTS_DEFINITE_MALICIOUS)
+            elif r['tier'] == 'heuristic' and r['verdict'] == 'malicious':
+                best = max(best, _CONFIDENCE_POINTS_HEURISTIC_MALICIOUS)
+            elif r['verdict'] == 'suspicious':
+                best = max(best, _CONFIDENCE_POINTS_SUSPICIOUS)
+        points += best
+    if points >= 40:
+        tier = 'confirmed'
+    elif points >= 20:
+        tier = 'high'
+    elif points >= 10:
+        tier = 'medium'
+    elif points > 0:
+        tier = 'low'
+    else:
+        return  # no signal at all -- leave confidence_score/tier NULL, not zero-and-'low'
+    conn.execute("UPDATE alerts SET confidence_score = ?, confidence_tier = ? WHERE id = ?", (points, tier, alert_id))
+
+
+def auto_enrich_and_score_alert(conn, alert_id, host, source_ip, destination_ip, file_hash, severity, daily_max=AUTO_ENRICH_DAILY_MAX_DEFAULT):
+    """Called once, right after a NEW alert is inserted. The two halves are
+    independent: enrichment is severity+budget gated since it spends real external API
+    quota; scoring is not, since it's local-only and cheap -- it runs even for a
+    Low/Medium alert, using whatever enrichment data already exists from an earlier,
+    unrelated lookup. Never raises: every analyzer function already degrades to
+    {'ok': False, 'verdict': 'error', ...} rather than throwing, and this wraps its own
+    SQL too, so one bad alert can never abort the caller's whole detection cycle or
+    ingest request."""
+    try:
+        key_row = conn.execute("SELECT value FROM settings WHERE key = 'enrichment_api_keys'").fetchone()
+        api_keys = json.loads(key_row['value']) if key_row and key_row['value'] else {}
+        if (severity or '').strip().lower() in AUTO_ENRICH_SEVERITIES and _auto_enrich_budget_ok(conn, daily_max):
+            if source_ip:
+                _enrich_value(conn, api_keys, source_ip, 'ip')
+            if destination_ip and destination_ip != source_ip:
+                _enrich_value(conn, api_keys, destination_ip, 'ip')
+            if file_hash:
+                _enrich_value(conn, api_keys, file_hash, 'hash')
+        _score_alert_confidence(conn, alert_id, [source_ip, destination_ip, file_hash])
+    except Exception:
+        pass

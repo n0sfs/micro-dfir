@@ -43,7 +43,11 @@ def extract_and_stub_scripts(text):
 
 
 def node_check(script_text, label):
-    result = subprocess.run(['node', '--check'], input=script_text, capture_output=True, text=True)
+    # encoding='utf-8' explicitly -- text=True alone defaults to the OS locale codepage
+    # (cp1252 on Windows), which can't encode real non-ASCII characters templates
+    # legitimately contain (e.g. '>=' as a real unicode glyph in UI copy), raising
+    # UnicodeEncodeError on Python's own stdin write rather than ever reaching node.
+    result = subprocess.run(['node', '--check'], input=script_text, capture_output=True, text=True, encoding='utf-8')
     if result.returncode != 0:
         print(f"[node --check FAILED] {label}\n{result.stderr}", file=sys.stderr)
         return False

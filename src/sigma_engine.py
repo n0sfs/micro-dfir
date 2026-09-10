@@ -1,4 +1,5 @@
 import os, json, re, time, sqlite3, requests, datetime
+import analyzers
 import soar_alerts
 from warninglists import filter_warninglisted_ips
 from geoip import lookup_country
@@ -898,13 +899,17 @@ def run_detection_cycle():
             else:
                 country_code, country_name = lookup_country(source_ip)
                 cursor.execute(
-                    "INSERT INTO alerts (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app, occurrence_count, last_seen, country_code, country_name, mitre_techniques) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)",
-                    (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app, g['count'], country_code, country_name, rule_mitre.get(rule_id, ''))
+                    "INSERT INTO alerts (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app, occurrence_count, last_seen, country_code, country_name, mitre_techniques, file_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)",
+                    (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, log_event_id, log_app, g['count'], country_code, country_name, rule_mitre.get(rule_id, ''), file_hash)
                 )
                 new_alert_id = cursor.lastrowid
                 _record_ioc_sightings(cursor, rule_id, host, source_ip, destination_ip, file_hash, query_name,
                                        new_alert_id, rule_titles.get(rule_id, 'Custom/YARA Rule'), rule_uses_ioc_placeholder)
+                # See analyzers.auto_enrich_and_score_alert's own docstring -- wraps its
+                # own errors, never commits (this function's own conn.commit() below
+                # picks up its writes).
+                analyzers.auto_enrich_and_score_alert(cursor, new_alert_id, host, source_ip, destination_ip, file_hash, severity)
                 if rule_id in rule_autocase:
                     try:
                         auto_cid = _auto_create_case(cursor, rule_titles.get(rule_id, 'Custom/YARA Rule'), host, username,

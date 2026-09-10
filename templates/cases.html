@@ -584,6 +584,15 @@ function enrichVerdictBadge(verdict) {
     return `<span class="badge ${map[verdict] || 'bg-secondary'}">${escHtml(verdict)}</span>`;
 }
 
+// See analyzers._tier_for -- distinguishes a curated-feed exact match ('definite') from
+// a reputation-score heuristic ('heuristic'). Same per-file duplication as
+// enrichVerdictBadge above (threat_intel.html has its own identical copy).
+function enrichTierBadge(tier) {
+    if (tier === 'definite') return '<span class="badge bg-danger bg-opacity-75" title="A curated-feed exact match or AV-engine-confirmed file hash -- not a reputation score">Confirmed</span>';
+    if (tier === 'heuristic') return '<span class="badge bg-secondary" title="A reputation-score heuristic -- worth investigating, not a confirmed match">Heuristic</span>';
+    return '';
+}
+
 // Live outbound lookup against analyzers.py's ANALYZERS (VirusTotal, AbuseIPDB, URLhaus,
 // Shodan InternetDB) via the same /api/ti/enrich endpoint Threat Intel's Quick IOC
 // Lookup already uses -- results are cached server-side (enrichment_results, 24h TTL),
@@ -599,8 +608,8 @@ function checkCaseIocExternal(iocId, value, iocType) {
             cell.innerHTML = `<span class="text-muted">${escHtml(data.message || 'No external sources configured for this type.')}</span>`;
             return;
         }
-        const overall = data.results.length > 1 ? `<div class="mb-1">Overall: ${enrichVerdictBadge(data.overall_verdict)}</div>` : '';
-        cell.innerHTML = overall + data.results.map(r => `<div><strong>${escHtml(r.source)}</strong> ${enrichVerdictBadge(r.verdict)}<div class="text-muted">${escHtml(r.summary)}</div></div>`).join('');
+        const overall = data.results.length > 1 ? `<div class="mb-1">Overall: ${enrichVerdictBadge(data.overall_verdict)} ${enrichTierBadge(data.overall_tier)}</div>` : '';
+        cell.innerHTML = overall + data.results.map(r => `<div><strong>${escHtml(r.source)}</strong> ${enrichVerdictBadge(r.verdict)} ${enrichTierBadge(r.tier)}<div class="text-muted">${escHtml(r.summary)}</div></div>`).join('');
     }).catch(err => { cell.innerHTML = '<span class="text-danger small">Error</span>'; console.error(err); });
 }
 

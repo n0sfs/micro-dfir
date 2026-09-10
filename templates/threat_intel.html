@@ -497,7 +497,22 @@
                         <div class="mt-3 text-start font-monospace small">
                             <div class="text-warning fw-bold mb-1">{{ matches|length }} match(es):</div>
                             {% for m in matches %}
-                            <div class="text-danger">[{{ m.rule }}] matched {{ m.file }}</div>
+                            <div class="border border-secondary rounded p-2 mb-2">
+                                <div class="text-danger">[{{ m.rule }}] matched {{ m.file }}</div>
+                                {% if m.tags %}
+                                <div class="mt-1">{% for t in m.tags %}<span class="badge bg-secondary me-1">{{ t }}</span>{% endfor %}</div>
+                                {% endif %}
+                                {% if m.strings %}
+                                <div class="text-muted mt-1" style="font-size:.8em;">
+                                    Evidence:
+                                    {% for s in m.strings %}
+                                    <div>&bull; {{ s.identifier }} @ offset {{ s.offset }}: <span class="text-light">{{ s.preview }}</span></div>
+                                    {% endfor %}
+                                </div>
+                                {% else %}
+                                <div class="text-muted mt-1" style="font-size:.8em;">No string-level evidence available for this match.</div>
+                                {% endif %}
+                            </div>
                             {% endfor %}
                         </div>
                         {% endif %}
@@ -2267,7 +2282,7 @@ async function runIocLookup() {
             if (!res.ok || !data.results) { resultEl.innerHTML = `<span class="text-danger">${escHtml(data.message || data.error || 'Lookup failed.')}</span>`; return; }
             if (!data.results.length) { resultEl.innerHTML = `<span class="text-muted">${escHtml(data.message || 'This source does not apply to this value.')}</span>`; return; }
             const r = data.results[0];
-            resultEl.innerHTML = `${enrichVerdictBadge(r.verdict)} <span class="small">${escHtml(r.summary)}${r.cached ? ` <span class="text-muted">(cached, ${escHtml(r.fetched_at || '')})</span>` : ''}</span>`;
+            resultEl.innerHTML = `${enrichVerdictBadge(r.verdict)} ${enrichTierBadge(r.tier)} <span class="small">${escHtml(r.summary)}${r.cached ? ` <span class="text-muted">(cached, ${escHtml(r.fetched_at || '')})</span>` : ''}</span>`;
         } catch (e) {
             resultEl.innerHTML = `<span class="text-danger">Error: ${escHtml(String(e))}</span>`;
         }
@@ -2305,6 +2320,18 @@ function enrichVerdictBadge(verdict) {
     return `<span class="badge ${map[verdict] || 'bg-secondary'}">${escHtml(verdict)}</span>`;
 }
 
+// A 'malicious' verdict can mean two different things: a curated-feed exact match
+// (URLhaus, or a VirusTotal HASH lookup where real AV engines flagged the exact file)
+// vs. a reputation-score heuristic (AbuseIPDB's community score, VT's own IP/domain
+// reputation). This is the visual distinction -- see analyzers._tier_for for the logic
+// that decides which is which. Renders nothing for a tier of null/undefined (a
+// clean/unconfigured/error result isn't itself a finding worth tiering).
+function enrichTierBadge(tier) {
+    if (tier === 'definite') return '<span class="badge bg-danger bg-opacity-75" title="A curated-feed exact match or AV-engine-confirmed file hash -- not a reputation score">Confirmed</span>';
+    if (tier === 'heuristic') return '<span class="badge bg-secondary" title="A reputation-score heuristic -- worth investigating, not a confirmed match">Heuristic</span>';
+    return '';
+}
+
 async function runIocEnrich() {
     const resultsEl = document.getElementById('iocEnrichResults');
     if (!lastLookupValue) return;
@@ -2318,10 +2345,10 @@ async function runIocEnrich() {
         const data = await res.json();
         if (!res.ok || !data.results) { resultsEl.innerHTML = `<span class="text-danger">${escHtml(data.message || data.error || 'Enrichment failed.')}</span>`; return; }
         if (!data.results.length) { resultsEl.innerHTML = `<span class="text-muted">${escHtml(data.message || 'No analyzers available for this value.')}</span>`; return; }
-        const overall = data.results.length > 1 ? `<div class="mb-1">Overall: ${enrichVerdictBadge(data.overall_verdict)}</div>` : '';
+        const overall = data.results.length > 1 ? `<div class="mb-1">Overall: ${enrichVerdictBadge(data.overall_verdict)} ${enrichTierBadge(data.overall_tier)}</div>` : '';
         resultsEl.innerHTML = overall + data.results.map(r => `
             <div class="border border-secondary rounded p-2 mb-1">
-                <strong>${escHtml(r.source)}</strong> ${enrichVerdictBadge(r.verdict)}
+                <strong>${escHtml(r.source)}</strong> ${enrichVerdictBadge(r.verdict)} ${enrichTierBadge(r.tier)}
                 ${r.cached ? `<span class="text-muted small">(cached, ${escHtml(r.fetched_at || '')})</span>` : ''}
                 <div class="text-muted small">${escHtml(r.summary)}</div>
             </div>`).join('');
