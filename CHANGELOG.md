@@ -51,6 +51,16 @@ verdict) via a plain submit-then-poll REST API:
   ~100 credits/month) that automatic enrichment would burn through on the first few
   alerts of the day.
 
+- **Fixed live, caught by a direct question about whether enrichment items needed to
+  "move over" to Sandbox**: the Indicator Browser catalog's per-row "Enrich" action
+  (`enrichCatalogIoc`) jumped straight to `runIocEnrich()`, which never touches the
+  Detonate button — only the manual "Check" flow (`runIocLookup`) did. A genuine
+  url-type indicator's row-level Enrich button never surfaced Detonate as a result.
+  Also fixed a smaller instance of the same gap inside `runIocLookup` itself: a
+  confirmed local match can refine the guessed ioc_type past the client's initial
+  shape guess (e.g. a bare domain STIX has tagged `url`), and the Enrich button was
+  re-synced to the refined type but Detonate wasn't.
+
 Explicitly deferred: file-sandbox submission (`type: 'file'` returns a clear
 not-yet-available error rather than silently no-op-ing — the schema is ready, no client
 exists yet), filescan.io and CAPE clients (real follow-ups once a live key/second host

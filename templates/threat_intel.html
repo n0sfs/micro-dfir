@@ -2369,6 +2369,10 @@ async function runIocLookup() {
             resultEl.innerHTML = `<span class="text-danger"><i class="fa-solid fa-triangle-exclamation me-1"></i>MATCH — ${escHtml(m.name || m.ioc_type)} (source: ${escHtml(m.source_name || 'Unknown')}${corrobNote}${sightingNote})</span>`;
         }
         enrichBtn.style.display = lastLookupIocType ? 'inline-block' : 'none';
+        // A confirmed local match can refine lastLookupIocType past the initial
+        // client-side guess (e.g. a bare domain the guess missed but STIX tagged
+        // 'url') -- re-sync Detonate's visibility now that the type may have changed.
+        detonateBtn.style.display = lastLookupIocType === 'url' ? 'inline-block' : 'none';
     } catch (e) {
         resultEl.innerHTML = `<span class="text-danger">Error: ${escHtml(String(e))}</span>`;
         enrichBtn.style.display = 'none';
@@ -3625,6 +3629,10 @@ function enrichCatalogIoc(idx) {
     document.getElementById('iocEnrichBtn').style.display = 'inline-block';
     lastLookupValue = ioc.pattern;
     lastLookupIocType = ioc.ioc_type || '';
+    // runIocEnrich() (called below) never touches the Detonate button -- only
+    // runIocLookup()'s manual "Check" flow does -- so a url-type catalog row jumping
+    // straight here would otherwise leave Detonate hidden even though it's a real URL.
+    document.getElementById('iocDetonateBtn').style.display = lastLookupIocType === 'url' ? 'inline-block' : 'none';
     document.getElementById('iocLookupInput').scrollIntoView({behavior: 'smooth', block: 'center'});
     runIocEnrich();
 }
