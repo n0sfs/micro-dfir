@@ -10,6 +10,54 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-10
 
+### Sandbox/detonation: urlscan.io URL sandboxing, IPQualityScore + Censys enrichment
+
+Follow-up to the verdict-signals work above: this app could say a URL/IP *looked* bad
+via reputation lookups, but never actually detonated anything. Researched VirusTotal
+file-behavior (Premium-only, dead end on the free tier), urlscan.io, filescan.io,
+IPQualityScore, Censys, and self-hosted Cuckoo/CAPE against their current docs before
+building — Cuckoo is confirmed abandoned (archived 2021), CAPE needs a second host with
+a hypervisor/guest VM this single-box appliance doesn't have, and filescan.io's docs are
+JS-rendered/unverifiable without a live key. urlscan.io is the one genuinely free,
+capable option (a real sandboxed-browser visit — screenshot, DOM, network requests,
+verdict) via a plain submit-then-poll REST API:
+
+- **New `src/sandbox.py`** — `urlscan_submit`/`urlscan_poll`, a sibling module to
+  `analyzers.py` rather than an addition to it, since submit-then-poll is a genuinely
+  different shape than that file's single-call synchronous lookups. Same house style
+  (short timeout, never raises, plain dict return).
+- **New `sandbox_submissions` table + 4 routes** (`/api/sandbox/submit`, `/<id>/status`,
+  list, delete) — source-agnostic schema (`source`/`submission_type` columns) so a
+  future filescan.io or CAPE client can plug in later without a redesign, per explicit
+  scope decision not to build those now. Polling follows the exact client-driven
+  repeated-fetch pattern Log Import's chunked normalize/commit already established —
+  this app has no background-job mechanism anywhere, so a still-pending scan is checked
+  again a few seconds later from the browser, not a server-side job queue.
+- **Private by default, explicit opt-in to Public** — urlscan's free quota is much
+  larger for Public scans (5,000/day vs. 50/day private), but Public scans are indexed
+  and searchable by anyone on urlscan's own site — a real wrong default for a URL
+  pulled from an actual phishing email. Visibility is a per-submission toggle, defaulting
+  Private.
+- **Three integration points, all sharing the same submit/poll mechanism**: a new
+  Sandbox tab on Threat Intel (submit form + polling Recent Submissions table +
+  screenshot/report-link detail), a "Detonate" button next to Quick IOC Lookup's Enrich
+  button (shown only for a URL-shaped value), and a per-IOC "Detonate in Sandbox" button
+  on case detail's URL-type indicators (submits with `case_id` set so the result surfaces
+  in that case's own context).
+- **`analyzers.py` gains IPQualityScore (proxy/VPN/Tor + fraud-score IP reputation) and
+  Censys (host/cert data, Shodan-like)** — both on-demand only (Quick IOC Lookup / Case
+  Analyze), explicitly excluded from the automatic Critical/High auto-enrichment sweep
+  via a new `auto_enrich_eligible: False` flag, since both have small free quotas (35/day,
+  ~100 credits/month) that automatic enrichment would burn through on the first few
+  alerts of the day.
+
+Explicitly deferred: file-sandbox submission (`type: 'file'` returns a clear
+not-yet-available error rather than silently no-op-ing — the schema is ready, no client
+exists yet), filescan.io and CAPE clients (real follow-ups once a live key/second host
+exists to verify against), and automatic sandbox submission on alert creation (detonation
+stays analyst-initiated — urlscan's private quota is small and "detonate every URL
+automatically" is a much bigger action than a passive reputation lookup).
+
 ### Suspicious-to-malicious verdict signals: auto-enrichment, YARA evidence, confidence tiering, per-alert score
 
 Follow-up to a direct question: when an alert fires, what actually says "definitively
