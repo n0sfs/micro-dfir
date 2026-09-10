@@ -172,6 +172,120 @@ $hash = (Get-FileHash $outPath -Algorithm SHA256).Hash
 @{{ pid=$targetPid; process_name=$proc.ProcessName; process_image=$procImage; dump_path=$outPath; size_bytes=$size; sha256=$hash; captured_at=(Get-Date).ToString('yyyy-MM-dd HH:mm:ss') }} | ConvertTo-Json -Compress
 """
 
+# capture_process_memory()'s real limitation: it needs an already-identified PID, which
+# an analyst doing FIRST triage on a possibly-compromised host usually doesn't have yet --
+# a chicken-and-egg gap. This closes it by doing the picking itself: a simple,
+# entirely-local (no server round-trip) suspicion heuristic ranks every running process,
+# and the top few get memory-dumped automatically via the same comsvcs.dll MiniDump
+# mechanism/output metadata shape as capture_process_memory() above (dump stays on the
+# endpoint's disk; only hash/metadata comes back).
+#
+# The heuristic is deliberately simple and explainable, not a real detection model:
+# +1 for a non-standard install path, +1 for an invalid/missing Authenticode signature,
+# +2 for an established TCP connection to a non-private IP (weighted highest since an
+# active outbound connection to the public internet is the strongest single signal of
+# ongoing C2/exfil this script can check without a network round-trip). A handful of
+# core OS processes are excluded outright -- not because they can't score high (they
+# rarely would), but because dumping one on a host that's actively under investigation
+# is a real stability risk for no real triage benefit (their own behavior is already
+# implicitly trusted by the OS, and lsass.exe already has its own deliberate, single-PID
+# path via capture_process_memory when an analyst genuinely wants it).
+#
+# [Confirmed by actually running this on a real Windows box, not just eyeballing it --
+# see the session that added this comment] Get-AuthenticodeSignature is genuinely slow
+# (disk I/O + Authenticode chain validation per call) -- calling it unconditionally for
+# every running process took well over 60s against a normal dev-machine process count
+# (150-300+), which would risk blowing this agent's own 180s SCRIPT_TIMEOUT_SECONDS on
+# a production host. Fixed by only running it as a SECOND pass, on the (typically small)
+# subset of processes that already scored from the cheap checks (non-standard path or a
+# live external connection) -- both faster and a better heuristic, since signature
+# corroborates an already-flagged process rather than blanket-scanning everything. Also
+# deduplicated by path (many processes, e.g. several svchost.exe, share one executable)
+# so a shared image is never signature-checked more than once.
+#
+# TOP_N and the per-process size cap both exist to respect this agent's own
+# SCRIPT_TIMEOUT_SECONDS (180s, run_remote_script() in micro_agent_windows.py) and the
+# 60,000-char stdout cap (api_agent_result, app.py) that bounds this command's whole
+# JSON result -- a handful of small dumps' metadata comfortably fits either; a dozen
+# multi-GB dumps would not.
+_TOP_SUSPICIOUS_MEMORY_N = 3
+_TOP_SUSPICIOUS_MEMORY_MAX_WORKING_SET_MB = 500
+
+def capture_top_suspicious_memory():
+    protected = "'System','Idle','csrss','wininit','services','smss','winlogon','lsass','Registry','Memory Compression'"
+    return r"""$topN = """ + str(_TOP_SUSPICIOUS_MEMORY_N) + r"""
+$maxBytes = """ + str(_TOP_SUSPICIOUS_MEMORY_MAX_WORKING_SET_MB) + r"""MB
+$protectedNames = @(""" + protected + r""")
+$standardDirs = @($env:WINDIR, "$env:WINDIR\System32", "$env:WINDIR\SysWOW64", ${env:ProgramFiles}, ${env:ProgramFiles(x86)}) | Where-Object { $_ }
+
+$connByPid = @{}
+Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_.RemoteAddress -and $_.RemoteAddress -notmatch '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.|169\.254\.)') {
+        $connByPid[$_.OwningProcess] = $true
+    }
+}
+
+# Pass 1 -- cheap checks only (no disk I/O beyond what Get-Process already did).
+$candidates = @()
+foreach ($p in (Get-Process | Where-Object { $protectedNames -notcontains $_.ProcessName })) {
+    $score = 0
+    $reasons = @()
+    if ($p.Path) {
+        $inStandardDir = $false
+        foreach ($d in $standardDirs) { if ($p.Path.StartsWith($d, [StringComparison]::OrdinalIgnoreCase)) { $inStandardDir = $true; break } }
+        if (-not $inStandardDir) { $score += 1; $reasons += 'non-standard install path' }
+    } else {
+        $score += 1; $reasons += 'no accessible executable path'
+    }
+    if ($connByPid.ContainsKey($p.Id)) { $score += 2; $reasons += 'active connection to a non-private IP' }
+    if ($score -gt 0) { $candidates += [PSCustomObject]@{ Process = $p; Score = $score; Reasons = $reasons } }
+}
+
+# Pass 2 -- signature check, only for candidates the cheap pass already flagged, and only
+# once per unique executable path (see the comment above this function for why).
+$sigCache = @{}
+foreach ($c in $candidates) {
+    $path = $c.Process.Path
+    if (-not $path) { continue }
+    if (-not $sigCache.ContainsKey($path)) {
+        try { $sigCache[$path] = (Get-AuthenticodeSignature -FilePath $path -ErrorAction Stop).Status } catch { $sigCache[$path] = 'Unknown' }
+    }
+    if ($sigCache[$path] -ne 'Valid') { $c.Score += 1; $c.Reasons += 'unsigned or invalid signature' }
+}
+$candidates = $candidates | ForEach-Object { [PSCustomObject]@{ Process = $_.Process; Score = $_.Score; Reasons = ($_.Reasons -join '; ') } }
+
+$targets = $candidates | Sort-Object -Property Score -Descending | Select-Object -First $topN
+if (-not $targets) { '{"message":"no processes scored as suspicious -- nothing captured","captures":[]}'; exit }
+
+$dir = "C:\ProgramData\MicroDFIR\MemoryCaptures"
+if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+$captures = @()
+foreach ($t in $targets) {
+    $p = $t.Process
+    if ($p.WorkingSet64 -gt $maxBytes) {
+        $captures += @{ pid = $p.Id; process_name = $p.ProcessName; score = $t.Score; reasons = $t.Reasons; error = "skipped -- working set ($($p.WorkingSet64) bytes) exceeds the $maxBytes byte cap for an automatic bulk dump" }
+        continue
+    }
+    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $safeName = ($p.ProcessName -replace '[^a-zA-Z0-9_-]', '_')
+    $outPath = Join-Path $dir "${stamp}_pid$($p.Id)_${safeName}.dmp"
+    try {
+        Start-Process -FilePath "rundll32.exe" -ArgumentList "C:\Windows\System32\comsvcs.dll, MiniDump $($p.Id) `"$outPath`" full" -Wait -WindowStyle Hidden -ErrorAction Stop
+        if (-not (Test-Path $outPath) -or (Get-Item $outPath).Length -eq 0) {
+            $captures += @{ pid = $p.Id; process_name = $p.ProcessName; score = $t.Score; reasons = $t.Reasons; error = "dump produced no output -- the process may be protected (PPL) or blocked by AV/EDR on this endpoint" }
+            continue
+        }
+        $size = (Get-Item $outPath).Length
+        $hash = (Get-FileHash $outPath -Algorithm SHA256).Hash
+        $captures += @{ pid = $p.Id; process_name = $p.ProcessName; process_image = $p.Path; dump_path = $outPath; size_bytes = $size; sha256 = $hash; score = $t.Score; reasons = $t.Reasons; captured_at = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss') }
+    } catch {
+        $errMsg = $_.Exception.Message -replace '"', "'"
+        $captures += @{ pid = $p.Id; process_name = $p.ProcessName; score = $t.Score; reasons = $t.Reasons; error = "failed to dump: $errMsg" }
+    }
+}
+@{ captures = $captures } | ConvertTo-Json -Compress -Depth 4
+"""
+
 # Validation tool for UEBA's Beaconing Detection model (see _run_beaconing_model in
 # ueba_engine.py) -- generates a real, jittered, periodic TCP connect pattern from this
 # host to an admin-chosen target, the same "known controlled beacon" idea as
@@ -1236,6 +1350,7 @@ WINDOWS_TEMPLATES = {
     'collect_file': (lambda params: _PROGRESS_SILENT + collect_file(params['path']), ['path']),
     'quarantine_file': (lambda params: _PROGRESS_SILENT + quarantine_file(params['path']), ['path']),
     'capture_process_memory': (lambda params: _PROGRESS_SILENT + capture_process_memory(params['pid']), ['pid']),
+    'capture_top_suspicious_memory': (lambda params: _PROGRESS_SILENT + capture_top_suspicious_memory(), []),
     'beacon_simulator': (lambda params: _PROGRESS_SILENT + beacon_simulator(params['target_ip'], params['target_port'], params['interval_seconds'], params['jitter_seconds'], params['count']), ['target_ip', 'target_port', 'interval_seconds', 'jitter_seconds', 'count']),
     'collect_registry_key': (lambda params: _PROGRESS_SILENT + collect_registry_key(params['key_path']), ['key_path']),
     'kill_scheduled_task': (lambda params: _PROGRESS_SILENT + kill_scheduled_task(params['task_name']), ['task_name']),

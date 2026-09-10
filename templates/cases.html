@@ -687,6 +687,8 @@ const CASE_EDR_ACTIONS = [
     { value: 'quarantine_file', label: 'Quarantine File', permission: 'edr.command.basic', needsParams: 'path', paramLabel: 'File path',
       confirm: (h, v) => `Quarantine ${v} on ${h}?` },
     { value: 'capture_process_memory', label: 'Capture Process Memory', permission: 'edr.command.advanced', needsParams: 'pid', paramLabel: 'PID to dump', osOnly: 'windows' },
+    { value: 'capture_top_suspicious_memory', label: 'Capture Top Suspicious Process Memory', permission: 'edr.command.advanced', osOnly: 'windows',
+      confirm: (h) => `Rank running processes on ${h} by simple heuristics (non-standard install path, unsigned/invalid signature, an active connection to a non-private IP) and memory-dump the top few automatically? For first triage when there's no PID in hand yet -- not a real detection model, and a large process's dump is skipped rather than attempted.` },
     { value: 'collect_file', label: 'Collect File', permission: 'edr.command.advanced', needsParams: 'path', paramLabel: 'File path' },
     { value: 'collect_registry_key', label: 'Registry Key', permission: 'edr.command.advanced', needsParams: 'key_path', paramLabel: 'Registry key path', osOnly: 'windows' },
     { value: 'kill_scheduled_task', label: 'Kill Scheduled Task', permission: 'edr.command.basic', needsParams: 'task_name', paramLabel: 'Task name', osOnly: 'windows',

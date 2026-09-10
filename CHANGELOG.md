@@ -10,6 +10,32 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-10
 
+### DFIR SME review, part 3: bulk suspicious-process memory capture (skipped dual-control)
+
+Last of the DFIR SME review findings. Dual-control on destructive approvals (#3) was
+deliberately not built this pass -- a second-approver requirement adds delay, and during
+an active incident that delay is itself a real risk (further lateral movement/
+exfiltration while the analyst waits on a second reviewer). Building #7 instead:
+`capture_process_memory`'s real gap was needing an already-identified PID, which an
+analyst doing first triage on a newly-flagged host usually doesn't have yet.
+
+- **New EDR action, `capture_top_suspicious_memory`** (`src/agent_scripts.py`,
+  Windows-only, matching `capture_process_memory`'s own scope) — ranks running processes
+  with a small, explainable heuristic (non-standard install path, invalid/missing
+  Authenticode signature, an active connection to a non-private IP -- weighted highest,
+  since that's the strongest signal available here for ongoing C2/exfil) and
+  memory-dumps the top 3 automatically via the same comsvcs.dll MiniDump mechanism/
+  metadata-only-result shape as the existing single-PID action. A handful of core OS
+  processes are excluded outright (stability risk on a host already under investigation,
+  no real triage benefit). Queueable from both Case detail's EDR Response tab and the
+  Agents console, same as every other canned action.
+- **Real bug caught by actually running the generated script**, not just parse-checking
+  it: an unconditional `Get-AuthenticodeSignature` call for every running process took
+  60s+ against a normal process count, which would have risked the agent's own 180s
+  script timeout on a real host. Fixed by only signature-checking processes the cheap
+  checks (path/connection) already flagged, deduplicated by executable path -- confirmed
+  down to ~21s on a real re-run.
+
 ### DFIR SME review, part 2: structured post-incident review, cross-host forensic timeline
 
 Follow-up to the same DFIR SME review's two larger findings, planned separately and now
