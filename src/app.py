@@ -16954,7 +16954,9 @@ def _build_log_response_rows(rows):
             'assignee': r['assignee'],
             'file_hash': r['file_hash'],
             'query_name': r['query_name'],
-            'is_atomic_test': bool(r['is_atomic_test'])
+            'is_atomic_test': bool(r['is_atomic_test']),
+            'confidence_score': r['confidence_score'],
+            'confidence_tier': r['confidence_tier'],
         })
     return logs
 
