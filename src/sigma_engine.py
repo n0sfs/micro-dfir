@@ -1000,7 +1000,19 @@ def run_due_log_purge():
 
     cutoff = (now - datetime.timedelta(days=retention_days)).strftime('%Y-%m-%d %H:%M:%S')
     now_str = now.strftime('%Y-%m-%d %H:%M:%S')
-    cursor.execute("DELETE FROM live_logs WHERE timestamp < ?", (cutoff,))
+    # Legal hold: a live_logs row an analyst has explicitly linked into an open case as
+    # a 'fim_event' item (app.py's CASE_ITEM_TYPES) is that case's evidence, not routine
+    # log volume -- age-based retention must not silently purge it out from under an
+    # active investigation. Same item_id-as-text comparison app.py:7099 already uses for
+    # this exact join. A case that's since been closed no longer holds this row back --
+    # closing is the deliberate "this evidence's active hold is over" signal.
+    cursor.execute(
+        "DELETE FROM live_logs WHERE timestamp < ? AND NOT EXISTS ("
+        "  SELECT 1 FROM case_items ci JOIN cases c ON c.id = ci.case_id "
+        "  WHERE ci.item_type = 'fim_event' AND ci.item_id = CAST(live_logs.id AS TEXT) AND c.status = 'open'"
+        ")",
+        (cutoff,)
+    )
     deleted = cursor.rowcount
     cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('log_retention_last_purge', ?)", (now_str,))
     conn.commit()

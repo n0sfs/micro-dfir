@@ -7400,7 +7400,13 @@ def api_case_attachment_download(cid, aid):
                 db, cid, 'attachment_integrity_mismatch',
                 f"{row['original_filename']}: on-disk SHA-256 no longer matches the hash recorded at upload"
             )
-            db.commit()
+    # Chain of custody needs both halves: attachment_added/attachment_removed already
+    # record who put evidence in or took it out (see the two _log_case_event calls
+    # elsewhere in this file), but until now nothing recorded who actually accessed it.
+    # Logged on every download, not just the first -- a real custody log is an access
+    # trail, not a one-time note.
+    _log_case_event(db, cid, 'attachment_downloaded', row['original_filename'])
+    db.commit()
     return send_from_directory(CASE_ATTACHMENTS_DIR, row['filename'], as_attachment=True, download_name=row['original_filename'])
 
 @app.route('/api/cases/<int:cid>/attachments/<int:aid>', methods=['DELETE'])
@@ -7907,8 +7913,10 @@ def _run_playbook_action(db, cid, action_type, params, dry_run=False):
         ).fetchall()]
         if not confirmed_hosts:
             return "no confirmed-compromised hosts in this case, skipped"
+        auto_triage = bool(params.get('auto_triage_before_isolate'))
         if dry_run:
-            return f"would isolate {len(confirmed_hosts)} confirmed host(s): {', '.join(confirmed_hosts)}"
+            triage_note = " (a collect_triage bundle is queued ahead of each isolation)" if auto_triage else ""
+            return f"would isolate {len(confirmed_hosts)} confirmed host(s){triage_note}: {', '.join(confirmed_hosts)}"
         # Same soc_ip auto-fill api_agent_commands() applies when the caller (there, the
         # EDR console UI; here, an approved playbook action) doesn't supply one.
         settings_map = {r[0]: r[1] for r in db.execute("SELECT key, value FROM settings").fetchall()}
@@ -7917,6 +7925,19 @@ def _run_playbook_action(db, cid, action_type, params, dry_run=False):
             soc_ip = request.host.split(':')[0]
         queued = []
         for host in confirmed_hosts:
+            # Order-of-volatility: when requested, queue collect_triage BEFORE
+            # isolate_host for this host. agent_commands is a strict per-host FIFO
+            # queue (api_agent_poll only ever returns the lowest-id 'pending' row, see
+            # the comment there) -- inserting the triage row first guarantees it's
+            # dispatched to the agent ahead of the isolation that would otherwise cut
+            # off the volatile process/network state a triage bundle captures.
+            if auto_triage:
+                triage_builder, _ = agent_scripts.TEMPLATES_BY_OS[_get_host_os(db, host)]['collect_triage']
+                triage_script = triage_builder({})
+                db.execute(
+                    "INSERT INTO agent_commands (hostname, label, script, queued_by) VALUES (?, 'collect_triage', ?, 'playbook')",
+                    (host, triage_script)
+                )
             builder, _ = agent_scripts.TEMPLATES_BY_OS[_get_host_os(db, host)]['isolate_host']
             script = builder({'soc_ip': soc_ip})
             db.execute(
@@ -7924,7 +7945,8 @@ def _run_playbook_action(db, cid, action_type, params, dry_run=False):
                 (host, script)
             )
             queued.append(host)
-        return f"queued isolate_host for {len(queued)} host(s): {', '.join(queued)}"
+        triage_note = " (with a collect_triage bundle queued first on each host)" if auto_triage else ""
+        return f"queued isolate_host for {len(queued)} host(s){triage_note}: {', '.join(queued)}"
 
     # The 5 actions below share isolate_host's exact targeting model (every Case Asset
     # marked 'confirmed' compromised, one agent_commands row per host) but, unlike

@@ -10,6 +10,31 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-10
 
+### DFIR SME review: order-of-volatility, legal hold, evidence access logging
+
+Reviewed the actual EDR/case workflow against NIST 800-61 / SANS PICERL practice
+(chain of custody, order of volatility, dual control, post-incident review) rather
+than app UI/navigation. Three findings addressed this pass; a structured
+post-incident-review artifact and a cross-host case timeline are larger items,
+planned separately.
+
+- **Order of volatility**: `isolate_host` playbook actions can now optionally
+  queue a `collect_triage` bundle for each targeted host immediately ahead of the
+  isolation command (`_run_playbook_action`, `src/app.py`) — `agent_commands` is a
+  strict per-host FIFO queue, so this guarantees the triage capture is dispatched
+  before containment cuts off the volatile process/network state it would capture.
+  Opt-in checkbox on the `isolate_host` action editor (`templates/soar.html`);
+  off by default, so no existing playbook's behavior changes.
+- **Legal hold on log retention**: the automatic log-retention purge
+  (`run_due_log_purge`, `src/sigma_engine.py`) no longer deletes a `live_logs` row
+  that's linked into an *open* case as a `fim_event` item — age-based retention was
+  previously blind to whether a row was an active case's evidence. A case's hold
+  releases once it's closed.
+- **Evidence access logging**: case attachment downloads are now logged to the
+  case timeline (`attachment_downloaded`, every download, not just the first) —
+  closes the other half of chain-of-custody (who added evidence was already
+  logged; who accessed it wasn't).
+
 ### Workflow consolidation pass: SOAR Settings tab, vulnerability cross-links, dev tooling
 
 Follow-up to the previous day's nav cleanup — reviewed the app's remaining tab
