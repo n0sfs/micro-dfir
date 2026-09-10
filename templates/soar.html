@@ -128,9 +128,9 @@
                 <div class="table-responsive">
                     <table class="table table-dark table-sm align-middle mb-0">
                         <thead><tr>
-                            <th class="ps-3">Name</th><th>Description</th><th>Tasks</th><th>Fields</th><th class="text-end pe-3"></th>
+                            <th class="ps-3">Name</th><th>Description</th><th>Prefix</th><th>Tasks</th><th>Fields</th><th class="text-end pe-3"></th>
                         </tr></thead>
-                        <tbody id="caseTemplatesTableBody"><tr><td colspan="5" class="text-center text-muted py-4">Loading&hellip;</td></tr></tbody>
+                        <tbody id="caseTemplatesTableBody"><tr><td colspan="6" class="text-center text-muted py-4">Loading&hellip;</td></tr></tbody>
                     </table>
                 </div>
             </div>
@@ -329,6 +329,11 @@
                 <div class="mb-3">
                     <label class="form-label small text-muted mb-1" for="ctDescription">Description</label>
                     <input type="text" id="ctDescription" class="form-control form-control-sm bg-dark text-light border-secondary">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label small text-muted mb-1" for="ctPrefix">Case Number Prefix <span class="text-muted">(optional)</span></label>
+                    <input type="text" id="ctPrefix" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:200px;" placeholder="e.g. INC, PHISH" maxlength="10">
+                    <div class="form-text small">When set, every case created from this template gets an auto-generated case number like <code>PREFIX-2026-014</code> (sequential, resets each year) shown instead of the raw <code>#id</code>. Leave blank to keep the plain <code>#id</code> convention.</div>
                 </div>
 
                 <label class="form-label small text-muted mb-1">Tasks <span class="text-muted">(copied onto every case that applies this template)</span></label>
@@ -991,7 +996,7 @@ function loadCaseTemplatesForSoar() {
         return r.json();
     }).then(t => { allCaseTemplatesForSoar = t || []; renderCaseTemplatesTable(); }).catch(err => {
         console.error('Error loading case templates:', err);
-        renderLoadError('caseTemplatesTableBody', 5, 'Failed to load case templates.');
+        renderLoadError('caseTemplatesTableBody', 6, 'Failed to load case templates.');
     });
 }
 
@@ -999,13 +1004,14 @@ function renderCaseTemplatesTable() {
     const tbody = document.getElementById('caseTemplatesTableBody');
     if (!tbody) return;
     if (!allCaseTemplatesForSoar.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted small py-3">No templates yet.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted small py-3">No templates yet.</td></tr>';
         return;
     }
     tbody.innerHTML = allCaseTemplatesForSoar.map(t => `
         <tr>
             <td class="ps-3 small">${escHtml(t.name)}</td>
             <td class="text-muted small">${escHtml(t.description || '')}</td>
+            <td class="small text-nowrap">${t.prefix ? `<code>${escHtml(t.prefix)}</code>` : '<span class="text-muted">&mdash;</span>'}</td>
             <td class="small text-nowrap">${t.tasks.length}</td>
             <td class="small text-nowrap">${t.fields.length}</td>
             <td class="text-end pe-3 text-nowrap">
@@ -1085,6 +1091,7 @@ function showCaseTemplateModal() {
     document.getElementById('ctId').value = '';
     document.getElementById('ctName').value = '';
     document.getElementById('ctDescription').value = '';
+    document.getElementById('ctPrefix').value = '';
     document.getElementById('ctError').style.display = 'none';
     document.getElementById('ctTasksList').innerHTML = '';
     document.getElementById('ctFieldsList').innerHTML = '';
@@ -1100,6 +1107,7 @@ function editCaseTemplate(tid) {
     document.getElementById('ctId').value = t.id;
     document.getElementById('ctName').value = t.name;
     document.getElementById('ctDescription').value = t.description || '';
+    document.getElementById('ctPrefix').value = t.prefix || '';
     document.getElementById('ctError').style.display = 'none';
     document.getElementById('ctTasksList').innerHTML = '';
     document.getElementById('ctFieldsList').innerHTML = '';
@@ -1116,6 +1124,7 @@ function saveCaseTemplate() {
     const payload = {
         name: document.getElementById('ctName').value.trim(),
         description: document.getElementById('ctDescription').value.trim(),
+        prefix: document.getElementById('ctPrefix').value.trim(),
         tasks: collectCaseTemplateTasks(),
         fields: collectCaseTemplateFields()
     };
