@@ -23,12 +23,8 @@
             {% if has_permission('cases.templates.manage') %}
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnCasetemplates" onclick="switchSoarTab('casetemplates')"><i class="fa-solid fa-list-check me-2"></i>Case Templates</button></li>
             {% endif %}
-            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnQueues" onclick="switchSoarTab('queues')"><i class="fa-solid fa-inbox me-2"></i>Queues</button></li>
             <li class="nav-item"><button type="button" class="nav-link" id="tabBtnActions" onclick="switchSoarTab('actions')"><i class="fa-solid fa-list me-2"></i>Actions</button></li>
-            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnNotifications" onclick="switchSoarTab('notifications')"><i class="fa-solid fa-tower-broadcast me-2"></i>Notifications</button></li>
-            {% if has_permission('settings.system.manage') %}
-            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnAutomation" onclick="switchSoarTab('automation')"><i class="fa-solid fa-gears me-2"></i>Automation</button></li>
-            {% endif %}
+            <li class="nav-item"><button type="button" class="nav-link" id="tabBtnSettings" onclick="switchSoarTab('settings')"><i class="fa-solid fa-gears me-2"></i>Settings</button></li>
         </ul>
     </div>
 
@@ -142,13 +138,43 @@
     </div>
     {% endif %}
 
-    <!-- Queues pane -- relocated from the old "Manage Queues" modal in templates/cases.html
-         (cases.html keeps its own read-only queue picker/filter, unaffected). Visible to
-         everyone (queue membership/description is useful context to any analyst, same as
-         the old modal let anyone open it); create/delete/member actions stay gated by
-         cases.queues.manage, matching how the old modal itself already split this. -->
-    <div id="paneQueues" style="display:none;">
+    <!-- Actions pane -->
+    <div id="paneActions" style="display:none;">
         <div class="card-body">
+            <p class="text-muted small mb-3">Every action type a playbook step can run -- read-only reference, not a queue. Build these into a playbook from the Playbooks tab.</p>
+            <div class="table-responsive">
+                <table class="table table-dark table-sm align-middle mb-0" id="actionsCatalogTable">
+                    <thead><tr>
+                        <th class="ps-3">Action</th>
+                        <th class="rule-th"><div class="th-inner"><span>Scope</span><div class="dropdown">
+                            <button type="button" class="th-icon-btn" id="filterBtnScope" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                            <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuScope" style="min-width:190px;"></div>
+                        </div></div></th>
+                        <th class="rule-th"><div class="th-inner"><span>Approval</span><div class="dropdown">
+                            <button type="button" class="th-icon-btn" id="filterBtnApproval" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
+                            <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuApproval" style="min-width:190px;"></div>
+                        </div></div></th>
+                        <th>Description</th>
+                    </tr></thead>
+                    <tbody id="actionsCatalogTableBody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings pane -- folds the previously-separate Queues, Notifications, and
+         Automation tabs into one config-surface tab (all three were thin next to
+         Playbooks/Actions, the real work surfaces). Each keeps its own permission
+         posture exactly as before, at the section level instead of the tab level --
+         Queues/Notifications stay visible to everyone (view-only when the specific
+         manage permission is absent, same as before), Automation keeps its whole-
+         section {% raw %}{% if has_permission('settings.system.manage') %}{% endraw %}
+         gate so its inputs are absent from the DOM (not just hidden) for a non-admin. -->
+    <div id="paneSettings" style="display:none;">
+        <div class="card-body">
+            <h6 class="text-info mb-3">Queues</h6>
+            <!-- Relocated from the old "Manage Queues" modal in templates/cases.html
+                 (cases.html keeps its own read-only queue picker/filter, unaffected). -->
             <div class="table-responsive mb-3">
                 <table class="table table-dark table-sm align-middle mb-0">
                     <thead><tr><th class="ps-3">Name</th><th>Description</th><th>Members</th><th>Cases</th><th>SLA Override</th><th class="text-end pe-3"></th></tr></thead>
@@ -177,39 +203,12 @@
             {% else %}
             <p class="text-muted small mb-0"><i class="fa-solid fa-lock me-1"></i>Admin role required to create or edit queues.</p>
             {% endif %}
-        </div>
-    </div>
 
-    <!-- Actions pane -->
-    <div id="paneActions" style="display:none;">
-        <div class="card-body">
-            <p class="text-muted small mb-3">Every action type a playbook step can run -- read-only reference, not a queue. Build these into a playbook from the Playbooks tab.</p>
-            <div class="table-responsive">
-                <table class="table table-dark table-sm align-middle mb-0" id="actionsCatalogTable">
-                    <thead><tr>
-                        <th class="ps-3">Action</th>
-                        <th class="rule-th"><div class="th-inner"><span>Scope</span><div class="dropdown">
-                            <button type="button" class="th-icon-btn" id="filterBtnScope" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
-                            <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuScope" style="min-width:190px;"></div>
-                        </div></div></th>
-                        <th class="rule-th"><div class="th-inner"><span>Approval</span><div class="dropdown">
-                            <button type="button" class="th-icon-btn" id="filterBtnApproval" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="fa-solid fa-filter"></i></button>
-                            <div class="dropdown-menu dropdown-menu-dark p-2" id="filterMenuApproval" style="min-width:190px;"></div>
-                        </div></div></th>
-                        <th>Description</th>
-                    </tr></thead>
-                    <tbody id="actionsCatalogTableBody"></tbody>
-                </table>
-            </div>
-        </div>
-    </div>
+            <hr class="border-secondary my-4">
 
-    <!-- Notifications pane -- the shared Email/Webhook server config that backs every
-         send_email/send_webhook playbook action (case- and alert-scoped alike), relocated
-         here from Settings since it's now genuinely part of automation, not a standalone
-         toggle. -->
-    <div id="paneNotifications" style="display:none;">
-        <div class="card-body">
+            <h6 class="text-info mb-3">Notifications</h6>
+            <!-- The shared Email/Webhook server config that backs every send_email/
+                 send_webhook playbook action (case- and alert-scoped alike). -->
             <p class="text-muted small mb-3">The shared Email (SMTP) and Webhook server config used by every <code>send_email</code>/<code>send_webhook</code> playbook action, and by the seeded "Legacy Alert Notifications" playbook below.</p>
             <div class="row g-4">
                 <div class="col-md-6">
@@ -269,58 +268,48 @@
             <p class="text-muted small mt-3 mb-0"><i class="fa-solid fa-lock me-1"></i>Tier 3 (Senior Analyst) or Admin role required to change notification channel settings.</p>
             {% endif %}
             <div id="notifMsg" class="mt-2 small" style="display:none;"></div>
-        </div>
-    </div>
 
-    {% if has_permission('settings.system.manage') %}
-    <!-- Automation pane -- case-lifecycle automation config relocated from Settings
-         since both are genuinely SOAR concerns (one creates cases, one fires a
-         playbook trigger event), not general system settings. Same routes/
-         permission as before -- including the whole-pane visibility gate
-         settings.html's System pane always had (matches the Case Templates pane's
-         own {% raw %}{% if has_permission(...) %}{% endraw %} wrapping above; the tab
-         button alone isn't enough, since the pane's inputs would otherwise still be
-         present (if hidden) in the DOM for a non-admin to read via devtools). -->
-    <div id="paneAutomation" style="display:none;">
-        <div class="card-body">
-            <h6 class="text-info mb-3">Alert Escalation</h6>
+            {% if has_permission('settings.system.manage') %}
+            <hr class="border-secondary my-4">
+
+            <h6 class="text-info mb-3">Automation</h6>
+            <!-- Case-lifecycle automation config: whole-section visibility gate (not
+                 just a hidden tab button) so a non-admin never gets these inputs in the
+                 DOM at all -- same reasoning this pane used when it was its own tab. -->
+            <h6 class="text-info mb-3" style="font-size:.85rem;">Alert Escalation</h6>
             <p class="text-muted small mb-3">Single-rule dedup already collapses repeats of the same rule on a host. This is the separate, cross-rule signal: when this many <em>distinct</em> rules fire on one host within the window, a case is created automatically (or an existing open case for that host gets a note) — surfacing a correlation an analyst would otherwise have to notice by hand.</p>
             <div class="row g-2 align-items-end mb-3">
                 <div class="col-auto">
                     <label class="form-label small text-muted mb-1" for="escalationThreshold">Distinct rules</label>
-                    <input type="number" min="2" id="escalationThreshold" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:100px;" {{ '' if has_permission('settings.system.manage') else 'disabled' }}>
+                    <input type="number" min="2" id="escalationThreshold" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:100px;">
                 </div>
                 <div class="col-auto">
                     <label class="form-label small text-muted mb-1" for="escalationWindow">Window (minutes)</label>
-                    <input type="number" min="1" id="escalationWindow" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;" {{ '' if has_permission('settings.system.manage') else 'disabled' }}>
+                    <input type="number" min="1" id="escalationWindow" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:120px;">
                 </div>
-                {% if has_permission('settings.system.manage') %}
                 <div class="col-auto">
                     <button class="btn btn-outline-primary btn-sm" onclick="saveEscalationConfig()"><i class="fa-solid fa-save me-1"></i> Save</button>
                 </div>
-                {% endif %}
             </div>
             <div class="small text-muted" id="escalationStatus"></div>
 
             <hr class="border-secondary my-4">
 
-            <h6 class="text-info mb-3">Case Stale Nudge</h6>
+            <h6 class="text-info mb-3" style="font-size:.85rem;">Case Stale Nudge</h6>
             <p class="text-muted small mb-3">When an open case has had no activity (no status/assignee/queue/severity/workflow change logged to its timeline) for this long, a "Case gone stale" playbook trigger fires — a proactive nudge distinct from SLA breach, which only tracks the case's age, not whether anyone has actually touched it since. Fires again after a fresh period of silence following any new activity.</p>
             <div class="row g-2 align-items-end mb-3">
                 <div class="col-auto">
                     <label class="form-label small text-muted mb-1" for="caseStaleHours">Stale after (hours)</label>
-                    <input type="number" min="1" id="caseStaleHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:130px;" {{ '' if has_permission('settings.system.manage') else 'disabled' }}>
+                    <input type="number" min="1" id="caseStaleHours" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:130px;">
                 </div>
-                {% if has_permission('settings.system.manage') %}
                 <div class="col-auto">
                     <button class="btn btn-outline-primary btn-sm" onclick="saveCaseStaleConfig()"><i class="fa-solid fa-save me-1"></i> Save</button>
                 </div>
-                {% endif %}
             </div>
             <div class="small text-muted" id="caseStaleStatus"></div>
+            {% endif %}
         </div>
     </div>
-    {% endif %}
 </div>
 
 <!-- New/Edit Case Template modal -->
@@ -844,8 +833,9 @@ function loadRuleNamesForPlaybooks() {
     return fetch('/api/alerts/rule-names').then(r => r.json()).then(names => { pbRuleNames = names || []; }).catch(() => { pbRuleNames = []; });
 }
 
-// ---- Queues tab -- relocated from cases.html's "Manage Queues" modal (see comment on
-// #paneQueues). A separate array/fetch from allQueuesForPb above rather than sharing it:
+// ---- Queues (Settings tab) -- relocated from cases.html's "Manage Queues" modal (see
+// the Queues section comment on #paneSettings). A separate array/fetch from
+// allQueuesForPb above rather than sharing it:
 // that one only backs the playbook editor's condition dropdown and isn't guaranteed to
 // carry members/open_case_count/total_case_count, which this table needs.
 let allQueuesForSoar = [];
@@ -1924,7 +1914,7 @@ async function cancelScheduledRevert(revertId) {
 // requested tab's elements aren't in the DOM (a permission-gated tab hidden for this
 // role), persisted across visits via localStorage.
 const SOAR_TAB_KEY = 'microdfir_soar_active_tab';
-const SOAR_TABS = ['playbooks', 'casetemplates', 'queues', 'actions', 'notifications', 'automation'];
+const SOAR_TABS = ['playbooks', 'casetemplates', 'actions', 'settings'];
 
 function switchSoarTab(tab) {
     if (!SOAR_TABS.includes(tab)) tab = 'playbooks';
@@ -1943,9 +1933,9 @@ function switchSoarTab(tab) {
 
 // ---- Alert Escalation (relocated from Settings, same route/permission) ----
 function loadEscalationConfig() {
-    // The Automation tab (and this whole pane's inputs) is now permission-gated
+    // The Automation section of the Settings tab (and its inputs) is permission-gated
     // server-side (settings.system.manage) -- skip for a non-admin rather than
-    // fetching/populating hidden, absent-from-nav elements.
+    // fetching/populating absent-from-DOM elements.
     if (!document.getElementById('escalationThreshold')) return;
     fetch('/api/settings/alert-escalation')
         .then(r => r.json())
