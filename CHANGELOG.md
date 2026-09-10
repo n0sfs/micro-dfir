@@ -10,6 +10,58 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-09
 
+### New: Replay Detection (Log Import's deferred Phase 2)
+
+Closes the Phase 2 gap explicitly deferred when Log Import Phase 1 shipped: an opt-in
+"Replay Detection" action on a completed import, running every enabled Sigma rule
+against just that import's `imported_logs` rows and creating real alerts for new
+matches — without ever touching the live detection cursor (`sigma_state.json`) or firing
+SOAR playbooks/auto-case for what could be months of historical data. New
+`sigma_engine.replay_import_chunk()` scopes the same `recent_events` TEMP VIEW mechanism
+`dry_run_rule()`/`dry_run_rule_scoped()` already use to `imported_logs WHERE import_id =
+?` instead of `live_logs` — `imported_logs` deliberately mirrors `live_logs`' column
+shape (a Phase 1 decision made specifically to leave this open), so `_make_backend()`'s
+field-to-column mapping needed zero changes.
+
+Chunked by rule (not by row), same "no async/background-job mechanism, drive a slow
+operation as a client-driven loop" convention Log Import's own normalize/commit phases
+already use — new `POST /api/logs/import/<id>/replay` route, optimistic-concurrency
+conditional UPDATE on `imports.replay_rule_offset` mirroring `commit_offset`'s own
+shape. Idempotent by design: re-replaying the same import (e.g. after enabling a new
+rule) never duplicates an alert for a rule/host/user combo already alerted from that
+import — it bumps `occurrence_count` instead, checked via a new `alerts.import_id`
+column.
+
+Deliberately scoped down, each a real trade-off rather than an oversight: aggregation-
+condition rules are skipped (their per-cycle accumulate-then-threshold design has no
+one-shot translation for a fixed dataset — same limitation `dry_run_rule()` already has);
+SOAR playbooks and auto-case creation never fire for a replay alert (an admin clicking
+Replay wants to see the alerts, not retroactively spam every live automation against a
+historical backlog); UEBA baselining is entirely untouched (no view-indirection exists
+there at all — ~15+ query strings hardcode `siem.live_logs` directly, and baselines are
+shared global state a replay run must never pollute — a materially larger, separately-
+scoped gap, not attempted here).
+
+**Real bug found and fixed while wiring this up**: `alerts.event_id` is compared against
+`live_logs.id` in two places (the Home dashboard's recent-alerts widget, and the MTTD
+calculation) — but `imported_logs` and `live_logs` have **independent AUTOINCREMENT
+sequences**, so a replay alert's `event_id` (pointing at an `imported_logs.id`) could
+silently collide with an unrelated `live_logs` row sharing the same numeric id, corrupting
+both the widget's displayed host/message and the MTTD average with garbage from a
+decade-old row. Both joins now guard on the new `import_id IS NULL` marker.
+
+Verified: 84 tests across 5 real fixture suites — 27 against the actual
+`sigma_engine.replay_import_chunk()` function with the real installed pySigma 0.11.23
+(real matches scoped correctly to one import and never touching a colliding `live_logs`
+row with the same pattern, idempotent re-replay verified by bumping `occurrence_count`
+not duplicating, aggregation rules genuinely skipped, exclusions honored, disabled rules
+never evaluated, chunked pagination math correct across multiple calls); 18 for the
+route's own offset/reset/optimistic-concurrency bookkeeping including a simulated
+concurrent-request race; 9 directly proving the `event_id` collision fix by deliberately
+constructing the exact same-id collision between the two independent tables; 8 for
+migration idempotency; 22 Node vm-context tests for the console's confirm-gate, chunked
+polling loop, and progress/completion UI. Commit + push + deploy via `update.sh`.
+
 ### New: Beacon Simulator EDR test action (Beaconing Detection's deferred Phase 2)
 
 Closes the Phase 2 gap explicitly deferred when Beaconing Detection shipped: a way to

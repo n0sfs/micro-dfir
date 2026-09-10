@@ -633,6 +633,135 @@ def dry_run_rule_scoped(conn, rule_yaml, hostname, start_time, end_time, exclusi
     preview = [{k: m[k] for k in DRY_RUN_PREVIEW_FIELDS if k in m.keys()} for m in matches[:preview_limit]]
     return {'total_matches': total, 'preview': preview, 'preview_truncated': total > preview_limit, 'is_aggregation': agg is not None}
 
+# Log Import's Phase 2 ("Replay Detection"): an opt-in, admin-triggered run of every
+# enabled Sigma rule against exactly one import's closed dataset (imported_logs WHERE
+# import_id = ?), never the live ingest cursor -- deliberately separate from
+# run_detection_cycle() (the live incremental scan against live_logs) so a bulk
+# historical replay can never desync sigma_state.json's last_id or retroactively flood
+# live SOAR playbooks/auto-case with however many months of old data an import might
+# contain. That isolation is the exact reasoning the original Log Import Phase 1 plan
+# used to keep imports out of live detection entirely -- Phase 2 makes detection
+# available on demand without reopening that risk. Called from app.py's Flask process
+# against that request's own connection, same pattern as dry_run_rule()/
+# dry_run_rule_scoped() -- the TEMP VIEW this creates is connection-scoped, gone once
+# the request ends, so it can never collide with the live engine's own long-lived
+# connection or its differently-scoped `recent_events` view.
+#
+# Chunked by RULE, not by row -- same "no async/background-job mechanism in this app,
+# drive a slow operation as a client-side loop calling a chunked endpoint" convention
+# Log Import's own normalize/commit phases already use (see CLAUDE.md). rule_offset is
+# the resume/version token the caller (api_logs_import_replay in app.py) advances via
+# an optimistic-concurrency conditional UPDATE on imports.replay_rule_offset, the same
+# shape commit_offset already uses.
+#
+# Deliberately does NOT: evaluate aggregation-condition rules (their per-cycle
+# accumulate-then-threshold-check design has no clean one-shot translation for a fixed,
+# already-closed dataset -- same documented limitation dry_run_rule() already has and
+# reports via is_aggregation), fire SOAR playbooks, or auto-create cases -- an admin who
+# explicitly clicks Replay wants to SEE the resulting alerts, not retroactively trigger
+# every live automation against a potentially large batch of historical data. UEBA
+# baselining is untouched entirely (a materially larger, separately-scoped gap: UEBA has
+# no `recent_events`-style view indirection, ~15+ query strings hardcode siem.live_logs
+# directly, and its baselines are shared global state a replay run must never write to).
+def replay_import_chunk(conn, import_id, rule_offset, chunk_size, ioc_cache=None):
+    conn.create_function('REGEXP', 2, _sqlite_regexp)
+    cursor = conn.cursor()
+
+    # Views can't take bound parameters at CREATE time (confirmed live, same note as
+    # dry_run_rule_scoped above) -- import_id is safe to embed as a literal since the
+    # caller's route parameter is Flask's <int:...> converter, never a raw string.
+    cursor.execute("DROP VIEW IF EXISTS recent_events")
+    cursor.execute(f"CREATE TEMP VIEW recent_events AS SELECT * FROM imported_logs WHERE import_id = {int(import_id)}")
+
+    all_rules = cursor.execute(
+        "SELECT id, title, rule_yaml, severity_override FROM sigma_rules WHERE enabled = 1 ORDER BY id"
+    ).fetchall()
+    total_rules = len(all_rules)
+    chunk_rules = all_rules[rule_offset:rule_offset + chunk_size]
+
+    exclusions_by_rule = {}
+    for e in cursor.execute("SELECT rule_id, field, operator, value FROM rule_exclusions WHERE enabled = 1").fetchall():
+        exclusions_by_rule.setdefault(e['rule_id'], []).append(e)
+
+    backend = _make_backend()
+    ioc_cache = ioc_cache if ioc_cache is not None else {}
+    alerts_created = 0
+    aggregation_rules_skipped = 0
+
+    for r in chunk_rules:
+        try:
+            severity = (r['severity_override'] or '').capitalize() or _extract_level(r['rule_yaml']) or 'High'
+            agg = _extract_aggregation_condition(r['rule_yaml'])
+            if agg:
+                aggregation_rules_skipped += 1
+                continue
+            rule_yaml_text = _prepare_ioc_correlation(_normalize_rule_dates(r['rule_yaml']), cursor, ioc_cache)
+            rule_uses_ioc_placeholder = {kind: placeholder in r['rule_yaml'] for kind, placeholder, *_ in _IOC_KINDS}
+            rule_exclusions = exclusions_by_rule.get(r['id'], [])
+            mitre = _extract_mitre_technique_ids(r['rule_yaml'])
+
+            seen_ids = set()
+            for q in backend.convert(SigmaCollection.from_yaml(rule_yaml_text)):
+                q = _rewrite_ioc_lookups(q)
+                for m in cursor.execute(q).fetchall():
+                    if m['id'] in seen_ids:
+                        continue
+                    if any(_exclusion_matches(e, m) for e in rule_exclusions):
+                        continue
+                    seen_ids.add(m['id'])
+                    m_keys = m.keys()
+                    host = m['host']
+                    username = m['username'] if 'username' in m_keys else None
+                    source_ip = m['source_ip'] if 'source_ip' in m_keys else None
+                    destination_ip = m['destination_ip'] if 'destination_ip' in m_keys else None
+                    file_hash = m['file_hash'] if 'file_hash' in m_keys else None
+                    query_name = m['query_name'] if 'query_name' in m_keys else None
+
+                    # Idempotency: re-replaying the same import (e.g. after enabling a
+                    # new rule, or adding one) must never duplicate an alert this exact
+                    # rule/host/user combo already produced from THIS import on a prior
+                    # replay run -- no time-window condition here (unlike the live
+                    # cycle's own 15-minute merge window), since "recent" is meaningless
+                    # for a fixed, already-closed historical dataset.
+                    existing = cursor.execute(
+                        "SELECT id FROM alerts WHERE rule_id = ? AND host = ? AND username IS ? AND import_id = ?",
+                        (r['id'], host, username, import_id)
+                    ).fetchone()
+                    if existing:
+                        cursor.execute(
+                            "UPDATE alerts SET occurrence_count = occurrence_count + 1, last_seen = datetime('now'), event_id = ? WHERE id = ?",
+                            (m['id'], existing['id'])
+                        )
+                        continue
+
+                    country_code, country_name = lookup_country(source_ip)
+                    cursor.execute(
+                        "INSERT INTO alerts (rule_id, event_id, severity, host, message, username, source_ip, destination_ip, "
+                        "log_event_id, log_app, occurrence_count, last_seen, country_code, country_name, mitre_techniques, import_id) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?, ?)",
+                        (r['id'], m['id'], severity, host, m['message'], username, source_ip, destination_ip,
+                         m['event_id'] if 'event_id' in m_keys else None, m['app'] if 'app' in m_keys else None,
+                         country_code, country_name, mitre, import_id)
+                    )
+                    new_alert_id = cursor.lastrowid
+                    alerts_created += 1
+                    _record_ioc_sightings(cursor, r['id'], host, source_ip, destination_ip, file_hash, query_name,
+                                           new_alert_id, r['title'], rule_uses_ioc_placeholder)
+        except Exception as e:
+            print(f"[-] Replay (import {import_id}): rule '{r['title']}' failed to convert/execute: {e}")
+
+    cursor.execute("DROP VIEW IF EXISTS recent_events")
+    conn.commit()
+
+    next_offset = rule_offset + len(chunk_rules)
+    return {
+        'rules_processed': next_offset,
+        'total_rules': total_rules,
+        'alerts_created': alerts_created,
+        'aggregation_rules_skipped': aggregation_rules_skipped,
+        'done': next_offset >= total_rules,
+    }
+
 def run_detection_cycle():
     if not os.path.exists(DB_PATH): return
     conn = sqlite3.connect(DB_PATH, timeout=30); conn.row_factory = sqlite3.Row

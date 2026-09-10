@@ -1058,7 +1058,7 @@ def api_alerts():
                    COALESCE(l.host, a.host) as hostname
             FROM alerts a
             LEFT JOIN sigma_rules s ON a.rule_id = s.id
-            LEFT JOIN live_logs l ON a.event_id = l.id
+            LEFT JOIN live_logs l ON a.event_id = l.id AND a.import_id IS NULL
             ORDER BY a.id DESC LIMIT ?
         """, (limit,)).fetchall()
         alerts = [dict(row) for row in rows]
@@ -3546,6 +3546,76 @@ def api_logs_import_commit(import_id):
     return jsonify({'status': 'complete' if reached_eof else 'importing', 'rows_imported': total_imported,
                      'rows_failed': total_failed, 'total_rows': imp['total_rows']})
 
+# Phase 2 of Log Import ("Replay Detection"): opt-in, chunked by RULE (not by row) --
+# same client-driven-loop convention /normalize and /commit above already use, since
+# this app has no async/background-job mechanism. `reset` starts a fresh replay run
+# (zeroing the offset/counter); omitting it continues an in-progress one. The
+# optimistic-concurrency conditional UPDATE on replay_rule_offset mirrors commit_offset's
+# own pattern exactly -- a lost race (two tabs replaying the same import) returns 409
+# rather than silently reprocessing, though replay_import_chunk's own dedup (keyed on
+# rule/host/user/import_id) already makes a re-run of the same chunk harmless either way.
+@app.route('/api/logs/import/<int:import_id>/replay', methods=['POST'])
+@login_required
+def api_logs_import_replay(import_id):
+    err = require_permission('logsearch.import.manage')
+    if err: return err
+    db = get_db()
+    imp = db.execute("SELECT * FROM imports WHERE id = ?", (import_id,)).fetchone()
+    if not imp:
+        return jsonify({'error': 'Import not found'}), 404
+    if imp['status'] != 'complete':
+        return jsonify({'error': 'Replay is only available once an import has finished committing'}), 400
+
+    data = request.json or {}
+    reset = bool(data.get('reset'))
+    # Server-clamped, same reasoning as /commit's chunk_rows -- a rule's compiled query
+    # can itself be slow against a large import, so the per-request chunk stays small
+    # (a handful of rules) rather than trusting an unbounded client-supplied value.
+    chunk_size = min(max(int(data.get('chunk_size', 5) or 5), 1), 25)
+
+    if reset or imp['replay_status'] != 'running':
+        start_offset = 0
+        db.execute(
+            "UPDATE imports SET replay_status = 'running', replay_rule_offset = 0, replay_alerts_created = 0, "
+            "replay_started_at = CURRENT_TIMESTAMP, replay_completed_at = NULL WHERE id = ?",
+            (import_id,)
+        )
+        db.commit()
+    else:
+        start_offset = imp['replay_rule_offset']
+
+    from sigma_engine import replay_import_chunk
+    try:
+        result = replay_import_chunk(db, import_id, start_offset, chunk_size)
+    except Exception as e:
+        return jsonify({'error': f'Replay failed: {e}'}), 500
+
+    cur = db.execute(
+        "UPDATE imports SET replay_rule_offset = ?, replay_alerts_created = replay_alerts_created + ?, "
+        "replay_status = ? WHERE id = ? AND replay_rule_offset = ?",
+        (result['rules_processed'], result['alerts_created'], 'complete' if result['done'] else 'running',
+         import_id, start_offset)
+    )
+    if cur.rowcount == 0:
+        db.rollback()
+        return jsonify({'error': 'This import is being replayed by another request -- stop and re-check its status.'}), 409
+    if result['done']:
+        db.execute("UPDATE imports SET replay_completed_at = CURRENT_TIMESTAMP WHERE id = ?", (import_id,))
+    db.commit()
+    log_audit('log_import_replay', 'import', import_id,
+              f"rules {result['rules_processed']}/{result['total_rules']}, +{result['alerts_created']} alerts, "
+              f"{result['aggregation_rules_skipped']} aggregation rule(s) skipped")
+
+    total_alerts = db.execute("SELECT replay_alerts_created FROM imports WHERE id = ?", (import_id,)).fetchone()['replay_alerts_created']
+    return jsonify({
+        'status': 'complete' if result['done'] else 'running',
+        'rules_processed': result['rules_processed'],
+        'total_rules': result['total_rules'],
+        'alerts_created_this_chunk': result['alerts_created'],
+        'alerts_created_total': total_alerts,
+        'aggregation_rules_skipped': result['aggregation_rules_skipped'],
+    })
+
 
 @app.route('/api/logs/import', methods=['GET'])
 @login_required
@@ -3555,7 +3625,8 @@ def api_logs_import_list():
     db = get_db()
     rows = db.execute(
         "SELECT id, name, source_filename, status, total_rows, rows_normalized, rows_imported, rows_failed, "
-        "created_by, created_at, completed_at FROM imports ORDER BY id DESC"
+        "created_by, created_at, completed_at, replay_status, replay_alerts_created, replay_completed_at "
+        "FROM imports ORDER BY id DESC"
     ).fetchall()
     return jsonify([dict(r) for r in rows])
 
@@ -10469,10 +10540,16 @@ def api_dashboard_case_stats():
     # counted -- the older heuristic ingest path shares its alert/log timestamps
     # (delta always ~0) and isn't a meaningful detection-latency signal.
     cutoff_local = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+    # a.import_id IS NULL excludes Phase 2 replay-sourced alerts -- their event_id
+    # points at imported_logs.id, not live_logs.id (independent AUTOINCREMENT
+    # sequences), so an unguarded join here could silently match an unrelated live_logs
+    # row with the same numeric id and pollute this average with a bogus latency.
+    # Detection latency is also a meaningless concept for a bulk historical replay
+    # anyway -- the "detection" event is the replay click, not a live capture.
     avg_mttd_seconds = db.execute(
         "SELECT AVG((julianday(datetime(a.timestamp, 'localtime')) - julianday(l.timestamp)) * 86400) "
         "FROM alerts a JOIN live_logs l ON l.id = a.event_id "
-        "WHERE a.event_id IS NOT NULL AND datetime(a.timestamp, 'localtime') >= ? "
+        "WHERE a.event_id IS NOT NULL AND a.import_id IS NULL AND datetime(a.timestamp, 'localtime') >= ? "
         "AND datetime(a.timestamp, 'localtime') >= l.timestamp",
         (cutoff_local,)
     ).fetchone()[0]
@@ -13044,7 +13121,40 @@ def migrate_log_imports():
             created_by TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )''')
+        # Phase 2 (Replay Detection): tracks the chunked, resumable replay-run state for
+        # one import, same optimistic-concurrency shape as normalize_offset/commit_offset
+        # above -- replay_rule_offset is the resume/version token a client-driven loop
+        # advances one rule-chunk at a time (see replay_import_chunk() in sigma_engine.py).
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(imports)").fetchall()}
+        if 'replay_status' not in cols:
+            conn.execute("ALTER TABLE imports ADD COLUMN replay_status TEXT")
+        if 'replay_rule_offset' not in cols:
+            conn.execute("ALTER TABLE imports ADD COLUMN replay_rule_offset INTEGER NOT NULL DEFAULT 0")
+        if 'replay_alerts_created' not in cols:
+            conn.execute("ALTER TABLE imports ADD COLUMN replay_alerts_created INTEGER NOT NULL DEFAULT 0")
+        if 'replay_started_at' not in cols:
+            conn.execute("ALTER TABLE imports ADD COLUMN replay_started_at DATETIME")
+        if 'replay_completed_at' not in cols:
+            conn.execute("ALTER TABLE imports ADD COLUMN replay_completed_at DATETIME")
         conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# Phase 2 (Replay Detection): a replay-sourced alert's event_id points at
+# imported_logs.id, NOT live_logs.id -- imported_logs and live_logs have independent
+# AUTOINCREMENT sequences, so an unguarded join on event_id (e.g. the Home dashboard
+# widget, the MTTD calculation) could silently match an unrelated live_logs row that
+# happens to share the same numeric id. import_id (NULL for every live-detection alert)
+# is the marker those two join sites now guard on -- see api_alerts_recent() and
+# api_dashboard_lifecycle_metrics()/wherever MTTD is computed.
+def migrate_alerts_import_id():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(alerts)").fetchall()}
+        if 'import_id' not in cols:
+            conn.execute("ALTER TABLE alerts ADD COLUMN import_id INTEGER")
+            conn.commit()
         conn.close()
     except Exception:
         pass
@@ -15720,7 +15830,7 @@ _ALERT_BRANCH_SQL = """SELECT a.timestamp, a.severity,
        NULL as process_image, NULL as command_line, NULL as parent_image, NULL as parent_command_line, NULL as original_file_name, NULL as raw_xml,
        a.occurrence_count as occurrence_count, a.last_seen as last_seen, a.id as item_id, NULL as entity_type,
        a.status as status, a.assignee as assignee, NULL as file_hash, NULL as query_name,
-       COALESCE(a.is_atomic_test, 0) as is_atomic_test, NULL as import_id
+       COALESCE(a.is_atomic_test, 0) as is_atomic_test, a.import_id as import_id
 FROM alerts a
 LEFT JOIN sigma_rules s ON a.rule_id = s.id"""
 
@@ -18717,6 +18827,7 @@ migrate_ti_entities_references()
 migrate_yara_rule_tags()
 migrate_custom_parsers()
 migrate_log_imports()
+migrate_alerts_import_id()
 migrate_logsearch_import_permission()
 migrate_ir_runbooks()
 migrate_runbooks_permission()
