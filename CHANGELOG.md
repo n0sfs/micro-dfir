@@ -38,6 +38,23 @@ directly over the simpler options after asking.
   small `caseNumberLabel()` fallback helper), and the New Case modal's template picker
   shows the prefix inline (`"Phishing Investigation (7 tasks, PHISH-#)"`).
 
+**Follow-up, same day**: added a second numbering mode, **year-only** (`2026-014`, no
+template-specific text at all) — a new `ctNumberMode` selector in the Case Template
+editor, listed above the prefix field with "Year only" as the first option. Picking it
+hides the prefix input entirely (nothing to type) and ignores any prefix text the
+template previously had.
+- **`case_templates.number_mode`** (nullable `TEXT`, `'custom'` or `'year'`) — `NULL`
+  (every row saved before this column existed, including the real "Phishing
+  Investigation" template already configured with a `PHISH` prefix during this same
+  day's live-verification) is normalized to `'custom'` everywhere it's read, so existing
+  configured prefixes kept working unchanged with zero manual re-save needed.
+- `_generate_case_number()` gained a `year_only` flag — format becomes `YYYY-NNN`. Its
+  counter-table key is namespaced (`year:2026`, lowercase+colon) rather than the bare
+  year string: `CASE_TEMPLATE_PREFIX_RE` happens to allow an all-digit custom prefix
+  like `'2026'`, and without this namespacing a template literally prefixed `2026`
+  would silently share (and corrupt) the same counter series as every year-only
+  template in that same calendar year.
+
 ### Second/third sandbox sources (filescan.io, Hybrid Analysis) + MalwareBazaar hash analyzer
 
 Follow-up to a "what else is out there" research pass (filescan.io, VirusTotal, and

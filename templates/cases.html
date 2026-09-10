@@ -397,6 +397,14 @@ function caseNumberLabel(c) {
     return c.case_number ? escHtml(c.case_number) : `#${c.id}`;
 }
 
+// Small ", PREFIX-#" / ", YYYY-#" hint appended to a template's own label in the New
+// Case modal's picker -- t.number_mode is 'custom' or 'year' (never NULL) since
+// api_case_templates' GET already normalizes a legacy NULL row to 'custom'.
+function templateNumberingHint(t) {
+    if (t.number_mode === 'year') return ', YYYY-#';
+    return t.prefix ? `, ${escHtml(t.prefix)}-#` : '';
+}
+
 // A loader's initial "Loading..." table state has no failure counterpart today -- a
 // non-2xx response (still a resolved fetch()) leaves it stuck showing "Loading..."
 // forever with no visible sign anything went wrong. This renders an explicit, retriable
@@ -958,7 +966,7 @@ function loadCaseTemplates() {
         caseTemplates = templates || [];
         const sel = document.getElementById('newCaseTemplate');
         sel.innerHTML = '<option value="">None — start with an empty task list</option>' +
-            caseTemplates.map(t => `<option value="${t.id}">${escHtml(t.name)} (${t.tasks.length} tasks${t.prefix ? `, ${escHtml(t.prefix)}-#` : ''})</option>`).join('');
+            caseTemplates.map(t => `<option value="${t.id}">${escHtml(t.name)} (${t.tasks.length} tasks${templateNumberingHint(t)})</option>`).join('');
     }).catch(err => console.error('Error loading case templates:', err));
 }
 

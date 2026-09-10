@@ -6874,12 +6874,13 @@ def api_cases():
         _log_case_event(db, cid, 'queue_change', queue_name)
 
     # Optional template: bulk-create its task list on the new case, and -- if the
-    # template has a prefix configured -- allocate a formatted case number (e.g.
-    # 'INC-2026-014') distinct from the raw id. A template with no prefix set leaves
-    # case_number NULL; that case keeps showing the existing #<id> convention.
+    # template has case numbering configured -- allocate a formatted case number
+    # ('INC-2026-014' for a custom prefix, or '2026-014' for year-only mode) distinct
+    # from the raw id. A template with neither leaves case_number NULL; that case keeps
+    # showing the existing #<id> convention.
     template_id = data.get('template_id')
     if template_id:
-        tpl = db.execute("SELECT name, tasks, prefix FROM case_templates WHERE id = ?", (template_id,)).fetchone()
+        tpl = db.execute("SELECT name, tasks, prefix, number_mode FROM case_templates WHERE id = ?", (template_id,)).fetchone()
         if tpl:
             tasks = json.loads(tpl['tasks'])
             db.executemany(
@@ -6888,7 +6889,12 @@ def api_cases():
             )
             _seed_case_template_fields(db, cid, template_id)
             _log_case_event(db, cid, 'template_applied', tpl['name'])
-            if tpl['prefix']:
+            # NULL number_mode (a template saved before this column existed) means
+            # 'custom', same normalization api_case_templates' GET applies.
+            if (tpl['number_mode'] or 'custom') == 'year':
+                case_number = _generate_case_number(db, None, year_only=True)
+                db.execute("UPDATE cases SET case_number = ? WHERE id = ?", (case_number, cid))
+            elif tpl['prefix']:
                 case_number = _generate_case_number(db, tpl['prefix'])
                 db.execute("UPDATE cases SET case_number = ? WHERE id = ?", (case_number, cid))
 
@@ -9667,12 +9673,16 @@ def _case_template_fields_out(db, template_id):
 def api_case_templates():
     db = get_db()
     if request.method == 'GET':
-        rows = db.execute("SELECT id, name, description, tasks, prefix FROM case_templates ORDER BY name").fetchall()
+        rows = db.execute("SELECT id, name, description, tasks, prefix, number_mode FROM case_templates ORDER BY name").fetchall()
         out = []
         for r in rows:
             d = dict(r)
             d['tasks'] = json.loads(d['tasks'])
             d['fields'] = _case_template_fields_out(db, d['id'])
+            # NULL (every row saved before number_mode existed) means 'custom' -- see
+            # migrate_case_numbering's comment. Normalized here so the frontend never
+            # has to special-case NULL vs 'custom' itself.
+            d['number_mode'] = d['number_mode'] or 'custom'
             out.append(d)
         return jsonify(out)
 
@@ -9682,7 +9692,12 @@ def api_case_templates():
     name = (d.get('name') or '').strip()
     tasks = [t.strip() for t in (d.get('tasks') or []) if isinstance(t, str) and t.strip()]
     fields = d.get('fields') or []
-    prefix = (d.get('prefix') or '').strip().upper() or None
+    number_mode = (d.get('number_mode') or 'custom').strip()
+    if number_mode not in ('custom', 'year'):
+        return jsonify({'error': "number_mode must be 'custom' or 'year'"}), 400
+    # Year-only mode ignores any submitted prefix text entirely -- the year itself is
+    # the whole prefix, so there's nothing template-specific left to store or validate.
+    prefix = None if number_mode == 'year' else ((d.get('prefix') or '').strip().upper() or None)
     if not name:
         return jsonify({'error': 'name is required'}), 400
     if prefix and not CASE_TEMPLATE_PREFIX_RE.match(prefix):
@@ -9695,8 +9710,8 @@ def api_case_templates():
     if db.execute("SELECT 1 FROM case_templates WHERE name = ?", (name,)).fetchone():
         return jsonify({'error': f'A template named "{name}" already exists'}), 400
     cur = db.execute(
-        "INSERT INTO case_templates (name, description, tasks, prefix, created_by) VALUES (?, ?, ?, ?, ?)",
-        (name, (d.get('description') or '').strip(), json.dumps(tasks), prefix, current_user.username)
+        "INSERT INTO case_templates (name, description, tasks, prefix, number_mode, created_by) VALUES (?, ?, ?, ?, ?, ?)",
+        (name, (d.get('description') or '').strip(), json.dumps(tasks), prefix, number_mode, current_user.username)
     )
     tid = cur.lastrowid
     for i, f in enumerate(fields):
@@ -9730,7 +9745,10 @@ def api_case_template_detail(tid):
     name = (d.get('name') or '').strip()
     tasks = [t.strip() for t in (d.get('tasks') or []) if isinstance(t, str) and t.strip()]
     fields = d.get('fields') or []
-    prefix = (d.get('prefix') or '').strip().upper() or None
+    number_mode = (d.get('number_mode') or 'custom').strip()
+    if number_mode not in ('custom', 'year'):
+        return jsonify({'error': "number_mode must be 'custom' or 'year'"}), 400
+    prefix = None if number_mode == 'year' else ((d.get('prefix') or '').strip().upper() or None)
     if not name:
         return jsonify({'error': 'name is required'}), 400
     if prefix and not CASE_TEMPLATE_PREFIX_RE.match(prefix):
@@ -9743,8 +9761,8 @@ def api_case_template_detail(tid):
     if db.execute("SELECT 1 FROM case_templates WHERE name = ? AND id != ?", (name, tid)).fetchone():
         return jsonify({'error': f'A template named "{name}" already exists'}), 400
     db.execute(
-        "UPDATE case_templates SET name = ?, description = ?, tasks = ?, prefix = ? WHERE id = ?",
-        (name, (d.get('description') or '').strip(), json.dumps(tasks), prefix, tid)
+        "UPDATE case_templates SET name = ?, description = ?, tasks = ?, prefix = ?, number_mode = ? WHERE id = ?",
+        (name, (d.get('description') or '').strip(), json.dumps(tasks), prefix, number_mode, tid)
     )
     db.execute("DELETE FROM case_template_fields WHERE template_id = ?", (tid,))
     for i, f in enumerate(fields):
@@ -12296,6 +12314,12 @@ def migrate_case_numbering():
         ct_cols = {row[1] for row in conn.execute("PRAGMA table_info(case_templates)").fetchall()}
         if 'prefix' not in ct_cols:
             conn.execute("ALTER TABLE case_templates ADD COLUMN prefix TEXT")
+        if 'number_mode' not in ct_cols:
+            # NULL (every row before this column existed, including a real template
+            # already configured with a custom prefix in production before this mode
+            # concept existed) means exactly the same thing as 'custom' -- never
+            # silently reinterpreted as 'year' or "no numbering" for existing data.
+            conn.execute("ALTER TABLE case_templates ADD COLUMN number_mode TEXT")
         c_cols = {row[1] for row in conn.execute("PRAGMA table_info(cases)").fetchall()}
         if 'case_number' not in c_cols:
             conn.execute("ALTER TABLE cases ADD COLUMN case_number TEXT")
@@ -12319,23 +12343,31 @@ def migrate_case_numbering():
 # user-facing identifier.
 CASE_TEMPLATE_PREFIX_RE = re.compile(r'^[A-Z0-9][A-Z0-9-]{0,9}$')
 
-def _generate_case_number(db, prefix):
-    """Atomically allocates the next sequence number for `prefix` within the current
-    calendar year and returns the formatted case number, e.g. 'INC-2026-014'. The
-    INSERT .. ON CONFLICT DO UPDATE is one single atomic statement, so two concurrent
-    case-creation requests (different gunicorn workers) can't race into issuing the
-    same number -- SQLite serializes the two writes, the second sees the first's
-    already-incremented row."""
+def _generate_case_number(db, prefix, year_only=False):
+    """Atomically allocates the next sequence number within the current calendar year
+    and returns the formatted case number -- 'INC-2026-014' normally, or '2026-014'
+    when year_only=True (the year itself IS the whole prefix, no template-specific
+    text). The INSERT .. ON CONFLICT DO UPDATE is one single atomic statement, so two
+    concurrent case-creation requests (different gunicorn workers) can't race into
+    issuing the same number -- SQLite serializes the two writes, the second sees the
+    first's already-incremented row.
+
+    year_only's counter key is namespaced ('year:2026', lowercase+colon) rather than
+    the bare year string -- CASE_TEMPLATE_PREFIX_RE happens to allow an all-digit
+    custom prefix like '2026', and without this a custom-prefix template literally
+    named '2026' would silently share (and corrupt) the same counter series as every
+    year-only template in that same year."""
     year = datetime.now().year
+    counter_key = f"year:{year}" if year_only else prefix
     db.execute(
         "INSERT INTO case_number_counters (prefix, year, next_seq) VALUES (?, ?, 1) "
         "ON CONFLICT(prefix, year) DO UPDATE SET next_seq = next_seq + 1",
-        (prefix, year)
+        (counter_key, year)
     )
     seq = db.execute(
-        "SELECT next_seq FROM case_number_counters WHERE prefix = ? AND year = ?", (prefix, year)
+        "SELECT next_seq FROM case_number_counters WHERE prefix = ? AND year = ?", (counter_key, year)
     ).fetchone()['next_seq']
-    return f"{prefix}-{year}-{seq:03d}"
+    return f"{year}-{seq:03d}" if year_only else f"{prefix}-{year}-{seq:03d}"
 
 # Mirrors Exabeam Case Manager's queue model (per the session's own research pass):
 # a queue is just a named group cases get manually routed into/between, with a
