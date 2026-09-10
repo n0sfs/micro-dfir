@@ -8,6 +8,34 @@ a new feature, a real architectural decision, an incident and its fix. Routine p
 fixes don't need their own line; group them into the feature they support. Newest first.
 Full commit-level detail is always available via `git log`.
 
+## 2026-09-10
+
+### Workflow consolidation pass: SOAR Settings tab, vulnerability cross-links, dev tooling
+
+Follow-up to the previous day's nav cleanup — reviewed the app's remaining tab
+structure, the alert-to-case-to-response analyst workflow, and this session's own
+dev/test/deploy process for further consolidation. Most of the app held up fine on
+inspection (nav is already lean, the core analyst workflow is already linear with no
+redundant screen-bouncing); three concrete items came out of it:
+
+- **SOAR: folded Queues, Notifications, and Automation into one "Settings" tab**
+  (`templates/soar.html`) — those three were thin config screens next to the two real
+  work surfaces (Playbooks, Actions). SOAR's tab strip goes from 6 tabs to 4
+  (Playbooks, Case Templates, Actions, Settings), with the three merged sections
+  separated by `<h6>`/`<hr>` inside one pane. Automation's whole-section
+  `has_permission('settings.system.manage')` gate is preserved (not weakened to
+  per-input `disabled` attributes) so its inputs still never reach a non-admin's DOM.
+- **Cross-linked the two vulnerability views** — Threat Intel & Hunting's
+  "Vulnerabilities" tab (raw CVE/EPSS/KEV browsing, not host-correlated) and
+  Coverage's "Vulnerability" tab (per-host coverage-score rollup) cover genuinely
+  different ground, so they weren't merged, but nothing pointed from one to the other.
+  Added a one-line link each way.
+- **New `tools/` directory**: `check_template.py` (Jinja compile-check + extract/stub/
+  `node --check` an inline `<script>` block, in one command) and `vm_test_harness.js`
+  (shared `extractFn`/`makeChecker` helpers for Node vm-context tests). Collapses
+  boilerplate that had been getting hand-rewritten from scratch in scratchpad every
+  phase this session — dev-only tooling, no production-path changes.
+
 ## 2026-09-09
 
 ### Nav cleanup: fold IR Runbooks into Cases as a sibling tab
