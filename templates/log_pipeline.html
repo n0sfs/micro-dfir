@@ -1887,6 +1887,7 @@ let importState = {
     detectedFields: [], suggestedMapping: {}, previewRows: [], severityValues: [],
 };
 let importHistory = [];
+let importReplayState = {};  // import id -> {running, rulesProcessed, totalRules}, only while a replay loop is in flight
 let importMappingProfiles = [];
 let importAbort = false;  // set true on a 409/fatal error to stop an in-flight loop
 
@@ -2245,10 +2246,67 @@ function renderImportHistory() {
             <td class="small text-muted">${escHtml(imp.created_at || '')}</td>
             <td>
                 ${imp.status === 'complete' ? `<a href="${importLogSearchLink(imp.id)}" target="_blank" class="btn btn-sm btn-outline-info me-1" title="View in Log Search"><i class="fa-solid fa-magnifying-glass"></i></a>` : ''}
+                ${imp.status === 'complete' ? importReplayButtonHtml(imp) : ''}
                 <button class="btn btn-sm btn-outline-danger" title="Delete this import" onclick="deleteImport(${imp.id})"><i class="fa-solid fa-trash"></i></button>
             </td>
         </tr>`;
     }).join('');
+}
+
+// ---- Replay Detection (Phase 2) ----
+function importReplayButtonHtml(imp) {
+    const state = importReplayState[imp.id];
+    if (state && state.running) {
+        return `<span class="badge bg-info text-dark me-1">Replaying ${state.rulesProcessed || 0}/${state.totalRules || '?'} rules&hellip;</span>`;
+    }
+    const title = imp.replay_completed_at
+        ? `Last replayed ${escAttr(imp.replay_completed_at)} -- ${imp.replay_alerts_created || 0} alert(s). Run every enabled Sigma rule against this import's data again.`
+        : `Run every enabled Sigma rule against this import's data -- real alerts are created for new matches, visible in Log Search filtered to this import.`;
+    return `<button class="btn btn-sm btn-outline-warning me-1" title="${title}" onclick="replayImportDetection(${imp.id})"><i class="fa-solid fa-bolt"></i></button>`;
+}
+
+async function replayImportDetection(id) {
+    if (!(await confirmDialog(
+        "Run every enabled Sigma rule against this import's data? Real alerts will be created for new matches (visible in Log Search, filtered to this import). "
+        + "This does NOT fire SOAR playbooks, auto-create cases, or evaluate aggregation-condition rules, and it's safe to re-run later -- it will never duplicate "
+        + "an alert for a rule/host/user combo already alerted from this import.",
+        {title: 'Replay Detection', confirmLabel: 'Run Replay'}
+    ))) return;
+    importReplayState[id] = { running: true, rulesProcessed: 0, totalRules: null };
+    renderImportHistory();
+    importReplayStep(id, true);
+}
+
+function importReplayStep(id, reset) {
+    fetch(`/api/logs/import/${id}/replay`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(reset ? {reset: true} : {})
+    })
+        .then(async r => {
+            const d = await r.json();
+            if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+            return d;
+        })
+        .then(d => {
+            if (d.status === 'complete') {
+                delete importReplayState[id];
+                loadImportHistory();
+                toast(
+                    `Replay complete: ${d.alerts_created_total} alert(s) total from ${d.total_rules} rule(s)`
+                    + (d.aggregation_rules_skipped ? ` (${d.aggregation_rules_skipped} aggregation rule(s) skipped)` : '') + '.',
+                    'success'
+                );
+            } else {
+                importReplayState[id] = { running: true, rulesProcessed: d.rules_processed, totalRules: d.total_rules };
+                renderImportHistory();
+                importReplayStep(id, false);
+            }
+        })
+        .catch(err => {
+            delete importReplayState[id];
+            renderImportHistory();
+            toast('Replay failed: ' + (err.message || err), 'danger');
+        });
 }
 
 async function deleteImport(id) {
