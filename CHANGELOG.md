@@ -10,6 +10,50 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-09
 
+### New: Click-through drill-down on the two dashboard trend charts
+
+Closes the gap explicitly left open when 3 other dashboard charts got click-through
+earlier this session: "there's no precise date-range deep-link into Log Search yet to
+click through to, and landing on an approximate day would be worse than no drill-down."
+Alert Volume Trend and Risk Score Trend now both have a real `Chart.js` `onClick` handler
+(neither had one at all before — the 3 already-shipped charts are a doughnut and two bar
+charts, this is the first time a `line`-type widget got one) that deep-links to Log
+Search scoped to exactly the clicked bucket's time window via a new `range=custom&start=
+&end=` query string, rather than a categorical `field:value` filter like the existing
+`pivotToLogSearch()` pivot uses.
+
+New shared `pivotToLogSearchBucket()` (`base.html`) handles a real, easy-to-get-wrong
+correctness trap: both trend charts' bucket labels (`t_bucket`/`day`) are computed via a
+plain `strftime()` against a UTC-native timestamp column (`alerts.timestamp`/
+`risk_score_events.computed_at`, both SQLite's own UTC `CURRENT_TIMESTAMP` default) with
+no `'localtime'` conversion — so the label itself is a UTC-clock string, while Log
+Search's `range=custom&start=/end=` are documented as LOCAL time
+(`_build_log_time_condition`, matching the existing custom-range date picker's own
+convention). Treating the UTC label as if it were already local would silently shift the
+deep-linked window by the server's UTC offset — exactly the mixed-clock bug class this
+session already fixed elsewhere in Log Search. Fixed by parsing the label as UTC (`Z`
+suffix) and reading it back via JS `Date`'s plain (non-UTC) getters, which naturally
+return browser-local time.
+
+Bucket width is read from the label itself (hourly `"YYYY-MM-DD HH:00"` vs daily
+`"YYYY-MM-DD"`, detected by a colon) rather than assumed from the dashboard's currently-
+selected range — `api_dashboard_alert_trend`'s own bucket switches to hourly only when
+the selected range is ≤7 days, so a click needs to reflect what the chart actually drew,
+not what range happens to be selected right now.
+
+`initSearchTab()` (`dashboard.html`) now reads `range=custom&start=&end=` from the
+incoming URL and applies it via the page's existing `timeRangeState`/custom-range-picker
+mechanism — previously only `alert_id`/`q` were ever read, and a `q` deep-link
+unconditionally reset the window to "All Time" (correct for a categorical pivot, wrong
+for a time-bucket click, which needs the *opposite*: the precise window, not the whole
+history). A plain page load with no deep-link params is completely unaffected.
+
+Verified: 22 Node vm-context tests (the UTC→local conversion independently re-derived
+and cross-checked rather than hardcoded to one timezone, hourly/daily bucket width math,
+both widgets' `onClick` wiring, `initSearchTab()`'s new branch including that a bare page
+load stays untouched) + 2 tests round-tripping the exact emitted timestamp format through
+the real, unmodified `_parse_datetime_local()` backend function.
+
 ### New: Windows Advanced Audit Policy drift detection
 
 Closes the gap a review pass explicitly left unfixed earlier this session ("would need a

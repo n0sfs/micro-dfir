@@ -2375,6 +2375,20 @@ function initSearchTab() {
     // previously only the one hardcoded alert_id case above could do this at all, so a
     // case's asset/IOC or an alert's host/user/IP had nowhere to pivot to.
     const _deepLinkQuery = _params.get('q');
+    // A trend-chart bucket click (pivotToLogSearchBucket, base.html) links here with an
+    // explicit range=custom&start=&end= and no q= at all -- applied before the initial
+    // load below so the clicked bucket's window is what actually loads, instead of
+    // falling through to the default 5-minute window (which would show nothing at all
+    // unless the clicked bucket happened to be the most recent one).
+    const _deepLinkStart = _params.get('start');
+    const _deepLinkEnd = _params.get('end');
+    if (_params.get('range') === 'custom' && (_deepLinkStart || _deepLinkEnd)) {
+        timeRangeState = { range: 'custom', start: _deepLinkStart || '', end: _deepLinkEnd || '' };
+        if (document.getElementById('customStart')) document.getElementById('customStart').value = (_deepLinkStart || '').replace(' ', 'T').slice(0, 16);
+        if (document.getElementById('customEnd')) document.getElementById('customEnd').value = (_deepLinkEnd || '').replace(' ', 'T').slice(0, 16);
+        setTimeRangeLabel();
+        markActivePresetBtn(null);
+    }
     if (_deepLinkAlertId) {
         // buildLogQueryParams() ignores #searchQuery entirely unless this is checked --
         // loadSearchModePrefs() (just above) may have just turned it off from a saved

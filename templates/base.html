@@ -584,6 +584,34 @@ body.sidebar-collapsed .nav-block .nav-badge{
             window.location.href = `/siem?tab=search&q=${encodeURIComponent(query)}`;
         }
 
+        // For a trend-chart bucket click (Alert Volume Trend, Risk Score Trend): deep-links
+        // into Log Search scoped to exactly the clicked bucket's time window, with no
+        // q= filter -- the point of clicking a bucket is "show me everything from THIS
+        // window", not a categorical field:value pivot like pivotToLogSearch above.
+        // bucketLabel is the raw server-computed bucket string (SQLite strftime output
+        // against a UTC-native timestamp column -- alerts.timestamp/risk_score_events.computed_at
+        // both default to SQLite's own UTC CURRENT_TIMESTAMP, confirmed against schema.sql),
+        // either hourly "YYYY-MM-DD HH:00" or daily "YYYY-MM-DD", detected by the presence
+        // of a colon -- never guessed from the dashboard's currently-selected range, since
+        // a widget's own effective bucket width can differ from that (see
+        // api_dashboard_alert_trend's days<=7 branch).
+        //
+        // Log Search's range=custom&start=/end= are LOCAL time (_build_log_time_condition's
+        // own documented convention, matching applyCustomRange()'s datetime-local picker) --
+        // appending 'Z' before parsing makes JS treat the bucket label as that UTC instant,
+        // and the Date object's plain (non-UTC) getters then naturally return it in the
+        // browser's local time. Skipping this conversion would reproduce the exact
+        // mixed-clock bug class already fixed elsewhere in Log Search.
+        function pivotToLogSearchBucket(bucketLabel) {
+            const isHourly = bucketLabel.includes(':');
+            const isoUtc = isHourly ? `${bucketLabel.replace(' ', 'T')}:00Z` : `${bucketLabel}T00:00:00Z`;
+            const start = new Date(isoUtc);
+            const end = new Date(start.getTime() + (isHourly ? 3600000 : 86400000));
+            const pad = n => String(n).padStart(2, '0');
+            const fmt = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+            window.location.href = `/siem?tab=search&range=custom&start=${encodeURIComponent(fmt(start))}&end=${encodeURIComponent(fmt(end))}`;
+        }
+
         // ---------- Styled prompt dialog (replaces prompt(), returns a Promise<string|null>) ----------
         function promptDialog(message, defaultValue, opts) {
             opts = opts || {};
