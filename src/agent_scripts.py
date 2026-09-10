@@ -66,6 +66,50 @@ Remove-NetFirewallRule -DisplayName "MicroDFIR-Isolation-*" -ErrorAction Silentl
 "Network isolation removed. Host restored to normal connectivity."
 """
 
+# A lighter-touch containment than isolate_host: adds two DENY rules for one specific
+# IP instead of flipping the whole host's default policy to block-everything-except-SOC.
+# The host stays otherwise fully usable (an analyst/user can keep working) while the one
+# known-bad destination is cut off -- the natural response to "this host is talking to a
+# bad IP" when full isolation would be overkill (or would cut off something the user
+# still legitimately needs, e.g. mid-investigation on their own machine). Same
+# Remove-then-create idempotency isolate_host already uses (a second block on the same
+# IP replaces, not duplicates, the existing rule). Both directions share one DisplayName
+# on purpose -- unblock_ip() below removes both with a single -DisplayName match.
+#
+# [Confirmed by actually running this without admin rights] New-NetFirewallRule without
+# -ErrorAction Stop lets a permission failure pass silently -- the script would otherwise
+# print its hardcoded success message regardless of whether the rule was actually
+# created, a false-positive an analyst could act on (believing a host is contained when
+# it isn't). Wrapped in try/catch here so a real failure is reported as one, not masked.
+def block_ip(target_ip):
+    if not _IPV4_RE.match(target_ip):
+        raise ValueError(f"Invalid target IP address: {target_ip!r}")
+    return f"""$ip = "{target_ip}"
+try {{
+    Remove-NetFirewallRule -DisplayName "MicroDFIR-Block-$ip" -ErrorAction SilentlyContinue
+    New-NetFirewallRule -DisplayName "MicroDFIR-Block-$ip" -Direction Outbound -RemoteAddress $ip -Action Block -Profile Any -ErrorAction Stop | Out-Null
+    New-NetFirewallRule -DisplayName "MicroDFIR-Block-$ip" -Direction Inbound -RemoteAddress $ip -Action Block -Profile Any -ErrorAction Stop | Out-Null
+    "Blocked all inbound/outbound traffic to/from $ip via Windows Firewall (two new deny rules; the host's own default policy and every other existing rule are untouched)."
+}} catch {{
+    $errMsg = $_.Exception.Message -replace '"', "'"
+    "{{`"error`":`"failed to create firewall block rule for $ip -- $errMsg`"}}"
+}}
+"""
+
+def unblock_ip(target_ip):
+    if not _IPV4_RE.match(target_ip):
+        raise ValueError(f"Invalid target IP address: {target_ip!r}")
+    return f"""$ip = "{target_ip}"
+try {{
+    $existing = @(Get-NetFirewallRule -DisplayName "MicroDFIR-Block-$ip" -ErrorAction Stop)
+    if ($existing.Count -gt 0) {{ Remove-NetFirewallRule -DisplayName "MicroDFIR-Block-$ip" -ErrorAction Stop }}
+    if ($existing.Count -gt 0) {{ "Removed $($existing.Count) MicroDFIR block rule(s) for $ip." }} else {{ "No MicroDFIR block rule found for $ip -- nothing to remove." }}
+}} catch {{
+    $errMsg = $_.Exception.Message -replace '"', "'"
+    "{{`"error`":`"failed to remove firewall block rule for $ip -- $errMsg`"}}"
+}}
+"""
+
 def collect_triage():
     return r"""$result = @{}
 $result.processes = Get-Process | Select-Object Id,ProcessName,Path,@{N='Hash';E={try{(Get-FileHash $_.Path -Algorithm SHA256 -ErrorAction Stop).Hash}catch{$null}}} | Select-Object -First 60
@@ -284,6 +328,58 @@ foreach ($t in $targets) {
     }
 }
 @{ captures = $captures } | ConvertTo-Json -Compress -Depth 4
+"""
+
+# Start-MpScan -ScanType QuickScan runs synchronously (blocks this whole script until it
+# finishes) -- a quick scan is typically a few minutes, comfortably inside this agent's
+# own 180s SCRIPT_TIMEOUT_SECONDS, but that's a real host-dependent "typically," not a
+# guarantee: a heavily loaded or unusually large QuickScan target set can still exceed
+# it. If it does, run_remote_script() (micro_agent_windows.py) reports a clean
+# "Command timed out after 180s" result rather than hanging or crashing -- a known,
+# accepted, self-explanatory failure mode, not a silent one. For anything that can
+# genuinely run long, see defender_full_scan() below, which launches detached instead of
+# blocking.
+def defender_quick_scan():
+    return r"""try {
+    Start-MpScan -ScanType QuickScan -ErrorAction Stop
+} catch {
+    $errMsg = $_.Exception.Message -replace '"', "'"
+    "{`"error`":`"failed to run quick scan: $errMsg`"}"; exit
+}
+try {
+    $status = Get-MpComputerStatus -ErrorAction Stop
+    # Get-MpThreatDetection has no "from this specific scan run" filter -- Defender
+    # doesn't expose one -- so this approximates it with a lookback window a little
+    # longer than a quick scan's typical runtime. A real detection from just before this
+    # scan started could double-count; an honest approximation, not a precise join.
+    $threats = @(Get-MpThreatDetection -ErrorAction SilentlyContinue | Where-Object { $_.InitialDetectionTime -gt (Get-Date).AddMinutes(-15) })
+    @{ status = 'completed'; scan_type = 'QuickScan'; last_quick_scan_time = $status.QuickScanEndTime.ToString('yyyy-MM-dd HH:mm:ss'); antivirus_signature_age_days = $status.AntivirusSignatureAge; threats_found_recently = $threats.Count; threats = @($threats | Select-Object -First 20 -Property ThreatName,Resources,ActionSuccess) } | ConvertTo-Json -Compress -Depth 4
+} catch {
+    '{"status":"completed","scan_type":"QuickScan","note":"scan completed but status/threat detail was unavailable"}'
+}
+"""
+
+# A full scan (every file on every local drive) can take hours on a real disk -- nowhere
+# close to fitting inside SCRIPT_TIMEOUT_SECONDS, so unlike defender_quick_scan() this
+# launches detached and returns immediately, the same "write a child .ps1, Start-Process
+# it independently, self-delete when done" pattern beacon_simulator() below already
+# established for exactly this "runs far longer than one command's budget" shape. There
+# is deliberately no companion "check full-scan status" action -- same as
+# beacon_simulator, this tool doesn't wait for or report back detached work; an admin
+# can check Get-MpComputerStatus.FullScanEndTime later via a Custom Command.
+def defender_full_scan():
+    child_body = r"""try { Start-MpScan -ScanType FullScan -ErrorAction Stop } catch {}
+Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+"""
+    return f"""$dir = "C:\\ProgramData\\MicroDFIR\\DefenderScans"
+if (-not (Test-Path $dir)) {{ New-Item -ItemType Directory -Path $dir -Force | Out-Null }}
+$stamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
+$childScript = Join-Path $dir "fullscan_$stamp.ps1"
+@'
+{child_body}
+'@ | Set-Content -Path $childScript -Encoding UTF8
+Start-Process -FilePath "powershell.exe" -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',"`"$childScript`"") -WindowStyle Hidden
+@{{ status = 'started'; scan_type = 'FullScan'; note = 'Runs detached in the background and can take hours depending on disk size -- check Get-MpComputerStatus.FullScanEndTime later (e.g. via a Custom Command) to confirm it finished.' }} | ConvertTo-Json -Compress
 """
 
 # Validation tool for UEBA's Beaconing Detection model (see _run_beaconing_model in
@@ -1345,12 +1441,16 @@ WINDOWS_TEMPLATES = {
     'kill_process_by_name': (lambda params: _PROGRESS_SILENT + kill_process_by_name(params['pattern']), ['pattern']),
     'isolate_host': (lambda params: _PROGRESS_SILENT + isolate_host(params['soc_ip']), ['soc_ip']),
     'restore_network': (lambda params: _PROGRESS_SILENT + restore_network(), []),
+    'block_ip': (lambda params: _PROGRESS_SILENT + block_ip(params['target_ip']), ['target_ip']),
+    'unblock_ip': (lambda params: _PROGRESS_SILENT + unblock_ip(params['target_ip']), ['target_ip']),
     'collect_triage': (lambda params: _PROGRESS_SILENT + collect_triage(), []),
     'persistence_sweep': (lambda params: _PROGRESS_SILENT + persistence_sweep(), []),
     'collect_file': (lambda params: _PROGRESS_SILENT + collect_file(params['path']), ['path']),
     'quarantine_file': (lambda params: _PROGRESS_SILENT + quarantine_file(params['path']), ['path']),
     'capture_process_memory': (lambda params: _PROGRESS_SILENT + capture_process_memory(params['pid']), ['pid']),
     'capture_top_suspicious_memory': (lambda params: _PROGRESS_SILENT + capture_top_suspicious_memory(), []),
+    'defender_quick_scan': (lambda params: _PROGRESS_SILENT + defender_quick_scan(), []),
+    'defender_full_scan': (lambda params: _PROGRESS_SILENT + defender_full_scan(), []),
     'beacon_simulator': (lambda params: _PROGRESS_SILENT + beacon_simulator(params['target_ip'], params['target_port'], params['interval_seconds'], params['jitter_seconds'], params['count']), ['target_ip', 'target_port', 'interval_seconds', 'jitter_seconds', 'count']),
     'collect_registry_key': (lambda params: _PROGRESS_SILENT + collect_registry_key(params['key_path']), ['key_path']),
     'kill_scheduled_task': (lambda params: _PROGRESS_SILENT + kill_scheduled_task(params['task_name']), ['task_name']),

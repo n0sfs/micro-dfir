@@ -10,6 +10,36 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-10
 
+### New EDR actions: targeted firewall block, Windows Defender scans
+
+Follow-up to a direct question about EDR coverage: neither a Defender scan nor any
+firewall policy beyond the existing all-or-nothing `isolate_host` toggle was available
+to trigger. Four new canned actions close that gap, all dispatched through the existing
+generic `/api/agent/commands` mechanism (no new routes needed):
+
+- **`block_ip`/`unblock_ip`** (`src/agent_scripts.py`, Tier1/`edr.command.basic`,
+  matching `isolate_host`/`restore_network`'s own gate) — a lighter-touch containment
+  than full isolation: two new Windows Firewall deny rules (inbound + outbound) for one
+  specific IP, host stays otherwise fully usable. `unblock_ip` removes them by the same
+  shared rule name. **Real bug caught by actually running the generated script without
+  admin rights**: the original version had no `-ErrorAction Stop` around
+  `New-NetFirewallRule`, so a permission failure printed the hardcoded success message
+  anyway -- a false-positive an analyst could act on believing a host was contained when
+  it wasn't. Fixed with a proper try/catch that reports a real failure as one.
+- **`defender_quick_scan`** (`edr.command.advanced`) — runs `Start-MpScan -ScanType
+  QuickScan` inline and returns real results (last scan time, signature age, recent
+  threat detections); typically finishes well inside the agent's 180s script timeout,
+  though a slow/loaded host can still exceed it (reported as a clean timeout, not a
+  crash or hang).
+- **`defender_full_scan`** (`edr.command.advanced`) — a full scan can take hours, so
+  this launches detached in the background (the same write-a-child-script/
+  `Start-Process`/self-delete pattern `beacon_simulator` already established) and
+  returns immediately; it does not wait for or report the result, same accepted
+  limitation as `beacon_simulator`'s own detached work.
+
+All four are Windows-only (no Linux/macOS equivalent exists for either mechanism),
+queueable from both Case detail's EDR Response tab and the Agents console.
+
 ### DFIR SME review, part 3: bulk suspicious-process memory capture (skipped dual-control)
 
 Last of the DFIR SME review findings. Dual-control on destructive approvals (#3) was
