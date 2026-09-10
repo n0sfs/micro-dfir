@@ -10,6 +10,50 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-09
 
+### New: Windows Advanced Audit Policy drift detection
+
+Closes the gap a review pass explicitly left unfixed earlier this session ("would need a
+new live-policy-read capability, out of scope for a review-driven fix pass"). This app's
+agent has always been able to *push* Advanced Audit Policy (`reconcile_windows_audit_policy()`
+in `micro_agent_windows.py`, 12 CIS/NSA-aligned subcategories set to Success+Failure via
+`auditpol /set`) but had zero read-back path — `auditpol /get` was never called anywhere
+in the codebase, so a domain GPO refresh silently overriding the pushed policy (or a
+subcategory drifting/being tampered with) had no way to surface.
+
+New `audit_policy_compliance` check folded directly into the existing `sca_check()`
+hardening-check action (Windows only) rather than a new mechanism: runs
+`auditpol /get /category:* /r`, parses the CSV, and compares the same 12 subcategories
+against the expected `Success and Failure` baseline — reusing the entire existing
+SCA pipeline (`SCA_CHECK_FRAMEWORKS` mapping, `_sca_framework_aggregate()`'s Hardening-
+score rollup, the "View SCA Results" table) with zero new routes, tables, or UI code.
+Domain-joined status (`Win32_ComputerSystem.PartOfDomain`) is included in the detail text
+as a diagnostic hint, not a gate — drift is worth flagging even on a non-domain host
+(e.g. a failed local push), the domain-joined note just helps an analyst tell GPO
+interference apart from other causes.
+
+**Real bug caught by actually running the script, not just reading it**: `auditpol` is a
+native console exe, not a cmdlet — it never throws a PowerShell exception on failure
+(e.g. insufficient privilege), it just writes an error to its own output and returns a
+non-zero exit code. The first draft's `auditpol /get ... | ConvertFrom-Csv` silently
+parsed a failed call's empty output as zero matching rows, which the comparison loop then
+misreported as "all 12 subcategories drifted" (status `fail`) instead of "could not
+determine" (status `error`) — confirmed live by running the check unelevated on a real
+Windows box and watching it produce exactly that false-fail. Fixed by checking
+`$LASTEXITCODE` and the parsed row count explicitly before ever comparing.
+
+Verified: 12 real PowerShell tests against the actual comparison logic (all-enabled →
+pass, a single drifted subcategory named correctly in the detail, "Success" without
+"Failure" correctly treated as drift, a subcategory missing from auditpol's own output
+entirely, unrelated extra subcategories in the real output ignored, domain-joined/
+non-domain/unknown all reported honestly) + 15 Python tests (the dual-definition
+`SCA_CHECK_FRAMEWORKS` copy in `app.py`/`generate_report.py` byte-for-byte identical,
+`_sca_framework_aggregate()`'s rollup exercised directly, and — the regression guard that
+actually matters here — the new check's 12-subcategory list cross-checked against
+`micro_agent_windows.py`'s own push-side list to prove there's no silent mismatch between
+what's enforced and what's verified). Both the outer script and this specific addition
+were parsed with PowerShell's own AST parser and genuinely executed on a real Windows
+host (unelevated, which is exactly what surfaced the bug above).
+
 ### New: Replay Detection (Log Import's deferred Phase 2)
 
 Closes the Phase 2 gap explicitly deferred when Log Import Phase 1 shipped: an opt-in
