@@ -535,10 +535,12 @@ function caseIocRow(i, isClosed) {
             <td class="small">
                 <div id="iocResult${i.id}"></div>
                 <div id="iocExternalResult${i.id}" class="mt-1"></div>
+                <div id="iocSandboxResult${i.id}" class="mt-1"></div>
             </td>
             <td class="text-end text-nowrap">
                 <button type="button" class="btn btn-sm btn-outline-info py-0 px-2 me-1" title="Check against the local Threat Intel set" onclick="checkCaseIoc(${i.id}, '${escJs(i.value)}')"><i class="fa-solid fa-magnifying-glass"></i></button>
                 <button type="button" class="btn btn-sm btn-outline-warning py-0 px-2 me-1" title="Check against external enrichment sources (VirusTotal, AbuseIPDB, URLhaus, etc.)" onclick="checkCaseIocExternal(${i.id}, '${escJs(i.value)}', '${escJs(i.ioc_type)}')"><i class="fa-solid fa-globe"></i></button>
+                ${(i.ioc_type || '').toLowerCase().includes('url') ? `<button type="button" class="btn btn-sm btn-outline-danger py-0 px-2 me-1" title="Submit to urlscan.io for a real sandboxed-browser visit (private by default)" onclick="detonateCaseIoc(${i.id}, '${escJs(i.value)}')"><i class="fa-solid fa-flask-vial"></i></button>` : ''}
                 <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 me-1" title="Search all logs for this indicator" onclick="pivotToLogSearch(null, '${escJs(iocPivotQuery(i))}')"><i class="fa-solid fa-magnifying-glass-arrow-right"></i></button>
                 <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove indicator" onclick="removeCaseIoc(${i.id})" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-xmark"></i></button>
             </td>
@@ -611,6 +613,41 @@ function checkCaseIocExternal(iocId, value, iocType) {
         const overall = data.results.length > 1 ? `<div class="mb-1">Overall: ${enrichVerdictBadge(data.overall_verdict)} ${enrichTierBadge(data.overall_tier)}</div>` : '';
         cell.innerHTML = overall + data.results.map(r => `<div><strong>${escHtml(r.source)}</strong> ${enrichVerdictBadge(r.verdict)} ${enrichTierBadge(r.tier)}<div class="text-muted">${escHtml(r.summary)}</div></div>`).join('');
     }).catch(err => { cell.innerHTML = '<span class="text-danger small">Error</span>'; console.error(err); });
+}
+
+// Submits a case URL indicator to urlscan.io for a real sandboxed-browser visit
+// (private by default), with case_id set so the result is tied to this case --
+// polls /api/sandbox/<id>/status the same way Threat Intel's own Sandbox tab does,
+// duplicated here per this file's established per-template self-contained convention.
+function detonateCaseIoc(iocId, value) {
+    const cell = document.getElementById(`iocSandboxResult${iocId}`);
+    cell.innerHTML = '<span class="text-muted">Submitting to urlscan.io&hellip;</span>';
+    fetch('/api/sandbox/submit', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({type: 'url', value, visibility: 'private', case_id: activeCaseId})
+    }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
+        if (!ok) { cell.innerHTML = `<span class="text-danger small">${escHtml(data.error || 'Failed to submit.')}</span>`; return; }
+        cell.innerHTML = '<span class="text-muted">Sandboxing&hellip; (this can take up to a minute)</span>';
+        pollCaseIocSandbox(iocId, data.id);
+    }).catch(err => { cell.innerHTML = '<span class="text-danger small">Error</span>'; console.error(err); });
+}
+
+function pollCaseIocSandbox(iocId, submissionId) {
+    const cell = document.getElementById(`iocSandboxResult${iocId}`);
+    fetch(`/api/sandbox/${submissionId}/status`).then(r => r.json()).then(sub => {
+        if (!cell) return; // row no longer on screen (e.g. case reloaded elsewhere)
+        if (sub.status === 'pending') {
+            setTimeout(() => pollCaseIocSandbox(iocId, submissionId), 5000);
+            return;
+        }
+        if (sub.status === 'error') {
+            cell.innerHTML = `<span class="text-danger small">Sandbox error: ${escHtml(sub.summary || 'Unknown error')}</span>`;
+            return;
+        }
+        const badgeMap = {malicious: 'bg-danger', suspicious: 'bg-warning text-dark', clean: 'bg-success'};
+        cell.innerHTML = `<div><span class="badge ${badgeMap[sub.verdict] || 'bg-secondary'}">${escHtml(sub.verdict || 'unknown')}</span> ${escHtml(sub.summary || '')}` +
+            (sub.report_url ? ` <a href="${escHtml(sub.report_url)}" target="_blank" rel="noopener">View report</a>` : '') + `</div>`;
+    }).catch(err => { if (cell) cell.innerHTML = '<span class="text-danger small">Error checking sandbox status</span>'; console.error(err); });
 }
 
 function addCaseIoc() {

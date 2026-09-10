@@ -119,8 +119,73 @@ def _urlhaus(value, api_key=None, ioc_type=None):
         return {'ok': False, 'verdict': 'error', 'summary': str(e), 'raw': {}}
 
 
+# IPQualityScore -- proxy/VPN/Tor + fraud-score IP reputation, genuinely complementary
+# to AbuseIPDB (community-reported abuse) and Shodan InternetDB (exposed ports/CVEs):
+# neither of those does anonymization-infrastructure detection. Free tier is small
+# (35 lookups/day per IPQS's own pricing page) -- see this file's ANALYZERS entry below,
+# `auto_enrich_eligible: False` keeps it out of the automatic Critical/High sweep so it's
+# never burned on the first few alerts of the day, on-demand lookups only.
+def _ipqualityscore(value, api_key=None, ioc_type=None):
+    if not api_key:
+        return {'ok': False, 'verdict': 'unconfigured', 'summary': 'No IPQualityScore API key configured.', 'raw': {}}
+    try:
+        res = requests.get(f"https://www.ipqualityscore.com/api/json/ip/{api_key}/{value}", timeout=8)
+        res.raise_for_status()
+        data = res.json() or {}
+        if not data.get('success', True) and data.get('message'):
+            return {'ok': False, 'verdict': 'error', 'summary': data['message'], 'raw': data}
+        score = data.get('fraud_score', 0)
+        verdict = 'malicious' if score >= 90 else ('suspicious' if score >= 75 else 'clean')
+        flags = [f for f, on in (('proxy', data.get('proxy')), ('VPN', data.get('vpn')), ('Tor', data.get('tor')),
+                                  ('recent abuse', data.get('recent_abuse'))) if on]
+        summary = (f"Fraud score: {score}/100" + (f"; {', '.join(flags)}" if flags else '') +
+                   f"; ISP: {data.get('ISP') or '?'}, org: {data.get('organization') or '?'}")
+        return {'ok': True, 'verdict': verdict, 'summary': summary, 'raw': data}
+    except Exception as e:
+        return {'ok': False, 'verdict': 'error', 'summary': str(e), 'raw': {}}
+
+
+# Censys -- an internet-wide host/certificate scanning search engine like Shodan, but
+# with real TLS certificate detail and ASN/org attribution InternetDB doesn't have.
+# Genuinely complementary to Shodan InternetDB (free/keyless, ports+CVEs only), not
+# redundant with it. Auth note, honestly flagged: Censys's v2 Search API uses HTTP
+# Basic Auth (API ID as username, API Secret as password) -- to fit this file's
+# established one-settings-key-per-analyzer convention without a schema change, both
+# are stored as one "API_ID:API_SECRET" string in the censys_api_key settings field and
+# split here, rather than adding a second settings key just for this one analyzer. This
+# hasn't been verified against a real Censys account yet (the platform's docs describe
+# a newer unified auth model that may differ) -- confirm against a real key before
+# trusting it in production, same "verify before shipping" discipline this session
+# already applied elsewhere.
+def _censys(value, api_key=None, ioc_type=None):
+    if not api_key or ':' not in api_key:
+        return {'ok': False, 'verdict': 'unconfigured', 'summary': 'No Censys API ID:Secret configured (format: "API_ID:API_SECRET").', 'raw': {}}
+    api_id, api_secret = api_key.split(':', 1)
+    try:
+        res = requests.get(f"https://search.censys.io/api/v2/hosts/{value}", auth=(api_id, api_secret), timeout=8)
+        if res.status_code == 404:
+            return {'ok': True, 'verdict': 'clean', 'summary': 'No data on record in Censys.', 'raw': {}}
+        res.raise_for_status()
+        result = (res.json() or {}).get('result', {})
+        services = result.get('services') or []
+        ports = sorted({s.get('port') for s in services if s.get('port')})
+        autonomous_system = result.get('autonomous_system') or {}
+        # Censys doesn't itself score maliciousness the way AbuseIPDB/IPQS do -- this is
+        # exposure/attribution data (like Shodan InternetDB), so verdict stays 'info' at
+        # most, never 'malicious'/'suspicious' on its own.
+        verdict = 'info' if ports else 'clean'
+        summary = ((f"{len(ports)} open port(s): {', '.join(str(p) for p in ports[:10])}" if ports else 'No open services on record.') +
+                   f"; ASN: {autonomous_system.get('asn') or '?'} ({autonomous_system.get('name') or '?'})")
+        return {'ok': True, 'verdict': verdict, 'summary': summary, 'raw': result}
+    except Exception as e:
+        return {'ok': False, 'verdict': 'error', 'summary': str(e), 'raw': {}}
+
+
 # 'settings_key' is the key each requires_key=True analyzer's API key is stored under
 # in the enrichment_api_keys settings blob (see app.py's api_ti_enrichment_settings).
+# 'auto_enrich_eligible' (default True when absent) gates whether auto_enrich_and_score_
+# alert's automatic Critical/High sweep may call this analyzer -- False for anything
+# with a free-tier quota too small to spend on automatic enrichment (see _enrich_value).
 ANALYZERS = [
     {'key': 'shodan_internetdb', 'label': 'Shodan InternetDB', 'ioc_types': ('ip',),
      'requires_key': False, 'settings_key': None, 'run': _shodan_internetdb},
@@ -130,6 +195,12 @@ ANALYZERS = [
      'requires_key': True, 'settings_key': 'virustotal_api_key', 'run': _virustotal},
     {'key': 'urlhaus', 'label': 'URLhaus', 'ioc_types': ('domain', 'url'),
      'requires_key': True, 'settings_key': 'urlhaus_api_key', 'run': _urlhaus},
+    {'key': 'ipqualityscore', 'label': 'IPQualityScore', 'ioc_types': ('ip',),
+     'requires_key': True, 'settings_key': 'ipqualityscore_api_key', 'run': _ipqualityscore,
+     'auto_enrich_eligible': False},
+    {'key': 'censys', 'label': 'Censys', 'ioc_types': ('ip',),
+     'requires_key': True, 'settings_key': 'censys_api_key', 'run': _censys,
+     'auto_enrich_eligible': False},
 ]
 
 
@@ -231,8 +302,14 @@ def _auto_enrich_budget_ok(conn, daily_max):
 def _enrich_value(conn, api_keys, value, ioc_type):
     """One value through applicable_analyzers(), cache-then-run-then-write -- the same
     shape app.py's /api/ti/enrich and _run_case_analysis already use, factored out here
-    so this module owns the pattern once rather than a third near-duplicate appearing."""
+    so this module owns the pattern once rather than a third near-duplicate appearing.
+    This is exclusively the automatic-enrichment path's own helper (only called from
+    auto_enrich_and_score_alert below) -- the plain on-demand routes in app.py have
+    their own separate loops and are NOT filtered by auto_enrich_eligible, since a human
+    explicitly asking for a lookup should always reach every configured analyzer."""
     for a in applicable_analyzers(ioc_type):
+        if not a.get('auto_enrich_eligible', True):
+            continue
         cached = conn.execute(
             "SELECT 1 FROM enrichment_results WHERE value = ? AND source = ? AND fetched_at >= datetime('now', ?)",
             (value, a['key'], f'-{ENRICHMENT_CACHE_TTL_HOURS} hours')

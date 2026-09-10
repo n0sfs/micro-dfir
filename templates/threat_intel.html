@@ -44,6 +44,7 @@
             <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'iocs' else '' }}" id="tabBtnIocs" onclick="switchTiTab('iocs')"><i class="fa-solid fa-globe me-2"></i>IOCs</button></li>
             <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'entities' else '' }}" id="tabBtnEntities" onclick="switchTiTab('entities')"><i class="fa-solid fa-user-ninja me-2"></i>Threat Entities</button></li>
             <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'hunt' else '' }}" id="tabBtnHunt" onclick="switchTiTab('hunt')"><i class="fa-solid fa-magnifying-glass me-2"></i>YARA Scanning</button></li>
+            <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'sandbox' else '' }}" id="tabBtnSandbox" onclick="switchTiTab('sandbox')"><i class="fa-solid fa-flask-vial me-2"></i>Sandbox</button></li>
             <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'vulns' else '' }}" id="tabBtnVulns" onclick="switchTiTab('vulns')"><i class="fa-solid fa-bug me-2"></i>Vulnerabilities</button></li>
             <li class="nav-item"><button type="button" class="nav-link {{ 'active' if active_tab == 'atomic' else '' }}" id="tabBtnAtomic" onclick="switchTiTab('atomic')"><i class="fa-solid fa-vial-circle-check me-2"></i>Atomic Testing</button></li>
         </ul>
@@ -131,6 +132,7 @@
                         </select>
                         <button type="button" id="iocLookupBtn" class="btn btn-sm btn-primary" onclick="runIocLookup()"><i class="fa-solid fa-search me-1"></i>Check</button>
                         <button type="button" id="iocEnrichBtn" class="btn btn-sm btn-outline-info" style="display:none;" onclick="runIocEnrich()"><i class="fa-solid fa-flask me-1"></i>Enrich</button>
+                        <button type="button" id="iocDetonateBtn" class="btn btn-sm btn-outline-warning" style="display:none;" onclick="detonateLookupValue()" title="Submit this URL to urlscan.io for a real sandboxed-browser visit"><i class="fa-solid fa-flask-vial me-1"></i>Detonate</button>
                         <span id="iocLookupResult" class="small"></span>
                     </div>
                     <div id="iocEnrichResults" class="mt-2 small" style="display:none;"></div>
@@ -567,6 +569,47 @@
                         </div>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Sandbox pane -->
+    <div id="paneSandbox" style="display:{{ 'block' if active_tab == 'sandbox' else 'none' }};">
+        <div class="card-body">
+            <div class="mb-3">
+                <h6 class="text-info mb-2"><i class="fa-solid fa-flask-vial me-1"></i>Detonate a URL</h6>
+                <p class="text-muted small">
+                    Submits a URL to <a href="https://urlscan.io" target="_blank" rel="noopener">urlscan.io</a> for a
+                    real sandboxed-browser visit -- screenshot, every network request, TLS certificate chain, and a
+                    verdict. <strong>Private</strong> scans aren't indexed/searchable (50/day free quota);
+                    <strong>Public</strong> scans get a much larger quota but are visible to anyone on urlscan.io's
+                    own site -- pick Public only for something genuinely low-stakes.
+                </p>
+                <div class="row g-2 align-items-end">
+                    <div class="col-md-6">
+                        <label class="form-label small text-muted mb-1">URL</label>
+                        <input type="text" id="sandboxUrlInput" class="form-control bg-dark text-light border-secondary" placeholder="https://example.com/suspicious-link">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted mb-1">Visibility</label>
+                        <select id="sandboxVisibility" class="form-select bg-dark text-light border-secondary">
+                            <option value="private" selected>Private (default)</option>
+                            <option value="public">Public</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <button type="button" class="btn btn-outline-info w-100" onclick="submitSandboxUrl()"><i class="fa-solid fa-paper-plane me-1"></i>Submit</button>
+                    </div>
+                </div>
+                <div id="sandboxSubmitMsg" class="small mt-2" style="display:none;"></div>
+            </div>
+            <hr class="border-secondary">
+            <h6 class="text-info mb-2">Recent Submissions</h6>
+            <div class="table-responsive">
+                <table class="table table-dark table-sm align-middle mb-0">
+                    <thead><tr><th>Submitted</th><th>Type</th><th>Value</th><th>Visibility</th><th>Status</th><th></th></tr></thead>
+                    <tbody id="sandboxSubmissionsBody"><tr><td colspan="6" class="text-center text-muted py-3">Loading&hellip;</td></tr></tbody>
+                </table>
             </div>
         </div>
     </div>
@@ -1141,7 +1184,7 @@ const LAST_MATCHES_COUNT = {{ matches|length }};
 // ---- Tabs + shared stat row (repurposed per active tab, not two separate rows) ----
 let activeTiTab = '{{ "hunt" if active_tab == "hunt" else "iocs" }}';
 
-const TI_TAB_IDS = ['iocs', 'entities', 'hunt', 'vulns', 'atomic'];
+const TI_TAB_IDS = ['iocs', 'entities', 'hunt', 'sandbox', 'vulns', 'atomic'];
 function switchTiTab(tab) {
     activeTiTab = tab;
     TI_TAB_IDS.forEach(t => {
@@ -2255,19 +2298,25 @@ function onIocSourceChange() {
     document.getElementById('iocLookupResult').innerHTML = '';
     document.getElementById('iocEnrichResults').style.display = 'none';
     document.getElementById('iocEnrichBtn').style.display = 'none';
+    document.getElementById('iocDetonateBtn').style.display = 'none';
 }
 
 async function runIocLookup() {
     const input = document.getElementById('iocLookupInput');
     const resultEl = document.getElementById('iocLookupResult');
     const enrichBtn = document.getElementById('iocEnrichBtn');
+    const detonateBtn = document.getElementById('iocDetonateBtn');
     const sourceVal = document.getElementById('iocLookupSource').value; // '' = all feeds, 'live:<key>' = one analyzer, else = a feed id
     const ioc = input.value.trim();
     document.getElementById('iocEnrichResults').style.display = 'none';
-    if (!ioc) { resultEl.innerHTML = '<span class="text-muted">Enter a value to check.</span>'; enrichBtn.style.display = 'none'; return; }
+    if (!ioc) { resultEl.innerHTML = '<span class="text-muted">Enter a value to check.</span>'; enrichBtn.style.display = 'none'; detonateBtn.style.display = 'none'; return; }
     resultEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
     lastLookupValue = ioc;
     lastLookupIocType = _guessIocShape(ioc);
+    // Detonation only ever makes sense for a url-shaped value -- shown regardless of
+    // which lookup branch below runs, unlike Enrich (which some branches hide on
+    // error), since guessing the shape doesn't depend on the lookup actually succeeding.
+    detonateBtn.style.display = lastLookupIocType === 'url' ? 'inline-block' : 'none';
 
     if (sourceVal.startsWith('live:')) {
         // A specific live source was picked -- Check IS the verify action here, no
@@ -2330,6 +2379,108 @@ function enrichTierBadge(tier) {
     if (tier === 'definite') return '<span class="badge bg-danger bg-opacity-75" title="A curated-feed exact match or AV-engine-confirmed file hash -- not a reputation score">Confirmed</span>';
     if (tier === 'heuristic') return '<span class="badge bg-secondary" title="A reputation-score heuristic -- worth investigating, not a confirmed match">Heuristic</span>';
     return '';
+}
+
+// ---- Sandbox / detonation (urlscan.io) ----
+
+function sandboxStatusBadge(sub) {
+    if (sub.status === 'pending') return '<span class="badge bg-info text-dark"><i class="fa-solid fa-spinner fa-spin me-1"></i>Pending</span>';
+    if (sub.status === 'error') return `<span class="badge bg-secondary" title="${escHtml(sub.summary || '')}">Error</span>`;
+    // 'complete' -- reuse the same verdict badge convention as enrichment results, not
+    // a third color scheme for what's conceptually the same malicious/suspicious/clean idea.
+    return enrichVerdictBadge(sub.verdict || 'unknown');
+}
+
+function sandboxSubmissionRow(sub) {
+    const valueCell = sub.submission_type === 'url'
+        ? `<a href="${escAttr(sub.value)}" target="_blank" rel="noopener" class="text-truncate d-inline-block" style="max-width:300px;">${escHtml(sub.value)}</a>`
+        : `<span class="text-muted">attachment #${sub.attachment_id}</span>`;
+    const reportLink = sub.report_url ? `<a href="${escAttr(sub.report_url)}" target="_blank" rel="noopener" class="small ms-2">View report</a>` : '';
+    const screenshot = sub.screenshot_url ? `<br><img src="${escAttr(sub.screenshot_url)}" style="max-width:200px; border:1px solid #444;" class="mt-1">` : '';
+    return `<tr id="sandboxRow${sub.id}">
+        <td class="small text-nowrap">${escHtml(sub.submitted_at || '')}</td>
+        <td><span class="badge bg-secondary">${escHtml(sub.submission_type)}</span></td>
+        <td>${valueCell}${screenshot}</td>
+        <td class="small">${escHtml(sub.visibility || '')}</td>
+        <td>${sandboxStatusBadge(sub)}${reportLink}${sub.status === 'error' ? ` <span class="text-danger small">${escHtml(sub.summary || '')}</span>` : ''}</td>
+        <td><button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Remove this record (the report stays on urlscan.io)" onclick="deleteSandboxSubmission(${sub.id})"><i class="fa-solid fa-xmark"></i></button></td>
+    </tr>`;
+}
+
+function renderSandboxSubmissions(rows) {
+    const tbody = document.getElementById('sandboxSubmissionsBody');
+    if (!tbody) return;
+    if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">No sandbox submissions yet.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = rows.map(sandboxSubmissionRow).join('');
+    rows.filter(r => r.status === 'pending').forEach(r => pollSandboxSubmission(r.id));
+}
+
+function loadSandboxSubmissions() {
+    fetch('/api/sandbox').then(r => r.json()).then(rows => renderSandboxSubmissions(rows || []))
+        .catch(err => {
+            console.error('Error loading sandbox submissions:', err);
+            renderLoadError('sandboxSubmissionsBody', 6, 'Failed to load sandbox submissions.');
+        });
+}
+
+// Client-driven repeated-fetch loop -- this app has no background-job mechanism, so a
+// still-pending scan is checked again in a few seconds, same shape Log Import's own
+// chunked normalize/commit steps already use. Stops on its own once the row leaves
+// 'pending' (or the row's been removed from the DOM, e.g. deleted mid-poll).
+function pollSandboxSubmission(id) {
+    setTimeout(() => {
+        const row = document.getElementById(`sandboxRow${id}`);
+        if (!row) return; // deleted while we were waiting
+        fetch(`/api/sandbox/${id}/status`).then(r => r.json()).then(sub => {
+            if (sub.error) return; // submission vanished server-side -- stop polling silently
+            const fresh = document.getElementById(`sandboxRow${id}`);
+            if (!fresh) return;
+            fresh.outerHTML = sandboxSubmissionRow(sub);
+            if (sub.status === 'pending') pollSandboxSubmission(id);
+        }).catch(() => pollSandboxSubmission(id)); // a transient network error just retries, doesn't give up
+    }, 5000);
+}
+
+async function submitSandboxUrl(prefillUrl, caseId) {
+    const urlInput = document.getElementById('sandboxUrlInput');
+    const visSelect = document.getElementById('sandboxVisibility');
+    const msgEl = document.getElementById('sandboxSubmitMsg');
+    const url = (typeof prefillUrl === 'string' ? prefillUrl : urlInput.value).trim();
+    if (!url) { msgEl.className = 'small mt-2 text-danger'; msgEl.innerText = 'Enter a URL to submit.'; msgEl.style.display = 'block'; return; }
+    msgEl.className = 'small mt-2 text-muted';
+    msgEl.innerText = 'Submitting...';
+    msgEl.style.display = 'block';
+    try {
+        const body = {type: 'url', value: url, visibility: visSelect.value};
+        if (caseId) body.case_id = caseId;
+        const res = await fetch('/api/sandbox/submit', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+        const data = await res.json();
+        if (!res.ok) { msgEl.className = 'small mt-2 text-danger'; msgEl.innerText = data.error || 'Submission failed.'; return; }
+        msgEl.className = 'small mt-2 text-success';
+        msgEl.innerText = 'Submitted -- see Recent Submissions below.';
+        if (!prefillUrl) urlInput.value = '';
+        loadSandboxSubmissions();
+    } catch (e) {
+        msgEl.className = 'small mt-2 text-danger';
+        msgEl.innerText = 'Error: ' + String(e);
+    }
+}
+
+function deleteSandboxSubmission(id) {
+    fetch(`/api/sandbox/${id}`, {method: 'DELETE'}).then(() => loadSandboxSubmissions())
+        .catch(err => toast('Error removing submission: ' + err, 'danger'));
+}
+
+// Quick IOC Lookup's "Detonate" button -- jumps to the Sandbox tab and pre-fills/
+// submits the same value the analyst just looked up, so they don't have to retype it.
+function detonateLookupValue() {
+    if (!lastLookupValue) return;
+    switchTiTab('sandbox');
+    document.getElementById('sandboxUrlInput').value = lastLookupValue;
+    submitSandboxUrl(lastLookupValue);
 }
 
 async function runIocEnrich() {
@@ -4058,5 +4209,6 @@ loadAllVulnFeedStatuses();
 loadCveRecords();
 loadAtomicTests();
 loadAtomicRuns();
+loadSandboxSubmissions();
 </script>
 {% endblock %}

@@ -1195,7 +1195,8 @@ def api_ti_analyzers():
 # listed here -- this is the sole allowlist gating what api_enrichment_settings() will
 # read/write in the enrichment_api_keys settings blob, so adding a new keyed analyzer
 # means adding its settings_key here too.
-ENRICHMENT_SETTINGS_KEYS = ('abuseipdb_api_key', 'virustotal_api_key', 'urlhaus_api_key')
+ENRICHMENT_SETTINGS_KEYS = ('abuseipdb_api_key', 'virustotal_api_key', 'urlhaus_api_key',
+                             'ipqualityscore_api_key', 'censys_api_key', 'urlscan_api_key')
 
 @app.route('/api/settings/enrichment', methods=['GET', 'POST'])
 @login_required
@@ -1296,6 +1297,116 @@ def _overall_enrichment_tier(results):
     if not real:
         return None
     return max(real, key=lambda t: _ENRICHMENT_TIER_RANK[t])
+
+
+# ==========================================
+# SANDBOX / DETONATION
+# ==========================================
+# Submit-then-poll, genuinely different from the enrichment lookups above (one HTTP
+# call, done) -- see src/sandbox.py's own module docstring for why this isn't folded
+# into analyzers.py. This app has no background-job mechanism anywhere (confirmed,
+# not assumed), so "submit now, check back in a few seconds" is a client-driven
+# repeated-fetch loop against GET /api/sandbox/<id>/status, the same shape Log
+# Import's chunked normalize/commit steps already established.
+
+@app.route('/api/sandbox/submit', methods=['POST'])
+@login_required
+def api_sandbox_submit():
+    err = require_permission('threatintel.manage')
+    if err: return err
+    import sandbox
+    db = get_db()
+    d = request.json or {}
+    submission_type = (d.get('type') or '').strip()
+    case_id = d.get('case_id')
+
+    if submission_type == 'file':
+        # Schema-ready (attachment_id column exists), not wired -- see the sandbox/
+        # detonation plan for why (filescan.io's docs are unverifiable without a live
+        # key). A clear "not yet available" beats a silent no-op or a confusing
+        # generic error.
+        return jsonify({'error': 'File sandbox submission is not available yet -- only URL detonation (urlscan.io) is wired up so far.'}), 501
+    if submission_type != 'url':
+        return jsonify({'error': "type must be 'url' (file sandboxing is not available yet)"}), 400
+
+    url = (d.get('value') or '').strip()
+    if not url:
+        return jsonify({'error': 'value (the URL to submit) is required'}), 400
+    visibility = (d.get('visibility') or 'private').strip()
+    if visibility not in ('private', 'public', 'unlisted'):
+        visibility = 'private'
+
+    key_row = db.execute("SELECT value FROM settings WHERE key = 'enrichment_api_keys'").fetchone()
+    api_keys = json.loads(key_row['value']) if key_row and key_row['value'] else {}
+    api_key = api_keys.get('urlscan_api_key')
+
+    out = sandbox.urlscan_submit(url, api_key, visibility)
+    if not out['ok']:
+        return jsonify({'error': out['error']}), 400
+
+    cur = db.execute(
+        "INSERT INTO sandbox_submissions (source, submission_type, value, visibility, external_job_id, status, report_url, case_id, submitted_by) "
+        "VALUES ('urlscan', 'url', ?, ?, ?, 'pending', ?, ?, ?)",
+        (url, visibility, out['job_id'], out.get('report_url'), case_id, current_user.username)
+    )
+    db.commit()
+    log_audit('sandbox_submit', 'sandbox_submission', str(cur.lastrowid), f"urlscan ({visibility}): {url}")
+    return jsonify({'status': 'success', 'id': cur.lastrowid})
+
+
+@app.route('/api/sandbox/<int:sid>/status', methods=['GET'])
+@login_required
+def api_sandbox_status(sid):
+    import sandbox
+    db = get_db()
+    row = db.execute("SELECT * FROM sandbox_submissions WHERE id = ?", (sid,)).fetchone()
+    if not row:
+        return jsonify({'error': 'Submission not found'}), 404
+    if row['status'] != 'pending' or row['source'] != 'urlscan':
+        return jsonify(dict(row))
+
+    key_row = db.execute("SELECT value FROM settings WHERE key = 'enrichment_api_keys'").fetchone()
+    api_keys = json.loads(key_row['value']) if key_row and key_row['value'] else {}
+    api_key = api_keys.get('urlscan_api_key')
+
+    out = sandbox.urlscan_poll(row['external_job_id'], api_key)
+    if out['status'] == 'pending':
+        return jsonify(dict(row))
+    if out['status'] == 'error':
+        db.execute("UPDATE sandbox_submissions SET status = 'error', summary = ?, completed_at = datetime('now') WHERE id = ?",
+                   (out.get('error', 'Unknown error'), sid))
+    else:
+        db.execute(
+            "UPDATE sandbox_submissions SET status = 'complete', verdict = ?, summary = ?, screenshot_url = ?, raw_json = ?, completed_at = datetime('now') WHERE id = ?",
+            (out['verdict'], out['summary'], out.get('screenshot_url'), json.dumps(out.get('raw') or {}), sid)
+        )
+    db.commit()
+    return jsonify(dict(db.execute("SELECT * FROM sandbox_submissions WHERE id = ?", (sid,)).fetchone()))
+
+
+@app.route('/api/sandbox', methods=['GET'])
+@login_required
+def api_sandbox_list():
+    db = get_db()
+    case_id = request.args.get('case_id')
+    if case_id:
+        rows = db.execute("SELECT * FROM sandbox_submissions WHERE case_id = ? ORDER BY id DESC", (case_id,)).fetchall()
+    else:
+        rows = db.execute("SELECT * FROM sandbox_submissions ORDER BY id DESC LIMIT 100").fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route('/api/sandbox/<int:sid>', methods=['DELETE'])
+@login_required
+def api_sandbox_delete(sid):
+    err = require_permission('threatintel.manage')
+    if err: return err
+    db = get_db()
+    # Local record only -- the report itself stays on urlscan.io's own site regardless
+    # (this app never had authority to delete it there, and doesn't try to).
+    db.execute("DELETE FROM sandbox_submissions WHERE id = ?", (sid,))
+    db.commit()
+    return jsonify({'ok': 1})
 
 
 # ==========================================
@@ -13538,6 +13649,38 @@ def migrate_enrichment_results():
     except Exception:
         pass
 
+# Source-agnostic on purpose -- 'urlscan' is the only source actually wired up this
+# pass (src/sandbox.py), but 'filescan'/'cape' are real, deliberately-anticipated
+# future values (see the sandbox/detonation plan) so adding either later is a new
+# client module + a new `source` value, not a schema change.
+def migrate_sandbox_submissions():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS sandbox_submissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            submission_type TEXT NOT NULL,
+            value TEXT,
+            attachment_id INTEGER,
+            visibility TEXT,
+            external_job_id TEXT,
+            status TEXT NOT NULL DEFAULT 'submitted',
+            verdict TEXT,
+            summary TEXT,
+            report_url TEXT,
+            screenshot_url TEXT,
+            raw_json TEXT,
+            case_id INTEGER,
+            submitted_by TEXT,
+            submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            completed_at DATETIME
+        )''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sandbox_submissions_case ON sandbox_submissions(case_id)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_ti_entities():
     try:
         from threat_actors import ACTORS
@@ -19039,6 +19182,7 @@ migrate_sigma_rules_original_yaml()
 migrate_sigma_rules_upstream_yaml()
 migrate_seed_ioc_correlation_rule()
 migrate_enrichment_results()
+migrate_sandbox_submissions()
 migrate_ti_entities()
 migrate_ti_entities_confidence()
 migrate_ti_entities_references()
