@@ -585,6 +585,17 @@
                     <strong>Public</strong> scans get a much larger quota but are visible to anyone on urlscan.io's
                     own site -- pick Public only for something genuinely low-stakes.
                 </p>
+                {% if has_permission('threatintel.manage') %}
+                <div class="row g-2 align-items-end mb-3">
+                    <div class="col-md-6">
+                        <label class="form-label small text-muted mb-1">urlscan.io API Key</label>
+                        <input type="password" id="sandboxApiKeyInput" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Not configured">
+                    </div>
+                    <div class="col-md-3">
+                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="saveSandboxApiKey()" title="Save key"><i class="fa-solid fa-floppy-disk me-1"></i>Save Key</button>
+                    </div>
+                </div>
+                {% endif %}
                 <div class="row g-2 align-items-end">
                     <div class="col-md-6">
                         <label class="form-label small text-muted mb-1">URL</label>
@@ -2418,6 +2429,36 @@ function renderSandboxSubmissions(rows) {
     rows.filter(r => r.status === 'pending').forEach(r => pollSandboxSubmission(r.id));
 }
 
+// urlscan.io isn't a registered analyzer (analyzers.py's ANALYZERS list) -- it's a
+// sandbox/detonation source, so it never appears in the analyzers table's own key-save
+// UI. Reuses the same /api/settings/enrichment route (urlscan_api_key is already part
+// of ENRICHMENT_SETTINGS_KEYS) with the same masked-placeholder convention.
+function loadSandboxApiKey() {
+    const input = document.getElementById('sandboxApiKeyInput');
+    if (!input) return; // non-admin, section not rendered
+    fetch('/api/settings/enrichment').then(r => r.json()).then(data => {
+        input.value = data.urlscan_api_key || '';
+        input.placeholder = data.urlscan_api_key ? '' : 'Not configured';
+    }).catch(err => console.error('Error loading urlscan.io key:', err));
+}
+
+async function saveSandboxApiKey() {
+    const input = document.getElementById('sandboxApiKeyInput');
+    if (!input) return;
+    try {
+        const res = await fetch('/api/settings/enrichment', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({urlscan_api_key: input.value})
+        });
+        const data = await res.json();
+        if (!res.ok) { toast(data.error || 'Failed to save key.', 'danger'); return; }
+        toast('Key saved.', 'success');
+        loadSandboxApiKey();
+    } catch (e) {
+        toast('Error saving key: ' + e, 'danger');
+    }
+}
+
 function loadSandboxSubmissions() {
     fetch('/api/sandbox').then(r => r.json()).then(rows => renderSandboxSubmissions(rows || []))
         .catch(err => {
@@ -2508,10 +2549,9 @@ async function runIocEnrich() {
     }
 }
 
-// Only 'abuseipdb' requires a key today (see analyzers.py's ANALYZERS) -- mapping its
-// analyzer key to the settings blob's key name here rather than changing
-// /api/settings/enrichment's shape for a single caller.
-const ANALYZER_SETTINGS_KEY = { abuseipdb: 'abuseipdb_api_key', virustotal: 'virustotal_api_key', urlhaus: 'urlhaus_api_key' };
+// Maps each key-requiring analyzer (analyzers.py's ANALYZERS) to the settings blob's
+// key name -- rather than changing /api/settings/enrichment's shape per caller.
+const ANALYZER_SETTINGS_KEY = { abuseipdb: 'abuseipdb_api_key', virustotal: 'virustotal_api_key', urlhaus: 'urlhaus_api_key', ipqualityscore: 'ipqualityscore_api_key', censys: 'censys_api_key' };
 
 async function saveAnalyzerKey(analyzerKey) {
     const input = document.getElementById(`analyzerKeyInput_${analyzerKey}`);
@@ -4210,5 +4250,6 @@ loadCveRecords();
 loadAtomicTests();
 loadAtomicRuns();
 loadSandboxSubmissions();
+loadSandboxApiKey();
 </script>
 {% endblock %}
