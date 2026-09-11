@@ -6683,6 +6683,20 @@ CASE_SEVERITY_VALUES = ('critical', 'high', 'medium', 'low')
 # Deliberately separate from the open/closed `status` -- see migrate_case_severity()'s
 # comment for why the two aren't merged into one enum.
 CASE_WORKFLOW_STATES = ('new', 'investigating', 'awaiting_input', 'resolved')
+# Explicit case-to-case relationship types an analyst can assert (see migrate_case_links).
+# Labels are directional: CASE_LINK_TYPE_LABELS describes case_id's relation to
+# related_case_id; CASE_LINK_TYPE_REVERSE_LABELS is shown on related_case_id's own page.
+# 'related_to'/'same_campaign' are symmetric so their forward/reverse text is identical;
+# 'duplicate_of'/'child_of' are not.
+CASE_LINK_TYPES = ('duplicate_of', 'child_of', 'related_to', 'same_campaign')
+CASE_LINK_TYPE_LABELS = {
+    'duplicate_of': 'Duplicate of', 'child_of': 'Child of',
+    'related_to': 'Related to', 'same_campaign': 'Same campaign as',
+}
+CASE_LINK_TYPE_REVERSE_LABELS = {
+    'duplicate_of': 'Has duplicate', 'child_of': 'Parent of',
+    'related_to': 'Related to', 'same_campaign': 'Same campaign as',
+}
 
 def _log_case_event(db, cid, event_type, detail=None):
     # Append-only -- never UPDATEd/DELETEd (except cascade-deleted alongside the case
@@ -7487,6 +7501,101 @@ def api_case_related_cases(cid):
                      'created_at': c['created_at'], 'reasons': sorted(set(reasons))})
     out.sort(key=lambda x: (-len(x['reasons']), x['created_at']))
     return jsonify(out)
+
+# Durable, analyst-asserted links (case_links) -- separate table and route from the
+# read-only auto-suggestion feed above. Returned from BOTH directions: a link where this
+# case is either case_id or related_case_id shows up here, with the label flipped to
+# CASE_LINK_TYPE_REVERSE_LABELS when viewed from the related_case_id side, so "case 140
+# is the parent of case 142" reads correctly on both cases' own Related Cases tab.
+@app.route('/api/cases/<int:cid>/links', methods=['GET'])
+@login_required
+def api_case_links(cid):
+    db = get_db()
+    if not db.execute("SELECT 1 FROM cases WHERE id = ?", (cid,)).fetchone():
+        return jsonify({"error": "Case not found"}), 404
+    rows = db.execute(
+        "SELECT id, case_id, related_case_id, relationship_type, created_by, created_at "
+        "FROM case_links WHERE case_id = ? OR related_case_id = ? ORDER BY created_at DESC",
+        (cid, cid)
+    ).fetchall()
+    if not rows:
+        return jsonify([])
+    other_ids = sorted({(r['related_case_id'] if r['case_id'] == cid else r['case_id']) for r in rows})
+    placeholders = ','.join('?' for _ in other_ids)
+    case_rows = {r['id']: r for r in db.execute(
+        f"SELECT id, title, status, severity, case_number FROM cases WHERE id IN ({placeholders})", other_ids
+    ).fetchall()}
+    out = []
+    for r in rows:
+        forward = r['case_id'] == cid
+        other_id = r['related_case_id'] if forward else r['case_id']
+        other = case_rows.get(other_id)
+        if not other:  # the other case was deleted after this link was created -- skip, don't 500
+            continue
+        label = CASE_LINK_TYPE_LABELS[r['relationship_type']] if forward else CASE_LINK_TYPE_REVERSE_LABELS[r['relationship_type']]
+        out.append({
+            'id': r['id'], 'relationship_type': r['relationship_type'], 'label': label,
+            'created_by': r['created_by'], 'created_at': r['created_at'],
+            'other_case': {'id': other['id'], 'title': other['title'], 'status': other['status'],
+                            'severity': other['severity'], 'case_number': other['case_number']},
+        })
+    return jsonify(out)
+
+@app.route('/api/cases/<int:cid>/links', methods=['POST'])
+@login_required
+def api_case_add_link(cid):
+    db = get_db()
+    err = _require_open_case(db, cid)
+    if err: return err
+    data = request.get_json() or {}
+    relationship_type = data.get('relationship_type')
+    if relationship_type not in CASE_LINK_TYPES:
+        return jsonify({"error": f"relationship_type must be one of {', '.join(CASE_LINK_TYPES)}"}), 400
+    try:
+        related_case_id = int(data.get('related_case_id'))
+    except (TypeError, ValueError):
+        return jsonify({"error": "related_case_id is required"}), 400
+    if related_case_id == cid:
+        return jsonify({"error": "A case can't be linked to itself"}), 400
+    if not db.execute("SELECT 1 FROM cases WHERE id = ?", (related_case_id,)).fetchone():
+        return jsonify({"error": "The case to link to was not found"}), 404
+    # Checked in both directions -- a link is one fact about a pair of cases regardless
+    # of which case it's declared from, so "142 duplicate_of 140" and "140 duplicate_of
+    # 142" (same type, reversed) are both treated as the same already-existing link.
+    if db.execute(
+        "SELECT 1 FROM case_links WHERE relationship_type = ? AND "
+        "((case_id = ? AND related_case_id = ?) OR (case_id = ? AND related_case_id = ?))",
+        (relationship_type, cid, related_case_id, related_case_id, cid)
+    ).fetchone():
+        return jsonify({"error": "That link already exists"}), 400
+    db.execute(
+        "INSERT INTO case_links (case_id, related_case_id, relationship_type, created_by) VALUES (?, ?, ?, ?)",
+        (cid, related_case_id, relationship_type, current_user.username)
+    )
+    label = CASE_LINK_TYPE_LABELS[relationship_type]
+    _log_case_event(db, cid, 'case_linked', f"{label} case #{related_case_id}")
+    _log_case_event(db, related_case_id, 'case_linked', f"{CASE_LINK_TYPE_REVERSE_LABELS[relationship_type]} case #{cid}")
+    db.commit()
+    return jsonify({"status": "success"})
+
+@app.route('/api/cases/<int:cid>/links/<int:link_id>', methods=['DELETE'])
+@login_required
+def api_case_remove_link(cid, link_id):
+    db = get_db()
+    err = _require_open_case(db, cid)
+    if err: return err
+    link = db.execute(
+        "SELECT case_id, related_case_id FROM case_links WHERE id = ? AND (case_id = ? OR related_case_id = ?)",
+        (link_id, cid, cid)
+    ).fetchone()
+    if not link:
+        return jsonify({"error": "Case link not found"}), 404
+    other_id = link['related_case_id'] if link['case_id'] == cid else link['case_id']
+    db.execute("DELETE FROM case_links WHERE id = ?", (link_id,))
+    _log_case_event(db, cid, 'case_unlinked', f"case #{other_id}")
+    _log_case_event(db, other_id, 'case_unlinked', f"case #{cid}")
+    db.commit()
+    return jsonify({"ok": 1})
 
 # Single source of truth for MTTC's start anchor (case_assets.confirmed_at), shared by
 # the create route (an asset can be added already-'confirmed' in one step) and the
@@ -12332,6 +12441,30 @@ def migrate_case_numbering():
             next_seq INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (prefix, year)
         )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# Explicit, analyst-asserted case-to-case relationships -- distinct from
+# api_case_related_cases' read-only, auto-derived "shares a host/IOC/entity" feed
+# (which can't be dismissed and disappears the moment the shared data does). This is a
+# durable record: "case 142 is a duplicate of case 140" stays true even after case 140's
+# IOCs are edited, letting an analyst track multi-incident campaigns and duplicate/child
+# cases the auto-suggestion heuristic doesn't attempt to model.
+def migrate_case_links():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS case_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id INTEGER NOT NULL,
+            related_case_id INTEGER NOT NULL,
+            relationship_type TEXT NOT NULL,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_case_links_case ON case_links(case_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_case_links_related ON case_links(related_case_id)")
         conn.commit()
         conn.close()
     except Exception:
@@ -19260,6 +19393,7 @@ migrate_cases()
 migrate_case_upgrade()
 migrate_case_template_fields()
 migrate_case_numbering()
+migrate_case_links()
 migrate_case_queues()
 migrate_case_assets()
 migrate_case_severity()

@@ -10,6 +10,29 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-10
 
+### Explicit, durable case-to-case links (duplicate/child/related/same-campaign)
+
+IR lifecycle gap-finding pass: Related Cases has only ever been a read-only
+auto-suggestion feed (cases sharing a host/indicator/threat entity) — it recomputes on
+every load and disappears the moment the shared data changes, and there was no way for
+an analyst to durably assert "case 142 is a duplicate of case 140" or track a
+multi-incident campaign across cases that don't happen to share any single IOC.
+
+- **New `case_links` table** (`case_id`, `related_case_id`, `relationship_type`,
+  `created_by`, `created_at`) — one row per asserted link. `relationship_type` is one of
+  `duplicate_of` / `child_of` / `related_to` / `same_campaign`.
+- **`GET /api/cases/<id>/links`** returns links from BOTH directions with the label
+  flipped correctly on each side — a `child_of` link declared as "140 is child_of 142"
+  reads as "Child of #142" on case 140's page and "Parent of #140" on case 142's page
+  (symmetric types like `same_campaign` read identically both ways). `POST`/`DELETE`
+  check for an existing link in *either* direction before inserting (a pair is one fact
+  regardless of which case it's declared from) and log a `case_linked`/`case_unlinked`
+  timeline event on both cases.
+- **Case detail's Related Cases tab** now shows a new "Linked Cases" card (add-link form
+  + list with remove buttons, hidden/read-only on a closed case) above the existing
+  auto-suggested feed, now relabeled "Suggested Related Cases" for clarity between the
+  two.
+
 ### Per-template case number prefixes (e.g. INC-2026-014)
 
 Direct request: cases only ever showed the raw `#<id>` primary key, and case templates
