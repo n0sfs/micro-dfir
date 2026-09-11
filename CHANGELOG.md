@@ -10,6 +10,26 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-11
 
+### EDR improvement pass 6: "usually within 15s" was a lie on this deployment's real config
+
+Exercised the File Integrity Monitoring add/delete flow live (both clean — add clears
+the form and inserts the row in place, delete has its own confirmation dialog) and
+noticed the "Agent Poll Interval" section showing Command/config check-in = **120
+seconds** on this real appliance.
+
+- **Four separate places hardcoded "usually within 15s"** for how long a queued command
+  takes to reach an endpoint — the Response Actions console's own hint text, the FIM
+  interval note, and two toast messages (single-host queue, bulk Upgrade Selected) —
+  none of them reading the actual admin-configurable `config_interval_seconds` setting
+  (5-3600s range) that this exact number is about. On this deployment that setting is
+  120s, 8x the claimed 15s, which reads as "the command is stuck" during exactly the
+  kind of live troubleshooting where trust in the UI matters most. All four now read
+  from one shared `agentConfigIntervalSecondsValue`, refreshed whenever the real value
+  loads or is saved, falling back to the old 15s only until the real value has actually
+  loaded. Verified with a `vm`-context test (fallback text before load, both notes
+  updating in lockstep once the real value loads, and no throw when a target element
+  isn't in the DOM for this permission level).
+
 ### EDR improvement pass 5: confirmation dialog on "Run on Group"
 
 More live-testing through EDR beyond the original 4 passes. Exercised areas not yet
