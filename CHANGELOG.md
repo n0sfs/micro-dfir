@@ -10,6 +10,26 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-11
 
+### SIEM improvement pass 2/4 (Detection Rules): severity-mix bar + a real stale-stats bug
+
+- **Toggling a single rule's Enabled switch left the top stat tiles stale.** The switch
+  itself flips instantly (it's a plain checkbox), and `bulkAction()` already called
+  `ld()` (a full reload) to refresh everything -- but the single-row `toggleSingle()`
+  path did nothing at all on success, so Total/Enabled/Disabled sat showing the
+  pre-toggle counts until the next full reload, filter change, or bulk action.
+  Confirmed live (toggled a rule off, watched Enabled/Disabled hold their old numbers).
+  Now patches the one changed row into `allRules` in place and re-renders stats,
+  instead of doing nothing or a wasteful full re-fetch.
+- **Added a severity-mix bar for the ENABLED subset** — "Enabled: 119" alone doesn't say
+  whether that active detection surface skews critical/high-signal or mostly
+  informational; answering that today meant filtering by Level four times and reading
+  the row count each time. One glance at a small stacked bar now (same flex-segment
+  pattern as Coverage's own tactic bars, reused for visual consistency rather than
+  inventing a new one). Verified with a Node `vm`-context test (excludes disabled rules,
+  falls back a null level to 'medium' matching the row-render code's own fallback,
+  orders segments by severity not insertion order, clears cleanly when nothing's
+  enabled) plus live verification with real data.
+
 ### SIEM improvement pass 1/4 (Log Search): alert/anomaly volume as its own chart series
 
 Direct follow-up request for several more usability passes through SIEM specifically,

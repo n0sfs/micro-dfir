@@ -6,6 +6,11 @@
     .time-preset-btn.active-filter{background-color:var(--accent); border-color:var(--accent); color:#fff;}
     mark.search-highlight{background-color:var(--accent); color:#fff; padding:0 2px; border-radius:2px;}
 
+    /* Same flex-segment stacked-bar pattern as coverage.html's .cov-bar, duplicated here
+       per this codebase's per-file convention rather than a shared import. */
+    .rule-level-bar{display:flex; height:6px; border-radius:3px; overflow:hidden; background:var(--bg-inset);}
+    .rule-level-bar span{height:100%;}
+
     #rulesTable{table-layout:fixed;}
     #rulesTable .rule-th{position:relative; white-space:nowrap; padding-right:10px; vertical-align:middle;}
     #rulesTable .th-inner{display:flex; align-items:center; justify-content:space-between; gap:4px;}
@@ -365,6 +370,17 @@
                 </div>
                 <button class="btn btn-sm btn-primary" onclick="openRuleModal()"><i class="fa-solid fa-plus"></i> New Rule</button>
             </div>
+        </div>
+
+        <!-- Severity mix of the ENABLED subset -- your actual active detection surface,
+             not the full 4000+-row catalog most of which sits disabled. Reading this off
+             the table itself means filtering by Level four times and counting rows. -->
+        <div class="mb-3 small" id="ruleLevelMixWrap">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+                <span class="text-muted"><i class="fa-solid fa-chart-simple me-1"></i>Enabled Rules by Level</span>
+                <span class="text-muted" id="ruleLevelMixLegend"></span>
+            </div>
+            <div class="rule-level-bar" id="ruleLevelMixBar"></div>
         </div>
 
         <!-- Interactive Table -->
@@ -881,6 +897,36 @@ function updateSharedStats(tab) {
         setStatTile(2, 'Noisy (7d ≥ 50 alerts)', allTuning.filter(r => r.alerts_7d >= 50).length);
         setStatTile(3, 'Active Exclusions', allTuning.reduce((sum, r) => sum + (r.exclusion_count || 0), 0));
     }
+}
+
+// Same 5-level set/order/color mapping Detection Tuning's own TUNE_LEVEL_BADGE and this
+// tab's own filterMenuLevel use, kept as its own const per this codebase's per-file
+// duplication convention (small catalogs aren't worth a shared-import mechanism here).
+const RULE_LEVEL_ORDER = ['critical', 'high', 'medium', 'low', 'informational'];
+const RULE_LEVEL_BAR_COLOR = { critical: 'var(--danger)', high: 'var(--danger)', medium: 'var(--warning)', low: 'var(--info)', informational: 'var(--border-light)' };
+
+// Enabled/Disabled counts alone don't say whether the active detection surface actually
+// skews toward high-signal rules or is mostly informational noise -- answering that
+// today means filtering the table by Level four times and reading the row count each
+// time. One glance at this bar instead.
+function renderRuleLevelMix() {
+    const wrap = document.getElementById('ruleLevelMixBar');
+    const legend = document.getElementById('ruleLevelMixLegend');
+    if (!wrap || !legend) return;
+    const enabled = (typeof allRules !== 'undefined' ? allRules : []).filter(r => r.enabled);
+    if (!enabled.length) {
+        wrap.innerHTML = '';
+        legend.textContent = 'No enabled rules yet';
+        return;
+    }
+    const counts = {};
+    enabled.forEach(r => { const lvl = r.level || 'medium'; counts[lvl] = (counts[lvl] || 0) + 1; });
+    const total = enabled.length;
+    const present = RULE_LEVEL_ORDER.filter(l => counts[l]);
+    wrap.innerHTML = present.map(l =>
+        `<span style="width:${(counts[l] / total * 100).toFixed(2)}%; background:${RULE_LEVEL_BAR_COLOR[l]};" title="${counts[l]} ${l}"></span>`
+    ).join('');
+    legend.textContent = present.map(l => `${counts[l]} ${l}`).join(' · ');
 }
 
 const SIEM_TABS = ['search', 'rules', 'tuning'];
@@ -2965,6 +3011,7 @@ async function ld(){
     buildMultiFilterMenu('filterMenuEnabled', 'enabled', [{value: '1', label: 'Enabled'}, {value: '0', label: 'Disabled'}]);
 
     updateSharedStats('rules');
+    renderRuleLevelMix();
     f();
 }
 
@@ -3097,7 +3144,18 @@ async function toggleSingle(id, state) {
         const err = await res.json().catch(() => ({}));
         toast(err.error || 'Failed to toggle rule.', 'danger');
         ld();
+        return;
     }
+    // The row's own switch already reflects the click instantly, but the 4 stat tiles
+    // above it (Enabled/Disabled counts) and the level-mix bar were both computed once
+    // at load time from allRules and never touched again on a single-row toggle --
+    // Enabled/Disabled sat stale until the next full reload or bulk action (bulkAction()
+    // already calls ld() and got this for free). Patch the one row in place instead of
+    // a full re-fetch, since that's all that actually changed.
+    const rule = allRules.find(r => r.id === id);
+    if (rule) rule.enabled = state;
+    updateSharedStats('rules');
+    renderRuleLevelMix();
 }
 
 async function bulkAction(enable) {
