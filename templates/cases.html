@@ -1317,6 +1317,67 @@ function renderForensicTimeline(data, append) {
     if (moreBtn) moreBtn.style.display = data.has_more ? '' : 'none';
 }
 
+// Explicit, durable links an analyst asserts (duplicate/child/related/same-campaign) --
+// distinct from the auto-suggested feed below, which recomputes from shared data on
+// every load and can't be dismissed or explained beyond "shares X".
+function loadCaseLinks(cid) {
+    fetch(`/api/cases/${cid}/links`).then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(data => {
+        if (cid !== activeCaseId) return;
+        renderCaseLinks(data);
+    }).catch(err => {
+        console.error('Error loading case links:', err);
+        const el = document.getElementById('linkedCasesBody');
+        if (el) el.innerHTML = '<p class="text-danger small mb-0"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load linked cases.</p>';
+    });
+}
+
+function renderCaseLinks(links) {
+    const el = document.getElementById('linkedCasesBody');
+    const formEl = document.getElementById('addCaseLinkForm');
+    if (formEl) formEl.style.display = activeCaseClosed ? 'none' : '';
+    if (!el) return;
+    if (!links.length) {
+        el.innerHTML = '<p class="text-muted small mb-0">No cases explicitly linked yet.</p>';
+        return;
+    }
+    el.innerHTML = links.map(l => `
+        <div class="d-flex justify-content-between align-items-start border border-secondary rounded p-2 mb-2">
+            <div style="cursor:pointer;" onclick="openCaseDetail(${l.other_case.id})">
+                <span class="badge bg-info text-dark me-2">${escHtml(l.label)}</span>
+                <span class="badge ${severityBadgeClass(l.other_case.severity)} me-2">${escHtml((l.other_case.severity || '').toUpperCase())}</span>
+                ${caseStatusBadge(l.other_case.status)}
+                <strong class="ms-1">${escHtml(l.other_case.case_number || ('#' + l.other_case.id))}</strong> — ${escHtml(l.other_case.title)}
+                <br><span class="text-muted small">Linked by ${escHtml(l.created_by || 'unknown')} on ${escHtml((l.created_at || '').slice(0, 10))}</span>
+            </div>
+            ${activeCaseClosed ? '' : `<button type="button" class="btn btn-sm btn-outline-danger ms-2" onclick="removeCaseLink(${l.id})" title="Remove link"><i class="fa-solid fa-xmark"></i></button>`}
+        </div>`).join('');
+}
+
+function addCaseLink() {
+    const targetId = parseInt(document.getElementById('caseLinkTargetId').value, 10);
+    const relationshipType = document.getElementById('caseLinkType').value;
+    if (!targetId) { toast('Enter a case number to link to.', 'danger'); return; }
+    fetch(`/api/cases/${activeCaseId}/links`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ related_case_id: targetId, relationship_type: relationshipType })
+    }).then(r => r.json().then(d => ({ ok: r.ok, d }))).then(({ ok, d }) => {
+        if (!ok) { toast(d.error || 'Failed to link case.', 'danger'); return; }
+        document.getElementById('caseLinkTargetId').value = '';
+        toast('Case linked.', 'success');
+        loadCaseLinks(activeCaseId);
+    }).catch(() => toast('Failed to link case.', 'danger'));
+}
+
+function removeCaseLink(linkId) {
+    fetch(`/api/cases/${activeCaseId}/links/${linkId}`, { method: 'DELETE' }).then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        loadCaseLinks(activeCaseId);
+    }).catch(() => toast('Failed to remove link.', 'danger'));
+}
+
 // Every case is otherwise a fully isolated island -- surfaces other cases sharing a
 // host (case_assets), an indicator (case_iocs), or a threat entity (ti_relationships)
 // with this one, so two analysts independently opening cases on the same host don't
@@ -1917,7 +1978,23 @@ function loadAndRenderCaseDetail(cid) {
 
             <div id="caseTabPane-relatedCases" class="case-tab-pane" style="display:none;">
                 <div class="card bg-dark border-secondary mb-3">
-                    <div class="card-header border-secondary">Related Cases <span class="text-muted small">— other cases sharing a host, indicator, or threat entity with this one</span></div>
+                    <div class="card-header border-secondary">Linked Cases <span class="text-muted small">— explicit, analyst-asserted links (duplicates, campaigns, parent/child) that persist even if the underlying shared data changes</span></div>
+                    <div class="card-body">
+                        <div id="linkedCasesBody"><p class="text-muted small mb-0">Loading&hellip;</p></div>
+                        <div id="addCaseLinkForm" class="d-flex gap-2 mt-3 flex-wrap" style="display:none;">
+                            <input type="number" id="caseLinkTargetId" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:110px;" placeholder="Case #">
+                            <select id="caseLinkType" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;">
+                                <option value="duplicate_of">Duplicate of</option>
+                                <option value="child_of">Child of</option>
+                                <option value="related_to" selected>Related to</option>
+                                <option value="same_campaign">Same campaign as</option>
+                            </select>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addCaseLink()"><i class="fa-solid fa-link me-1"></i>Link</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-header border-secondary">Suggested Related Cases <span class="text-muted small">— other cases sharing a host, indicator, or threat entity with this one</span></div>
                     <div class="card-body" id="relatedCasesBody"><p class="text-muted small mb-0">Loading&hellip;</p></div>
                 </div>
             </div>
@@ -2107,6 +2184,7 @@ function loadAndRenderCaseDetail(cid) {
         loadRelatedItems(c.id);
         loadCaseCoverageGaps(c.id);
         loadRelatedCases(c.id);
+        loadCaseLinks(c.id);
         loadCaseAttachments(c.id);
         loadForensicTimeline(c.id);
         initEdrResponseCard();
