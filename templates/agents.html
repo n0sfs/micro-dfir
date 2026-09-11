@@ -117,12 +117,13 @@
                                 </div>
                             </th>
                             <th>Group</th>
+                            <th title="Alerts fired on this host in the last 24 hours">Alerts (24h)</th>
                             <th>Heartbeat</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody id="endpointsTableBody">
-                        <tr><td colspan="11" class="text-center text-muted py-4">Loading active endpoints...</td></tr>
+                        <tr><td colspan="12" class="text-center text-muted py-4">Loading active endpoints...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -1130,7 +1131,7 @@ function renderEndpoints() {
 
     if (allEndpoints.length === 0) {
         document.getElementById('endpointCountLabel').innerText = '';
-        tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted py-3">No active agent endpoints detected.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="12" class="text-center text-muted py-3">No active agent endpoints detected.</td></tr>';
         updateSelectAllCheckboxState();
         updateBulkActionBar();
         return;
@@ -1153,7 +1154,7 @@ function renderEndpoints() {
         : `${allEndpoints.length} endpoint${allEndpoints.length === 1 ? '' : 's'}`;
 
     if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted py-3">No endpoints match your filters.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="12" class="text-center text-muted py-3">No endpoints match your filters.</td></tr>';
         updateSelectAllCheckboxState();
         updateBulkActionBar();
         return;
@@ -1176,6 +1177,7 @@ function renderEndpoints() {
                     <td class="text-nowrap">${lastLogReceivedCell(dev)}</td>
                     <td class="text-nowrap">${versionBadge(dev)}</td>
                     <td class="text-nowrap"><input type="text" class="form-control form-control-sm bg-dark text-light border-secondary py-0" style="width:110px; font-size:.8rem;" value="${escHtml(dev.group || '')}" placeholder="—" title="Organizational grouping for bulk response actions -- not a config policy" onblur="saveEndpointGroup(rowHost(this), this.value)" onkeydown="if(event.key==='Enter') this.blur()"></td>
+                    <td class="text-nowrap">${dev.alerts_24h > 0 ? `<span class="text-danger fw-bold">${dev.alerts_24h}</span>` : '<span class="text-muted">0</span>'}</td>
                     <td><div style="cursor:pointer; display:inline-block;" onclick="openHeartbeatHistoryModal(rowHost(this));" title="Click for 24h check-in history">${heartbeatSpark(dev.status, dev.recent_polls)}</div></td>
                     <td class="text-nowrap">
                         <div class="dropdown d-inline-block">

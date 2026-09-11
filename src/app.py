@@ -18958,7 +18958,8 @@ def agent_checkins():
                 "os": os_name,
                 "os_detail": os_detail,
                 "group": "",
-                "recent_polls": []
+                "recent_polls": [],
+                "alerts_24h": 0
             })
 
         if hostnames:
@@ -19018,6 +19019,25 @@ def agent_checkins():
                 vh_map = {(vr['hostname'], vr['version']): vr['first_seen'] for vr in vh_rows}
                 for m in mapped:
                     m['version_since'] = vh_map.get((m['hostname'], m['version']))
+
+        # Alerts (24h) per host, bulk-queried the same way as group/version above rather
+        # than a query per row -- surfaced as its own Agents-table column so a host
+        # generating unusual alert volume is visible at a glance instead of requiring a
+        # click into that host's own detail modal (where this same number already lived)
+        # to notice. Same UTC-vs-local timestamp convention as api_agent_detail's own
+        # alerts_24h calculation -- alerts.timestamp is UTC, unlike agent_polls' local
+        # clock, so it's compared against its own datetime('now') convention, not reused
+        # from the checkin-status math above.
+        if hostnames:
+            placeholders = ','.join('?' * len(hostnames))
+            alert_rows = db.execute(
+                f"SELECT host, COUNT(*) as c FROM alerts WHERE host IN ({placeholders}) "
+                f"AND COALESCE(last_seen, timestamp) >= datetime('now', '-1 day') GROUP BY host",
+                hostnames
+            ).fetchall()
+            alerts_by_host = {r['host']: r['c'] for r in alert_rows}
+            for m in mapped:
+                m['alerts_24h'] = alerts_by_host.get(m['hostname'], 0)
 
         # Last log actually ingested from this host, distinct from the agent_polls
         # heartbeat above -- an agent can check in fine while its log shipping is

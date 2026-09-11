@@ -10,6 +10,24 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-11
 
+### EDR improvement pass 2/4 (Agents): Alerts (24h) surfaced on the fleet table
+
+The host-detail modal (click a hostname) already showed a striking, red-highlighted
+"Alerts (24h)" count — 1403 for the one real online host in this appliance — but seeing
+it meant clicking into each host individually, one at a time, to notice. Added as its
+own column on the main Agents table instead, so a host generating unusual alert volume
+is visible at a glance across the whole fleet.
+
+- `/api/agent/checkins` now also bulk-queries `alerts_24h` per visible host (one
+  `GROUP BY host` query alongside the existing bulk group/version-history lookups it
+  already does this way, not a query per row) using the exact same
+  `COALESCE(last_seen, timestamp) >= datetime('now', '-1 day')` UTC-timestamp
+  convention the host-detail modal's own `alerts_24h` calculation already used, so the
+  two never drift apart. Verified with a SQLite fixture test (counts a repeat-alert
+  correctly via its bumped `last_seen` even though its original `timestamp` is outside
+  the window, respects the 24h boundary, and omits a host with zero alerts from the
+  aggregate rather than erroring — the frontend defaults that case to 0).
+
 ### EDR improvement pass 1/4 (Response Actions): structured command output as a table
 
 Same live-testing methodology as the SIEM passes, this time through EDR (Agents /
