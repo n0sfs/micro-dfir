@@ -217,7 +217,10 @@
         <div class="card-body p-3 border-bottom border-secondary">
             <div class="row g-3">
                 <div class="col-lg-4">
-                    <label for="consoleHostSelect" class="form-label small text-muted mb-1 fw-bold">Target Host</label>
+                    <div class="d-flex justify-content-between align-items-center">
+                        <label for="consoleHostSelect" class="form-label small text-muted mb-1 fw-bold">Target Host</label>
+                        <a href="#" id="consoleHostDetailLink" class="small mb-1" style="display:none;" onclick="openHostDetailModal(consoleSelectedHost); return false;" title="View this host's full details without leaving the console"><i class="fa-solid fa-circle-info me-1"></i>Details</a>
+                    </div>
                     <select id="consoleHostSelect" class="form-select form-select-sm bg-dark text-light border-secondary mb-3" onchange="onConsoleHostChange()">
                         <option value="">-- Select an endpoint --</option>
                     </select>
@@ -531,6 +534,26 @@ function switchAgentsTab(tab) {
     });
     try { localStorage.setItem(AGENTS_TAB_KEY, tab); } catch (e) {}
 }
+
+// "/" focuses the Agents tab's own hostname/IP search box, matching the same
+// convention SIEM's Log Search/Detection Rules/Detection Tuning already use --
+// deliberately scoped to ONLY fire when the Agents pane is actually the one visible.
+// Response Actions has a live PowerShell command input where '/' is an entirely normal
+// character (file paths, flags) and there's no search box to send it to on that or the
+// Deployment tab -- unlike SIEM, where every tab had its own search box to fall back to,
+// stealing '/' here on the wrong tab would do nothing useful and, worse, could yank
+// focus away from an in-progress command on Response Actions.
+document.addEventListener('keydown', function(e) {
+    if (e.key !== '/') return;
+    const active = document.activeElement;
+    const tag = active && active.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || (active && active.isContentEditable)) return;
+    const pane = document.getElementById('paneAgents');
+    const box = document.getElementById('endpointSearchBox');
+    if (!pane || pane.style.display === 'none' || !box) return;
+    e.preventDefault();
+    box.focus();
+});
 
 function escHtml(str) {
     const d = document.createElement('div');
@@ -1556,6 +1579,7 @@ function onConsoleHostChange() {
     const wrap = document.getElementById('consoleActionsWrap');
     const active = !!consoleSelectedHost;
     wrap.classList.toggle('disabled', !active);
+    document.getElementById('consoleHostDetailLink').style.display = active ? '' : 'none';
     // Free-text commands always queue as label 'custom', which requires
     // edr.command.advanced server-side -- so the input stays disabled for anyone
     // without it even with a host selected, rather than letting them type a command
