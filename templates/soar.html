@@ -44,12 +44,21 @@
                     fire it on demand against a specific case, instead of waiting for its trigger.
                 </div>
                 <div class="d-flex gap-2 text-nowrap">
-                    {% if has_permission('soar.secrets.manage') %}
-                    <button type="button" class="btn btn-outline-secondary" onclick="showSecretsModal()"><i class="fa-solid fa-key me-1"></i>Manage Secrets</button>
+                    {% if has_permission('soar.secrets.manage') or has_permission('soar.playbooks.manage') %}
+                    <div class="dropdown">
+                        <button type="button" class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false"><i class="fa-solid fa-gear me-1"></i>Configure</button>
+                        <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
+                            {% if has_permission('soar.secrets.manage') %}
+                            <li><button type="button" class="dropdown-item" onclick="showSecretsModal()"><i class="fa-solid fa-key me-2"></i>Manage Secrets</button></li>
+                            {% endif %}
+                            {% if has_permission('soar.playbooks.manage') %}
+                            <li><button type="button" class="dropdown-item" onclick="showCustomActionsModal()"><i class="fa-solid fa-bolt me-2"></i>Manage Custom Actions</button></li>
+                            <li><button type="button" class="dropdown-item" onclick="showEmailTemplatesModal()"><i class="fa-solid fa-envelope me-2"></i>Manage Email Templates</button></li>
+                            {% endif %}
+                        </ul>
+                    </div>
                     {% endif %}
                     {% if has_permission('soar.playbooks.manage') %}
-                    <button type="button" class="btn btn-outline-secondary" onclick="showCustomActionsModal()"><i class="fa-solid fa-bolt me-1"></i>Manage Custom Actions</button>
-                    <button type="button" class="btn btn-outline-secondary" onclick="showEmailTemplatesModal()"><i class="fa-solid fa-envelope me-1"></i>Manage Email Templates</button>
                     <button type="button" class="btn btn-outline-secondary" onclick="showPlaybookTemplateGallery()"><i class="fa-solid fa-shapes me-1"></i>New from Template</button>
                     <button type="button" class="btn btn-primary" onclick="showPlaybookModal()"><i class="fa-solid fa-plus me-1"></i>New Playbook</button>
                     {% endif %}
