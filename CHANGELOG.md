@@ -10,6 +10,16 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-11
 
+### EDR improvement pass 3/4 (Deployment): click-to-copy on every install command
+
+Deployment's entire job is handing an analyst a command to paste into a remote shell —
+the install/uninstall commands for Windows/Linux/macOS (6 total) and the SOC ingestion
+token itself were all plain, unselectable-by-click text with no copy affordance,
+meaning every install started with a manual click-drag-select. Added a shared
+`copyCommandToClipboard()` (click the block, icon briefly swaps to a checkmark to
+confirm) wired to all 6 command blocks plus a dedicated copy button next to the SOC
+token field.
+
 ### EDR improvement pass 2/4 (Agents): Alerts (24h) surfaced on the fleet table
 
 The host-detail modal (click a hostname) already showed a striking, red-highlighted
