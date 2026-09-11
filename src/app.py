@@ -6868,6 +6868,7 @@ def api_cases():
     tlp = (data.get('tlp') or '').strip()
     pap = (data.get('pap') or '').strip()
     severity = (data.get('severity') or 'medium').strip()
+    severity_rationale = (data.get('severity_rationale') or '').strip()
     queue_id = data.get('queue_id') or None
     if tlp and tlp not in CASE_TLP_VALUES:
         return jsonify({"error": f"tlp must be empty (not set) or one of {', '.join(CASE_TLP_VALUES)}"}), 400
@@ -6878,8 +6879,8 @@ def api_cases():
     if queue_id and not db.execute("SELECT 1 FROM case_queues WHERE id = ?", (queue_id,)).fetchone():
         return jsonify({"error": "Queue not found"}), 400
     cur = db.execute(
-        "INSERT INTO cases (title, assignee, description, created_by, tlp, pap, severity, queue_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (title, assignee, description, current_user.username, tlp, pap, severity, queue_id)
+        "INSERT INTO cases (title, assignee, description, created_by, tlp, pap, severity, severity_rationale, queue_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (title, assignee, description, current_user.username, tlp, pap, severity, severity_rationale, queue_id)
     )
     cid = cur.lastrowid
     _log_case_event(db, cid, 'created', title)
@@ -7023,6 +7024,7 @@ def api_case_detail(cid):
         tlp = data['tlp'].strip() if 'tlp' in data else case['tlp']
         pap = data['pap'].strip() if 'pap' in data else case['pap']
         severity = data['severity'].strip() if 'severity' in data and data['severity'] else case['severity']
+        severity_rationale = data['severity_rationale'].strip() if 'severity_rationale' in data else (case['severity_rationale'] or '')
         workflow_state = data['workflow_state'].strip() if 'workflow_state' in data and data['workflow_state'] else case['workflow_state']
         queue_id = data['queue_id'] if 'queue_id' in data else case['queue_id']
         queue_id = queue_id or None
@@ -7097,6 +7099,8 @@ def api_case_detail(cid):
             _log_case_event(db, cid, 'pap_change', pap)
         if severity_changed:
             _log_case_event(db, cid, 'severity_change', severity)
+        if severity_rationale != (case['severity_rationale'] or ''):
+            _log_case_event(db, cid, 'severity_rationale_updated', severity_rationale or '(cleared)')
         if workflow_state != case['workflow_state']:
             _log_case_event(db, cid, 'workflow_state_change', workflow_state)
         if queue_changed:
@@ -7111,8 +7115,8 @@ def api_case_detail(cid):
                 or pir_notes != (case['pir_notes'] or '')):
             _log_case_event(db, cid, 'pir_updated', 'Post-incident review updated')
         db.execute(
-            "UPDATE cases SET title = ?, status = ?, assignee = ?, description = ?, root_cause = ?, lessons_learned = ?, pir_notes = ?, closed_at = ?, tlp = ?, pap = ?, severity = ?, workflow_state = ?, acknowledged_at = ?, sla_breach_notified_at = ?, queue_id = ?, last_closed_at = ?, reopened_count = ? WHERE id = ?",
-            (title, status, assignee, description, root_cause, lessons_learned, pir_notes, closed_at, tlp, pap, severity, workflow_state, acknowledged_at, sla_breach_notified_at, queue_id, last_closed_at, reopened_count, cid)
+            "UPDATE cases SET title = ?, status = ?, assignee = ?, description = ?, root_cause = ?, lessons_learned = ?, pir_notes = ?, closed_at = ?, tlp = ?, pap = ?, severity = ?, severity_rationale = ?, workflow_state = ?, acknowledged_at = ?, sla_breach_notified_at = ?, queue_id = ?, last_closed_at = ?, reopened_count = ? WHERE id = ?",
+            (title, status, assignee, description, root_cause, lessons_learned, pir_notes, closed_at, tlp, pap, severity, severity_rationale, workflow_state, acknowledged_at, sla_breach_notified_at, queue_id, last_closed_at, reopened_count, cid)
         )
         if status_changed:
             _run_playbooks_for_case(db, cid, 'status_changed', queue_id, tlp, status, severity)
@@ -12607,6 +12611,14 @@ def migrate_case_severity():
         # an analyst already wrote is hidden or lost.
         if 'pir_notes' not in cols:
             conn.execute("ALTER TABLE cases ADD COLUMN pir_notes TEXT")
+        # Free-text "why this severity" note -- optionally auto-filled by the frontend's
+        # severity-helper rubric (scope/data sensitivity/business impact/confidence ->
+        # a suggested tier), but never enforced server-side; an analyst can always
+        # override the Severity select directly. Closes a real gap: severity was a
+        # free-pick enum with no record of the reasoning behind it, undermining
+        # consistency across triage/SLA tiers/escalation rules that already key off it.
+        if 'severity_rationale' not in cols:
+            conn.execute("ALTER TABLE cases ADD COLUMN severity_rationale TEXT")
         conn.commit()
         conn.close()
     except Exception:
