@@ -200,7 +200,7 @@
         <label for="timeRangeBtn" class="form-label text-muted small mb-1 fw-bold">Time Window</label>
         <div class="dropdown">
             <button id="timeRangeBtn" class="btn btn-sm bg-dark text-light border-secondary text-start d-flex justify-content-between align-items-center dropdown-toggle w-100" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" title="Pick a relative window, an exact date/time range, or a saved favorite">
-                <span id="timeRangeLabel" class="text-truncate">Last 5m</span>
+                <span id="timeRangeLabel" class="text-truncate">Last 24h</span>
             </button>
             <div class="dropdown-menu dropdown-menu-dark shadow p-2" style="min-width: 300px;">
                 <div class="small text-muted fw-bold mb-1">Quick Ranges</div>
@@ -844,6 +844,18 @@ function setStatTile(i, label, value, large) {
     if (vEl) { vEl.innerText = value; vEl.style.fontSize = large ? '1.05rem' : ''; }
 }
 
+// Each SIEM tab's stat row is only ever populated by its own single fetch resolving --
+// on failure, the table below gets an explicit renderLoadError but these 4 tiles were
+// simply never touched again, left stuck on the initial "Loading..." placeholder
+// forever with nothing distinguishing "still waiting" from "this failed." Mirrors
+// log_pipeline.html's identical fix.
+function setStatTileError(i, label) {
+    const lEl = document.getElementById('statLabel' + i);
+    const vEl = document.getElementById('statValue' + i);
+    if (lEl) lEl.innerText = label;
+    if (vEl) { vEl.innerHTML = '<i class="fa-solid fa-triangle-exclamation text-danger" title="Failed to load" style="font-size: 0.85em;"></i>'; vEl.style.fontSize = ''; }
+}
+
 let searchStats = {};
 
 function updateSharedStats(tab) {
@@ -898,7 +910,11 @@ function switchSiemTab(tab) {
 // =====================================================================
 let timelineChart = null;
 
-let timeRangeState = { range: '5m', start: '', end: '' };
+// Default widened from 5m to 24h -- a first-time query with 0 hits in a 5-minute window
+// reads as "the app is broken/no logs are flowing" rather than "the window's too narrow"
+// (deep-linked/saved searches already fell back to 24h when unspecified, see the
+// `params.range || '24h'` below -- this just makes the page's own initial state match).
+let timeRangeState = { range: '24h', start: '', end: '' };
 const RANGE_LABELS = {
     '5m': 'Last 5m', '15m': 'Last 15m', '30m': 'Last 30m', '1h': 'Last 1h', '4h': 'Last 4h',
     '12h': 'Last 12h', '24h': 'Last 24h', '3d': 'Last 3d', '7d': 'Last 7d', '30d': 'Last 30d', 'all': 'All Time'
@@ -1759,6 +1775,10 @@ window.loadLogs = function(opts) {
             // which is the case that would otherwise be stuck on "Loading logs..." forever.
             if (!opts || !opts.auto) {
                 renderLoadError('logsTableBody', (activeColumnDefs().length || 1) + 1, 'Failed to load logs.');
+                setStatTileError(0, 'Total Matches (All Results)');
+                setStatTileError(1, 'Alerts/Anomalies (This Page)');
+                setStatTileError(2, 'Unique Hosts (This Page)');
+                setStatTileError(3, 'Time Window');
             }
         });
 };
@@ -2403,8 +2423,8 @@ function initSearchTab() {
     // A trend-chart bucket click (pivotToLogSearchBucket, base.html) links here with an
     // explicit range=custom&start=&end= and no q= at all -- applied before the initial
     // load below so the clicked bucket's window is what actually loads, instead of
-    // falling through to the default 5-minute window (which would show nothing at all
-    // unless the clicked bucket happened to be the most recent one).
+    // falling through to the default 24-hour window (which would miss an older bucket
+    // entirely rather than showing the one actually clicked).
     const _deepLinkStart = _params.get('start');
     const _deepLinkEnd = _params.get('end');
     if (_params.get('range') === 'custom' && (_deepLinkStart || _deepLinkEnd)) {
@@ -2897,6 +2917,10 @@ async function ld(){
         // table would just stay blank forever with nothing telling the analyst detection
         // rules failed to load at all.
         renderLoadError('rt', 11, 'Failed to load detection rules.');
+        setStatTileError(0, 'Total Rules');
+        setStatTileError(1, 'Enabled');
+        setStatTileError(2, 'Disabled');
+        setStatTileError(3, 'Platforms Covered');
         return;
     }
 
@@ -3702,6 +3726,10 @@ function tuneLoad() {
     }).catch(err => {
         console.error('Error loading tuning data:', err);
         renderLoadError('tuningTableBody', 10, 'Failed to load detection tuning data.');
+        setStatTileError(0, 'Enabled Rules');
+        setStatTileError(1, 'Never Triggered');
+        setStatTileError(2, 'Noisy (7d ≥ 50 alerts)');
+        setStatTileError(3, 'Active Exclusions');
     });
 }
 

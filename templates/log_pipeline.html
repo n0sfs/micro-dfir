@@ -781,13 +781,28 @@ function setStatTile(i, label, value, isText) {
     document.getElementById('statValue' + i).textContent = value;
 }
 
+// A tile stuck on the initial "Loading..." markup and a tile whose fetch genuinely
+// failed both used to end up rendered as a bare '—' -- indistinguishable from a
+// legitimate zero. This renders a small warning glyph instead, so a real failure looks
+// different from "still waiting" and from "the count actually is zero."
+function setStatTileError(i, label) {
+    document.getElementById('statLabel' + i).textContent = label;
+    document.getElementById('statValue' + i).innerHTML = '<i class="fa-solid fa-triangle-exclamation text-danger" title="Failed to load" style="font-size: 0.85em;"></i>';
+}
+
 let pipelineStats = {};
 
+// Each tile is only ever written once its own loader actually resolves (guarded by
+// `!= null`, so a legitimate 0 still renders) -- previously this unconditionally
+// re-rendered all 4 tiles from whatever's in `pipelineStats` on every call, so
+// whichever loader finished first (loadDropRules is a small, fast fetch) stomped the
+// other 3 tiles' "Loading..." placeholder back to '—' well before their own slower
+// fetch (loadIngestionHealth) had actually resolved or failed.
 function updateSharedStats() {
-    setStatTile(0, 'Active Drop Rules', pipelineStats.activeDropRules ?? '—');
-    setStatTile(1, 'Sources Ingesting', pipelineStats.sourcesCount ?? '—');
-    setStatTile(2, 'Events / Hour (recent)', pipelineStats.eventsPerHour != null ? pipelineStats.eventsPerHour.toLocaleString() : '—');
-    setStatTile(3, 'Last Event Received', pipelineStats.lastEventAt ?? '—');
+    if (pipelineStats.activeDropRules != null) setStatTile(0, 'Active Drop Rules', pipelineStats.activeDropRules);
+    if (pipelineStats.sourcesCount != null) setStatTile(1, 'Sources Ingesting', pipelineStats.sourcesCount);
+    if (pipelineStats.eventsPerHour != null) setStatTile(2, 'Events / Hour (recent)', pipelineStats.eventsPerHour.toLocaleString());
+    if (pipelineStats.lastEventAt != null) setStatTile(3, 'Last Event Received', pipelineStats.lastEventAt);
 }
 
 // The page's own "is anything actually flowing" answer -- these 4 tiles used to show
@@ -804,7 +819,12 @@ function loadIngestionHealth() {
             pipelineStats.lastEventAt = d.last_event_at;
             updateSharedStats();
         })
-        .catch(err => console.error('Error loading ingestion health:', err));
+        .catch(err => {
+            console.error('Error loading ingestion health:', err);
+            setStatTileError(1, 'Sources Ingesting');
+            setStatTileError(2, 'Events / Hour (recent)');
+            setStatTileError(3, 'Last Event Received');
+        });
 }
 
 // =====================================================================
@@ -868,6 +888,7 @@ function loadDropRules() {
         }).catch(err => {
             console.error("Error loading drop rules:", err);
             renderLoadError('dropRulesTableBody', 5, 'Failed to load drop rules.');
+            setStatTileError(0, 'Active Drop Rules');
         });
 }
 
