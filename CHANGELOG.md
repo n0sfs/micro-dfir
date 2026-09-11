@@ -10,6 +10,22 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-11
 
+### SIEM improvement pass 3/4 (Detection Tuning): inline enable toggle + noise-mix bar
+
+- **Disabling a noisy rule from Detection Tuning required a full modal round trip** —
+  "Enabled" was a static badge, not a switch, so the only way to disable a rule from the
+  one view built specifically for "which rules need action" was Tune → Disable This
+  Rule → Close (a modal open/close for the single most common tuning action). Now an
+  inline switch, matching Detection Rules' own table. Same stale-stats fix as pass 2
+  applied here too: patches the row into `allTuning` and re-renders stats in place
+  rather than doing nothing.
+- **Added a noise-mix bar for the ENABLED subset** — same idea as pass 2's severity-mix
+  bar: answering "of what's actually live, how much is well-behaved vs. flooding vs.
+  dead weight that's never fired" today meant clicking each quick-filter chip in turn
+  and reading its row count. Verified with a `vm`-context test (excludes disabled rules
+  even when they'd otherwise look extremely noisy, classifies each bucket correctly,
+  orders attention-worthy-first) plus live verification.
+
 ### SIEM improvement pass 2/4 (Detection Rules): severity-mix bar + a real stale-stats bug
 
 - **Toggling a single rule's Enabled switch left the top stat tiles stale.** The switch
