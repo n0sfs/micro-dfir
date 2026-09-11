@@ -195,11 +195,17 @@
                             <option value="medium" selected>Medium</option>
                             <option value="low">Low</option>
                         </select>
+                        <a href="#" class="small" onclick="toggleSeverityHelper('newCase'); return false;">Severity helper</a>
                     </div>
                     <div class="col-md-3">
                         <label class="form-label small text-muted mb-1" for="newCaseTlp">TLP</label>
                         <select id="newCaseTlp" class="form-select bg-dark text-light border-secondary"></select>
                     </div>
+                </div>
+                <div id="newCaseSeverityHelper" class="border border-secondary rounded p-2 mb-2" style="display:none;"></div>
+                <div class="mb-2">
+                    <label class="form-label small text-muted mb-1" for="newCaseSeverityRationale">Severity rationale (optional)</label>
+                    <input type="text" id="newCaseSeverityRationale" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Why this severity? (filled in automatically by the helper above, or type your own)">
                 </div>
                 <div class="mb-2">
                     <label class="form-label small text-muted mb-1" for="newCaseDescription">Description (optional)</label>
@@ -1084,12 +1090,111 @@ function escJs(s) {
     return String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
+// A lightweight severity-classification rubric (scope / data sensitivity / business
+// impact / confidence -- the factors real SOC severity matrices actually key off,
+// closer to how an incident already in front of an analyst gets classified than an
+// abstract impact-x-likelihood risk matrix would be) -- purely a suggestion an analyst
+// can accept or override, never enforced server-side. "Apply" sets the Severity select
+// AND writes a short rationale string into the rationale field, so the *why* behind a
+// severity choice survives even after the analyst tweaks it further by hand.
+const SEVERITY_MATRIX_FACTORS = [
+    { key: 'scope', label: 'Scope of compromise', options: [
+        { label: 'Single host', points: 1 },
+        { label: 'Multiple hosts, same segment', points: 2 },
+        { label: 'Multiple hosts, multiple segments', points: 3 },
+        { label: 'Org-wide or crosses a trust boundary', points: 4 },
+    ] },
+    { key: 'data', label: 'Data sensitivity involved', options: [
+        { label: 'None / public', points: 0 },
+        { label: 'Internal only', points: 1 },
+        { label: 'Sensitive (PII, financial)', points: 3 },
+        { label: 'Regulated / crown-jewel (PHI, cardholder data, IP)', points: 4 },
+    ] },
+    { key: 'impact', label: 'Business impact', options: [
+        { label: 'None', points: 0 },
+        { label: 'Degraded performance', points: 1 },
+        { label: 'Significant disruption', points: 3 },
+        { label: 'Critical system down / safety impact', points: 4 },
+    ] },
+    { key: 'confidence', label: 'Confidence', options: [
+        { label: 'Suspected / unconfirmed', points: 0 },
+        { label: 'Confirmed malicious activity', points: 2 },
+    ] },
+];
+
+function severityTierFromScore(score) {
+    if (score >= 12) return 'critical';
+    if (score >= 8) return 'high';
+    if (score >= 4) return 'medium';
+    return 'low';
+}
+
+function severityHelperFieldsHtml(prefix) {
+    const factorSelects = SEVERITY_MATRIX_FACTORS.map(f => `
+        <div class="col-md-3 mb-2">
+            <label class="form-label small text-muted mb-1">${escHtml(f.label)}</label>
+            <select id="${prefix}SevFactor_${f.key}" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="recomputeSeverityHelper('${prefix}')">
+                ${f.options.map((o, i) => `<option value="${o.points}" ${i === 0 ? 'selected' : ''}>${escHtml(o.label)}</option>`).join('')}
+            </select>
+        </div>`).join('');
+    return `
+        <div class="row g-2">${factorSelects}</div>
+        <div class="small text-muted">Suggested severity: <strong id="${prefix}SevHelperOut">—</strong></div>
+        <button type="button" class="btn btn-sm btn-outline-secondary mt-1" onclick="applySeverityHelper('${prefix}')">Apply to Severity</button>`;
+}
+
+function toggleSeverityHelper(prefix) {
+    const panel = document.getElementById(`${prefix}SeverityHelper`);
+    if (!panel) return;
+    const show = panel.style.display === 'none';
+    if (show && !panel.dataset.built) {
+        panel.innerHTML = severityHelperFieldsHtml(prefix);
+        panel.dataset.built = '1';
+        recomputeSeverityHelper(prefix);
+    }
+    panel.style.display = show ? '' : 'none';
+}
+
+function recomputeSeverityHelper(prefix) {
+    const out = document.getElementById(`${prefix}SevHelperOut`);
+    if (!out) return;
+    const score = SEVERITY_MATRIX_FACTORS.reduce((sum, f) => {
+        const el = document.getElementById(`${prefix}SevFactor_${f.key}`);
+        return sum + (el ? parseInt(el.value, 10) || 0 : 0);
+    }, 0);
+    const tier = severityTierFromScore(score);
+    out.textContent = `${tier.charAt(0).toUpperCase()}${tier.slice(1)} (score ${score}/14)`;
+}
+
+function applySeverityHelper(prefix) {
+    const parts = SEVERITY_MATRIX_FACTORS.map(f => {
+        const el = document.getElementById(`${prefix}SevFactor_${f.key}`);
+        const points = el ? parseInt(el.value, 10) || 0 : 0;
+        const opt = f.options.find(o => o.points === points) || f.options[0];
+        return `${f.label}: ${opt.label} (${points})`;
+    });
+    const score = SEVERITY_MATRIX_FACTORS.reduce((sum, f) => {
+        const el = document.getElementById(`${prefix}SevFactor_${f.key}`);
+        return sum + (el ? parseInt(el.value, 10) || 0 : 0);
+    }, 0);
+    const tier = severityTierFromScore(score);
+    const sevEl = document.getElementById(`${prefix}Severity`);
+    const rationaleEl = document.getElementById(`${prefix}SeverityRationale`);
+    if (sevEl) sevEl.value = tier;
+    if (rationaleEl) rationaleEl.value = `${parts.join('; ')} = ${score} -> ${tier.charAt(0).toUpperCase()}${tier.slice(1)}`;
+    toggleSeverityHelper(prefix);
+}
+
 function showNewCaseModal() {
     document.getElementById('newCaseTitle').value = '';
     document.getElementById('newCaseAssignee').value = '';
     document.getElementById('newCaseDescription').value = '';
     document.getElementById('newCaseError').style.display = 'none';
     document.getElementById('newCaseSeverity').value = 'medium';
+    document.getElementById('newCaseSeverityRationale').value = '';
+    const helperPanel = document.getElementById('newCaseSeverityHelper');
+    helperPanel.style.display = 'none';
+    delete helperPanel.dataset.built;
     populateTlpPapSelect('newCaseTlp', TLP_VALUES, '');
     populateQueueSelect('newCaseQueue', '');
     if (!caseTemplates.length) loadCaseTemplates();
@@ -1106,6 +1211,7 @@ function createCase() {
         description: document.getElementById('newCaseDescription').value.trim(),
         tlp: document.getElementById('newCaseTlp').value,
         severity: document.getElementById('newCaseSeverity').value,
+        severity_rationale: document.getElementById('newCaseSeverityRationale').value.trim(),
         template_id: templateId ? parseInt(templateId, 10) : null,
         queue_id: queueId ? parseInt(queueId, 10) : null
     };
@@ -1886,10 +1992,16 @@ function loadAndRenderCaseDetail(cid) {
                                 <option value="medium" ${!c.severity || c.severity === 'medium' ? 'selected' : ''}>Medium</option>
                                 <option value="low" ${c.severity === 'low' ? 'selected' : ''}>Low</option>
                             </select>
+                            ${isClosed ? '' : `<a href="#" class="small" onclick="toggleSeverityHelper('editCase'); return false;">Severity helper</a>`}
                         </div>
                         <div class="col-md-4">
                             <label class="form-label small text-muted mb-1">SLA Target</label>
                             <div class="form-control-plaintext text-muted small">${caseSlaHours}h fleet-wide <a href="/dashboards" class="text-light">(edit)</a></div>
+                        </div>
+                        <div id="editCaseSeverityHelper" class="col-12 border border-secondary rounded p-2 mb-1" style="display:none;"></div>
+                        <div class="col-12">
+                            <label class="form-label small text-muted mb-1">Severity rationale <span class="text-muted">(optional)</span></label>
+                            <input type="text" id="editCaseSeverityRationale" class="form-control form-control-sm bg-dark text-light border-secondary" value="${escHtml(c.severity_rationale || '')}" placeholder="Why this severity?" ${isClosed ? 'disabled' : ''}>
                         </div>
                         <div class="col-12">
                             <label class="form-label small text-muted mb-1">Description</label>
@@ -2240,6 +2352,7 @@ async function saveCaseDetail() {
         pir_notes: Object.keys(pirNotesObj).length ? JSON.stringify(pirNotesObj) : '',
         tlp: document.getElementById('editCaseTlp').value,
         severity: document.getElementById('editCaseSeverity').value,
+        severity_rationale: document.getElementById('editCaseSeverityRationale').value.trim(),
         workflow_state: statusWorkflow === 'closed' ? 'resolved' : statusWorkflow,
         queue_id: queueVal ? parseInt(queueVal, 10) : null
     };

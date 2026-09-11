@@ -10,6 +10,27 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-10
 
+### Severity classification helper + rationale on cases
+
+Second item from the same IR-lifecycle gap-finding pass: `cases.severity` has always
+been a free-pick enum with no record of *why* an analyst chose Critical vs. Medium —
+undermining consistency across the SLA tiers, escalation rules, and metrics that already
+key off it. Adds a lightweight, optional rubric rather than a rigid enforced matrix.
+
+- **New `cases.severity_rationale` TEXT column** (nullable, free text) on both the New
+  Case modal and case detail's edit form, next to the Severity select.
+- **"Severity helper" inline panel** — 4 quick-pick factors (scope of compromise, data
+  sensitivity, business impact, confidence) each worth 0-4 points, summed to a 0-14
+  score mapped to a suggested tier (`>=12` Critical, `>=8` High, `>=4` Medium, else Low).
+  "Apply" sets the Severity select and writes a readable breakdown into the rationale
+  field (`"Scope of compromise: Multiple hosts, same segment (2); ... = 10 -> High"`) —
+  purely a suggestion the analyst can freely override afterward, never enforced
+  server-side or blocking manual entry.
+- `PUT /api/cases/<id>` logs a `severity_rationale_updated` case-timeline event only when
+  the rationale text actually changes (including an explicit clear, logged as
+  `(cleared)`), matching the existing "only log real changes" convention the rest of this
+  route already follows.
+
 ### Explicit, durable case-to-case links (duplicate/child/related/same-campaign)
 
 IR lifecycle gap-finding pass: Related Cases has only ever been a read-only
