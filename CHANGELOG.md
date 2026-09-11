@@ -10,6 +10,26 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-11
 
+### Coverage improvement pass: rule names instead of bare IDs in Compliance's audit trail
+
+Live-tested MITRE ATT&CK (technique drill-down popover, the disabled-rule links inside
+it correctly deep-link to `/siem?tab=rules&rule_id=N` — already solid), Compliance, and
+Vulnerability (clean, matches EDR's own "Check for Vulnerabilities" snapshot — already
+solid). Compliance's "Recent Changes" audit trail was the one real gap.
+
+- **"Recent Changes" showed bare rule IDs** — `admin toggled rule #3338` — telling an
+  analyst nothing without leaving the page to look up what that rule actually is, on a
+  page where every other rule reference in the app shows its title. `target_id` is
+  always a `sigma_rules.id` for the two actions that use it (`rule_toggle`,
+  `rule_compliance_tag` — confirmed against `api_r_tog`/`api_rule_compliance`);
+  `/api/compliance/audit-trail` now LEFT JOINs `sigma_rules` to resolve the real title,
+  falling back to `#id` only if the rule has since been deleted (a LEFT JOIN keeps that
+  row in the trail instead of an INNER JOIN silently dropping it). `rule_bulk_toggle`'s
+  target_id isn't a rule id at all and rides along as harmless NULL, unchanged.
+  Verified with a SQLite fixture test (title resolves correctly, a deleted rule's row
+  survives with a NULL title rather than vanishing, bulk-toggle unaffected) and a
+  `vm`-context test for the frontend fallback logic.
+
 ### EDR improvement pass 6: "usually within 15s" was a lie on this deployment's real config
 
 Exercised the File Integrity Monitoring add/delete flow live (both clean — add clears

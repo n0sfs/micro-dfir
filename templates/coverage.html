@@ -854,14 +854,21 @@ function toggleNist80053Detail() {
     });
 }
 
+// A bare "#3338" told an analyst nothing without leaving this page to look it up --
+// rule_title rides along from the backend's LEFT JOIN against sigma_rules, falling
+// back to the id (not blank) for the rare case of a since-deleted rule.
+function complianceAuditRuleLabel(row) {
+    return row.rule_title ? `"${escHtml(row.rule_title)}"` : `#${row.target_id}`;
+}
+
 function complianceAuditLine(row) {
     const who = escHtml(row.username || 'unknown');
     if (row.action === 'rule_compliance_tag') {
         const tags = (row.details || '(cleared)').trim();
-        return `${who} tagged rule #${row.target_id} — ${escHtml(tags === '' ? '(cleared)' : tags)}`;
+        return `${who} tagged rule ${complianceAuditRuleLabel(row)} — ${escHtml(tags === '' ? '(cleared)' : tags)}`;
     }
     if (row.action === 'rule_toggle') {
-        return `${who} toggled rule #${row.target_id}`;
+        return `${who} toggled rule ${complianceAuditRuleLabel(row)}`;
     }
     if (row.action === 'rule_bulk_toggle') {
         return `${who} ${escHtml(row.details || '')}`;
