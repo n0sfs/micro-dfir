@@ -780,7 +780,10 @@
   <div class="modal-dialog modal-lg modal-dialog-scrollable">
     <div class="modal-content bg-dark text-light border-secondary">
       <div class="modal-header border-secondary">
-        <h5 class="modal-title" id="tuneModalTitle">Tune Rule</h5>
+        <div class="d-flex align-items-center gap-2">
+          <h5 class="modal-title mb-0" id="tuneModalTitle">Tune Rule</h5>
+          <button type="button" class="btn btn-sm btn-outline-secondary" onclick="openRuleFromTuneModal()" title="Open this rule's definition in the rule editor"><i class="fa-solid fa-pen"></i></button>
+        </div>
         <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
@@ -962,6 +965,24 @@ function switchSiemTab(tab) {
     }
     try { localStorage.setItem('microdfir_siem_active_tab', tab); } catch (e) {}
 }
+
+// "/" focuses whichever tab's own search box is actually on screen right now (Advanced
+// Query on Log Search, or Basic Field Filter's Value box if that's the active mode
+// instead; the title-search box on Detection Rules/Detection Tuning) -- a standard
+// convention (GitHub, Gmail, Splunk...) this page had none of, so every search started
+// with a mouse click no matter which tab you were already on.
+const SIEM_SEARCH_BOX_IDS = ['searchQuery', 'fieldVal', 'titleSearchBox', 'tuningSearchBox'];
+document.addEventListener('keydown', function(e) {
+    if (e.key !== '/') return;
+    const active = document.activeElement;
+    const tag = active && active.tagName;
+    // Never steal '/' from an actual text entry -- typing a path/regex/URL fragment
+    // into any of these (including the box '/' is about to focus, on a second press)
+    // needs a literal '/' character, not another refocus.
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || (active && active.isContentEditable)) return;
+    const box = SIEM_SEARCH_BOX_IDS.map(id => document.getElementById(id)).find(el => el && el.offsetParent !== null);
+    if (box) { e.preventDefault(); box.focus(); }
+});
 
 // =====================================================================
 // LOG SEARCH TAB
@@ -3923,6 +3944,18 @@ function openTuneModal(id) {
 
     loadExclusions(id);
     new bootstrap.Modal(document.getElementById('tuneModal')).show();
+}
+
+// Assessing a problematic rule here (noisy, never fired, exclusions piling up) very
+// often ends in "I need to actually look at/edit its definition" -- previously that
+// meant closing this modal, switching to the Detection Rules tab, and searching for the
+// same rule by name all over again. Closes this modal and opens the same rule editor
+// Detection Rules' own row-title/Edit menu use, keyed off the same rule id.
+function openRuleFromTuneModal() {
+    if (!activeTuneRuleId) return;
+    const modalEl = document.getElementById('tuneModal');
+    bootstrap.Modal.getInstance(modalEl)?.hide();
+    openRuleModal(activeTuneRuleId);
 }
 
 function loadExclusions(id) {
