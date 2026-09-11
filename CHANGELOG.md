@@ -10,6 +10,24 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-11
 
+### SIEM improvement pass 1/4 (Log Search): alert/anomaly volume as its own chart series
+
+Direct follow-up request for several more usability passes through SIEM specifically,
+optimizing for fewer clicks to a common task and adding visualization where an analyst
+is currently reading a raw number/table that a chart would make faster to parse.
+
+- **Log Search's volume chart couldn't show an alert/anomaly spike** — it plotted one
+  undifferentiated line for total log volume, and at this appliance's real ratio
+  (~8k routine logs/hour against single-digit alerts/hour on a quiet day) an alert spike
+  would be invisible, flattened against the x-axis by sheer log volume. `/api/logs/timeline`
+  now also returns `alert_count` per bucket (one extra `SUM(CASE WHEN log_type IN
+  ('alert','anomaly')...)` in the same query, not a second round trip), plotted as its
+  own line on a secondary right-hand axis so it stays legible regardless of routine
+  volume. Verified with a fixture test isolating the CASE/SUM aggregation, then live
+  against real data.
+- Checked "View Rule" / "Add Exclusion" quick actions on alert rows and Enter-to-search
+  on both query inputs — both already existed, so left untouched.
+
 ### Full-cycle UX review: Logs → Log Search → Detections → Investigations → Reporting
 
 Fresh-eyes live walkthrough of the whole analyst workflow, cross-checking suspicious
