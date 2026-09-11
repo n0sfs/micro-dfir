@@ -8112,10 +8112,18 @@ def _parse_schedule_interval(d):
         return None
     return val if val > 0 else None
 
-def _fill_playbook_template(text, cid, case_row):
+# Turns a case-field label ('Attack Vector') into a safe placeholder slug
+# ('attack_vector') -- lowercased, any run of non-alphanumeric characters collapsed to
+# one underscore, leading/trailing underscores stripped. Returns None for a label that
+# has no alphanumeric content at all (nothing sensible to key a placeholder on).
+def _case_field_placeholder_slug(label):
+    slug = re.sub(r'[^a-z0-9]+', '_', (label or '').strip().lower()).strip('_')
+    return slug or None
+
+def _fill_playbook_template(db, text, cid, case_row):
     # Deliberately plain string substitution, not a real template engine -- the
-    # placeholder set is small and fixed (unlike Jinja in the case-report generator),
-    # and this runs against admin-authored config, not untrusted input.
+    # placeholder set is small (unlike Jinja in the case-report generator), and this
+    # runs against admin-authored config, not untrusted input.
     if not text:
         return text
     values = {
@@ -8125,6 +8133,15 @@ def _fill_playbook_template(text, cid, case_row):
         '{{tlp}}': (case_row['tlp'] if case_row else '') or '',
         '{{pap}}': (case_row['pap'] if case_row else '') or '',
     }
+    # Custom case fields (case_field_values -- whatever a case template seeded, or an
+    # analyst added directly) become {{field_<slug>}} placeholders, so a playbook action
+    # can reference them alongside the 5 fixed built-ins above. setdefault: if two
+    # differently-spelled labels slug to the same key (e.g. "Attack Vector" and
+    # "attack-vector"), the first one found wins rather than silently overwriting.
+    for row in db.execute("SELECT label, value FROM case_field_values WHERE case_id = ?", (cid,)).fetchall():
+        slug = _case_field_placeholder_slug(row['label'])
+        if slug:
+            values.setdefault('{{field_%s}}' % slug, row['value'] or '')
     for k, v in values.items():
         text = text.replace(k, v)
     return text
@@ -8234,8 +8251,21 @@ def _run_playbook_action(db, cid, action_type, params, dry_run=False):
         to_addrs = [a.strip() for a in to_raw.split(',') if a.strip()]
         if not to_addrs:
             return "no recipient configured (and no default To on the Email channel), skipped"
-        subject = _fill_playbook_template(params.get('subject') or 'Case #{{case_id}}: {{case_title}}', cid, case)
-        body = _fill_playbook_template(params.get('body') or 'Case #{{case_id}} ({{status}}): {{case_title}}', cid, case)
+        # A saved email_templates row (selected via email_template_id) overrides this
+        # action's own inline subject/body fields entirely -- one admin-managed template
+        # reused across many playbooks/actions, instead of retyping the same subject/body
+        # into every send_email action that wants it.
+        template_id = params.get('email_template_id')
+        if template_id:
+            tpl = db.execute("SELECT name, subject, body FROM email_templates WHERE id = ?", (template_id,)).fetchone()
+            if not tpl:
+                return "email template not found or not selected, skipped"
+            subject_raw, body_raw = tpl['subject'], tpl['body']
+        else:
+            subject_raw = params.get('subject') or 'Case #{{case_id}}: {{case_title}}'
+            body_raw = params.get('body') or 'Case #{{case_id}} ({{status}}): {{case_title}}'
+        subject = _fill_playbook_template(db, subject_raw, cid, case)
+        body = _fill_playbook_template(db, body_raw, cid, case)
         if dry_run:
             return f"would email {', '.join(to_addrs)}: \"{subject}\""
         from email.mime.text import MIMEText
@@ -8269,7 +8299,7 @@ def _run_playbook_action(db, cid, action_type, params, dry_run=False):
         if not url:
             return "no URL configured, skipped"
         case = db.execute("SELECT title, status, tlp, pap FROM cases WHERE id = ?", (cid,)).fetchone()
-        body_text = _fill_playbook_template(params.get('body') or '{"case_id": "{{case_id}}", "title": "{{case_title}}", "status": "{{status}}"}', cid, case)
+        body_text = _fill_playbook_template(db, params.get('body') or '{"case_id": "{{case_id}}", "title": "{{case_title}}", "status": "{{status}}"}', cid, case)
         if dry_run:
             return f"would POST to {url_display} with body: {body_text}"
         try:
@@ -8292,7 +8322,7 @@ def _run_playbook_action(db, cid, action_type, params, dry_run=False):
         if not webhook_url:
             return "no Slack webhook URL configured, skipped"
         case = db.execute("SELECT title, status, tlp, pap FROM cases WHERE id = ?", (cid,)).fetchone()
-        message = _fill_playbook_template(params.get('message') or 'Case #{{case_id}}: {{case_title}} ({{status}})', cid, case)
+        message = _fill_playbook_template(db, params.get('message') or 'Case #{{case_id}}: {{case_title}} ({{status}})', cid, case)
         if dry_run:
             return f'would send Slack message via {url_display}: "{message}"'
         import requests
@@ -8319,7 +8349,7 @@ def _run_playbook_action(db, cid, action_type, params, dry_run=False):
         if not url:
             return f"custom action '{ca['name']}' has no URL configured, skipped"
         case = db.execute("SELECT title, status, tlp, pap FROM cases WHERE id = ?", (cid,)).fetchone()
-        body_text = _fill_playbook_template(ca['body'] or '{"case_id": "{{case_id}}", "title": "{{case_title}}", "status": "{{status}}"}', cid, case)
+        body_text = _fill_playbook_template(db, ca['body'] or '{"case_id": "{{case_id}}", "title": "{{case_title}}", "status": "{{status}}"}', cid, case)
         if dry_run:
             return f"would run custom action '{ca['name']}': POST to {url_display} with body: {body_text}"
         try:
@@ -9766,6 +9796,68 @@ def api_playbook_custom_action_detail(caid):
     )
     db.commit()
     log_audit('playbook_custom_action_update', 'playbook_custom_action', name)
+    return jsonify({'status': 'success'})
+
+@app.route('/api/email-templates', methods=['GET', 'POST'])
+@login_required
+def api_email_templates():
+    db = get_db()
+    err = require_permission('soar.playbooks.manage')
+    if err: return err
+    if request.method == 'GET':
+        rows = db.execute(
+            "SELECT id, name, subject, body, created_by, created_at, updated_by, updated_at "
+            "FROM email_templates ORDER BY name"
+        ).fetchall()
+        return jsonify([dict(r) for r in rows])
+    d = request.json or {}
+    name = (d.get('name') or '').strip()
+    subject = (d.get('subject') or '').strip()
+    body = (d.get('body') or '').strip()
+    if not name:
+        return jsonify({'error': 'name is required'}), 400
+    if not subject or not body:
+        return jsonify({'error': 'subject and body are both required'}), 400
+    if db.execute("SELECT 1 FROM email_templates WHERE name = ?", (name,)).fetchone():
+        return jsonify({'error': f'An email template named "{name}" already exists'}), 400
+    db.execute(
+        "INSERT INTO email_templates (name, subject, body, created_by) VALUES (?, ?, ?, ?)",
+        (name, subject, body, current_user.username)
+    )
+    db.commit()
+    log_audit('email_template_create', 'email_template', name)
+    return jsonify({'status': 'success'})
+
+@app.route('/api/email-templates/<int:tid>', methods=['PUT', 'DELETE'])
+@login_required
+def api_email_template_detail(tid):
+    err = require_permission('soar.playbooks.manage')
+    if err: return err
+    db = get_db()
+    existing = db.execute("SELECT name FROM email_templates WHERE id = ?", (tid,)).fetchone()
+    if not existing:
+        return jsonify({'error': 'Email template not found'}), 404
+    if request.method == 'DELETE':
+        db.execute("DELETE FROM email_templates WHERE id = ?", (tid,))
+        db.commit()
+        log_audit('email_template_delete', 'email_template', existing['name'])
+        return jsonify({'ok': 1})
+    d = request.json or {}
+    name = (d.get('name') or '').strip()
+    subject = (d.get('subject') or '').strip()
+    body = (d.get('body') or '').strip()
+    if not name:
+        return jsonify({'error': 'name is required'}), 400
+    if not subject or not body:
+        return jsonify({'error': 'subject and body are both required'}), 400
+    if db.execute("SELECT 1 FROM email_templates WHERE name = ? AND id != ?", (name, tid)).fetchone():
+        return jsonify({'error': f'An email template named "{name}" already exists'}), 400
+    db.execute(
+        "UPDATE email_templates SET name = ?, subject = ?, body = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (name, subject, body, current_user.username, tid)
+    )
+    db.commit()
+    log_audit('email_template_update', 'email_template', name)
     return jsonify({'status': 'success'})
 
 def _case_template_fields_out(db, template_id):
@@ -13302,6 +13394,29 @@ def migrate_playbook_custom_actions():
             url TEXT,
             url_secret TEXT,
             body TEXT,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_by TEXT,
+            updated_at DATETIME
+        )''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# Named, reusable Subject+Body pairs for the send_email playbook action -- same
+# admin-defined-and-reused shape as playbook_custom_actions above, just for email
+# instead of a webhook. Selecting one on a send_email action overrides that action's own
+# inline subject/body fields; both still go through _fill_playbook_template's
+# placeholder substitution (case_id/case_title/status/tlp/pap plus any custom case field).
+def migrate_email_templates():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.execute('''CREATE TABLE IF NOT EXISTS email_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            subject TEXT NOT NULL,
+            body TEXT NOT NULL,
             created_by TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_by TEXT,
@@ -19426,6 +19541,7 @@ migrate_case_analytics_widgets()
 migrate_playbooks()
 migrate_playbook_secrets()
 migrate_playbook_custom_actions()
+migrate_email_templates()
 migrate_playbook_approvals()
 migrate_playbook_pending_reverts()
 migrate_playbook_alert_runs()

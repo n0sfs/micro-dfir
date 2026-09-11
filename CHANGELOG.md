@@ -10,6 +10,37 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-11
 
+### Named email templates for Send Email + custom case fields usable by every playbook action
+
+Direct follow-up request after reviewing two more Exabeam Case Manager pages (Email
+Notifications, Investigate a Security Incident): (1) reusable, named email templates
+instead of retyping subject/body into every `send_email` action, and (2) case custom
+fields usable as template variables the way Exabeam's own "Case Manager Incident
+Fields" become `{{variable}}`s in their email templates.
+
+- **New `email_templates` table** (name, subject, body) + CRUD routes, mirroring
+  `playbook_custom_actions`' exact shape/permission gate. New "Manage Email Templates"
+  button on SOAR > Playbooks. `send_email`'s action editor gained a "Use a saved
+  template" select — picking one hides the inline Subject/Body inputs (the template's
+  own text is used instead); leaving it on "Type subject/body inline…" works exactly as
+  before. Deleting a template that's still referenced by a playbook fails that one
+  action cleanly (`"email template not found, skipped"`) rather than erroring the whole
+  run, matching `custom_webhook`'s established behavior for a deleted custom action.
+- **`_fill_playbook_template` now also substitutes custom case fields** — any
+  `case_field_values` row (from a case template's custom fields, or one an analyst added
+  directly) becomes a `{{field_<slug>}}` placeholder, where `<slug>` is the field's label
+  lowercased with punctuation/spaces collapsed to underscores (`"Attack Vector"` →
+  `{{field_attack_vector}}`). This is a change to the one shared substitution function
+  every templated action already calls, so it's available for free in `send_email`,
+  `send_webhook`, `send_slack`, and `custom_webhook` alike — not just the new email
+  templates. A slug collision (two differently-punctuated labels landing on the same
+  key) keeps the first field's value rather than silently overwriting it; an unmatched
+  `{{field_*}}` placeholder is left as literal text rather than erroring, consistent
+  with this function's existing plain-substitution (not a real template engine) design.
+- Out of scope for this pass: the Report generator's own PDF email delivery (a
+  fixed-format Jinja report, not a plain Subject+Body pair — a genuinely different
+  templating shape) was left untouched.
+
 ### Export Cases to CSV
 
 Third item from the same Exabeam-docs review: Case Manager's "export a filtered incident
