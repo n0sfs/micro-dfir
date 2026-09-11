@@ -10,6 +10,41 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-11
 
+### UX simplification pass: Cases + SOAR
+
+Direct request to review Case Management and SOAR for accumulated clutter after several
+sessions of feature additions. A fresh-eyes audit (not code I'd just written myself)
+flagged 8 real friction points; shipped the 6 that were small, safe, UI-only changes —
+the two structural ones (grouping the 13-tab case-detail nav, reordering the New
+Playbook form) were left for a dedicated follow-up pass rather than rushed.
+
+- **Retrospective/PIR section is now collapsed by default** on the case-detail header
+  card — Root Cause, Lessons Learned, Post-Incident Review, and Follow-up Actions sat
+  fully expanded on every case regardless of age, even a 5-minute-old one with nothing
+  to retrospect on yet. Now a `<details>` disclosure, auto-expanded only once the case's
+  workflow state is Resolved or its status is Closed.
+- **Case-detail tab count reduced from 14 to 13**: the standalone "Threat Intel" tab was
+  just one dropdown+button (link this case to a known actor/entity) burning a whole tab
+  slot, with a name confusingly close to the separate "Indicators" tab. Folded into
+  Indicators as a second card.
+- **"Items" → "Linked Items"; Attachments gets its own icon** — both tabs shared the
+  identical `fa-paperclip` icon, and "Items" alone didn't distinguish "pivoted alerts/
+  EDR results" from "Attachments"'s uploaded files.
+- **"Related Cases" tab → "Case Links"**, and its "Suggested Related Cases" card →
+  "Suggestions" — three near-identical phrases ("Related Items," "Related Cases,"
+  "Suggested Related Cases") across two adjacent tabs was genuinely confusing under time
+  pressure; now each tab/card name is visually distinct.
+- **Cases list: "My queues only" switch merged into the queue filter `&lt;select&gt;`** as a
+  top "My queues" option — one control instead of two doing overlapping jobs (a queue
+  filter and a "my queues" filter were never both meaningfully active at once). Export
+  CSV shrunk from a labeled button to an icon-only one (title tooltip retained) so it
+  reads as secondary to the actual filter controls next to it.
+- **SOAR toolbar: 3 rarely-used config buttons (Manage Secrets/Custom Actions/Email
+  Templates) collapsed into one "Configure" dropdown** — these are admin setup actions,
+  not the everyday "build a playbook" action, and were visually competing for attention
+  with "New from Template"/"New Playbook" at the same weight. The two actual everyday
+  buttons stay as direct, one-click toolbar buttons.
+
 ### Named email templates for Send Email + custom case fields usable by every playbook action
 
 Direct follow-up request after reviewing two more Exabeam Case Manager pages (Email

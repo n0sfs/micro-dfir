@@ -58,19 +58,16 @@
             <div class="card-header border-secondary d-flex justify-content-between align-items-center flex-wrap gap-2">
                 <span><i class="fa-solid fa-list me-2"></i>All Cases</span>
                 <div class="d-flex align-items-center gap-2 flex-wrap">
-                    <div class="form-check form-switch mb-0">
-                        <input class="form-check-input" type="checkbox" id="myQueuesOnlyToggle" onchange="renderCases()">
-                        <label class="form-check-label small" for="myQueuesOnlyToggle">My queues only</label>
-                    </div>
                     <select id="queueFilterSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:180px;" onchange="renderCases()">
                         <option value="">All queues</option>
+                        <option value="__my__">My queues</option>
                     </select>
                     <div class="btn-group btn-group-sm" role="group">
                         <button type="button" class="btn btn-outline-secondary active" id="caseFilterAll" onclick="setCaseFilter('all')">All</button>
                         <button type="button" class="btn btn-outline-secondary" id="caseFilterOpen" onclick="setCaseFilter('open')">Open</button>
                         <button type="button" class="btn btn-outline-secondary" id="caseFilterClosed" onclick="setCaseFilter('closed')">Closed</button>
                     </div>
-                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="exportCasesCsv()" title="Export the cases currently shown below (respects every filter above) as a CSV file"><i class="fa-solid fa-file-csv me-1"></i>Export CSV</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="exportCasesCsv()" title="Export the cases currently shown below (respects every filter above) as a CSV file"><i class="fa-solid fa-file-csv"></i></button>
                 </div>
             </div>
             <div class="table-responsive">
@@ -897,9 +894,10 @@ function populateTlpPapSelect(elId, values, current) {
 
 // ---- Per-column filters (multi-select with in-menu search) on the Cases table --
 // same th-icon-btn/dropdown pattern as dashboard.html's Detection Rules table, copied
-// per this codebase's per-file-duplication convention. Combines (AND) with the 3
-// pre-existing page-level controls (caseFilter/queueFilterSelect/myQueuesOnlyToggle)
-// inside renderCases() itself, rather than introducing a parallel filter function.
+// per this codebase's per-file-duplication convention. Combines (AND) with the 2
+// pre-existing page-level controls (caseFilter/queueFilterSelect, the latter also
+// carrying the "My queues" special value) inside renderCases() itself, rather than
+// introducing a parallel filter function.
 let colFilters = { severity: [], tlp: [], assignee: [] };
 
 function buildMultiFilterMenu(menuId, colKey, options) {
@@ -1035,7 +1033,7 @@ function loadCaseQueues() {
         allQueues = queues || [];
         const filterSel = document.getElementById('queueFilterSelect');
         const prevFilter = filterSel.value;
-        filterSel.innerHTML = '<option value="">All queues</option>' + allQueues.map(q => `<option value="${q.id}">${escHtml(q.name)}</option>`).join('');
+        filterSel.innerHTML = '<option value="">All queues</option><option value="__my__">My queues</option>' + allQueues.map(q => `<option value="${q.id}">${escHtml(q.name)}</option>`).join('');
         filterSel.value = prevFilter;
         renderCases();
     }).catch(err => console.error('Error loading case queues:', err));
@@ -1052,11 +1050,16 @@ function populateQueueSelect(elId, current) {
 // silently drift from the table's own filtering logic.
 function getFilteredCases() {
     let rows = caseFilter === 'all' ? allCases : allCases.filter(c => c.status === caseFilter);
-    const queueFilterId = document.getElementById('queueFilterSelect').value;
-    if (queueFilterId) rows = rows.filter(c => String(c.queue_id) === queueFilterId);
-    if (document.getElementById('myQueuesOnlyToggle').checked) {
+    // "My queues" is a special option value in the same select as a specific queue --
+    // merged from what used to be a separate "My queues only" switch, one less control
+    // for the same job (this list is either scoped to one real queue, to every queue
+    // this user belongs to, or to all queues -- never more than one of those at once).
+    const queueFilterVal = document.getElementById('queueFilterSelect').value;
+    if (queueFilterVal === '__my__') {
         const myQueueIds = new Set(allQueues.filter(q => (q.members || []).includes(CURRENT_USERNAME)).map(q => q.id));
         rows = rows.filter(c => myQueueIds.has(c.queue_id));
+    } else if (queueFilterVal) {
+        rows = rows.filter(c => String(c.queue_id) === queueFilterVal);
     }
     if (colFilters.severity.length) rows = rows.filter(c => colFilters.severity.includes(c.severity || 'medium'));
     if (colFilters.tlp.length) rows = rows.filter(c => colFilters.tlp.includes(c.tlp || ''));
@@ -1981,14 +1984,13 @@ function loadAndRenderCaseDetail(cid) {
         const caseTabs = [
             { key: 'tasks', label: `Tasks (${c.tasks.filter(t => t.status === 'done').length}/${c.tasks.length})`, icon: 'fa-list-check' },
             ...(c.fields.length ? [{ key: 'fields', label: 'Custom Fields', icon: 'fa-table-list' }] : []),
-            { key: 'items', label: `Items (${c.items.length})`, icon: 'fa-paperclip' },
+            { key: 'items', label: `Linked Items (${c.items.length})`, icon: 'fa-paperclip' },
             { key: 'related', label: 'Related Items', icon: 'fa-diagram-project' },
-            { key: 'relatedCases', label: 'Related Cases', icon: 'fa-folder-tree' },
-            { key: 'entities', label: 'Threat Intel', icon: 'fa-globe' },
+            { key: 'relatedCases', label: 'Case Links', icon: 'fa-folder-tree' },
             { key: 'assets', label: `Assets (${c.assets.length})`, icon: 'fa-server' },
             { key: 'edr', label: 'EDR Response', icon: 'fa-laptop-medical' },
             { key: 'iocs', label: `Indicators (${c.iocs.length})`, icon: 'fa-fingerprint' },
-            { key: 'attachments', label: 'Attachments', icon: 'fa-paperclip' },
+            { key: 'attachments', label: 'Attachments', icon: 'fa-folder-open' },
             { key: 'analyze', label: 'Analyze', icon: 'fa-magnifying-glass-chart' },
             { key: 'report', label: 'Report', icon: 'fa-file-pdf' },
             { key: 'timeline', label: 'Timeline', icon: 'fa-clock-rotate-left' },
@@ -2051,27 +2053,31 @@ function loadAndRenderCaseDetail(cid) {
                         </div>
                         <div class="col-12"><hr class="border-secondary my-1"></div>
                         <div class="col-12">
-                            <div class="small text-muted mb-2"><i class="fa-solid fa-magnifying-glass-chart me-1"></i>Retrospective — fill in before closing, while the details are still fresh.</div>
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label small text-muted mb-1">Root Cause</label>
-                            <textarea id="editCaseRootCause" class="form-control bg-dark text-light border-secondary" rows="2" placeholder="How did this happen?" ${isClosed ? 'disabled' : ''}>${escHtml(c.root_cause || '')}</textarea>
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label small text-muted mb-1">Lessons Learned</label>
-                            <textarea id="editCaseLessonsLearned" class="form-control bg-dark text-light border-secondary" rows="2" placeholder="What went well? What would you do differently?" ${isClosed ? 'disabled' : ''}>${escHtml(c.lessons_learned || '')}</textarea>
-                        </div>
-                        <div class="col-12">
-                            <div class="small text-muted mb-2 mt-2">Post-Incident Review</div>
-                        </div>
-                        ${pirNotes(c, isClosed)}
-                        <div class="col-12">
-                            <label class="form-label small text-muted mb-1">Follow-up Actions</label>
-                            <div class="d-flex gap-2">
-                                <input type="text" id="pirFollowupInput" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="A concrete follow-up action..." onkeyup="if(event.key === 'Enter') addPirFollowupAction()" ${isClosed ? 'disabled' : ''}>
-                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addPirFollowupAction()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-plus"></i> Add as task</button>
-                            </div>
-                            <div class="small text-muted mt-1">Adds a real, trackable task on this case (see the Tasks tab) -- a follow-up action here is only worth something if it's actually tracked to done.</div>
+                            <details id="caseRetrospectiveDetails" ${(c.workflow_state === 'resolved' || c.status === 'closed') ? 'open' : ''}>
+                                <summary class="small text-muted" style="cursor:pointer;"><i class="fa-solid fa-magnifying-glass-chart me-1"></i>Retrospective &amp; Post-Incident Review <span class="text-muted">— root cause, lessons learned, follow-ups (auto-expands once the case is Resolved or Closed)</span></summary>
+                                <div class="row g-2 mt-1">
+                                    <div class="col-md-6">
+                                        <label class="form-label small text-muted mb-1">Root Cause</label>
+                                        <textarea id="editCaseRootCause" class="form-control bg-dark text-light border-secondary" rows="2" placeholder="How did this happen?" ${isClosed ? 'disabled' : ''}>${escHtml(c.root_cause || '')}</textarea>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label small text-muted mb-1">Lessons Learned</label>
+                                        <textarea id="editCaseLessonsLearned" class="form-control bg-dark text-light border-secondary" rows="2" placeholder="What went well? What would you do differently?" ${isClosed ? 'disabled' : ''}>${escHtml(c.lessons_learned || '')}</textarea>
+                                    </div>
+                                    <div class="col-12">
+                                        <div class="small text-muted mb-2 mt-2">Post-Incident Review</div>
+                                    </div>
+                                    ${pirNotes(c, isClosed)}
+                                    <div class="col-12">
+                                        <label class="form-label small text-muted mb-1">Follow-up Actions</label>
+                                        <div class="d-flex gap-2">
+                                            <input type="text" id="pirFollowupInput" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="A concrete follow-up action..." onkeyup="if(event.key === 'Enter') addPirFollowupAction()" ${isClosed ? 'disabled' : ''}>
+                                            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addPirFollowupAction()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-plus"></i> Add as task</button>
+                                        </div>
+                                        <div class="small text-muted mt-1">Adds a real, trackable task on this case (see the Tasks tab) -- a follow-up action here is only worth something if it's actually tracked to done.</div>
+                                    </div>
+                                </div>
+                            </details>
                         </div>
                     </div>
                     <button type="button" class="btn btn-sm btn-outline-primary" onclick="saveCaseDetail()"><i class="fa-solid fa-floppy-disk me-1"></i>Save</button>
@@ -2148,15 +2154,8 @@ function loadAndRenderCaseDetail(cid) {
                     </div>
                 </div>
                 <div class="card bg-dark border-secondary mb-3">
-                    <div class="card-header border-secondary">Suggested Related Cases <span class="text-muted small">— other cases sharing a host, indicator, or threat entity with this one</span></div>
+                    <div class="card-header border-secondary">Suggestions <span class="text-muted small">— other cases sharing a host, indicator, or threat entity with this one</span></div>
                     <div class="card-body" id="relatedCasesBody"><p class="text-muted small mb-0">Loading&hellip;</p></div>
-                </div>
-            </div>
-
-            <div id="caseTabPane-entities" class="case-tab-pane" style="display:none;">
-                <div class="card bg-dark border-secondary mb-3">
-                    <div class="card-header border-secondary">Threat Intel Entities</div>
-                    <div class="card-body"><div id="linkToEntityWrap"></div></div>
                 </div>
             </div>
 
@@ -2252,6 +2251,10 @@ function loadAndRenderCaseDetail(cid) {
                         <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="addCaseIoc()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-plus me-1"></i>Add Indicator</button>
                         <div id="newIocError" class="text-danger small mt-1" style="display:none;"></div>
                     </div>
+                </div>
+                <div class="card bg-dark border-secondary mb-3">
+                    <div class="card-header border-secondary">Threat Intel Entities <span class="text-muted small">— link this case to a known actor/malware/campaign profile</span></div>
+                    <div class="card-body"><div id="linkToEntityWrap"></div></div>
                 </div>
             </div>
 
