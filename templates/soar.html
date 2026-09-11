@@ -49,6 +49,7 @@
                     {% endif %}
                     {% if has_permission('soar.playbooks.manage') %}
                     <button type="button" class="btn btn-outline-secondary" onclick="showCustomActionsModal()"><i class="fa-solid fa-bolt me-1"></i>Manage Custom Actions</button>
+                    <button type="button" class="btn btn-outline-secondary" onclick="showEmailTemplatesModal()"><i class="fa-solid fa-envelope me-1"></i>Manage Email Templates</button>
                     <button type="button" class="btn btn-outline-secondary" onclick="showPlaybookTemplateGallery()"><i class="fa-solid fa-shapes me-1"></i>New from Template</button>
                     <button type="button" class="btn btn-primary" onclick="showPlaybookModal()"><i class="fa-solid fa-plus me-1"></i>New Playbook</button>
                     {% endif %}
@@ -606,6 +607,47 @@
     </div>
 </div>
 
+<!-- Email Templates modal (send_email's optional saved subject+body) -->
+<div class="modal fade" id="emailTemplatesModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content bg-dark text-light border-secondary">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title"><i class="fa-solid fa-envelope me-2"></i>Email Templates</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted small">A named, reusable Subject + Body for the Send Email action -- select one on any send_email action instead of retyping the same subject/body into every playbook that wants it. Editing one here updates every playbook using it.</p>
+                <p class="text-muted small">Variable fields available in Subject and Body: <code>{{case_id}}</code>, <code>{{case_title}}</code>, <code>{{status}}</code>, <code>{{tlp}}</code>, <code>{{pap}}</code>, plus any custom case field prefixed <code>field_</code> (a field labeled "Attack Vector" becomes <code>{{field_attack_vector}}</code> -- lowercased, spaces/punctuation collapsed to underscores).</p>
+                <div class="table-responsive mb-3">
+                    <table class="table table-dark table-sm align-middle mb-0">
+                        <thead><tr><th>Name</th><th>Subject</th><th></th></tr></thead>
+                        <tbody id="emailTemplatesTableBody"><tr><td colspan="3" class="text-center text-muted small py-3">Loading&hellip;</td></tr></tbody>
+                    </table>
+                </div>
+                <div class="row g-2 align-items-start bg-secondary bg-opacity-10 p-2 rounded border border-secondary">
+                    <div class="col-md-12">
+                        <label class="form-label small text-muted mb-1" for="etName">Name</label>
+                        <input type="text" id="etName" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="e.g. Weekly Stakeholder Update">
+                    </div>
+                    <div class="col-md-12">
+                        <label class="form-label small text-muted mb-1" for="etSubject">Subject</label>
+                        <input type="text" id="etSubject" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Case #{{case_id}}: {{case_title}}">
+                    </div>
+                    <div class="col-md-9">
+                        <label class="form-label small text-muted mb-1" for="etBody">Body</label>
+                        <textarea id="etBody" rows="3" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Case #{{case_id}} ({{status}}): {{case_title}}"></textarea>
+                    </div>
+                    <div class="col-md-3 d-flex gap-2 align-items-end">
+                        <button type="button" class="btn btn-sm btn-outline-primary flex-grow-1" id="etSaveBtn" onclick="saveEmailTemplate()"><i class="fa-solid fa-plus me-1"></i>Add</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="etCancelBtn" onclick="cancelEditEmailTemplate()" style="display:none;">Cancel</button>
+                    </div>
+                </div>
+                <div id="etError" class="text-danger small mt-1" style="display:none;"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
 const IS_ADMIN = hasPermission('soar.secrets.manage');
 const CAN_MANAGE_PLAYBOOKS = hasPermission('soar.playbooks.manage');
@@ -616,8 +658,10 @@ let caseTemplatesForPb = [];
 let allPlaybookSecrets = [];
 let customActionsForPb = [];
 let pbActionSeq = 0;
-let playbookModal, playbookRunsModal, secretsModal, customActionsModal, playbookTemplateGalleryModal;
+let playbookModal, playbookRunsModal, secretsModal, customActionsModal, playbookTemplateGalleryModal, emailTemplatesModal;
 let editingCustomActionId = null;
+let emailTemplatesForPb = [];
+let editingEmailTemplateId = null;
 
 // A small built-in gallery of playbook starting points, all using ONLY this app's real,
 // existing action types (no new backend capability) -- closes the "blank canvas" gap a
@@ -1092,6 +1136,19 @@ function loadCustomActionsForPlaybooks() {
     });
 }
 
+// Same load-error-vs-empty-catalog distinction as loadCustomActionsForPlaybooks above.
+let lastEmailTemplatesLoadOk = true;
+function loadEmailTemplatesForPlaybooks() {
+    return fetch('/api/email-templates').then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    }).then(t => { emailTemplatesForPb = t || []; lastEmailTemplatesLoadOk = true; }).catch(err => {
+        console.error('Error loading email templates:', err);
+        emailTemplatesForPb = [];
+        lastEmailTemplatesLoadOk = false;
+    });
+}
+
 // ---- Case Templates tab -- full CRUD + typed custom fields. Own fetch/array (not
 // caseTemplatesForPb above) so a save/delete here can refresh independently of whether
 // the playbook editor has been opened yet.
@@ -1451,6 +1508,81 @@ async function deleteCustomAction(caid, name) {
     renderCustomActionsTable();
 }
 
+async function showEmailTemplatesModal() {
+    await loadEmailTemplatesForPlaybooks();
+    if (lastEmailTemplatesLoadOk) renderEmailTemplatesTable();
+    else renderLoadError('emailTemplatesTableBody', 3, 'Failed to load email templates.');
+    cancelEditEmailTemplate();
+    if (!emailTemplatesModal) emailTemplatesModal = new bootstrap.Modal(document.getElementById('emailTemplatesModal'));
+    emailTemplatesModal.show();
+}
+
+function renderEmailTemplatesTable() {
+    const tbody = document.getElementById('emailTemplatesTableBody');
+    if (!emailTemplatesForPb.length) {
+        tbody.innerHTML = '<tr><td colspan="3" class="text-center text-muted small py-3">No email templates yet.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = emailTemplatesForPb.map(t => `
+        <tr>
+            <td class="small">${escHtml(t.name)}</td>
+            <td class="text-muted small">${escHtml((t.subject || '').length > 60 ? t.subject.slice(0, 60) + '…' : (t.subject || ''))}</td>
+            <td class="text-end">
+                <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 me-1" title="Edit" onclick="editEmailTemplate(${t.id})"><i class="fa-solid fa-pen"></i></button>
+                <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete" onclick="deleteEmailTemplate(${t.id}, '${escJs(t.name)}')"><i class="fa-solid fa-trash"></i></button>
+            </td>
+        </tr>
+    `).join('');
+}
+
+function editEmailTemplate(tid) {
+    const t = emailTemplatesForPb.find(x => x.id === tid);
+    if (!t) return;
+    editingEmailTemplateId = tid;
+    document.getElementById('etName').value = t.name;
+    document.getElementById('etSubject').value = t.subject || '';
+    document.getElementById('etBody').value = t.body || '';
+    document.getElementById('etSaveBtn').innerHTML = '<i class="fa-solid fa-check me-1"></i>Save Changes';
+    document.getElementById('etCancelBtn').style.display = '';
+    document.getElementById('etError').style.display = 'none';
+}
+
+function cancelEditEmailTemplate() {
+    editingEmailTemplateId = null;
+    document.getElementById('etName').value = '';
+    document.getElementById('etSubject').value = '';
+    document.getElementById('etBody').value = '';
+    document.getElementById('etSaveBtn').innerHTML = '<i class="fa-solid fa-plus me-1"></i>Add';
+    document.getElementById('etCancelBtn').style.display = 'none';
+    document.getElementById('etError').style.display = 'none';
+}
+
+async function saveEmailTemplate() {
+    const errBox = document.getElementById('etError');
+    errBox.style.display = 'none';
+    const name = document.getElementById('etName').value.trim();
+    const subject = document.getElementById('etSubject').value.trim();
+    const body = document.getElementById('etBody').value.trim();
+    if (!name) { errBox.innerText = 'Name is required.'; errBox.style.display = 'block'; return; }
+    if (!subject || !body) { errBox.innerText = 'Subject and body are both required.'; errBox.style.display = 'block'; return; }
+    const payload = { name, subject, body };
+    const url_ = editingEmailTemplateId ? `/api/email-templates/${editingEmailTemplateId}` : '/api/email-templates';
+    const method = editingEmailTemplateId ? 'PUT' : 'POST';
+    const res = await fetch(url_, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const data = await res.json();
+    if (!res.ok) { errBox.innerText = data.error || 'Failed to save email template.'; errBox.style.display = 'block'; return; }
+    cancelEditEmailTemplate();
+    await loadEmailTemplatesForPlaybooks();
+    renderEmailTemplatesTable();
+}
+
+async function deleteEmailTemplate(tid, name) {
+    if (!(await confirmDialog(`Delete the "${name}" email template? Any Send Email action still referencing it will skip cleanly ("email template not found") the next time it runs, rather than sending anywhere.`, { title: 'Delete email template', danger: true, confirmLabel: 'Delete' }))) return;
+    await fetch(`/api/email-templates/${tid}`, { method: 'DELETE' });
+    await loadEmailTemplatesForPlaybooks();
+    renderEmailTemplatesTable();
+}
+
 function loadPlaybooks() {
     fetch('/api/playbooks').then(r => {
         if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -1570,8 +1702,14 @@ function actionParamsFieldsHtml(seq, actionType, params) {
             </select>`;
         case 'send_email':
             return `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_to" placeholder="To (optional -- defaults to the Email channel's To address)" value="${escHtml(params.to || '')}">
-                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_subject" placeholder="Subject (optional -- case_id/case_title/status/tlp placeholders supported)" value="${escHtml(params.subject || '')}">
-                <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_body" placeholder="Body (optional -- same placeholders supported)" value="${escHtml(params.body || '')}">`;
+                <select class="form-select form-select-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_email_template_id" onchange="toggleEmailTemplateFields(${seq})">
+                    <option value="">Type subject/body inline&hellip;</option>
+                    ${emailTemplatesForPb.map(t => `<option value="${t.id}" ${String(t.id) === String(params.email_template_id) ? 'selected' : ''}>${escHtml(t.name)}</option>`).join('')}
+                </select>
+                <div id="pbActParam_${seq}_emailInlineFields" style="${params.email_template_id ? 'display:none;' : ''}">
+                    <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_subject" placeholder="Subject (optional -- case_id/case_title/status/tlp/pap or field_<slug> placeholders supported)" value="${escHtml(params.subject || '')}">
+                    <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" id="pbActParam_${seq}_body" placeholder="Body (optional -- same placeholders supported)" value="${escHtml(params.body || '')}">
+                </div>`;
         case 'send_webhook':
             return urlSourceSelectHtml(seq, 'url', params.url_secret) +
                 `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary mb-1" id="pbActParam_${seq}_url" placeholder="https://&hellip;" value="${escHtml(params.url || '')}" style="${params.url_secret ? 'display:none;' : ''}">
@@ -1675,6 +1813,15 @@ function onPlaybookActionTypeChange(seq) {
     syncApprovalCheckboxGating(seq, actionType);
 }
 
+// Hides send_email's inline Subject/Body inputs once a saved template is picked (the
+// template's own subject/body will be used instead) -- same show/hide idea
+// urlSourceSelectHtml already uses for a secret vs. a literal URL.
+function toggleEmailTemplateFields(seq) {
+    const sel = document.getElementById(`pbActParam_${seq}_email_template_id`);
+    const wrap = document.getElementById(`pbActParam_${seq}_emailInlineFields`);
+    if (sel && wrap) wrap.style.display = sel.value ? 'none' : '';
+}
+
 function collectActionRow(row) {
     const seq = row.id.split('_')[1];
     const actionType = document.getElementById(`pbActType_${seq}`).value;
@@ -1689,6 +1836,7 @@ function collectActionRow(row) {
         case 'analyze_entity': params.entity_type = getVal('entity_type'); break;
         case 'send_email':
             params.to = getVal('to');
+            params.email_template_id = getVal('email_template_id') ? parseInt(getVal('email_template_id'), 10) : null;
             params.subject = getVal('subject');
             params.body = getVal('body');
             break;
@@ -1777,6 +1925,7 @@ async function showPlaybookModal() {
     if (!caseTemplatesForPb.length) await loadTemplatesForPlaybooks();
     if (!allPlaybookSecrets.length) await loadPlaybookSecretsList();
     if (!customActionsForPb.length) await loadCustomActionsForPlaybooks();
+    if (!emailTemplatesForPb.length) await loadEmailTemplatesForPlaybooks();
     if (!pbRuleNames.length) await loadRuleNamesForPlaybooks();
     populatePbConditionSelects({});
     addPlaybookActionRow('add_note', {});
@@ -1801,6 +1950,7 @@ async function editPlaybook(pid) {
     if (!caseTemplatesForPb.length) await loadTemplatesForPlaybooks();
     if (!allPlaybookSecrets.length) await loadPlaybookSecretsList();
     if (!customActionsForPb.length) await loadCustomActionsForPlaybooks();
+    if (!emailTemplatesForPb.length) await loadEmailTemplatesForPlaybooks();
     if (!pbRuleNames.length) await loadRuleNamesForPlaybooks();
     populatePbConditionSelects(p);
     (p.actions.length ? p.actions : [{ action_type: 'add_note', params: {} }]).forEach(a => addPlaybookActionRow(a.action_type, a.params, a.requires_approval));
