@@ -70,6 +70,7 @@
                         <button type="button" class="btn btn-outline-secondary" id="caseFilterOpen" onclick="setCaseFilter('open')">Open</button>
                         <button type="button" class="btn btn-outline-secondary" id="caseFilterClosed" onclick="setCaseFilter('closed')">Closed</button>
                     </div>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="exportCasesCsv()" title="Export the cases currently shown below (respects every filter above) as a CSV file"><i class="fa-solid fa-file-csv me-1"></i>Export CSV</button>
                 </div>
             </div>
             <div class="table-responsive">
@@ -1046,8 +1047,10 @@ function populateQueueSelect(elId, current) {
     el.value = current ? String(current) : '';
 }
 
-function renderCases() {
-    const tbody = document.getElementById('casesTableBody');
+// Shared by renderCases() and exportCasesCsv() -- one filtering implementation so the
+// exported CSV always matches exactly what's on screen, never a second copy that could
+// silently drift from the table's own filtering logic.
+function getFilteredCases() {
     let rows = caseFilter === 'all' ? allCases : allCases.filter(c => c.status === caseFilter);
     const queueFilterId = document.getElementById('queueFilterSelect').value;
     if (queueFilterId) rows = rows.filter(c => String(c.queue_id) === queueFilterId);
@@ -1058,6 +1061,45 @@ function renderCases() {
     if (colFilters.severity.length) rows = rows.filter(c => colFilters.severity.includes(c.severity || 'medium'));
     if (colFilters.tlp.length) rows = rows.filter(c => colFilters.tlp.includes(c.tlp || ''));
     if (colFilters.assignee.length) rows = rows.filter(c => colFilters.assignee.includes(c.assignee || '__unassigned__'));
+    return rows;
+}
+
+// Wraps a field in double quotes (doubling any internal quotes) whenever it contains a
+// comma, quote, or newline -- anything else is left bare, matching RFC 4180's "only
+// quote when necessary" convention rather than quoting every field unconditionally.
+function csvEscapeField(val) {
+    const s = String(val === null || val === undefined ? '' : val);
+    return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function exportCasesCsv() {
+    const rows = getFilteredCases();
+    if (!rows.length) { toast('No cases match the current filters to export.', 'danger'); return; }
+    const headers = ['Case Number', 'ID', 'Title', 'Severity', 'Status', 'Queue', 'TLP', 'Assignee', 'Items', 'Tasks Done', 'Tasks Total', 'Created At'];
+    const lines = [headers.map(csvEscapeField).join(',')];
+    rows.forEach(c => {
+        lines.push([
+            c.case_number || '', c.id, c.title, c.severity || 'medium', c.status,
+            c.queue_name || '', c.tlp || '', c.assignee || '', c.item_count,
+            c.task_done_count, c.task_count, c.created_at,
+        ].map(csvEscapeField).join(','));
+    });
+    // \r\n line endings -- RFC 4180's own convention, and what every spreadsheet app
+    // expects a CSV to use regardless of the OS generating it.
+    const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `cases_export_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+function renderCases() {
+    const tbody = document.getElementById('casesTableBody');
+    const rows = getFilteredCases();
     if (!rows.length) {
         tbody.innerHTML = allCases.length
             ? '<tr><td colspan="10" class="text-center text-muted py-4">No cases match these filters. Try clearing some of them above.</td></tr>'
