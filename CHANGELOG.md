@@ -10,6 +10,26 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-11
 
+### EDR improvement pass 1/4 (Response Actions): structured command output as a table
+
+Same live-testing methodology as the SIEM passes, this time through EDR (Agents /
+Response Actions / Deployment). Ran a real "List Processes" against the one online
+Windows agent to see actual output, not synthetic data.
+
+- **Canned actions that return JSON (List Processes and anything else shaped like it)
+  dumped raw, unbroken JSON into the terminal** — a single unwrapped line like
+  `{"Id":1992,"ProcessName":"msedgewebview2","Path":"C:\...` per process, effectively
+  unreadable past a couple of entries. Added `formatCommandOutput()`: if the whole
+  stdout string parses as JSON, an array of flat objects renders as a table (column
+  union across all rows, not just the first row's keys — a later row can have an extra
+  field the first doesn't); a bare JSON object pretty-prints with indentation instead.
+  Typed ad-hoc PowerShell output that ISN'T JSON falls straight through to the exact
+  same plain-text rendering as before, unchanged. Verified with a `vm`-context test
+  (escapes cell values against injection, handles a column only present on a later row,
+  stringifies a nested-object cell instead of leaking `[object Object]`, and an empty
+  array shows a literal `[]` rather than a blank table) plus live verification against
+  the real agent's actual process list.
+
 ### SIEM improvement pass 4/4 (cross-SIEM): "/" to search, jump from Tune to the rule editor
 
 - **Assessing a problematic rule in the Tune modal (noisy, never fired, piling up
