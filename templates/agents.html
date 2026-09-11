@@ -373,6 +373,7 @@
                     <div class="input-group mb-3">
                         <input type="password" class="form-control bg-dark text-light border-secondary" id="socToken" value="{{ soc_token }}">
                         <button class="btn btn-outline-secondary" type="button" onclick="toggleSocTokenVisibility()" title="Show/hide"><i class="fa-solid fa-eye" id="socTokenEyeIcon"></i></button>
+                        <button class="btn btn-outline-secondary" type="button" onclick="copyCommandToClipboard(this, document.getElementById('socToken').value)" title="Copy token"><i class="fa-regular fa-copy"></i></button>
                         <button class="btn btn-outline-warning" type="button" onclick="generateToken()"><i class="fa-solid fa-key me-1"></i> Generate New</button>
                     </div>
                     <button class="btn btn-outline-primary btn-sm" onclick="saveToken()"><i class="fa-solid fa-lock me-1"></i> Save Ingestion Token</button>
@@ -399,9 +400,9 @@
                     </div>
                     <p class="text-muted small mb-2"><i class="fa-solid fa-circle-info me-1"></i>Requires <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">Python 3.10+</a> already installed on the endpoint (check "Add python.exe to PATH" during install) -- this is a plain script, not a bundled .exe. If `python` isn't recognized after installing, open a new terminal window (PATH changes don't apply to one already open). Prefer the Installer above unless you specifically need the raw script (e.g. to read/modify it before running).</p>
                     <p class="text-muted small mb-2">To run the agent persistently in the background, open PowerShell as Administrator and run:</p>
-                    <div class="bg-black p-2 rounded mb-3 font-monospace text-success small border border-secondary">python micro_agent_windows.py install</div>
+                    <div class="bg-black p-2 rounded mb-3 font-monospace text-success small border border-secondary d-flex justify-content-between align-items-center" style="cursor:pointer;" title="Click to copy" onclick="copyCommandToClipboard(this, 'python micro_agent_windows.py install')"><span>python micro_agent_windows.py install</span><i class="fa-regular fa-copy text-muted ms-2"></i></div>
                     <p class="text-muted small mb-2">To stop and remove the background service:</p>
-                    <div class="bg-black p-2 rounded font-monospace text-danger small border border-secondary">python micro_agent_windows.py uninstall</div>
+                    <div class="bg-black p-2 rounded font-monospace text-danger small border border-secondary d-flex justify-content-between align-items-center" style="cursor:pointer;" title="Click to copy" onclick="copyCommandToClipboard(this, 'python micro_agent_windows.py uninstall')"><span>python micro_agent_windows.py uninstall</span><i class="fa-regular fa-copy text-muted ms-2"></i></div>
                 </div>
             </div>
 
@@ -412,9 +413,9 @@
                         <a href="/api/agent/download/linux" class="btn btn-outline-info btn-sm"><i class="fa-solid fa-download me-1"></i> Download Agent (.tar.gz)</a>
                     </div>
                     <p class="text-muted small mb-2">To run the agent persistently as a systemd service, extract the download and run as root:</p>
-                    <div class="bg-black p-2 rounded mb-3 font-monospace text-success small border border-secondary">sudo python3 micro_agent_linux.py install</div>
+                    <div class="bg-black p-2 rounded mb-3 font-monospace text-success small border border-secondary d-flex justify-content-between align-items-center" style="cursor:pointer;" title="Click to copy" onclick="copyCommandToClipboard(this, 'sudo python3 micro_agent_linux.py install')"><span>sudo python3 micro_agent_linux.py install</span><i class="fa-regular fa-copy text-muted ms-2"></i></div>
                     <p class="text-muted small mb-2">To stop and remove the background service:</p>
-                    <div class="bg-black p-2 rounded font-monospace text-danger small border border-secondary">sudo python3 micro_agent_linux.py uninstall</div>
+                    <div class="bg-black p-2 rounded font-monospace text-danger small border border-secondary d-flex justify-content-between align-items-center" style="cursor:pointer;" title="Click to copy" onclick="copyCommandToClipboard(this, 'sudo python3 micro_agent_linux.py uninstall')"><span>sudo python3 micro_agent_linux.py uninstall</span><i class="fa-regular fa-copy text-muted ms-2"></i></div>
                 </div>
             </div>
 
@@ -425,9 +426,9 @@
                         <a href="/api/agent/download/macos" class="btn btn-outline-light btn-sm"><i class="fa-solid fa-download me-1"></i> Download Agent (.tar.gz)</a>
                     </div>
                     <p class="text-muted small mb-2">To run the agent persistently as a launchd daemon, extract the download and run as root (launchd requires it for a system-level daemon):</p>
-                    <div class="bg-black p-2 rounded mb-3 font-monospace text-success small border border-secondary">sudo python3 micro_agent_macos.py install</div>
+                    <div class="bg-black p-2 rounded mb-3 font-monospace text-success small border border-secondary d-flex justify-content-between align-items-center" style="cursor:pointer;" title="Click to copy" onclick="copyCommandToClipboard(this, 'sudo python3 micro_agent_macos.py install')"><span>sudo python3 micro_agent_macos.py install</span><i class="fa-regular fa-copy text-muted ms-2"></i></div>
                     <p class="text-muted small mb-2">To stop and remove the background service:</p>
-                    <div class="bg-black p-2 rounded font-monospace text-danger small border border-secondary">sudo python3 micro_agent_macos.py uninstall</div>
+                    <div class="bg-black p-2 rounded font-monospace text-danger small border border-secondary d-flex justify-content-between align-items-center" style="cursor:pointer;" title="Click to copy" onclick="copyCommandToClipboard(this, 'sudo python3 micro_agent_macos.py uninstall')"><span>sudo python3 micro_agent_macos.py uninstall</span><i class="fa-regular fa-copy text-muted ms-2"></i></div>
                     <p class="text-muted small mt-3 mb-0"><i class="fa-solid fa-triangle-exclamation me-1 text-warning"></i>macOS support is newer and has a smaller action set than Windows/Linux (no persistence sweep, software inventory, or SCA checks yet), and host isolation (pfctl) has not been live-verified against real macOS hardware -- test Isolate Host on a non-critical machine before relying on it during a real incident.</p>
                 </div>
             </div>
@@ -535,6 +536,22 @@ function escHtml(str) {
     const d = document.createElement('div');
     d.innerText = str == null ? '' : String(str);
     return d.innerHTML;
+}
+
+// Deployment's whole job is handing an analyst a command to paste into a remote shell --
+// these were plain unselectable-by-click text blocks with no copy affordance at all,
+// so every install used a manual click-drag-select. `el` is the block itself (icon
+// swapped briefly to confirm), `text` the exact command to copy -- passed explicitly
+// rather than read from el's own textContent, so the visible text can carry the trailing
+// copy icon without it ending up in the clipboard too.
+function copyCommandToClipboard(el, text) {
+    navigator.clipboard.writeText(text).then(() => {
+        const icon = el.querySelector('i');
+        if (!icon) return;
+        const original = icon.className;
+        icon.className = 'fa-solid fa-check text-success';
+        setTimeout(() => { icon.className = original; }, 1500);
+    }).catch(() => toast('Could not copy to clipboard.', 'danger'));
 }
 
 // A loader's initial "Loading..." table state has no failure counterpart today -- a
