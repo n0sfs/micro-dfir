@@ -246,7 +246,7 @@ function updateReportStats() {
     const latest = reportHistoryData[0];
     setStatTile(0, 'Total Reports', successCount);
     setStatTile(1, 'Latest Report', latest ? (REPORT_TYPE_LABELS[latest.report_type] || latest.report_type) : 'None yet', true);
-    setStatTile(2, 'Last Generated', latest ? (latest.completed_at || latest.started_at || '—').split(' ')[0] : '—', true);
+    setStatTile(2, 'Last Generated', latest ? formatReportTimestamp(latest.completed_at || latest.started_at) : '—', true);
     setStatTile(3, 'Format', 'PDF', true);
 }
 
@@ -270,6 +270,16 @@ function formatReportSize(bytes) {
     return (bytes / 1024 / 1024).toFixed(1) + ' MB';
 }
 
+// report_history.started_at/completed_at are written server-side as Python's
+// datetime.now().isoformat() (see app.py's generate_report.py correlation lookup) --
+// a 'T' separator plus microseconds, unlike every other timestamp in this app (SQLite
+// datetime('now') style, "YYYY-MM-DD HH:MM:SS"). Normalize for display only; never
+// change the stored format, it's used as a correlation key elsewhere.
+function formatReportTimestamp(ts) {
+    if (!ts) return '—';
+    return ts.replace('T', ' ').split('.')[0];
+}
+
 function renderReportHistory() {
     const body = document.getElementById('reportHistoryBody');
     if (!reportHistoryData.length) {
@@ -279,7 +289,7 @@ function renderReportHistory() {
     body.innerHTML = reportHistoryData.map(h => `
         <tr>
             <td><i class="fa-regular fa-file-pdf text-danger me-2"></i>${escHtml(REPORT_TYPE_LABELS[h.report_type] || h.report_type)}${h.framework_label ? ' — ' + escHtml(h.framework_label) : ''}</td>
-            <td class="small text-muted">${escHtml(h.completed_at || h.started_at || '')}</td>
+            <td class="small text-muted">${escHtml(formatReportTimestamp(h.completed_at || h.started_at))}</td>
             <td class="small">${h.triggered_by ? escHtml(h.triggered_by) : '<span class="text-muted">scheduled</span>'}</td>
             <td>${h.status === 'success' ? '<span class="badge bg-success">Success</span>' : `<span class="badge bg-danger" title="${escHtml(h.error_message || '')}">Failed</span>`}</td>
             <td class="small text-muted">${h.file_size_bytes ? formatReportSize(h.file_size_bytes) : '—'}</td>

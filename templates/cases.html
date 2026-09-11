@@ -2595,6 +2595,16 @@ function analyzeCaseEntity() {
 // into the same report_history table the fleet-wide Reports tab uses -- download links
 // go through the existing /reports/download/<id> route unchanged, keyed off case_id
 // rather than the fleet-wide report_type filter api_report_history() applies.
+
+// report_history.started_at/completed_at are Python datetime.now().isoformat() (a 'T'
+// separator plus microseconds) -- reports.html's own reports list has the identical
+// gap/fix, duplicated here per this codebase's per-file convention. Display-only:
+// never touch the stored format, it's a correlation key elsewhere.
+function formatReportTimestamp(ts) {
+    if (!ts) return '—';
+    return ts.replace('T', ' ').split('.')[0];
+}
+
 function loadCaseReports(cid) {
     fetch(`/api/cases/${cid}/reports`).then(r => {
         if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -2608,7 +2618,7 @@ function loadCaseReports(cid) {
                 <span>${r.status === 'success' && r.file_exists
                     ? `<a href="/reports/download/${r.id}" target="_blank"><i class="fa-solid fa-file-pdf me-1"></i>${escHtml(r.filename)}</a>`
                     : `<span class="text-danger"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed${r.error_message ? ': ' + escHtml(r.error_message) : ''}</span>`}</span>
-                <span class="text-muted">${escHtml(r.completed_at || r.started_at || '')}</span>
+                <span class="text-muted">${escHtml(formatReportTimestamp(r.completed_at || r.started_at))}</span>
             </div>
         `).join('');
     }).catch(err => {

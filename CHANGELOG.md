@@ -10,6 +10,38 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-11
 
+### Full-cycle UX review: Logs → Log Search → Detections → Investigations → Reporting
+
+Fresh-eyes live walkthrough of the whole analyst workflow, cross-checking suspicious
+findings against actual API responses and source before acting (one suspect — bare
+"Compliance Report" rows with no framework suffix — turned out to be correct behavior,
+not a bug, and was dropped; another — defaulting Detection Tuning to a different quick
+filter — turned out to have no clearly-better option among the existing four chips,
+given the page already default-sorts by 30-day alert volume, so left alone).
+
+- **Reporting: raw unformatted timestamps.** `report_history.started_at`/`completed_at`
+  are written server-side as Python `datetime.now().isoformat()` (used as a correlation
+  key elsewhere, so the write side is untouched) while the rest of the app displays
+  SQLite `datetime('now')`-style timestamps — three places rendered the raw
+  `2026-09-09T17:52:54.207821` straight through: the Reports list, its "Last Generated"
+  stat tile, and the per-case Report tab. Added a display-only `formatReportTimestamp()`
+  helper (duplicated in both `reports.html` and `cases.html` per this codebase's
+  convention) to normalize it.
+- **Stat tiles couldn't distinguish loading / failed / genuinely zero.** On Log Pipeline,
+  a fast-resolving loader (`loadDropRules`) was unconditionally re-rendering all 4 shared
+  stat tiles on every call, stomping the other 3 tiles' "Loading..." placeholder back to
+  a bare `'—'` well before their own slower fetch (`loadIngestionHealth`, e.g. events/hour)
+  had actually resolved — a real, if intermittent, bug, not just a slow load. Tiles are
+  now only written once their own data actually arrives. Both Log Pipeline and SIEM
+  (all three tabs — Log Search, Detection Rules, Detection Tuning) also had no visible
+  error state at all: a failed fetch left the tiles stuck on "Loading..." forever with
+  no sign anything broke. Added a `setStatTileError()` (small warning glyph) on every
+  stat-tile-owning fetch's `.catch()`.
+- **Log Search defaulted to a 5-minute window.** At this appliance's real traffic volume
+  that's not literally empty, but a first-time query with zero hits in 5 minutes reads as
+  "nothing's flowing" rather than "the window's too narrow" — widened the default to 24h,
+  matching what deep-linked/saved searches already fell back to when unspecified.
+
 ### UX simplification pass: Cases + SOAR
 
 Direct request to review Case Management and SOAR for accumulated clutter after several
