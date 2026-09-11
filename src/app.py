@@ -4244,9 +4244,17 @@ def api_compliance_audit_trail():
     if err: return err
     db = get_db()
     placeholders = ','.join('?' * len(COMPLIANCE_AUDIT_ACTIONS))
+    # rule_toggle/rule_compliance_tag's target_id is always a sigma_rules.id (see
+    # api_r_tog/api_rule_compliance) -- LEFT JOIN (not INNER) so a since-deleted rule's
+    # row still shows up, just with rule_title NULL, rather than vanishing from the
+    # trail entirely. rule_bulk_toggle's target_id isn't a rule id at all (its own
+    # rendering never reads target_id, only `details`), so it rides along as NULL too,
+    # harmlessly.
     rows = db.execute(
-        f"SELECT id, timestamp, username, action, target_id, details FROM audit_log "
-        f"WHERE action IN ({placeholders}) ORDER BY id DESC LIMIT 25",
+        f"SELECT audit_log.id, audit_log.timestamp, audit_log.username, audit_log.action, "
+        f"audit_log.target_id, audit_log.details, sigma_rules.title as rule_title "
+        f"FROM audit_log LEFT JOIN sigma_rules ON sigma_rules.id = audit_log.target_id "
+        f"WHERE audit_log.action IN ({placeholders}) ORDER BY audit_log.id DESC LIMIT 25",
         COMPLIANCE_AUDIT_ACTIONS
     ).fetchall()
     return jsonify([dict(r) for r in rows])
