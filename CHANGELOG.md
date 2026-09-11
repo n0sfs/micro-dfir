@@ -10,6 +10,22 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-11
 
+### SIEM improvement pass 4/4 (cross-SIEM): "/" to search, jump from Tune to the rule editor
+
+- **Assessing a problematic rule in the Tune modal (noisy, never fired, piling up
+  exclusions) very often ends in "I need to actually look at its definition"** — that
+  meant closing the modal, switching to Detection Rules, and searching for the same
+  rule by name all over again. Added a small edit-pencil button next to the Tune modal's
+  title that closes it and opens the same rule editor Detection Rules' own row-title/
+  Edit menu use, keyed off the same rule id (handles both Sigma and Custom rules, same
+  as that existing path already does).
+- **"/" now focuses whichever tab's own search box is on screen** (Advanced Query or
+  Basic Field Filter's Value box on Log Search — whichever mode is actually active —
+  the title-search box on Detection Rules/Detection Tuning) — a standard convention
+  (GitHub, Gmail, Splunk...) this page had none of, so every search on every tab started
+  with a mouse click. Never steals '/' while an input/textarea/contenteditable already
+  has focus, so typing a literal '/' into a query still works normally.
+
 ### SIEM improvement pass 3/4 (Detection Tuning): inline enable toggle + noise-mix bar
 
 - **Disabling a noisy rule from Detection Tuning required a full modal round trip** —
