@@ -10,6 +10,22 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-11
 
+### Export Cases to CSV
+
+Third item from the same Exabeam-docs review: Case Manager's "export a filtered incident
+list to CSV for auditing/external sharing" had no equivalent here — the only case export
+was a single-case PDF report, nothing for the list view.
+
+- New "Export CSV" button on the Cases list, next to the All/Open/Closed filter. Pure
+  client-side (the case list is already fully loaded and filtered in the browser, no new
+  route needed) — downloads exactly the rows currently on screen, honoring every active
+  filter (status, queue, My queues only, and the column filters on severity/TLP/assignee).
+  `getFilteredCases()` is now the one shared filtering implementation both the table and
+  the export use, so the two can't silently drift apart.
+- Standard RFC 4180 CSV (comma-separated, `\r\n` line endings, fields quoted only when
+  they contain a comma/quote/newline) — Case Number, ID, Title, Severity, Status, Queue,
+  TLP, Assignee, Items, Tasks Done, Tasks Total, Created At.
+
 ### SOAR "New from Template" playbook gallery
 
 Direct request: reviewed Exabeam's Case Manager and Incident Responder docs
