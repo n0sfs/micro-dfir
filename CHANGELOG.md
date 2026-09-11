@@ -10,6 +10,20 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-11
 
+### EDR improvement pass 4/4 (cross-EDR): "/" to search Agents, host details from the console
+
+- **"/" now focuses the Agents tab's hostname/IP search box** — same convention as
+  SIEM's three tabs. Deliberately scoped to only fire when the Agents pane is actually
+  visible: Response Actions has a live PowerShell command input where '/' is an
+  entirely normal character (paths, flags), and there's no search box on either
+  Response Actions or Deployment to send it to — stealing it there would do nothing
+  useful and risk yanking focus off an in-progress command.
+- **Response Actions had no way to see a host's full details without switching tabs.**
+  Mid-response, checking a host's OS/group/agent version/recent actions meant leaving
+  the console, finding the row on the Agents tab, clicking it, then switching back.
+  Added a small "Details" link next to Target Host that opens the exact same host-detail
+  modal the Agents tab's hostname click already uses, without leaving the console.
+
 ### EDR improvement pass 3/4 (Deployment): click-to-copy on every install command
 
 Deployment's entire job is handing an analyst a command to paste into a remote shell —
