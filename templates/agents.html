@@ -1566,6 +1566,35 @@ function onConsoleHostChange() {
     renderConsoleTerminal();
 }
 
+// Canned actions like List Processes return a JSON array of flat PowerShell objects
+// (ConvertTo-Json) -- previously dumped through escHtml() as one giant unbroken line,
+// unreadable past a couple of entries. Typed ad-hoc PowerShell output that ISN'T JSON
+// still falls through untouched to the exact same plain-text rendering as before --
+// this only upgrades the case where the whole stdout string actually parses as JSON.
+function formatCommandOutputCell(v) {
+    if (v === null || v === undefined) return '';
+    if (typeof v === 'object') return JSON.stringify(v);
+    return String(v);
+}
+
+function formatCommandOutput(stdout) {
+    const trimmed = (stdout || '').trim();
+    let parsed;
+    try { parsed = JSON.parse(trimmed); } catch (e) { return null; }
+    if (Array.isArray(parsed) && parsed.length && parsed.every(r => r && typeof r === 'object' && !Array.isArray(r))) {
+        const cols = [];
+        parsed.forEach(row => Object.keys(row).forEach(k => { if (!cols.includes(k)) cols.push(k); }));
+        const ROW_CAP = 300;
+        const rows = parsed.slice(0, ROW_CAP);
+        const head = cols.map(c => `<th class="text-nowrap">${escHtml(c)}</th>`).join('');
+        const body = rows.map(row => `<tr>${cols.map(c => `<td class="text-nowrap">${escHtml(formatCommandOutputCell(row[c]))}</td>`).join('')}</tr>`).join('');
+        const more = parsed.length > ROW_CAP ? `<div class="text-muted small mt-1">+${parsed.length - ROW_CAP} more row(s) not shown.</div>` : '';
+        return `<div class="table-responsive"><table class="table table-dark table-sm mb-0" style="font-size:0.85em;"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>${more}`;
+    }
+    // A single JSON object (not an array of rows) -- pretty-print instead of a table.
+    return `<pre class="mb-0" style="white-space:pre-wrap;">${escHtml(JSON.stringify(parsed, null, 2))}</pre>`;
+}
+
 function consoleEntryHtml(entry) {
     // Always rendered for consoleSelectedHost's own session (see renderConsoleTerminal),
     // so its current OS is the right prompt for every entry in this transcript.
@@ -1577,7 +1606,10 @@ function consoleEntryHtml(entry) {
     } else if (entry.status === 'pending' || entry.status === 'sent') {
         out += `<div class="term-line text-muted">[waiting for endpoint check-in...]</div>`;
     } else {
-        if (entry.stdout) out += `<div class="term-line">${escHtml(entry.stdout)}</div>`;
+        if (entry.stdout) {
+            const formatted = formatCommandOutput(entry.stdout);
+            out += `<div class="term-line">${formatted !== null ? formatted : escHtml(entry.stdout)}</div>`;
+        }
         if (entry.stderr) out += `<div class="term-line text-danger">${escHtml(entry.stderr)}</div>`;
         if (!entry.stdout && !entry.stderr) out += `<div class="term-line text-muted">(no output)</div>`;
     }
