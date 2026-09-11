@@ -270,7 +270,7 @@
                         <input type="text" id="consoleCmdInput" class="form-control bg-black text-light border-secondary font-monospace" placeholder="Type a PowerShell command and press Enter..." disabled onkeydown="if(event.key==='Enter') consoleSubmitTyped()">
                         <button class="btn btn-outline-danger" id="consoleSendBtn" disabled onclick="consoleSubmitTyped()"><i class="fa-solid fa-paper-plane"></i></button>
                     </div>
-                    <p class="text-muted small mt-1 mb-0"><i class="fa-solid fa-circle-info me-1"></i>Commands queue to the endpoint and run on its next check-in (usually within 15s).</p>
+                    <p class="text-muted small mt-1 mb-0"><i class="fa-solid fa-circle-info me-1"></i>Commands queue to the endpoint and run on its next check-in (<span id="consoleCheckinNote">usually within 15s</span>).</p>
                 </div>
             </div>
         </div>
@@ -597,8 +597,7 @@ const FIM_IS_ADMIN = hasPermission('edr.fim.manage');
 function loadFimInterval() {
     fetch('/api/fim/interval').then(r => r.json()).then(data => {
         document.getElementById('fimIntervalSeconds').value = data.interval_seconds;
-        document.getElementById('fimIntervalNote').innerText =
-            `Applies on each agent's next check-in (usually within ~15s) -- no need to re-upgrade the agent for interval changes alone.`;
+        updateCheckinNoteText();
     }).catch(err => console.error('Error loading FIM interval:', err));
 }
 
@@ -623,10 +622,29 @@ function saveFimInterval() {
 }
 
 // ---- Agent Poll Interval ----
+// How long a queued command actually takes to run is this deployment's real,
+// admin-configurable Command/config check-in interval -- four separate places used to
+// hardcode "usually within 15s" regardless of what's actually configured (a fleet
+// tuned to e.g. 120s to cut request volume would see every one of those claims read
+// "usually within 15s" while genuinely taking 8x that), which reads as "something's
+// stuck" during exactly the kind of live troubleshooting where trust in the UI matters
+// most. Falls back to the old hardcoded 15 until the real value loads.
+let agentConfigIntervalSecondsValue = 15;
+
+function updateCheckinNoteText() {
+    const note = `usually within ${agentConfigIntervalSecondsValue}s`;
+    const consoleNote = document.getElementById('consoleCheckinNote');
+    if (consoleNote) consoleNote.innerText = note;
+    const fimNote = document.getElementById('fimIntervalNote');
+    if (fimNote) fimNote.innerText = `Applies on each agent's next check-in (${note}) -- no need to re-upgrade the agent for interval changes alone.`;
+}
+
 function loadAgentPollInterval() {
     fetch('/api/agent/poll-interval').then(r => r.json()).then(data => {
         document.getElementById('agentConfigIntervalSeconds').value = data.config_interval_seconds;
         document.getElementById('agentLogIntervalSeconds').value = data.log_interval_seconds;
+        agentConfigIntervalSecondsValue = data.config_interval_seconds;
+        updateCheckinNoteText();
     }).catch(err => console.error('Error loading agent poll interval:', err));
 }
 
@@ -1368,7 +1386,7 @@ async function bulkUpgradeSelected() {
         if (failed.length) {
             toast(`Upgrade queued for ${results.length - failed.length}/${results.length} host(s).\nFailed: ${failed.map(f => `${f.hostname} (${f.data.error || 'error'})`).join(', ')}`, 'warning', {duration: 8000});
         } else {
-            toast(`Upgrade queued for all ${results.length} selected host(s). Each applies on its next check-in (usually within 15s).`, 'success');
+            toast(`Upgrade queued for all ${results.length} selected host(s). Each applies on its next check-in (usually within ${agentConfigIntervalSecondsValue}s).`, 'success');
         }
         selectedEndpoints.clear();
         renderEndpoints();
@@ -1396,7 +1414,7 @@ async function queueCommand(hostname, label, params, confirmMsg) {
         body: JSON.stringify({hostname, label, params: params || {}})
     }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
         if (ok) {
-            toast(`"${label}" queued for ${hostname}. It will run on the endpoint's next check-in (usually within 15s).`, 'success');
+            toast(`"${label}" queued for ${hostname}. It will run on the endpoint's next check-in (usually within ${agentConfigIntervalSecondsValue}s).`, 'success');
             loadCommandHistory();
         } else {
             toast(data.error || 'Failed to queue command.', 'danger');
