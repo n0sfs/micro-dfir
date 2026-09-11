@@ -2965,7 +2965,7 @@ function renderTable(rules) {
                 ${rl.upstream_drifted ? '<span class="badge bg-info text-dark ms-1" title="SigmaHQ has updated this rule upstream since you customized it -- Revert to Default would now land on the OLD baseline, not the latest one">Upstream updated</span>' : ''}
             </td>
             <td title="${escAttr(rl.title)}">
-                <div class="fw-bold text-info text-truncate">${rl.title}</div>
+                <div class="fw-bold text-info text-truncate" style="cursor:pointer;" onclick="openRuleModal(${rl.id})">${rl.title}</div>
             </td>
             <td class="text-truncate" title="${escAttr(rl.platform)}"><span class="text-light"><i class="fa-solid fa-display me-1"></i>${rl.platform}</span></td>
             <td title="${mitreTags.length ? escAttr(mitreTags.join(', ')) : ''}">
@@ -3052,7 +3052,15 @@ function refreshSelectionUI() {
     const btn = document.getElementById('selectedActionsBtn');
     const label = document.getElementById('selectedActionsLabel');
     if (label) label.textContent = n === 0 ? 'Select Rules' : `${n} Selected`;
-    if (btn) btn.disabled = n === 0;
+    // Disabling an open dropdown's own toggle button (e.g. right after "Clear Selection"
+    // -- data-bs-auto-close="outside" deliberately keeps the menu open on an inside
+    // click) leaves the menu stuck open: a disabled element no longer participates in
+    // Bootstrap's outside-click/Escape dismiss handling, so neither closes it anymore.
+    // Explicitly hide it first, before disabling.
+    if (btn) {
+        if (n === 0) bootstrap.Dropdown.getInstance(btn)?.hide();
+        btn.disabled = n === 0;
+    }
     const headerCb = document.getElementById('selectAllRulesCb');
     if (headerCb) {
         const visible = document.querySelectorAll('.rule-cb').length;

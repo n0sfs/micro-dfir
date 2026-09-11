@@ -42,7 +42,26 @@ given the page already default-sorts by 30-day alert volume, so left alone).
   "nothing's flowing" rather than "the window's too narrow" — widened the default to 24h,
   matching what deep-linked/saved searches already fell back to when unspecified.
 
-### UX simplification pass: Cases + SOAR
+### SIEM deep-dive: two real bugs found by actually clicking through it
+
+Direct follow-up request to specifically evaluate SIEM in depth after the full-cycle
+review above. Exercised every control on Log Search, Detection Rules, and Detection
+Tuning (row detail modal, pivoting, Columns picker, bulk actions, Tune modal, New Rule
+builder) rather than just reading the code.
+
+- **Detection Rules' rule title looked clickable but did nothing.** Styled identically to
+  a link (`fw-bold text-info`, the same color/weight the rest of the app uses for actual
+  links) but had no `onclick`/`href` at all — the only way to open a rule was the small
+  `⋮` menu at the far right of its row. Now clicking the title opens the same rule editor
+  the menu's "Edit" item does.
+- **The Detection Rules bulk-action dropdown ("Select Rules" / "N Selected") could get
+  stuck open with no way to close it.** It uses `data-bs-auto-close="outside"` so clicking
+  an item inside (e.g. "Clear Selection") deliberately doesn't close it — by design, so a
+  few bulk actions can be done in a row without reopening the menu. But once the selection
+  count hits zero, the toggle button gets `disabled` while the menu is still open, and a
+  disabled element stops participating in Bootstrap's outside-click/Escape dismiss
+  handling entirely — the menu was then stuck open, floating over the table, until a full
+  page reload. Now the dropdown is explicitly hidden before its toggle is disabled.
 
 Direct request to review Case Management and SOAR for accumulated clutter after several
 sessions of feature additions. A fresh-eyes audit (not code I'd just written myself)
