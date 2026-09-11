@@ -617,7 +617,7 @@
             </div>
             <div class="modal-body">
                 <p class="text-muted small">A named, reusable Subject + Body for the Send Email action -- select one on any send_email action instead of retyping the same subject/body into every playbook that wants it. Editing one here updates every playbook using it.</p>
-                <p class="text-muted small">Variable fields available in Subject and Body: <code>{{case_id}}</code>, <code>{{case_title}}</code>, <code>{{status}}</code>, <code>{{tlp}}</code>, <code>{{pap}}</code>, plus any custom case field prefixed <code>field_</code> (a field labeled "Attack Vector" becomes <code>{{field_attack_vector}}</code> -- lowercased, spaces/punctuation collapsed to underscores).</p>
+                <p class="text-muted small">{% raw %}Variable fields available in Subject and Body: <code>{{case_id}}</code>, <code>{{case_title}}</code>, <code>{{status}}</code>, <code>{{tlp}}</code>, <code>{{pap}}</code>, plus any custom case field prefixed <code>field_</code> (a field labeled "Attack Vector" becomes <code>{{field_attack_vector}}</code> -- lowercased, spaces/punctuation collapsed to underscores).{% endraw %}</p>
                 <div class="table-responsive mb-3">
                     <table class="table table-dark table-sm align-middle mb-0">
                         <thead><tr><th>Name</th><th>Subject</th><th></th></tr></thead>
@@ -631,11 +631,11 @@
                     </div>
                     <div class="col-md-12">
                         <label class="form-label small text-muted mb-1" for="etSubject">Subject</label>
-                        <input type="text" id="etSubject" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Case #{{case_id}}: {{case_title}}">
+                        <input type="text" id="etSubject" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="{% raw %}Case #{{case_id}}: {{case_title}}{% endraw %}">
                     </div>
                     <div class="col-md-9">
                         <label class="form-label small text-muted mb-1" for="etBody">Body</label>
-                        <textarea id="etBody" rows="3" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Case #{{case_id}} ({{status}}): {{case_title}}"></textarea>
+                        <textarea id="etBody" rows="3" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="{% raw %}Case #{{case_id}} ({{status}}): {{case_title}}{% endraw %}"></textarea>
                     </div>
                     <div class="col-md-3 d-flex gap-2 align-items-end">
                         <button type="button" class="btn btn-sm btn-outline-primary flex-grow-1" id="etSaveBtn" onclick="saveEmailTemplate()"><i class="fa-solid fa-plus me-1"></i>Add</button>
