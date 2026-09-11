@@ -8,10 +8,15 @@ duplicate those here, just link. This file is expected to go stale and get overw
 ## System state (as of 2026-09-11)
 
 - Production: `n0snuc` / `192.168.86.100:5001`, deployed via `update.sh` (see CLAUDE.md
-  Deployment section). Last deploy corresponds to commit `739117f` (Email Templates
-  modal `{{case_id}}` fix).
-- Working tree has uncommitted changes not yet described anywhere — see
-  [tasks.md](tasks.md) for the breakdown.
+  Deployment section). Last **deployed** commit is `739117f` (Email Templates modal
+  `{{case_id}}` fix) — `d7792c9` is committed locally but not yet pushed/deployed.
+- **Multiple Claude Code sessions can be working this repo concurrently** on the same
+  machine/git identity (`n0sfs`) — observed directly 2026-09-11 when a concurrent
+  session committed in-flight `cases.html`/`soar.html` work mid-session, sweeping up
+  this file's own creation into the same commit. Don't assume you're the only session
+  with a dirty working tree; re-check `git status`/`git log` before commit/push/deploy.
+- Working tree still has one unstaged change — see [tasks.md](tasks.md) for the
+  breakdown.
 
 ## Active constraints
 
