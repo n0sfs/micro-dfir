@@ -17673,12 +17673,21 @@ def api_logs_timeline():
             # follows up on). Bucket labels are therefore always UTC now, same as the
             # Log Search table's own canonical value.
             source_sql, params = _build_normalized_log_union(branches, other_where, other_params, request.args)
-            query = f"SELECT {time_format} as t_bucket, COUNT(*) as count FROM {source_sql} GROUP BY t_bucket ORDER BY t_bucket ASC"
+            # alert_count rides along in the same query/scan as the total (not a second
+            # round trip) -- the Log Search volume chart plots it as its own series so an
+            # alert/anomaly spike is visible even when it's a rounding error against
+            # routine log volume (this appliance sees ~8k logs/hr against single-digit
+            # alerts/hr on a quiet day).
+            query = (
+                f"SELECT {time_format} as t_bucket, COUNT(*) as count, "
+                f"SUM(CASE WHEN log_type IN ('alert', 'anomaly') THEN 1 ELSE 0 END) as alert_count "
+                f"FROM {source_sql} GROUP BY t_bucket ORDER BY t_bucket ASC"
+            )
             rows = db.execute(query, params).fetchall()
         else:
             rows = []
 
-        timeline = [{'time': r['t_bucket'], 'count': r['count']} for r in rows]
+        timeline = [{'time': r['t_bucket'], 'count': r['count'], 'alert_count': r['alert_count']} for r in rows]
         return jsonify({'timeline': timeline})
     except Exception as e:
         return jsonify({'timeline': [], 'error': str(e)})
