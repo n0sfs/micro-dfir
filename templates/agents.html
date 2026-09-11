@@ -718,11 +718,23 @@ function loadAgentGroupsDropdown() {
     }).catch(err => console.error('Error loading agent groups:', err));
 }
 
-function runGroupDispatch() {
-    const group = document.getElementById('groupDispatchGroup').value;
-    const label = document.getElementById('groupDispatchAction').value;
+async function runGroupDispatch() {
+    const groupSel = document.getElementById('groupDispatchGroup');
+    const actionSel = document.getElementById('groupDispatchAction');
+    const group = groupSel.value;
+    const label = actionSel.value;
     const msg = document.getElementById('groupDispatchMsg');
     if (!group) { msg.className = 'small text-danger'; msg.innerText = 'No group selected.'; msg.style.display = 'inline'; return; }
+    // Every single-host equivalent of these actions (including this exact 'upgrade'
+    // label from the per-row Respond menu) already confirms via confirmDialog() --
+    // this dispatch path had none at all, despite being the one action on this page
+    // whose blast radius is "every endpoint in a group" rather than one host. Naming
+    // the actual host count (not just the action) matters here specifically: a
+    // wrong-group-selected misclick is otherwise invisible until it's already dispatched.
+    const memberCount = (typeof allEndpoints !== 'undefined' ? allEndpoints : []).filter(e => e.group === group).length;
+    const actionText = actionSel.selectedOptions[0] ? actionSel.selectedOptions[0].text : label;
+    const confirmMsg = `Run "${actionText}" on every endpoint in group "${group}" (${memberCount} host${memberCount === 1 ? '' : 's'})? Each queues it for its next check-in.`;
+    if (!(await confirmDialog(confirmMsg, {title: 'Run on Group', danger: true, confirmLabel: 'Run'}))) return;
     fetch('/api/agent/commands', {
         method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({group, label})
     }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {

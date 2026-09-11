@@ -10,6 +10,26 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-11
 
+### EDR improvement pass 5: confirmation dialog on "Run on Group"
+
+More live-testing through EDR beyond the original 4 passes. Exercised areas not yet
+touched: View SCA Results / Check for Vulnerabilities (already solid — clean tables,
+honest caveat text, nothing to fix), the "All Response Action History" table's rich
+JSON-to-table result modal (already solid, confirms pass 1's console fix wasn't
+redundant with it — two genuinely separate rendering paths), the right-click host
+context menu and Heartbeat History modal (both already solid), and PID/path param-form
+validation on Kill Process/Collect File (already solid — numeric-only PID check,
+confirmation dialog, no risk of submitting the `1234` placeholder by accident).
+
+- **"Run on a Group" had no confirmation dialog at all** — every single-host action of
+  comparable or lesser risk (including the exact same "Upgrade Agent" action from the
+  per-row Respond menu) already confirms via `confirmDialog()` before queuing, but this
+  is the one dispatch path whose blast radius is an entire group of hosts, not one, and
+  it fired immediately on click. Added a confirmation naming both the action and the
+  actual member count of the selected group (`allEndpoints.filter(...)`, no extra
+  request), so a wrong-group-selected misclick is caught before dispatch instead of
+  being invisible until it's already gone out.
+
 ### EDR improvement pass 4/4 (cross-EDR): "/" to search Agents, host details from the console
 
 - **"/" now focuses the Agents tab's hostname/IP search box** — same convention as
