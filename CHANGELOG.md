@@ -8,7 +8,32 @@ a new feature, a real architectural decision, an incident and its fix. Routine p
 fixes don't need their own line; group them into the feature they support. Newest first.
 Full commit-level detail is always available via `git log`.
 
-## 2026-09-10
+## 2026-09-11
+
+### SOAR "New from Template" playbook gallery
+
+Direct request: reviewed Exabeam's Case Manager and Incident Responder docs
+(docs.exabeam.com) for ideas worth borrowing. Most of what those pages describe is
+already matched or exceeded here (entities/artifacts ~ case assets/IOCs, incident types
+~ case templates with custom fields, phases ~ workflow_state, workbench ~ EDR Response
+tab + case timeline, KPI dashboards/watchlists ~ existing dashboards/UEBA watchlisting).
+The one genuine, concretely buildable gap: Incident Responder ships 16 out-of-box
+"turnkey" playbook templates so a new admin isn't starting from a blank canvas — this
+app's SOAR had no equivalent.
+
+- New **"New from Template"** button (SOAR > Playbooks) opens a small gallery of 5
+  starting points, each built entirely from this app's own existing action types (no new
+  backend capability): **Phishing Triage**, **Malware Containment**, **Critical Alert
+  Escalation**, **Threat Intel Enrichment**, **SLA Breach Notification**. Picking one
+  opens the regular playbook editor pre-filled with a name/trigger/action sequence —
+  nothing saves until the admin reviews and clicks Save, same as building one by hand.
+- `apply_template`'s `template_id` (used by Phishing Triage) is auto-resolved by a
+  case-insensitive substring match against this instance's own real Case Templates (e.g.
+  "Phishing Investigation") — if nothing matches, the action row is added with no
+  template selected rather than guessing wrong.
+- Gated actions (`isolate_host`, `collect_triage` in Malware Containment) come in
+  pre-flagged "Requires approval", matching how every other gated action in this app
+  already works.
 
 ### Severity classification helper + rationale on cases
 

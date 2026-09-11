@@ -49,6 +49,7 @@
                     {% endif %}
                     {% if has_permission('soar.playbooks.manage') %}
                     <button type="button" class="btn btn-outline-secondary" onclick="showCustomActionsModal()"><i class="fa-solid fa-bolt me-1"></i>Manage Custom Actions</button>
+                    <button type="button" class="btn btn-outline-secondary" onclick="showPlaybookTemplateGallery()"><i class="fa-solid fa-shapes me-1"></i>New from Template</button>
                     <button type="button" class="btn btn-primary" onclick="showPlaybookModal()"><i class="fa-solid fa-plus me-1"></i>New Playbook</button>
                     {% endif %}
                 </div>
@@ -360,6 +361,22 @@
     </div>
 </div>
 
+<!-- Playbook Template Gallery modal -->
+<div class="modal fade" id="playbookTemplateGalleryModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content bg-dark text-light border-secondary">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title">New Playbook from Template</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="small text-muted mb-2">Starting points built from this app's own action types -- opens pre-filled in the regular playbook editor so you can review and adjust everything (webhook URLs, Slack channels, thresholds) before saving.</div>
+                <div id="playbookTemplateGalleryBody"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- New/Edit Playbook modal -->
 <div class="modal fade" id="playbookModal" tabindex="-1">
     <div class="modal-dialog modal-lg modal-dialog-scrollable">
@@ -599,8 +616,95 @@ let caseTemplatesForPb = [];
 let allPlaybookSecrets = [];
 let customActionsForPb = [];
 let pbActionSeq = 0;
-let playbookModal, playbookRunsModal, secretsModal, customActionsModal;
+let playbookModal, playbookRunsModal, secretsModal, customActionsModal, playbookTemplateGalleryModal;
 let editingCustomActionId = null;
+
+// A small built-in gallery of playbook starting points, all using ONLY this app's real,
+// existing action types (no new backend capability) -- closes the "blank canvas" gap a
+// first-time SOAR admin hits, matching the "turnkey playbook" idea Exabeam Incident
+// Responder ships out of the box. `matchTemplateName` is an optional case-insensitive
+// substring match against the real Case Templates already configured on this instance,
+// used to auto-resolve apply_template's template_id -- if nothing matches, that action
+// row is added with no template selected rather than guessing wrong, so the admin picks
+// one (or removes the row) before saving.
+const PLAYBOOK_TEMPLATES = [
+    {
+        key: 'phishing_triage', name: 'Phishing Triage', trigger_event: 'case_created',
+        description: 'On every new case: applies a "Phishing" case template if one exists, and logs a triage reminder.',
+        matchTemplateName: 'phishing',
+        actions: [
+            { action_type: 'apply_template', params: {} },
+            { action_type: 'add_note', params: { text: 'Phishing triage: verify sender, headers, reported URLs/attachments, and check for other recipients before further action.' } },
+        ],
+    },
+    {
+        key: 'malware_containment', name: 'Malware Containment', trigger_event: 'case_created',
+        description: 'On every new case: isolates confirmed-compromised hosts and collects a triage bundle (both require approval before running).',
+        actions: [
+            { action_type: 'isolate_host', params: {}, requires_approval: true },
+            { action_type: 'collect_triage', params: {}, requires_approval: true },
+            { action_type: 'add_note', params: { text: 'Malware containment playbook applied: confirmed hosts isolated and a triage bundle queued for collection.' } },
+        ],
+    },
+    {
+        key: 'critical_alert_escalation', name: 'Critical Alert Escalation', trigger_event: 'alert_created', condition_severity: 'critical',
+        description: 'On a Critical-or-above alert: creates a case and posts a Slack notification. Fill in a Slack webhook (or secret) before enabling.',
+        actions: [
+            { action_type: 'create_case', params: {} },
+            { action_type: 'send_slack', params: { message: 'Critical alert fired: {{case_title}}' } },
+        ],
+    },
+    {
+        key: 'threat_intel_enrichment', name: 'Threat Intel Enrichment', trigger_event: 'case_created',
+        description: 'On every new case: automatically runs host and user threat-intel analysis.',
+        actions: [
+            { action_type: 'analyze_entity', params: { entity_type: 'host' } },
+            { action_type: 'analyze_entity', params: { entity_type: 'user' } },
+        ],
+    },
+    {
+        key: 'sla_breach_notification', name: 'SLA Breach Notification', trigger_event: 'sla_breached',
+        description: 'The moment a case breaches its configured SLA: logs a note and sends an email. Fill in a To address before enabling.',
+        actions: [
+            { action_type: 'add_note', params: { text: 'SLA breach: this case has exceeded the configured SLA threshold -- escalate.' } },
+            { action_type: 'send_email', params: { subject: 'SLA breached: {{case_title}}', body: 'Case {{case_id}} ({{case_title}}) has breached its SLA target.' } },
+        ],
+    },
+];
+
+function showPlaybookTemplateGallery() {
+    document.getElementById('playbookTemplateGalleryBody').innerHTML = PLAYBOOK_TEMPLATES.map(t => `
+        <div class="d-flex justify-content-between align-items-start border border-secondary rounded p-2 mb-2">
+            <div><strong>${escHtml(t.name)}</strong><br><span class="text-muted small">${escHtml(t.description)}</span></div>
+            <button type="button" class="btn btn-sm btn-outline-primary ms-2 flex-shrink-0" onclick="useSoarPlaybookTemplate('${t.key}')">Use</button>
+        </div>`).join('');
+    if (!playbookTemplateGalleryModal) playbookTemplateGalleryModal = new bootstrap.Modal(document.getElementById('playbookTemplateGalleryModal'));
+    playbookTemplateGalleryModal.show();
+}
+
+async function useSoarPlaybookTemplate(key) {
+    const t = PLAYBOOK_TEMPLATES.find(x => x.key === key);
+    if (!t) return;
+    if (playbookTemplateGalleryModal) playbookTemplateGalleryModal.hide();
+    await showPlaybookModal();  // resets the form + loads every catalog the editor needs
+    document.getElementById('pbName').value = t.name;
+    document.getElementById('pbDescription').value = t.description;
+    document.getElementById('pbTrigger').value = t.trigger_event;
+    document.getElementById('pbActionsList').innerHTML = '';
+    onPlaybookTriggerChange();  // must run BEFORE adding rows -- it refreshes visibility/
+                                // condition state for the new trigger, and addPlaybookActionRow
+                                // reads pbTrigger.value at add time to build each row's own type list
+    if (t.condition_severity) document.getElementById('pbCondSeverity').value = t.condition_severity;
+    let templateId = null;
+    if (t.matchTemplateName) {
+        const match = caseTemplatesForPb.find(ct => ct.name.toLowerCase().includes(t.matchTemplateName));
+        templateId = match ? match.id : null;
+    }
+    t.actions.forEach(a => {
+        const params = (a.action_type === 'apply_template' && templateId) ? { template_id: templateId } : (a.params || {});
+        addPlaybookActionRow(a.action_type, params, !!a.requires_approval);
+    });
+}
 
 const TRIGGER_LABELS = {
     case_created: 'Case created', status_changed: 'Status changed',
