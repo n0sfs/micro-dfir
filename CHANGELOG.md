@@ -42,6 +42,24 @@ genuine, previously-invisible pattern on this deployment: 5 failed logins agains
 `admin` from `192.168.86.49` within 3 minutes on 2026-09-01, now visible with its
 source IP instead of buried in nearly 2,000 other audit events.
 
+### Report content improvements (3/7): Endpoint & Infrastructure Health section
+
+Agent Fleet Health, Agent Status (idle/offline), File Integrity Monitoring activity,
+and DNS query/threat-intel-match activity all have dedicated Home dashboard widgets
+but appeared in zero reports — a periodic security report previously said nothing
+about endpoint or infrastructure health at all. Added a new "Endpoint & Infrastructure
+Health" section to the Security Summary, ported from the same underlying queries
+(`api_dashboard_agent_status`/`_fim_activity`/`_dns_activity`). Agent status is
+explicitly labeled a point-in-time snapshot as of report generation, not a days-window
+trend like everything else in the report — matching how the dashboard widget it
+mirrors is itself labeled "Live".
+
+Verified with a real SQLite fixture (status-threshold boundaries, the MAX(id)-per-host
+resolution, and an empty-deployment case). Live-generated a Security Summary report and
+confirmed it matches the Home dashboard exactly: 2 agents (1 idle, 1 offline), 2 File
+Integrity changes on `LAPTOP-KKPV777T`, and 6,956 DNS queries with no threat-intel
+matches.
+
 ### Reports improvement pass: Branding tab undersold its own scope
 
 Live-tested Reports end to end: generated a real Compliance Report (PCI DSS, Last 7
