@@ -26,6 +26,13 @@ integer ranges (e.g. the thousands-scale Anomaly Rules chart) already picked rou
 numbers and are unaffected. Confirmed live on production: Analyst Workload now shows
 0/1/2/3 and Open Cases by Queue shows 0/1, both previously fractional.
 
+The same missing precision existed in `baseLineOptions()` (9 trend-line widgets: Alert
+Volume, FIM Activity, DNS Activity, Agent Health, Risk Score, Cases Closed, plus the
+user-built Custom Chart widget's trend type) — every one of them plots an integer count
+or points total, never a continuous value. Live on this deployment, **Cases Closed
+Trend** (a single day with 1 closed case) rendered a 0–1.0 y-axis in 0.2 increments.
+Applied the identical `ticks.precision: 0` fix to the shared y-axis.
+
 ### Home (Dashboards) improvement pass: Top Source Countries looked broken when empty
 
 "Home" in the sidebar is just a label for the Dashboards page (`dashboards_page`) — Home
