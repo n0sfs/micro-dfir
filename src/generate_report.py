@@ -4,6 +4,7 @@ from jinja2 import Environment, FileSystemLoader
 from weasyprint import HTML
 import notifications
 import vuln_matching
+import mitre_attack
 
 REPORT_TYPE_EMAIL_LABELS = {'security': 'Security Summary', 'compliance': 'Compliance', 'audit': 'Audit Trail', 'vulnerability': 'Vulnerability'}
 
@@ -620,6 +621,52 @@ def _framework_relevant_apps(cursor, framework_key):
             apps |= expected
     return apps
 
+# Same tags:-block extraction _get_rules_cache() uses (app.py:4991-4992) to find each
+# framework-tagged rule's MITRE techniques, feeding them through mitre_attack's own
+# techniques_for_tags() (a pure function, safely importable with no Flask context)
+# rather than re-deriving technique-tag parsing a second time. Returns technique IDs
+# WITHOUT the "T" prefix (mitre_attack's own convention), matching
+# _strip_technique_t_prefix()'s output for atomic_tests.technique_id below.
+def _framework_technique_ids(cursor, framework_key):
+    like_pattern = f'%{framework_key}%'
+    technique_ids = set()
+    for row in cursor.execute(
+        "SELECT rule_yaml FROM sigma_rules WHERE compliance_tags LIKE ?", (like_pattern,)
+    ).fetchall():
+        t_match = re.search(r'^tags:\s*\n((\s+-\s*[^\n\r]+\n?)+)', row['rule_yaml'], re.MULTILINE)
+        tags = [t.strip().strip('- ') for t in t_match.group(1).split('\n') if t.strip()] if t_match else []
+        technique_ids.update(t['id'] for t in mitre_attack.techniques_for_tags(tags))
+    return technique_ids
+
+def _strip_technique_t_prefix(tid):
+    tid = (tid or '').strip().upper()
+    return tid[1:] if tid.startswith('T') else tid
+
+# Detection VALIDATION evidence, distinct from and stronger than the "rule exists and is
+# enabled" coverage already shown above -- Atomic Testing (atomic_test_runs, app.py:
+# 12069) proves a technique's detection actually fired against a real simulated attack,
+# not just that a rule is configured for it. Reads whatever validation_status is
+# currently stored (the same lazy on-read recompute api_atomic_runs_list performs is a
+# live, stateful side effect appropriate for that interactive page, not something this
+# point-in-time report snapshot should trigger) -- same "read the stored state, don't
+# recompute" convention coverage_snapshots already establishes for this report set.
+def _detection_validation_context(conn, cursor, framework_key):
+    technique_ids = _framework_technique_ids(cursor, framework_key)
+    if not technique_ids:
+        return {'relevant_technique_count': 0, 'validated_technique_count': 0, 'validations': []}
+    rows = [dict(r) for r in cursor.execute(
+        "SELECT r.hostname, r.validated_at, t.technique_id, t.technique_name, t.test_name "
+        "FROM atomic_test_runs r JOIN atomic_tests t ON t.id = r.atomic_test_id "
+        "WHERE r.validation_status = 'detected' ORDER BY r.validated_at DESC"
+    ).fetchall()]
+    validations = [r for r in rows if _strip_technique_t_prefix(r['technique_id']) in technique_ids]
+    validated_technique_count = len({_strip_technique_t_prefix(r['technique_id']) for r in validations})
+    return {
+        'relevant_technique_count': len(technique_ids),
+        'validated_technique_count': validated_technique_count,
+        'validations': validations[:AUDIT_REPORT_ROW_CAP],
+    }
+
 def _framework_focused_context(conn, cursor, framework_key, days=30):
     label = COMPLIANCE_FRAMEWORK_LABELS.get(framework_key, framework_key)
     like_pattern = f'%{framework_key}%'
@@ -713,6 +760,8 @@ def _framework_focused_context(conn, cursor, framework_key, days=30):
             (*relevant_apps, thirty_days_ago)
         ).fetchall()]
 
+    detection_validation = _detection_validation_context(conn, cursor, framework_key)
+
     return {
         "date_generated": datetime.now().strftime("%B %d, %Y"),
         "report_title": f"Compliance Report — {label}",
@@ -720,6 +769,7 @@ def _framework_focused_context(conn, cursor, framework_key, days=30):
         "report_days": days,
         "branding": _branding_context(conn),
         "framework_label": label,
+        "detection_validation": detection_validation,
         "rules": rules,
         "rules_total": len(rules),
         "rules_enabled_count": rules_enabled_count,

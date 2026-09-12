@@ -7,6 +7,7 @@
         <div class="metric-box"><div class="metric-value">{{ assessed_hosts }} / {{ total_hosts }}</div><div>Endpoints Assessed</div></div>
         <div class="metric-box"><div class="metric-value">{{ total_detections }}</div><div>Detections ({{ report_days }} days)</div></div>
         <div class="metric-box"><div class="metric-value">{{ log_volume_total }}</div><div>Log Events ({{ report_days }} days)</div></div>
+        <div class="metric-box"><div class="metric-value">{% if detection_validation.relevant_technique_count %}{{ detection_validation.validated_technique_count }} / {{ detection_validation.relevant_technique_count }}{% else %}&mdash;{% endif %}</div><div>Techniques Validated (Atomic Testing)</div></div>
     </div>
     <p style="margin-top:20px; font-size:9pt; color:#666;">This report is scoped to {{ framework_label }} only: which detection rules are tagged and enabled for it, whether those rules have actually produced alerts, whether the endpoint hardening state {{ framework_label }} calls for is verified true across the fleet, and what fraction of the enrolled estate that hardening picture actually reflects. It is a snapshot of this deployment's own detection/configuration posture, not an independent compliance attestation or audit finding.</p>
 
@@ -25,6 +26,26 @@
         </tbody>
     </table>
     {% else %}<p>No rules are currently tagged for {{ framework_label }}.</p>{% endif %}
+
+    <h2 class="section-title">Detection Validation Evidence</h2>
+    <p style="font-size:9pt; color:#666;">Whether a technique {{ framework_label }}'s tagged rules cover has actually been <em>tested</em> — an Atomic Red Team simulation run against a real endpoint that a detection then genuinely fired on — not just that a rule is configured for it.</p>
+    {% if detection_validation.relevant_technique_count %}
+        {% if detection_validation.validations %}
+        <table>
+            <thead><tr><th>Technique</th><th>Atomic Test</th><th>Host</th><th>Validated</th></tr></thead>
+            <tbody>
+            {% for v in detection_validation.validations %}
+                <tr>
+                    <td>{{ v.technique_id }}{% if v.technique_name %} &mdash; {{ v.technique_name }}{% endif %}</td>
+                    <td>{{ v.test_name }}</td>
+                    <td>{{ v.hostname }}</td>
+                    <td>{{ v.validated_at }}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}<p>None of the {{ detection_validation.relevant_technique_count }} technique(s) {{ framework_label }}'s tagged rules cover have been validated via Atomic Testing yet.</p>{% endif %}
+    {% else %}<p>No rules are tagged for {{ framework_label }} yet, so no techniques are known to validate.</p>{% endif %}
 
     <h2 class="section-title">Endpoint Hardening (SCA)</h2>
     <p style="font-size:9pt; color:#666;">{{ assessed_hosts }} of {{ total_hosts }} enrolled endpoint(s) have run an SCA hardening check. Percentages below reflect only the endpoints that have.</p>
