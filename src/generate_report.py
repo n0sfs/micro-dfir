@@ -445,6 +445,40 @@ def _threat_intel_context(conn, days):
     ).fetchall()]
     return {'total': total, 'top_indicators': top_indicators}
 
+# SOAR execution history splits across two tables with the same shape (playbook_runs
+# for case-scoped runs, playbook_alert_runs for alert-triggered ones -- see
+# migrate_playbook_runs/migrate_playbook_alert_runs, app.py:13400/13552); api_playbooks
+# (app.py:9295) already combines them the same way (a `+` between two subqueries) for
+# its own per-playbook run/success counts. Neither table's totals were ever surfaced in
+# a report -- no report previously said anything about automation activity at all.
+def _soar_automation_context(conn, days):
+    cutoff_local = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+    combined = (
+        "SELECT playbook_id, status, triggered_at FROM playbook_runs "
+        "UNION ALL SELECT playbook_id, status, triggered_at FROM playbook_alert_runs"
+    )
+    totals = conn.execute(
+        f"SELECT COUNT(*) as total, SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count "
+        f"FROM ({combined}) r WHERE r.triggered_at >= ?",
+        (cutoff_local,)
+    ).fetchone()
+    top_playbooks = [dict(r) for r in conn.execute(
+        f"SELECT p.name, COUNT(*) as run_count, "
+        f"SUM(CASE WHEN r.status = 'success' THEN 1 ELSE 0 END) as success_count "
+        f"FROM ({combined}) r JOIN playbooks p ON p.id = r.playbook_id "
+        f"WHERE r.triggered_at >= ? GROUP BY p.id ORDER BY run_count DESC LIMIT 10",
+        (cutoff_local,)
+    ).fetchall()]
+    success_rate_pct = (
+        round(totals['success_count'] / totals['total'] * 100, 1) if totals['total'] else None
+    )
+    return {
+        'total_runs': totals['total'] or 0,
+        'success_count': totals['success_count'] or 0,
+        'success_rate_label': _pct_label(success_rate_pct),
+        'top_playbooks': top_playbooks,
+    }
+
 def generate_security_report(days=30):
     conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
     # Left as-is (UTC .isoformat() window, not this file's usual datetime.now() string) --
@@ -531,6 +565,7 @@ def generate_security_report(days=30):
 
     endpoint_health = _endpoint_health_context(conn, days)
     threat_intel = _threat_intel_context(conn, days)
+    soar_automation = _soar_automation_context(conn, days)
 
     context = {
         "date_generated": datetime.now().strftime("%B %d, %Y"),
@@ -550,6 +585,7 @@ def generate_security_report(days=30):
         "coverage_snapshots": coverage_snapshots,
         "endpoint_health": endpoint_health,
         "threat_intel": threat_intel,
+        "soar_automation": soar_automation,
     }
     conn.close()
     return _render_and_write('report_template.html', context, _report_filename('Security'))

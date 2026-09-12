@@ -130,5 +130,22 @@
     </table>
     {% else %}<p>No sightings of a synced threat-intelligence indicator in the last {{ report_days }} days.</p>{% endif %}
 
+    <h2 class="section-title">SOAR Automation</h2>
+    {% if soar_automation.total_runs %}
+    <p><strong>{{ soar_automation.total_runs }}</strong> playbook run{{ '' if soar_automation.total_runs == 1 else 's' }} in the last {{ report_days }} days ({{ soar_automation.success_count }} succeeded, {{ soar_automation.success_rate_label }} success rate).</p>
+    <table>
+        <thead><tr><th>Playbook</th><th>Runs</th><th>Succeeded</th></tr></thead>
+        <tbody>
+        {% for p in soar_automation.top_playbooks %}
+            <tr>
+                <td>{{ p.name }}</td>
+                <td>{{ p.run_count }}</td>
+                <td>{{ p.success_count }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<p>No SOAR playbook runs in the last {{ report_days }} days.</p>{% endif %}
+
     {% include "_report_branding_footer.html" %}
 </body></html>
