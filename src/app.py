@@ -14881,12 +14881,22 @@ def migrate_ueba_insights_indexes():
     # the timestamp condition, so a host with a long history pays the same full-history
     # cost as before regardless of the WHERE clause. A composite (entity, timestamp) index
     # lets it seek straight to the in-window rows instead of touching the rest.
+    #
+    # idx_live_logs_app_timestamp added later for the same reason, discovered via
+    # api_droprules_preview: dropping that route's COALESCE (see the fix there) let
+    # SQLite use plain idx_live_logs_app for an 'equals' preview, but that's still a
+    # single-column index -- fine for a rare app value, but "Sysmon"/"PowerShell" (this
+    # deployment's two most common app values, together ~99% of live_logs) still forced
+    # a rowid lookup per matching row across their entire history. Drop Rules exists
+    # specifically to filter noisy/common apps, so this is the *typical* case, not an
+    # edge case -- the composite index is load-bearing for the feature working at all.
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
         for stmt in (
             "CREATE INDEX IF NOT EXISTS idx_live_logs_host_timestamp ON live_logs(host, timestamp)",
             "CREATE INDEX IF NOT EXISTS idx_live_logs_username_timestamp ON live_logs(username, timestamp)",
             "CREATE INDEX IF NOT EXISTS idx_alerts_host_timestamp ON alerts(host, timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_live_logs_app_timestamp ON live_logs(app, timestamp)",
         ):
             conn.execute(stmt)
         conn.commit()
