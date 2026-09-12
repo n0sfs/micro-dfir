@@ -10,6 +10,20 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-12
 
+### Reports improvement pass: Branding tab undersold its own scope
+
+Live-tested Reports end to end: generated a real Compliance Report (PCI DSS, Last 7
+days) and confirmed the resulting PDF downloads correctly (valid `%PDF-1.7` header,
+size matching the list). Checked `src/generate_report.py` against the Branding tab's
+description — every one of the 6 report generators (security, compliance, audit,
+vulnerability, case, tabletop) passes a `branding` context into its template via the
+shared `_report_branding_header.html` partial, but the tab's own description text only
+named 3 of them ("Security, Compliance, Audit Trail"), understating what company
+name/footer/accent-color/logo actually gets applied to. Corrected the description to
+list all 6. Schedule tab reviewed and confirmed correct (all cadences default Off, the
+email-recipients field held only its placeholder text, not real data) — left
+unexercised since toggling it on would need a configured SMTP server to verify
+meaningfully.
 ### Home (Dashboards) pass, continued: fractional axis ticks on small-integer bar charts
 
 Continuing the Home/Dashboards pass below the fold. `baseHBarOptions()` — the shared
