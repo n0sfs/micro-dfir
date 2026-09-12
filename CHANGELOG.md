@@ -43,7 +43,10 @@ checked for an existing feed of the same type before inserting another one.
 - Verified with a fixture test covering all 12 singleton types (each rejects a second
   instance) and the two real differentiated types (`taxii` with different
   `discovery_url`s, `yara_forge` with different `collection_id` packages both still
-  allowed) — a naive "one feed_type, period" rule would have wrongly broken those.
+  allowed) — a naive "one feed_type, period" rule would have wrongly broken those. Live
+  on production: opening Add Feed defaulted to ThreatFox (already existing) and
+  attempting to save surfaced the exact rejection message naming the real id/name of
+  the existing feed, no test row left behind.
 
 ### Log Pipeline improvement pass 1: Drop Rule preview hung on real log volume
 
