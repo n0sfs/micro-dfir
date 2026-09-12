@@ -68,16 +68,16 @@ screenshot.
   once the deploy script exited.
 - **Root cause of the original hang, once the dust settled: `LAPTOP-KKPV777T` and
   `DESKTOP-C3LBEGL` between them account for 7.6M of the database's 7.62M `live_logs`
-  rows** — 6.88M rows packed into 24 days for the first, 722K into 6 days for the
-  second (confirmed via direct read-only queries against the production DB, not
-  inferred) — i.e. essentially the entire dataset is dense synthetic/stress-test
-  traffic on two hosts, not organic activity. Every one of those rows already falls
-  inside a 90-day window, so no time bound can make Data Insights fast for those two
-  specific hosts; verified the fix is otherwise correct and fast against a real,
-  normal-volume entity (`n0snuc`, 6528 events, loads instantly with proper "(last 90d)"
-  labels throughout). Flagging both hosts to the user as likely cleanup candidates —
-  same category as the previously-flagged `TEST-REPLAY-VERIFY-2` entity — rather than
-  deleting data unprompted.
+  rows** — 6.88M rows over 24 days for the first, 722K over 6 days for the second
+  (confirmed via direct read-only queries against the production DB, not inferred).
+  **Correction**: these are the user's own two real EDR-monitored laptops, not test
+  data — initially misread as synthetic/stress-test traffic given the volume (~287K and
+  ~120K events/day respectively); the user corrected this. Every one of those rows
+  already falls inside a 90-day window, so no time bound can make Data Insights fast for
+  these two specific hosts while their logging stays this verbose — that's a real,
+  ongoing volume characteristic to design around, not a one-time cleanup. Verified the
+  fix is otherwise correct and fast against a lower-volume real entity (`n0snuc`, 6528
+  events, loads instantly with proper "(last 90d)" labels throughout).
 
 ### UEBA improvement pass 1/3: process pivot link, unbounded risk-detail text
 
