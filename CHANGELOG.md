@@ -43,6 +43,22 @@ Analyst, and Insider Threat Analyst. Confirmed via the live DOM (`selectedIndex:
   it because Settings is exactly the area where a live-testing mistake could do real
   damage; this one didn't.
 
+Also live-tested the role permission editor (well-organized by category — Cases, Log
+Search, Detection Rules, UEBA, Threat Intel, EDR/Agents, etc.), Audit Log's filters
+(Action/Username/date-range all correctly narrow the real log — confirmed my own
+`anomaly_rule_delete`/`epss_sync`/`cisa_kev_sync` entries from earlier passes are all
+present and accurate), and Changelog's search (correctly filters to only matching
+entries, not just highlighting — a memory note flagged this tab as one the user has
+raised before, but the multi-line-list-item and paragraph-joining fixes already in
+place render every entry from this session's own passes correctly). **Network and
+System were deliberately observed read-only, not exercised** — both host exactly the
+kind of action a live-testing mistake could turn into real damage (rebinding the UI's
+own IP/port, uploading a bad TLS cert, `Purge Now` on log retention, `Vacuum` on a
+17GB live database) — confirmed the displayed state is internally consistent (Network's
+bind IPs/ports match production reality; System's backup history, retention, and
+archive settings all show real, plausible, steadily-growing data) without touching any
+of their write actions.
+
 ### Threat Intel & Hunting improvement pass 1: duplicate feed guard
 
 Live-tested the IOCs tab with real production data (49,844 synced indicators across 6
