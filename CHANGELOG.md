@@ -48,6 +48,24 @@ checked for an existing feed of the same type before inserting another one.
   attempting to save surfaced the exact rejection message naming the real id/name of
   the existing feed, no test row left behind.
 
+Also live-tested Threat Entities (APT28/APT29/etc. detail modal, MITRE technique badges,
+manual relationships — all solid) and Atomic Testing, where a second real bug turned up:
+
+- **"Browse & Import Atomic Red Team Tests" showed "? test(s) cached" instead of a real
+  number**, even though `last_synced` right next to it correctly showed a real date.
+  Root cause: `cached_test_count` only ever read `_ATOMIC_LIST_CACHE['data']`, an
+  in-memory dict that's per-gunicorn-worker-process, not shared. `_list_atomic_tests_
+  available()` (the function that actually serves the test list) already has a comment
+  documenting this exact multi-worker gotcha and falls back to a DB-persisted copy
+  (`atomic_test_catalog_cache` in `settings`) for that reason — but the status endpoint
+  never got the same fallback, so a GET landing on any of the 2 workers that didn't
+  personally run the last sync showed "?" forever, even seconds after a real sync had
+  completed on a different worker. Added the same DB fallback here, mirroring the
+  established pattern instead of inventing a new one. Verified with a fixture test (a
+  worker with its own in-memory copy reports it directly; a worker with none falls back
+  to the DB-persisted count; a genuinely-never-synced appliance still reports `None`
+  cleanly; a corrupted cache value fails safe instead of crashing).
+
 ### Log Pipeline improvement pass 1: Drop Rule preview hung on real log volume
 
 Live-tested Drop Rules with real production data. Typing `App Name equals FIM` and
