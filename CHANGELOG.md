@@ -10,6 +10,25 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-12
 
+### Report content improvements (1/7): SOC effectiveness metrics in the Security Summary
+
+Research pass into what would make the generated reports more useful, working through
+7 findings in order. First: `api_dashboard_case_stats` (app.py:11119) already computes
+MTTD/MTTA/MTTI/MTTC/MTTR, false-positive rate, SLA compliance, reopen rate, and
+escalation rate — the same numbers the Home dashboard's "Case Metrics & SLA" widget
+shows — but the Security Summary report only ever ported the basic open/closed case
+counts, leaving out the metrics a periodic report's reader would want most. Ported the
+full query set into `generate_report.py`, which also fixed the report's SLA-breach
+count to resolve each case's own per-queue/per-severity SLA threshold instead of a
+single global one (matching the dashboard widget's existing accuracy). Added a "SOC
+Effectiveness Metrics" section to `report_template.html`.
+
+Verified with a real SQLite fixture test covering all 9 metrics, SLA precedence, and
+the `hoursLabel`/`secondsLabel`/`pctLabel` formatting helpers ported from
+`dashboards.html`. Live-generated a real Security Summary report on production and
+confirmed every new metric matches what the Home dashboard shows for the same window
+(12m MTTD, 39.3h MTTA, 18m MTTC, 16.7% false-positive rate, 100% SLA compliance, etc.).
+
 ### Reports improvement pass: Branding tab undersold its own scope
 
 Live-tested Reports end to end: generated a real Compliance Report (PCI DSS, Last 7
