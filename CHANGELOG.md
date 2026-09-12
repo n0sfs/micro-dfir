@@ -57,7 +57,7 @@ mirrors is itself labeled "Live".
 Verified with a real SQLite fixture (status-threshold boundaries, the MAX(id)-per-host
 resolution, and an empty-deployment case). Live-generated a Security Summary report and
 confirmed it matches the Home dashboard exactly: 2 agents (1 idle, 1 offline), 2 File
-Integrity changes on `WORKSTATION-A`, and 6,956 DNS queries with no threat-intel
+Integrity changes on `LAPTOP-1`, and 6,956 DNS queries with no threat-intel
 matches.
 
 ### Report content improvements (4/7): Threat Intelligence Matches section
@@ -370,7 +370,7 @@ manual relationships — all solid) and Atomic Testing, where a second real bug 
   now reads "1821 test(s) cached — last synced 2026-09-04 10:55:50" instead of "?".
 
 Live-tested YARA Scanning's IOC Hash Sweep and String Sweep (existing real sweep results
-from both real EDR hosts — 20 alerts on WORKSTATION-B, 90 on WORKSTATION-A — render
+from both real EDR hosts — 20 alerts on DESKTOP-1, 90 on LAPTOP-1 — render
 correctly with matched-pattern detail; did not trigger a new sweep, since that dispatches
 a real command to real agents) and Sandbox's URL detonation form (correctly rejects a
 submission with "No urlscan.io API key configured." — no keys are set on this
@@ -380,7 +380,7 @@ previously-never-synced Vulnerability feeds (CISA KEV: 1709 records; FIRST.org E
 hadn't been run yet rather than being broken.
 
 **Not investigated further, flagged for the user's own awareness, not this pass's
-concern**: one YARA Hash Sweep hit on WORKSTATION-B matched `AHK_DarkGate_Payload_
+concern**: one YARA Hash Sweep hit on DESKTOP-1 matched `AHK_DarkGate_Payload_
 April_2024` and `APT_Bitter_Almond_RAT` (146 total patterns) against `C:\Users\<user>\
 AppData\Local\Temp\tmp7e_ljju5.ps1` — the matched strings shown (`#NoTrayIcon`,
 `A_ScriptDir`, `DllCall("VirtualAlloc", ...)`) look like ordinary AutoHotkey script
@@ -537,8 +537,8 @@ screenshot.
   was unreachable for roughly 5 minutes. Verified recovery live (`EXPLAIN QUERY PLAN`
   against the real database, not just the fixture) rather than assuming the fix was done
   once the deploy script exited.
-- **Root cause of the original hang, once the dust settled: `WORKSTATION-A` and
-  `WORKSTATION-B` between them account for 7.6M of the database's 7.62M `live_logs`
+- **Root cause of the original hang, once the dust settled: `LAPTOP-1` and
+  `DESKTOP-1` between them account for 7.6M of the database's 7.62M `live_logs`
   rows** — 6.88M rows over 24 days for the first, 722K over 6 days for the second
   (confirmed via direct read-only queries against the production DB, not inferred).
   **Correction**: these are the user's own two real EDR-monitored laptops, not test
@@ -3005,7 +3005,7 @@ production's real single template came through byte-identical after migration). 
 Log Pipeline Channels tab gets a group selector, shows whether the selected group has
 its own override or is inheriting the default, and can remove an override to revert
 a group to the default. Live-verified full isolation against production's real "Test"
-group (the one real group in use, assigned to `WORKSTATION-B`): saving an override
+group (the one real group in use, assigned to `DESKTOP-1`): saving an override
 changed only that group's template, left the default and other groups untouched, and
 removing it cleanly reverted to inheritance — cleaned up afterward, no leftover
 override left in the file.
@@ -3128,7 +3128,7 @@ to fall back on:
   the raw token hash values from the table's own surviving index page and reinserted them
   unbound (`hostname=NULL`), letting `_validate_agent_auth`'s existing trust-on-first-use
   logic re-bind them to the real agents on their next check-in. Both fleet agents
-  (`WORKSTATION-A`, `WORKSTATION-B`) re-authenticated successfully with no re-enrollment
+  (`LAPTOP-1`, `DESKTOP-1`) re-authenticated successfully with no re-enrollment
   needed.
 - The corrupted original is preserved at `/opt/micro-dfir/siem.db.corrupted.bak` on the
   production host.
