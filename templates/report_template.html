@@ -92,5 +92,24 @@
     </table>
     {% endif %}
 
+    <h2 class="section-title">Endpoint &amp; Infrastructure Health</h2>
+    <p style="font-size:9pt; color:#666;">Agent status reflects the moment this report was generated, not the {{ report_days }}-day window below.</p>
+    <table>
+        <thead><tr><th>Total Agents</th><th>Online</th><th>Idle</th><th>Offline</th><th>Outdated Version</th></tr></thead>
+        <tbody><tr>
+            <td>{{ endpoint_health.total_agents }}</td>
+            <td>{{ endpoint_health.status_counts.Online }}</td>
+            <td>{{ endpoint_health.status_counts.Idle }}</td>
+            <td>{{ endpoint_health.status_counts.Offline + endpoint_health.status_counts.Unknown }}</td>
+            <td>{{ endpoint_health.outdated_agent_count }}{% if endpoint_health.latest_version %} (latest: {{ endpoint_health.latest_version }}){% endif %}</td>
+        </tr></tbody>
+    </table>
+    {% if endpoint_health.fim_total %}
+    <p>File Integrity Monitoring recorded {{ endpoint_health.fim_total }} change{{ '' if endpoint_health.fim_total == 1 else 's' }} in the last {{ report_days }} days{% if endpoint_health.fim_top_host %}, busiest host: {{ endpoint_health.fim_top_host.host }} ({{ endpoint_health.fim_top_host.count }}){% endif %}.</p>
+    {% else %}<p>No File Integrity Monitoring activity in the last {{ report_days }} days.</p>{% endif %}
+    {% if endpoint_health.dns_total %}
+    <p>{{ endpoint_health.dns_total }} DNS quer{{ 'y' if endpoint_health.dns_total == 1 else 'ies' }} logged in the last {{ report_days }} days{% if endpoint_health.dns_ti_matches %}, including <strong>{{ endpoint_health.dns_ti_matches }}</strong> matching known threat intelligence{% else %}, none matching known threat intelligence{% endif %}.</p>
+    {% else %}<p>No DNS query activity in the last {{ report_days }} days &mdash; enable Micro DFIR's DNS server under Log Pipeline &gt; DNS Query Logging to monitor this.</p>{% endif %}
+
     {% include "_report_branding_footer.html" %}
 </body></html>
