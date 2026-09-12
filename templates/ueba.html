@@ -781,6 +781,18 @@ function timelineTypeBadge(t) {
 // the tail -- ...\Git\bin\git.exe vs ...\Git\mingw64\bin\git.exe -- is what actually
 // distinguishes otherwise-identical-looking entries) so path context isn't lost for a
 // masquerading check, with the untruncated value always available via the title tooltip.
+// Same idea as dashboard.html's own pivotLinkHtml (process_image is already an
+// established Log Search pivot field there via PIVOT_COLUMNS) -- ueba.html doesn't
+// share that file's helper (per this codebase's per-file convention), so a small
+// equivalent lives here instead, calling the genuinely-global pivotToLogSearch
+// (base.html). data-* attribute (not an inline JS string literal) so a path
+// containing a quote/backslash can't break the onclick -- dataset auto-decodes the
+// escHtml()'d attribute value back to the raw string.
+function processPivotLink(rawValue, renderedHtml) {
+    if (!rawValue) return renderedHtml;
+    return `<a href="#" class="text-info text-decoration-none" title="Search all logs for this process" data-pivot-value="${escHtml(rawValue)}" onclick="pivotToLogSearch('process_image', this.dataset.pivotValue); return false;">${renderedHtml}</a>`;
+}
+
 function renderTimelineProcess(ev) {
     if (!ev.process_image && !ev.command_line) return '<span class="text-muted">—</span>';
     const name = ev.process_image ? ev.process_image.split(/[\\/]/).pop() : '';
@@ -792,7 +804,12 @@ function renderTimelineProcess(ev) {
     const cmdShort = cmd.length > 60 ? cmd.slice(0, 60) + '…' : cmd;
     const cmdLine = cmd
         ? `<br><span class="text-muted font-monospace" style="font-size:.7rem;" title="${escHtml(cmd)}">${escHtml(cmdShort)}</span>` : '';
-    return `${name ? `<code class="text-info">${escHtml(name)}</code>` : '<span class="text-muted">—</span>'}${pathLine}${cmdLine}`;
+    // Was a bare <code class="text-info"> -- styled exactly like this app's own link
+    // convention (text-info, same as dashboard.html's pivotLinkHtml) but with zero
+    // interactivity. Pivots on the full path (not just the displayed basename), since
+    // that's what Log Search's own process_image column actually stores.
+    const nameHtml = name ? `<code class="text-info">${escHtml(name)}</code>` : '<span class="text-muted">—</span>';
+    return `${name ? processPivotLink(path, nameHtml) : nameHtml}${pathLine}${cmdLine}`;
 }
 
 function timelineEntityCell(ev) {
@@ -988,16 +1005,27 @@ function viewRiskScoreDetail(entityType, entityId) {
                     byKey.get(key).details.push(e.detail || '');
                 }
             }
+            // A single indicator's own detail text is unbounded -- e.g. rare_process_population
+            // can carry a full command line with embedded JSON config running to several KB
+            // (an Electron/Chrome-style --desktop-features={...} blob) -- unlike Timeline's own
+            // timelineDetailCell(), which already truncates to 160 chars, this table had no cap
+            // at all, so one such row could blow out the whole modal's layout. Truncate each
+            // sample individually (before the join, so the ellipsis lands per-detail rather
+            // than only at the very end of the combined string) and keep the full text on hover.
+            const DETAIL_TRUNCATE_LEN = 200;
+            const truncateDetail = d => d.length > DETAIL_TRUNCATE_LEN ? d.slice(0, DETAIL_TRUNCATE_LEN) + '…' : d;
             const rows = groups.map(g => {
                 const count = g.details.length;
-                const shown = g.details.slice(0, 2).filter(Boolean).join(' &middot; ');
+                const sampleDetails = g.details.slice(0, 2).filter(Boolean);
+                const shown = sampleDetails.map(truncateDetail).join(' &middot; ');
+                const shownTitle = sampleDetails.join(' | ');
                 const more = count > 2 ? ` <span class="text-muted">and ${count - 2} more</span>` : '';
                 return `
                 <tr>
                     <td class="text-nowrap small text-muted">${escHtml(g.computed_at)}</td>
                     <td class="small">${escHtml(g.indicator)}${count > 1 ? ` <span class="badge bg-secondary">&times;${count}</span>` : ''}</td>
                     <td class="fw-bold">${g.points}${count > 1 ? '<span class="text-muted small fw-normal"> each</span>' : ''}</td>
-                    <td class="small text-muted">${escHtml(shown)}${more}</td>
+                    <td class="small text-muted" style="max-width:400px;" title="${escHtml(shownTitle)}">${escHtml(shown)}${more}</td>
                 </tr>
             `;
             }).join('');
