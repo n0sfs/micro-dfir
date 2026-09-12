@@ -1150,7 +1150,18 @@ function populateManageRoleSelect() {
     const sel = document.getElementById('manageRole');
     const current = sel.value;
     sel.innerHTML = ROLES_CACHE.map(r => `<option value="${r.slug}">${escHtml(r.label)}${r.description ? ' — ' + escHtml(r.description) : ''}</option>`).join('');
-    if (current && ROLES_CACHE.some(r => r.slug === current)) sel.value = current;
+    if (current && ROLES_CACHE.some(r => r.slug === current)) {
+        sel.value = current;
+    } else if (ROLES_CACHE.some(r => r.slug === 'analyst')) {
+        // A plain <select> defaults to its first <option> -- which happened to be
+        // Admin (role id 1, first ever created), silently pre-selecting the most
+        // privileged role in the Add New User form. api_settings_users() already
+        // falls back to 'analyst' server-side when no role is sent (see its
+        // data.get('role', 'analyst')), but a <select> always sends *some* value, so
+        // that safe default never actually took effect. Match it explicitly here
+        // instead of leaving the choice to option order.
+        sel.value = 'analyst';
+    }
 }
 
 function initModal() {
