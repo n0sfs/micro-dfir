@@ -126,9 +126,12 @@ def _sca_framework_aggregate(sca_results):
 
 # Action categories a compliance reviewer would specifically want called out, not
 # buried in a full activity list -- user management, credential/cert changes, and
-# anything that alters what gets retained.
+# anything that alters what gets retained. 'login_failed' (app.py:449) was missing here
+# despite being exactly the kind of event PCI DSS/HIPAA/SOC 2 all expect an audit trail
+# to surface -- brute-force/credential-stuffing patterns were previously invisible
+# unless they happened to survive the 200-row-capped generic activity list.
 AUDIT_SENSITIVE_ACTIONS = (
-    'user_create', 'user_password_reset', 'user_delete',
+    'user_create', 'user_password_reset', 'user_delete', 'login_failed',
     'soc_token_change', 'network_config_change', 'tls_cert_upload',
     'retention_policy_change', 'manual_log_purge', 'db_vacuum',
 )
@@ -660,9 +663,13 @@ def generate_audit_report(days=30):
         (thirty_days_ago,)
     ).fetchall()]
 
+    # ip_address included here specifically for login_failed rows -- source IP is the
+    # one detail that turns "a login failed" into "this IP is trying multiple accounts"
+    # or "this account is being brute-forced," and audit_log already stores it on every
+    # row (request.remote_addr, log_audit()) but no report previously surfaced it.
     placeholders = ','.join('?' for _ in AUDIT_SENSITIVE_ACTIONS)
     sensitive_events = [dict(r) for r in cursor.execute(
-        f"SELECT timestamp, username, action, target_type, target_id, details FROM audit_log "
+        f"SELECT timestamp, username, ip_address, action, target_type, target_id, details FROM audit_log "
         f"WHERE timestamp >= ? AND action IN ({placeholders}) ORDER BY id DESC",
         (thirty_days_ago, *AUDIT_SENSITIVE_ACTIONS)
     ).fetchall()]
