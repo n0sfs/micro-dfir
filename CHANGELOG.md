@@ -10,6 +10,39 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-12
 
+### Settings improvement pass 1: "Add New User" defaulted to Admin
+
+Live-tested Security (Users & Roles). The "Add New User" modal's Role/Group dropdown
+opened with **Admin — Adds users, certs, backups, system settings** pre-selected — the
+single most privileged role on the platform, ahead of Tier 1/2 Analyst, Tier 3 Senior
+Analyst, and Insider Threat Analyst. Confirmed via the live DOM (`selectedIndex: 0`,
+`value: "admin"`), not assumed from a screenshot.
+
+- **Root cause: `populateManageRoleSelect()` never explicitly set a default — a plain
+  `<select>` just selects whatever option ends up first**, and Admin (role id 1, the
+  first role this table has ever had) is first in `ROLES_CACHE`'s natural DB order.
+  The backend (`api_settings_users()`) already has the *correct* safe default —
+  `data.get('role', 'analyst')` — but a `<select>` always sends some value, so that
+  fallback never actually had a chance to fire; the frontend silently overrode it every
+  time. An admin quickly filling in username + password without noticing the
+  pre-selected role (easy to miss — it reads like normal placeholder text, not a
+  warning) would create a brand-new full-admin account by accident.
+- Now explicitly defaults the dropdown to `analyst` when present, matching the
+  backend's own intended fallback instead of leaving it to option order. Preserves an
+  already-selected value if one exists (e.g. a future re-population mid-edit), and
+  fails safe (falls back to native first-option behavior, not a crash) on a deployment
+  that renamed or removed the `analyst` role entirely.
+- Verified with a `vm`-context test (defaults to `analyst` over Admin; an
+  already-selected valid role survives a re-population; a deployment with no `analyst`
+  role doesn't crash) and live on production: opening Add New User now shows "Tier 1/2
+  Analyst — Triage, cases, incident response" pre-selected.
+- **Caught and corrected my own mistake mid-pass**: clicking the "Insider Threat
+  Analyst" role's delete icon (its edit and delete buttons sit right next to each
+  other) opened a real "Delete the 'Insider Threat Analyst' group?" confirmation —
+  caught it before confirming and cancelled, no role was actually deleted. Mentioning
+  it because Settings is exactly the area where a live-testing mistake could do real
+  damage; this one didn't.
+
 ### Threat Intel & Hunting improvement pass 1: duplicate feed guard
 
 Live-tested the IOCs tab with real production data (49,844 synced indicators across 6
