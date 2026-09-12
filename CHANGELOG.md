@@ -74,6 +74,18 @@ matching known threat intelligence" from item 3), so the new section's honest em
 state — "No sightings of a synced threat-intelligence indicator in the last 30 days" —
 is exactly what should render, and does.
 
+### Report content improvements (5/7): SOAR Automation section
+
+SOAR execution history (`playbook_runs` for case-scoped runs, `playbook_alert_runs` for
+alert-triggered ones) was never surfaced in any report — no report said anything about
+automation activity at all. Added `_soar_automation_context()`, combining both tables
+the same way `api_playbooks` (app.py:9295) already does for its own per-playbook
+counts, and a "SOAR Automation" section (total runs, success rate, top playbooks) to
+the Security Summary. Verified with a real SQLite fixture (combines both run tables
+correctly, ranks by run count, respects the days window, no division-by-zero on an
+empty deployment). Live-generated a report and confirmed it matches this deployment's
+real automation history exactly: 9 "New Case Checklist" runs, 100% success rate.
+
 ### Reports improvement pass: Branding tab undersold its own scope
 
 Live-tested Reports end to end: generated a real Compliance Report (PCI DSS, Last 7
