@@ -14864,6 +14864,29 @@ def migrate_log_search_indexes():
     except Exception:
         pass
 
+def migrate_ueba_insights_indexes():
+    # api_ueba_insights_entity (UEBA Data Insights) filters on host/username together with
+    # a recent timestamp window (see the 90-day window_days bound added there after it was
+    # observed to hang 20s+ live against a busy real host). That bound alone didn't help:
+    # the single-column idx_live_logs_host/idx_live_logs_username/idx_alerts_host indexes
+    # only narrow rows down to "this entity", not "this entity within the window" -- SQLite
+    # still has to visit and rowid-lookup every row that entity has EVER produced to test
+    # the timestamp condition, so a host with a long history pays the same full-history
+    # cost as before regardless of the WHERE clause. A composite (entity, timestamp) index
+    # lets it seek straight to the in-window rows instead of touching the rest.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        for stmt in (
+            "CREATE INDEX IF NOT EXISTS idx_live_logs_host_timestamp ON live_logs(host, timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_live_logs_username_timestamp ON live_logs(username, timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_alerts_host_timestamp ON alerts(host, timestamp)",
+        ):
+            conn.execute(stmt)
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 # Resolves a SIGMAHQ_PACKS asset filename to its real download URL via the live "latest
 # release" API response, rather than a hardcoded release tag -- so a new SigmaHQ release
 # (a new r<date> tag) is picked up automatically on the next import with no code change.
@@ -19624,6 +19647,7 @@ migrate_report_history()
 migrate_report_history_case_id()
 migrate_report_history_framework()
 migrate_log_search_indexes()
+migrate_ueba_insights_indexes()
 migrate_alerts_triage()
 migrate_alerts_geoip_columns()
 migrate_alerts_mitre_column()

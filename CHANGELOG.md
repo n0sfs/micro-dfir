@@ -42,6 +42,22 @@ screenshot.
   window-label rendering (defaults to 90d when the field is absent, shows the real value
   otherwise). Caught the incompleteness of the first fix by re-testing live against
   production after deploying it, rather than assuming a plausible-looking fix was done.
+- **Second live-test, same host: still hung 30s+ even with all 6 queries time-bounded.**
+  `EXPLAIN QUERY PLAN` on the exact query (fixture-tested, not guessed) showed why: the
+  existing single-column `idx_live_logs_host`/`idx_live_logs_username`/`idx_alerts_host`
+  indexes only narrow rows to "this entity" — `SEARCH live_logs USING INDEX
+  idx_live_logs_host (host=?)`, with the `timestamp >= ...` bound applied only as a
+  residual filter *after* the index search, not pushed into it. SQLite still visited
+  every row that host had ever produced regardless of the WHERE clause, so the 90-day
+  bound changed nothing for a host with a long history. Added a new migration,
+  `migrate_ueba_insights_indexes()`, creating composite `(host, timestamp)` /
+  `(username, timestamp)` indexes on `live_logs` and `(host, timestamp)` on `alerts` (
+  `risk_score_events` already had a usable composite index, `idx_risk_score_events_entity
+  (entity_type, entity_id, computed_at)`, so it didn't need one). Re-ran the same
+  `EXPLAIN QUERY PLAN` fixture test after adding the index: `SEARCH live_logs USING
+  COVERING INDEX idx_live_logs_host_timestamp (host=? AND timestamp>?)` — a covering
+  index seek straight to the in-window rows, confirmed against a plan with vs. without
+  the index rather than assumed from the index existing.
 
 ### UEBA improvement pass 1/3: process pivot link, unbounded risk-detail text
 
