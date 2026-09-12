@@ -58,6 +58,17 @@ confirmed by leaving the request running rather than assuming a slow screenshot.
   (previously the request this same query represents had been left running for 2+
   minutes with nothing back).
 
+Also live-tested the other 6 tabs — DNS Query Logging (both the DNS server config and
+DNS Activity's domain filter, which already uses a bare `app = 'dns_server'` column plus
+`ORDER BY timestamp DESC LIMIT`, so it was never exposed to this bug), Windows/Linux Log
+Channels (including switching the per-group template selector to the real "Test" agent
+group), Silent Hosts, and Parsers (Pipeline Health, Parser Catalog's fixed-row-count
+sampling, and the Custom Parsers live-preview/test flow, including its "pattern matched
+but no named group maps to a recognized field" warning working correctly). All confirmed
+solid — no further fixes needed this pass. Import's wizard was reviewed structurally but
+not exercised end-to-end (would need a real file upload + cleanup) — worth a dedicated
+look if the user wants that depth.
+
 ### UEBA improvement pass 3/3: Clone Rule on Scoring & Rules
 
 Live-tested Model Tuning (Baseline Model Parameters, Entity Baselines table, Exclusions)
