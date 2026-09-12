@@ -640,14 +640,22 @@ function renderAnomalyRulesWidget(container, widgetId, config) {
 }
 
 function renderCountriesWidget(container, widgetId, config) {
-    container.innerHTML = '<canvas></canvas>';
+    container.innerHTML = '<canvas></canvas><p class="text-muted small text-center mb-0 pt-4 widget-empty" style="display:none;">No public-IP alert sources in this window — private/internal source IPs have no country to show.</p>';
     const canvas = container.querySelector('canvas');
+    const empty = container.querySelector('.widget-empty');
     fetch(`/api/dashboards/top-countries?range=${widgetRange(config)}`).then(r => {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
     }).then(d => {
-        const c = chartTheme();
         destroyChart(widgetId);
+        if (!d.countries.length) {
+            canvas.style.display = 'none';
+            empty.style.display = 'block';
+            return;
+        }
+        canvas.style.display = '';
+        empty.style.display = 'none';
+        const c = chartTheme();
         DASH_CHARTS[widgetId] = new Chart(canvas.getContext('2d'), {
             type: 'bar',
             data: { labels: d.countries.map(x => x.country || x.iso_code), datasets: [{ label: 'Alerts', data: d.countries.map(x => x.count), backgroundColor: c.info }] },
