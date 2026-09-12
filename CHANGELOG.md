@@ -10,6 +10,34 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-12
 
+### Settings improvement pass 2: Roles table's Member count went stale
+
+Pass 1 deliberately avoided exercising the actual create/delete lifecycle for real
+users and roles (too risky to test on Settings' real config live). Pass 2 tested it
+properly with disposable throwaway data instead: created a `claude_test_role` role
+(confirmed it starts with zero permissions checked — the safe-by-default behavior the
+opposite bug in pass 1 was missing), created a `claude_test_verify_user` account
+against it, then a real user against `Tier 1/2 Analyst` — cleaned both up via their own
+delete-with-confirmation flow afterward, verified via the Audit Log that both the
+creates and deletes were logged correctly.
+
+- **Creating or deleting a user left the Roles table's Member column stale until the
+  next full page load.** Confirmed live: after creating `claude_test_verify_user`
+  under Tier 1/2 Analyst, the Users table above correctly showed the new row
+  immediately, but the Roles table below still read "1" member for Tier 1/2 Analyst
+  instead of 2 — the same page, no reload, no re-navigation. Root cause:
+  `submitUserForm()` and `deleteUser()` both call `loadUsers()` on success, but the
+  Member count comes from a completely separate cache (`ROLES_CACHE`) that only
+  `loadRoles()` populates — nothing on the user-management path ever called it.
+- Both functions now also call `loadRoles()` on success, so the Roles table's counts
+  stay accurate without a reload. Verified with a `vm`-context test (both functions
+  call `loadRoles()`, not just `loadUsers()`, after a successful create/delete) and
+  live on production (member counts updated immediately after both the create and the
+  delete, no reload needed).
+- Also verified the password-length validation (`< 8 chars` correctly rejected with a
+  clear toast) and the delete-user confirmation dialog (names the real username, not a
+  generic message) along the way — both already correct.
+
 ### Settings improvement pass 1: "Add New User" defaulted to Admin
 
 Live-tested Security (Users & Roles). The "Add New User" modal's Role/Group dropdown

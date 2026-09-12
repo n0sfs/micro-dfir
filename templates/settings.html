@@ -1215,6 +1215,13 @@ function submitUserForm() {
         if(res.status === 'success') {
             userModal.hide();
             loadUsers();
+            // A new user (or a password reset, harmlessly) changes which role now has
+            // one more member -- the Roles table's Member count comes from ROLES_CACHE,
+            // populated only by loadRoles(), a completely separate fetch from
+            // loadUsers(). Without this, a just-created user shows up immediately in
+            // the Users table above but the Roles table's count for their role stays
+            // stale until the next full page load.
+            loadRoles();
         } else {
             toast(res.error || 'Operation failed.', 'danger');
         }
@@ -1227,7 +1234,7 @@ async function deleteUser(id, username) {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({action: 'delete', id: id})
-        }).then(() => loadUsers());
+        }).then(() => { loadUsers(); loadRoles(); }); // same stale-Member-count reason as submitUserForm()
     }
 }
 
