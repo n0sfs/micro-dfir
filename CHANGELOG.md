@@ -64,7 +64,28 @@ manual relationships — all solid) and Atomic Testing, where a second real bug 
   established pattern instead of inventing a new one. Verified with a fixture test (a
   worker with its own in-memory copy reports it directly; a worker with none falls back
   to the DB-persisted count; a genuinely-never-synced appliance still reports `None`
-  cleanly; a corrupted cache value fails safe instead of crashing).
+  cleanly; a corrupted cache value fails safe instead of crashing). Live on production
+  (fresh workers after deploy, so definitely no in-memory copy yet): "Browse & Import"
+  now reads "1821 test(s) cached — last synced 2026-09-04 10:55:50" instead of "?".
+
+Live-tested YARA Scanning's IOC Hash Sweep and String Sweep (existing real sweep results
+from both real EDR hosts — 20 alerts on DESKTOP-C3LBEGL, 90 on LAPTOP-KKPV777T — render
+correctly with matched-pattern detail; did not trigger a new sweep, since that dispatches
+a real command to real agents) and Sandbox's URL detonation form (correctly rejects a
+submission with "No urlscan.io API key configured." — no keys are set on this
+deployment, and nothing was actually submitted externally). Also synced the two
+previously-never-synced Vulnerability feeds (CISA KEV: 1709 records; FIRST.org EPSS:
+2092 scored) — both worked correctly on the first real trigger, confirming they just
+hadn't been run yet rather than being broken.
+
+**Not investigated further, flagged for the user's own awareness, not this pass's
+concern**: one YARA Hash Sweep hit on DESKTOP-C3LBEGL matched `AHK_DarkGate_Payload_
+April_2024` and `APT_Bitter_Almond_RAT` (146 total patterns) against `C:\Users\noslo\
+AppData\Local\Temp\tmp7e_ljju5.ps1` — the matched strings shown (`#NoTrayIcon`,
+`A_ScriptDir`, `DllCall("VirtualAlloc", ...)`) look like ordinary AutoHotkey script
+syntax, so this reads like a plausible false positive from a broad community
+signature-base rule, not a confirmed detection — but it's real security-relevant data
+on a real host, worth a look regardless of this UX pass's scope.
 
 ### Log Pipeline improvement pass 1: Drop Rule preview hung on real log volume
 
