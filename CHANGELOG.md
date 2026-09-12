@@ -60,6 +60,20 @@ confirmed it matches the Home dashboard exactly: 2 agents (1 idle, 1 offline), 2
 Integrity changes on `LAPTOP-KKPV777T`, and 6,956 DNS queries with no threat-intel
 matches.
 
+### Report content improvements (4/7): Threat Intelligence Matches section
+
+`ioc_sightings` (real correlations between synced threat-intel indicators and actual
+traffic/alerts) is fully queryable but was never surfaced in any report. Added a
+"Threat Intelligence Matches" section to the Security Summary, grouping sightings per
+indicator (type/pattern/feed name, sighting count, last seen) rather than one row per
+raw sighting — mirrors the join shape `_attach_actor_sightings` (app.py:2256) already
+uses. Verified with a real SQLite fixture (grouping/ranking, days-window filtering, and
+an empty-deployment case). Live-generated a Security Summary report: this deployment
+genuinely has zero threat-intel sightings (consistent with the DNS section's own "none
+matching known threat intelligence" from item 3), so the new section's honest empty
+state — "No sightings of a synced threat-intelligence indicator in the last 30 days" —
+is exactly what should render, and does.
+
 ### Reports improvement pass: Branding tab undersold its own scope
 
 Live-tested Reports end to end: generated a real Compliance Report (PCI DSS, Last 7
