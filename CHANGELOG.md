@@ -10,6 +10,41 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-12
 
+### Threat Intel & Hunting improvement pass 1: duplicate feed guard
+
+Live-tested the IOCs tab with real production data (49,844 synced indicators across 6
+feed rows). Noticed two separate "Tor Exit Nodes (Public)" rows in Feed Sources — same
+name, same type, same source URL, both enabled and status OK, each independently
+holding its own synced copy of the same 1339 Tor exit IPs. `migrate_ti_feeds()`'s own
+seeding is already guarded against creating this (`if not conn.execute("SELECT 1 FROM
+ti_feeds WHERE feed_type = 'tor_exit'")...`), so this wasn't the seed migration
+double-running — the gap is that `POST /api/ti/feeds` (the "+ Add Feed" button) never
+checked for an existing feed of the same type before inserting another one.
+
+- For most feed types this is fine — `taxii`/`misp` take a user-supplied
+  `discovery_url` (a different server each time), `csv` is inherently a one-off upload,
+  `otx`'s `api_key` ties to a specific account's pulse subscription, and `yara_forge`
+  has its own `collection_id` package selector — all genuinely support multiple
+  legitimate instances. But `threatfox`/`urlhaus`/`feodotracker`/`sslbl`/`yaraify`/
+  `yara_rules_project`/`signature_base`/`spamhaus_drop`/`tor_exit`/`openphish`/
+  `blocklist_de`/`malwarebazaar` are all single fixed public sources with zero
+  configurable content (confirmed in `threat_intel.html`'s own `FEED_TYPES_WITH_URL`/
+  `FEED_TYPES_WITH_OPTIONAL_API_KEY` comments — an optional API key on these only raises
+  the rate limit, it never changes what's fetched) — a second feed of one of these types
+  can never be a *different* feed, only a duplicate of the same one.
+- Added a `TI_FEED_SINGLETON_TYPES` check to the feed-creation route: attempting to add
+  a second feed of one of those 12 fixed-source types is now rejected with a clear error
+  naming the existing feed (id + name) instead of silently creating a duplicate that
+  double-syncs and double-counts the same indicators.
+- **Did not delete the existing duplicate Tor Exit feed** — flagged to the user rather
+  than removing configuration unilaterally, same as the earlier `TEST-REPLAY-VERIFY-2`
+  and `pivotToLogSearch` findings. Deleting it would drop the duplicated 1339 IOCs from
+  the Total IOCs count with no loss of real coverage (both rows hold identical content).
+- Verified with a fixture test covering all 12 singleton types (each rejects a second
+  instance) and the two real differentiated types (`taxii` with different
+  `discovery_url`s, `yara_forge` with different `collection_id` packages both still
+  allowed) — a naive "one feed_type, period" rule would have wrongly broken those.
+
 ### Log Pipeline improvement pass 1: Drop Rule preview hung on real log volume
 
 Live-tested Drop Rules with real production data. Typing `App Name equals FIM` and
