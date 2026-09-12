@@ -58,6 +58,26 @@ screenshot.
   COVERING INDEX idx_live_logs_host_timestamp (host=? AND timestamp>?)` — a covering
   index seek straight to the in-window rows, confirmed against a plan with vs. without
   the index rather than assumed from the index existing.
+- **Deploying the composite-index migration caused a real, if brief, production outage**
+  — `live_logs` turned out to hold 7.6M rows, and building 3 new indexes over it on
+  first startup took long enough that gunicorn's 3 worker processes (which each
+  independently re-run every `migrate_*()` at boot) piled up on SQLite's single-writer
+  lock; one worker crashed on `database is locked` and had to be respawned, and the site
+  was unreachable for roughly 5 minutes. Verified recovery live (`EXPLAIN QUERY PLAN`
+  against the real database, not just the fixture) rather than assuming the fix was done
+  once the deploy script exited.
+- **Root cause of the original hang, once the dust settled: `LAPTOP-KKPV777T` and
+  `DESKTOP-C3LBEGL` between them account for 7.6M of the database's 7.62M `live_logs`
+  rows** — 6.88M rows packed into 24 days for the first, 722K into 6 days for the
+  second (confirmed via direct read-only queries against the production DB, not
+  inferred) — i.e. essentially the entire dataset is dense synthetic/stress-test
+  traffic on two hosts, not organic activity. Every one of those rows already falls
+  inside a 90-day window, so no time bound can make Data Insights fast for those two
+  specific hosts; verified the fix is otherwise correct and fast against a real,
+  normal-volume entity (`n0snuc`, 6528 events, loads instantly with proper "(last 90d)"
+  labels throughout). Flagging both hosts to the user as likely cleanup candidates —
+  same category as the previously-flagged `TEST-REPLAY-VERIFY-2` entity — rather than
+  deleting data unprompted.
 
 ### UEBA improvement pass 1/3: process pivot link, unbounded risk-detail text
 
