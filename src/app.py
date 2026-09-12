@@ -15407,10 +15407,25 @@ def api_settings_atomic_catalog_sync():
         row = db.execute("SELECT value FROM settings WHERE key = 'atomic_catalog_sync_interval'").fetchone()
         interval = row['value'] if row and row['value'] in ATOMIC_CATALOG_SYNC_HOURS_OPTIONS else DEFAULT_ATOMIC_CATALOG_SYNC_INTERVAL
         ts_row = db.execute("SELECT value FROM settings WHERE key = 'atomic_test_catalog_cache_time'").fetchone()
+        # _ATOMIC_LIST_CACHE is per-worker-process in-memory (see _list_atomic_tests_
+        # available()'s own comment on why that alone isn't enough with gunicorn's
+        # multiple workers) -- a GET landing on a worker that never ran the actual sync
+        # itself showed "? test(s) cached" forever, even right after a real sync,
+        # because only the requesting worker's own copy was ever checked. Fall back to
+        # the same DB-persisted cache _list_atomic_tests_available() already uses so the
+        # count doesn't depend on which of the 3 workers happened to handle this GET.
+        cached_test_count = len(_ATOMIC_LIST_CACHE['data']) if _ATOMIC_LIST_CACHE['data'] is not None else None
+        if cached_test_count is None:
+            cache_row = db.execute("SELECT value FROM settings WHERE key = 'atomic_test_catalog_cache'").fetchone()
+            if cache_row and cache_row['value']:
+                try:
+                    cached_test_count = len(json.loads(cache_row['value']))
+                except (TypeError, json.JSONDecodeError):
+                    pass
         return jsonify({
             'interval': interval,
             'last_synced': datetime.fromtimestamp(float(ts_row['value'])).strftime('%Y-%m-%d %H:%M:%S') if ts_row and ts_row['value'] else None,
-            'cached_test_count': len(_ATOMIC_LIST_CACHE['data']) if _ATOMIC_LIST_CACHE['data'] is not None else None,
+            'cached_test_count': cached_test_count,
         })
     err = require_permission('rules.manage')
     if err: return err
