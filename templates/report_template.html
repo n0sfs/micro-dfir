@@ -147,5 +147,20 @@
     </table>
     {% else %}<p>No SOAR playbook runs in the last {{ report_days }} days.</p>{% endif %}
 
+    <h2 class="section-title">Appliance Operational Health</h2>
+    <p style="font-size:9pt; color:#666;">The appliance's own maintenance state as of report generation &mdash; not a security finding, but context for how much to trust everything above it.</p>
+    <table>
+        <thead><tr><th>Agents Active (24h)</th><th>Rules Enabled</th><th>Last Backup</th><th>Retention Configured</th><th>Archiving Configured</th><th>Assets Tracked</th><th>Users</th></tr></thead>
+        <tbody><tr>
+            <td>{{ appliance_health.agents_active_24h }} / {{ appliance_health.agents_total }}</td>
+            <td>{{ appliance_health.rules_enabled }} / {{ appliance_health.rules_total }}</td>
+            <td>{% if appliance_health.last_backup %}{{ appliance_health.last_backup }}{% if not appliance_health.backup_recent %} <span style="color:#a13a4d;">(stale)</span>{% endif %}{% else %}<span style="color:#a13a4d;">Never</span>{% endif %}</td>
+            <td>{{ 'Yes' if appliance_health.retention_configured else 'No' }}</td>
+            <td>{{ 'Yes' if appliance_health.archiving_configured else 'No' }}</td>
+            <td>{{ appliance_health.assets_tracked }}</td>
+            <td>{{ appliance_health.user_count }}</td>
+        </tr></tbody>
+    </table>
+
     {% include "_report_branding_footer.html" %}
 </body></html>
