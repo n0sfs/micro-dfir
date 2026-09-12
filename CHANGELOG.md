@@ -31,7 +31,9 @@ Volume, FIM Activity, DNS Activity, Agent Health, Risk Score, Cases Closed, plus
 user-built Custom Chart widget's trend type) — every one of them plots an integer count
 or points total, never a continuous value. Live on this deployment, **Cases Closed
 Trend** (a single day with 1 closed case) rendered a 0–1.0 y-axis in 0.2 increments.
-Applied the identical `ticks.precision: 0` fix to the shared y-axis.
+Applied the identical `ticks.precision: 0` fix to the shared y-axis. Confirmed live:
+Cases Closed Trend, File Integrity Activity, and Agent Fleet Health all now show clean
+whole-number y-axes.
 
 ### Home (Dashboards) improvement pass: Top Source Countries looked broken when empty
 
