@@ -10,6 +10,21 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-12
 
+### Home (Dashboards) pass, continued: fractional axis ticks on small-integer bar charts
+
+Continuing the Home/Dashboards pass below the fold. `baseHBarOptions()` — the shared
+Chart.js options used by every horizontal bar widget (Analyst Workload, Agent Status,
+Open Cases by Queue, Case Workload/Backlog, Top-Firing Anomaly Rules) — never set an
+axis tick precision, so Chart.js's auto-scaling picked fractional steps (0, 0.2, 0.4,
+0.6, 0.8, 1.0) whenever every bar's value was a small integer. Live on this deployment,
+**Open Cases by Queue** (5 queues, 1 open case each) rendered a 0–1.0 axis in 0.2
+increments, and **Analyst Workload** (3 unassigned, 2 assigned to admin) rendered a
+0–3.0 axis with half-integer gridlines — both technically correct but confusing for a
+chart of whole-number case counts. Added `ticks.precision: 0` to the shared x-axis
+config, forcing whole-number ticks everywhere this helper is used; charts with larger
+integer ranges (e.g. the thousands-scale Anomaly Rules chart) already picked round
+numbers and are unaffected.
+
 ### Home (Dashboards) improvement pass: Top Source Countries looked broken when empty
 
 "Home" in the sidebar is just a label for the Dashboards page (`dashboards_page`) — Home
