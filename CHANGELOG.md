@@ -48,13 +48,15 @@ confirmed by leaving the request running rather than assuming a slow screenshot.
   composite-index-for-a-time-boxed-entity-filter pattern) to make it a covering-index
   seek instead. Flagged the known outage risk to the user before this second deploy,
   given the UEBA pass's `CREATE INDEX` had caused one minutes earlier in the same
-  session.
+  session — this one recovered faster (~3 minutes vs. ~15), monitored the same way
+  (polling curl + read-only `ps`/`journalctl` over SSH, no direct intervention).
 - Verified with a SQLite fixture test (NULL-app and out-of-window rows correctly
   excluded from the count; a simulated "common app with a long history" scenario
   confirms a covering-index seek via `idx_live_logs_app_timestamp`, not a full-history
-  scan; 'contains' behavior unchanged) and live on production (`FIM` — zero matches,
-  instant; `Sysmon` — a real, common value, live-verified after the composite index
-  deployed).
+  scan; 'contains' behavior unchanged) and live on production: `FIM` — zero matches,
+  instant; `Sysmon` — **1,221,186 matching logs in the last 7 days, resolved instantly**
+  (previously the request this same query represents had been left running for 2+
+  minutes with nothing back).
 
 ### UEBA improvement pass 3/3: Clone Rule on Scoring & Rules
 
