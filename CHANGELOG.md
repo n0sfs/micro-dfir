@@ -381,7 +381,7 @@ hadn't been run yet rather than being broken.
 
 **Not investigated further, flagged for the user's own awareness, not this pass's
 concern**: one YARA Hash Sweep hit on WORKSTATION-B matched `AHK_DarkGate_Payload_
-April_2024` and `APT_Bitter_Almond_RAT` (146 total patterns) against `C:\Users\noslo\
+April_2024` and `APT_Bitter_Almond_RAT` (146 total patterns) against `C:\Users\<user>\
 AppData\Local\Temp\tmp7e_ljju5.ps1` — the matched strings shown (`#NoTrayIcon`,
 `A_ScriptDir`, `DllCall("VirtualAlloc", ...)`) look like ordinary AutoHotkey script
 syntax, so this reads like a plausible false positive from a broad community
@@ -2553,8 +2553,9 @@ custom parsing belongs server-side in Python, not in Vector/VRL.
      genuine built-in *extractor* to protect (unlike `process_image`/`command_line`,
      which Sysmon/auditd parsing actually derives from content), a matching custom parser
      now unconditionally overrides them — verified live: a real "Security 4688 acting
-     user" parser now correctly overrides "SYSTEM" with the real actor ("noslo") while
-     correctly leaving distinct machine-account/local-service events alone. Kept in
+     user" parser now correctly overrides "SYSTEM" with the real actor (a real Windows
+     account name) while correctly leaving distinct machine-account/local-service
+     events alone. Kept in
      production as a genuinely useful parser, not deleted as test data.
 
 ### Fixed the two review findings flagged for judgment
