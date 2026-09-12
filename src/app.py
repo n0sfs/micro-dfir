@@ -1871,6 +1871,19 @@ def threat_intel():
 
 TI_FEED_TYPES = ('taxii', 'threatfox', 'otx', 'urlhaus', 'feodotracker', 'yaraify', 'yara_forge', 'yara_rules_project', 'signature_base', 'misp', 'sslbl', 'spamhaus_drop', 'tor_exit', 'malwarebazaar', 'openphish', 'blocklist_de', 'csv')
 
+# Every feed_type NOT listed here can legitimately have more than one instance --
+# taxii/misp take a user-supplied discovery_url (a different server each time), csv is
+# inherently a one-off upload, otx's api_key ties to a specific account/pulse
+# subscription (a different key really can mean different content), and yara_forge has
+# its own collection_id "package" selector (see FEED_TYPES_WITH_URL / yaraForgeFields in
+# threat_intel.html). Every other type here is a single fixed public source with zero
+# configurable content -- an optional API key on threatfox/urlhaus/feodotracker/sslbl/
+# yaraify only raises the rate limit, per FEED_TYPES_WITH_OPTIONAL_API_KEY's own
+# comment, it never changes what gets synced. A second feed of one of these types is
+# never a different feed, just a duplicate of the same one, seen live: two independent
+# "Tor Exit Nodes (Public)" rows, each syncing its own copy of the same 1339 IPs.
+TI_FEED_SINGLETON_TYPES = ('threatfox', 'urlhaus', 'feodotracker', 'sslbl', 'yaraify', 'yara_rules_project', 'signature_base', 'spamhaus_drop', 'tor_exit', 'openphish', 'blocklist_de', 'malwarebazaar')
+
 _CSV_VALUE_COLS = ('value', 'indicator', 'ioc', 'pattern', 'ip', 'url', 'domain', 'hash', 'ioc_value')
 _CSV_TYPE_COLS = ('type', 'ioc_type')
 _CSV_NAME_COLS = ('name', 'description', 'desc', 'notes')
@@ -1966,6 +1979,12 @@ def api_ti_feeds():
     feed_type = d.get('feed_type')
     if not name or feed_type not in TI_FEED_TYPES:
         return jsonify({'error': f'name and a valid feed_type ({"/".join(TI_FEED_TYPES)}) are required'}), 400
+    if feed_type in TI_FEED_SINGLETON_TYPES:
+        existing = db.execute("SELECT id, name FROM ti_feeds WHERE feed_type = ?", (feed_type,)).fetchone()
+        if existing:
+            return jsonify({'error': f'A "{existing["name"]}" feed (id {existing["id"]}) already exists for this '
+                                      f'source — it\'s a single fixed public feed, so a second one would just '
+                                      f'duplicate the same indicators. Edit or enable the existing one instead.'}), 400
     if feed_type == 'csv':
         return jsonify({'error': 'CSV feeds are created by uploading a file — use the CSV upload option instead'}), 400
     if feed_type == 'taxii' and not (d.get('discovery_url') and d.get('collection_id')):
