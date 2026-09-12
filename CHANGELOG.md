@@ -86,6 +86,29 @@ correctly, ranks by run count, respects the days window, no division-by-zero on 
 empty deployment). Live-generated a report and confirmed it matches this deployment's
 real automation history exactly: 9 "New Case Checklist" runs, 100% success rate.
 
+### Report content improvements (6/7): Detection Validation Evidence in Compliance reports
+
+`atomic_test_runs` already proves a technique's detection genuinely fired against a
+real Atomic Red Team simulation — stronger evidence than "a rule is configured and
+enabled" — but no compliance report surfaced it, so an auditor had no way to see which
+techniques were actually *tested* versus merely covered on paper. Added
+`_framework_technique_ids()` (resolves a framework's tagged rules to their MITRE
+techniques via `mitre_attack.techniques_for_tags()`, the same tags-parsing
+`_get_rules_cache()` already does) and `_detection_validation_context()` (matches
+those techniques against `detected` atomic-test runs), plus a new "Detection
+Validation Evidence" section and executive-summary metric on the per-framework
+Compliance report. Reads the stored `validation_status` rather than triggering the
+live on-read recompute the interactive Atomic Testing page performs — appropriate
+there, not for a point-in-time report snapshot.
+
+Verified with a real SQLite fixture covering all 3 branches: a validated technique
+correctly surfaces as evidence, a `pending` (not-yet-detected) run and an unrelated
+framework are both excluded, and a framework with no tagged rules degrades to zero.
+Live-generated a PCI DSS compliance report: this deployment currently has zero rules
+tagged for any framework, so the new section correctly renders "No rules are tagged
+... yet, so no techniques are known to validate" — consistent with every other section
+of that same report reaching the identical conclusion.
+
 ### Reports improvement pass: Branding tab undersold its own scope
 
 Live-tested Reports end to end: generated a real Compliance Report (PCI DSS, Last 7
