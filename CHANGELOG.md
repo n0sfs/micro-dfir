@@ -29,6 +29,19 @@ the `hoursLabel`/`secondsLabel`/`pctLabel` formatting helpers ported from
 confirmed every new metric matches what the Home dashboard shows for the same window
 (12m MTTD, 39.3h MTTA, 18m MTTC, 16.7% false-positive rate, 100% SLA compliance, etc.).
 
+### Report content improvements (2/7): failed logins in the Audit Trail report
+
+`login_failed` (app.py:449) was missing from `AUDIT_SENSITIVE_ACTIONS`, so
+brute-force/credential-stuffing activity was invisible in the Audit Trail report unless
+it survived the 200-row-capped generic activity list — exactly the kind of event PCI
+DSS/HIPAA/SOC 2 expect an audit trail to call out. Added it, and added `ip_address` to
+the Sensitive Actions table (audit_log already stores the source IP on every row, but
+no report surfaced it — the one detail that turns "a login failed" into "this IP is
+trying multiple accounts"). Live-generated a real Audit Trail report and it surfaced a
+genuine, previously-invisible pattern on this deployment: 5 failed logins against
+`admin` from `192.168.86.49` within 3 minutes on 2026-09-01, now visible with its
+source IP instead of buried in nearly 2,000 other audit events.
+
 ### Reports improvement pass: Branding tab undersold its own scope
 
 Live-tested Reports end to end: generated a real Compliance Report (PCI DSS, Last 7
