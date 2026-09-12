@@ -10,7 +10,33 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-11
 
-### Coverage improvement pass: rule names instead of bare IDs in Compliance's audit trail
+### UEBA improvement pass 1/3: process pivot link, unbounded risk-detail text
+
+Live-tested Timeline and Risk Scoring with real production data (a genuinely
+high-volume UEBA deployment — 6487 matching events, one entity scored 757161 raw points
+at Priority 10/10 Critical). Noticed a `TEST-REPLAY-VERIFY-2` host sitting in Risk
+Scoring with a real score — looks like leftover test data from a prior session's replay
+verification, flagged to the user rather than touched (out of scope for this pass, not
+a code bug).
+
+- **Timeline's process name was another instance of the styled-like-a-link-but-inert
+  bug** (same pattern as the SIEM Detection Rules title fixed earlier) — `<code
+  class="text-info">` with zero interactivity, even though `process_image` is already
+  an established Log Search pivot field elsewhere in the app (dashboard.html's own
+  `PIVOT_COLUMNS`/`pivotLinkHtml`). Now pivots to Log Search filtered on the full
+  process path (not just the displayed basename, since that's what Log Search's own
+  `process_image` column actually stores), reusing the genuinely-global
+  `pivotToLogSearch()` from base.html. Verified with a `vm`-context test (pivots on the
+  full path, no link when there's nothing to pivot on, no throw on an event with
+  neither `process_image` nor `command_line`).
+- **A Risk Scoring breakdown row's detail text had no length cap at all** — unlike
+  Timeline's own `timelineDetailCell()` (already truncates to 160 chars), a single
+  `rare_process_population` indicator's detail (a full command line with embedded JSON
+  config, several KB long) blew out the entire modal's layout. Each sample is now
+  truncated to 200 chars individually (before joining multiple samples, so the ellipsis
+  lands per-detail) with the full untruncated text kept in a `title` tooltip. Verified
+  with a targeted test of the truncation boundary math (short text unchanged, a 5000-char
+  string cut to exactly 200 + ellipsis, no off-by-one at the exact 200-char boundary).
 
 Live-tested MITRE ATT&CK (technique drill-down popover, the disabled-rule links inside
 it correctly deep-link to `/siem?tab=rules&rule_id=N` — already solid), Compliance, and
