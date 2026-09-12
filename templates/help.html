@@ -31,6 +31,7 @@
         <a href="#log-pipeline">Log Pipeline</a>
         <a href="#edr">EDR / Agents</a>
         <a href="#ueba">UEBA</a>
+        <a href="#threat-intel">Threat Intel &amp; Hunting</a>
         <a href="#soar">SOAR (Playbooks)</a>
         <a href="#coverage">Coverage</a>
         <a href="#reports">Reports</a>
@@ -85,12 +86,13 @@
                 <li><strong>Windows / Linux Log Channels</strong> — which event log channels (Windows) or auditd rules (Linux) get pushed to agents, with optional per-agent-group overrides.</li>
                 <li><strong>Silent Hosts</strong> — alerts when a previously-active host or log source has gone quiet.</li>
                 <li><strong>Parsers</strong> — the field-extraction layer. Four built-in extractors always run (Windows Event XML, a Windows message-body regex fallback, Linux auditd, and the DNS query parser); admin-defined <strong>custom parsers</strong> fill gaps the built-ins don't cover, using named-group regex patterns. The parser editor shows a live preview of what a pattern would extract as you type it, and can pull a real recent log in to test against before you save.</li>
+                <li><strong>Import</strong> — bring a historical export from another SIEM (CSV, NDJSON, or a JSON array) into Log Search for investigation. A step-by-step wizard maps source fields to this appliance's own field names and previews a sample before committing; imported rows are searchable but never feed live detection rules or UEBA baselines.</li>
             </ul>
         </div>
 
         <div class="help-section" id="edr">
             <h4>EDR / Agents</h4>
-            <p>Lightweight Windows/Linux/macOS agent scripts check in periodically and can be given <strong>response actions</strong> to run — queued from the Agents page and picked up on the endpoint's next check-in (usually within 15 seconds while online). Actions range from read-only collection (process list, network connections, browser history, software inventory) to active response (kill a process, isolate a host from the network, quarantine a file).</p>
+            <p>Lightweight Windows/Linux/macOS agent scripts check in periodically and can be given <strong>response actions</strong> to run — queued from the Agents page and picked up on the endpoint's next check-in. The check-in interval is admin-configurable (Settings or the agent's own install command), and the Agents page always shows the real current value rather than a fixed number. Actions range from read-only collection (process list, network connections, browser history, software inventory) to active response (kill a process, isolate a host from the network, quarantine a file).</p>
             <p>The most impactful actions — isolating a host, killing a process — require the <code>edr.command.advanced</code> permission; routine collection actions use the more widely-granted <code>edr.command.basic</code>. Automatic Endpoint Sweeps can run a bundle of safe, read-only checks (hash sweeps, YARA string sweeps, hardening checks, software inventory) on a schedule across every online endpoint, instead of only when queued by hand.</p>
         </div>
 
@@ -98,6 +100,16 @@
             <h4>UEBA</h4>
             <p>User and Entity Behavior Analytics scores hosts and users on accumulated risk — failed logins, rare processes, threat-intel matches, anomalous timing, and more — each indicator contributing points toward an entity's overall risk score. Scoring weights are fully editable (UEBA &gt; Scoring &amp; Rules) rather than fixed. An entity whose score crosses a threshold can automatically open a case.</p>
             <p>The Asset &amp; Identity tab is where hosts get a criticality tier (standard/important/critical) — this feeds both UEBA's peer-group comparisons and general risk context elsewhere in the app.</p>
+        </div>
+
+        <div class="help-section" id="threat-intel">
+            <h4>Threat Intel &amp; Hunting</h4>
+            <p><strong>IOCs</strong> syncs indicators (IPs, domains, hashes, URLs) from external threat feeds — abuse.ch's ThreatFox/URLhaus/Feodo Tracker, MISP-format feeds, TAXII servers, OTX, and several others — into a local set you can search offline. Quick IOC Lookup is an exact-match check against that local set, not a live external query; Enrich queries a handful of free-tier external sources (Shodan InternetDB, AbuseIPDB, VirusTotal, URLhaus) on demand instead, cached for 24 hours. Most feed types are a single fixed public source, so adding a second feed of the same type is rejected — edit or enable the existing one instead of duplicating it.</p>
+            <p><strong>Threat Entities</strong> catalogs known threat actors and malware families (synced from MITRE ATT&amp;CK or added by hand), each linked to the techniques it's known to use and, where they appear, matching IOCs from your synced feeds.</p>
+            <p><strong>YARA Scanning</strong> imports rule packs (YARAify, YARA Forge, community GitHub repos) and runs them against real endpoints: a full File Scan uploads one file for on-demand matching, IOC Hash Sweep checks endpoint filesystems for files matching a known-bad hash from the local IOC set, and String Sweep (beta) does a lighter-weight literal-substring check pulled from the same imported rules.</p>
+            <p><strong>Sandbox</strong> submits a URL to a real third-party sandbox (urlscan.io, filescan.io, or Hybrid Analysis, each needing its own API key) for detonation — a sandboxed-browser visit at minimum, full file execution analysis where the source supports it.</p>
+            <p><strong>Vulnerabilities</strong> is the raw CVE database itself (synced from NVD, enriched with CISA's Known Exploited Vulnerabilities catalog and FIRST.org's EPSS exploitation-likelihood score) — distinct from Coverage's own Vulnerability tab, which matches this same CVE data against what's actually installed on each endpoint.</p>
+            <p><strong>Atomic Testing</strong> runs real Atomic Red Team attack-simulation tests against a real endpoint, then checks whether a Sigma rule actually fired for that technique afterward — proof a detection works against genuinely-simulated behavior, not just that a rule exists for the technique. These are real commands that can create real files/registry keys/processes; review what a test does before running it, and use its cleanup command afterward.</p>
         </div>
 
         <div class="help-section" id="soar">

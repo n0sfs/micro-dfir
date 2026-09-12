@@ -10,6 +10,33 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-12
 
+### Help & Reference updated to match the current app
+
+Reviewed every section against the actual app after this session's run of improvement
+passes through most of it. Found three gaps:
+
+- **No "Threat Intel & Hunting" section existed at all** — the page's own left-nav TOC
+  skipped straight from UEBA to SOAR, even though Threat Intel & Hunting is a full
+  top-level sidebar item with 6 sub-tabs. Added one covering IOCs (feed sync, the
+  local-only Quick Lookup vs. the external Enrich, and the new duplicate-feed guard),
+  Threat Entities, YARA Scanning (File Scan/Hash Sweep/String Sweep), Sandbox, and
+  Atomic Testing — including calling out the real distinction between this page's
+  Vulnerabilities tab (the raw CVE/KEV/EPSS database) and Coverage's own Vulnerability
+  tab (that same CVE data matched against actual installed software), since the two
+  easily get confused by name alone.
+- **Log Pipeline's list of sub-tabs was missing Import** — the CSV/NDJSON/JSON-array
+  historical log import wizard has its own tab on the real page but no entry here.
+  Added one.
+- **EDR's copy said response actions land "usually within 15 seconds" — the exact
+  hardcoded claim already fixed in the Agents page itself** (EDR pass 6, this
+  deployment's real interval was 120s, 8x that number) had never been corrected here,
+  so the documentation was repeating the same stale claim the code fix already
+  addressed. Reworded to describe the interval as admin-configurable and always shown
+  live on the Agents page, instead of naming a number that can drift out of sync again.
+
+Pure content/documentation change — no logic to fixture-test, verified with a Jinja
+compile-check and `node --check` on the (unchanged) scroll-spy script.
+
 ### Settings improvement pass 2: Roles table's Member count went stale
 
 Pass 1 deliberately avoided exercising the actual create/delete lifecycle for real
