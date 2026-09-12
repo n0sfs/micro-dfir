@@ -424,6 +424,27 @@ def _endpoint_health_context(conn, days):
         'dns_ti_matches': dns_ti_matches,
     }
 
+# ioc_sightings (real correlations between synced threat-intel indicators and actual
+# traffic/alerts -- see migrate_ioc_sightings, app.py:13766) is fully queryable but was
+# never surfaced in any report. Mirrors _attach_actor_sightings' join shape
+# (app.py:2256) for the indicator's own catalog metadata (type/pattern/feed name),
+# grouped per indicator rather than per raw sighting so a widely-seen IOC shows as one
+# row with a count, not a wall of duplicate lines.
+def _threat_intel_context(conn, days):
+    cutoff_local = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+    total = conn.execute(
+        "SELECT COUNT(*) as cnt FROM ioc_sightings WHERE seen_at >= ?", (cutoff_local,)
+    ).fetchone()['cnt']
+    top_indicators = [dict(r) for r in conn.execute(
+        "SELECT si.ioc_type, si.pattern, si.name, tf.name as feed_name, "
+        "COUNT(s.id) as sighting_count, MAX(s.seen_at) as last_seen "
+        "FROM ioc_sightings s JOIN stix_indicators si ON si.stix_id = s.stix_id "
+        "LEFT JOIN ti_feeds tf ON tf.id = si.feed_id "
+        "WHERE s.seen_at >= ? GROUP BY s.stix_id ORDER BY sighting_count DESC LIMIT 10",
+        (cutoff_local,)
+    ).fetchall()]
+    return {'total': total, 'top_indicators': top_indicators}
+
 def generate_security_report(days=30):
     conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
     # Left as-is (UTC .isoformat() window, not this file's usual datetime.now() string) --
@@ -509,6 +530,7 @@ def generate_security_report(days=30):
     )
 
     endpoint_health = _endpoint_health_context(conn, days)
+    threat_intel = _threat_intel_context(conn, days)
 
     context = {
         "date_generated": datetime.now().strftime("%B %d, %Y"),
@@ -527,6 +549,7 @@ def generate_security_report(days=30):
         "coverage_latest": coverage_latest, "coverage_delta": coverage_delta,
         "coverage_snapshots": coverage_snapshots,
         "endpoint_health": endpoint_health,
+        "threat_intel": threat_intel,
     }
     conn.close()
     return _render_and_write('report_template.html', context, _report_filename('Security'))
