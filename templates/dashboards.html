@@ -287,7 +287,7 @@ function baseLineOptions(c, opts) {
             x: { grid: { color: c.grid }, ticks: { color: c.text, maxTicksLimit: 10 } },
             y: opts.logScale
                 ? { type: 'logarithmic', grid: { color: c.grid }, ticks: { color: c.text } }
-                : { grid: { color: c.grid }, ticks: { color: c.text }, beginAtZero: true },
+                : { grid: { color: c.grid }, ticks: { color: c.text, precision: 0 }, beginAtZero: true },
         },
     };
 }
