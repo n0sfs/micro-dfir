@@ -10,6 +10,39 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-12
 
+### Log Pipeline improvement pass 1: Drop Rule preview hung on real log volume
+
+Live-tested Drop Rules with real production data. Typing `App Name equals FIM` and
+clicking Preview left "Checking recent logs…" spinning for 2+ minutes with no result,
+confirmed by leaving the request running rather than assuming a slow screenshot.
+
+- **`/api/droprules/preview` wrapped the matched column in `COALESCE(field, '')` for
+  the 'equals' operator, which made it an unindexable expression** — `EXPLAIN QUERY
+  PLAN` on the exact query (fixture-tested, not guessed) showed SQLite falling back to
+  `SEARCH ... USING INDEX idx_live_logs_timestamp (timestamp>?)`, i.e. scanning every
+  row in the whole 7-day preview window (millions on this deployment's real hosts) to
+  test the COALESCE condition on each one, instead of seeking directly to matching rows
+  via `idx_live_logs_app`/`idx_live_logs_host`/`idx_live_logs_event_id`. The COALESCE
+  was there to mirror Vector's VRL `?? ""` null-coalescing semantics exactly (a real,
+  deliberate design decision, not an oversight — see the comment above the route), but
+  since the preview form always requires a non-empty match value, `field = ?` and
+  `COALESCE(field, '') = ?` are equivalent for every input the form can ever send:
+  `NULL = <non-empty>` is falsy either way. Dropped the COALESCE for 'equals' only —
+  behaviorally identical, but now indexable. Left 'contains' (`INSTR`) as-is: substring
+  search isn't index-friendly in SQLite regardless of COALESCE, so that operator was
+  never the bug and gets no benefit from this change.
+- **Deliberately did not add a new index this time** — the UEBA Data Insights pass
+  earlier today already showed that a `CREATE INDEX` migration on this deployment's
+  7.6M-row `live_logs` can itself cause a multi-minute outage while it builds. The query
+  fix alone is enough: `host` and `event_id` searches already benefit from indexes that
+  exist today (`host` even gets the composite `idx_live_logs_host_timestamp` added in
+  that same UEBA pass), and `app` gets a real, verified improvement from its existing
+  single-column index. No schema change, no deploy risk.
+- Verified with a SQLite fixture test (NULL-app and out-of-window rows correctly
+  excluded from the count; `EXPLAIN QUERY PLAN` confirms `idx_live_logs_app`/
+  `idx_live_logs_event_id` are used instead of a timestamp-only scan; 'contains'
+  behavior unchanged) and live on production.
+
 ### UEBA improvement pass 3/3: Clone Rule on Scoring & Rules
 
 Live-tested Model Tuning (Baseline Model Parameters, Entity Baselines table, Exclusions)

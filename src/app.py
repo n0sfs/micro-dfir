@@ -3192,7 +3192,14 @@ def api_droprules_preview():
         return jsonify({'error': 'A match value is required to preview.'}), 400
 
     if operator == 'equals':
-        cond = f"COALESCE({field}, '') = ?"
+        # No COALESCE needed here specifically: value is guaranteed non-empty (checked
+        # above), so `field = ?` and `COALESCE(field, '') = ?` are equivalent for every
+        # valid input -- `NULL = <non-empty>` is falsy either way. Wrapping the column
+        # in COALESCE made it an unindexable expression, forcing a full scan of the
+        # whole preview window on every call; on this deployment's real log volume
+        # (millions of rows within even the 7-day window) that was observed to hang for
+        # many seconds. Plain `field = ?` lets SQLite use idx_live_logs_app/host/event_id.
+        cond = f"{field} = ?"
     else:
         cond = f"INSTR(COALESCE({field}, ''), ?) > 0"
     where = f"{cond} AND timestamp >= datetime('now', ?)"
