@@ -19,12 +19,13 @@
     <p style="font-size:9pt; color:#666;">User management, credential/certificate changes, and settings that affect data retention — the categories a compliance reviewer would want called out specifically.</p>
     {% if sensitive_events %}
     <table>
-        <thead><tr><th>Timestamp</th><th>Actor</th><th>Action</th><th>Target</th><th>Details</th></tr></thead>
+        <thead><tr><th>Timestamp</th><th>Actor</th><th>Source IP</th><th>Action</th><th>Target</th><th>Details</th></tr></thead>
         <tbody>
         {% for e in sensitive_events %}
             <tr class="sensitive-row">
                 <td>{{ e.timestamp }}</td>
                 <td>{{ e.username or '(unknown)' }}</td>
+                <td>{{ e.ip_address or '' }}</td>
                 <td>{{ e.action }}</td>
                 <td>{{ e.target_type or '' }}{% if e.target_id %}: {{ e.target_id }}{% endif %}</td>
                 <td>{{ e.details or '' }}</td>
