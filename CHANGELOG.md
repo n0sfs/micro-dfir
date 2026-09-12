@@ -35,7 +35,9 @@ passes through most of it. Found three gaps:
   live on the Agents page, instead of naming a number that can drift out of sync again.
 
 Pure content/documentation change — no logic to fixture-test, verified with a Jinja
-compile-check and `node --check` on the (unchanged) scroll-spy script.
+compile-check and `node --check` on the (unchanged) scroll-spy script, then live on
+production: the new TOC link correctly scrolls to and highlights the new section, and
+both corrected sections (Log Pipeline, EDR) render as intended.
 
 ### Settings improvement pass 2: Roles table's Member count went stale
 
