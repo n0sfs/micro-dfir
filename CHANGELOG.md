@@ -23,7 +23,8 @@ increments, and **Analyst Workload** (3 unassigned, 2 assigned to admin) rendere
 chart of whole-number case counts. Added `ticks.precision: 0` to the shared x-axis
 config, forcing whole-number ticks everywhere this helper is used; charts with larger
 integer ranges (e.g. the thousands-scale Anomaly Rules chart) already picked round
-numbers and are unaffected.
+numbers and are unaffected. Confirmed live on production: Analyst Workload now shows
+0/1/2/3 and Open Cases by Queue shows 0/1, both previously fractional.
 
 ### Home (Dashboards) improvement pass: Top Source Countries looked broken when empty
 
