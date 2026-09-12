@@ -109,6 +109,27 @@ tagged for any framework, so the new section correctly renders "No rules are tag
 ... yet, so no techniques are known to validate" — consistent with every other section
 of that same report reaching the identical conclusion.
 
+### Report content improvements (7/7): Appliance Operational Health section
+
+`api_dashboard_readiness` (app.py:11359) already computes a compact operational-health
+scorecard (fleet enrollment, rule enablement, backup recency, retention/archiving
+configured) for the Home dashboard's Readiness widget, but it never made it into a
+report — useful context for how much to trust everything else in the report (a stale
+backup or unconfigured retention matters to a reader deciding how seriously to take
+the rest of the numbers). Ported the same queries into `_appliance_health_context()`
+and added a closing "Appliance Operational Health" section to the Security Summary.
+
+Verified with a real SQLite fixture: an empty deployment degrades to honest
+zeros/False/None, a populated one computes fleet/rule/backup/asset/user figures
+correctly (an asset with no criticality value set correctly doesn't count as
+"tracked"), and a backup older than 48h is correctly flagged stale. Live-generated a
+Security Summary report and confirmed every figure matches `/api/dashboards/readiness`
+exactly: 1/2 agents active, 119/4062 rules enabled, backup from 02:13:54 (not flagged
+stale), retention configured, archiving not, 0 assets tracked, 2 users.
+
+**This closes out all 7 report-content improvements identified in the research pass** —
+every one implemented, fixture-tested, and live-verified against real production data.
+
 ### Reports improvement pass: Branding tab undersold its own scope
 
 Live-tested Reports end to end: generated a real Compliance Report (PCI DSS, Last 7
