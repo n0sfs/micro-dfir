@@ -32,9 +32,15 @@ regression from an established pattern, just a possible future enhancement.
   down to editing 2-3 fields instead of re-entering every condition. Verified with a
   `vm`-context test (clone passes `id: null` + the suffixed name to the shared modal
   opener with every other field preserved; cloning an unknown id no-ops rather than
-  throwing) and live on production (cloned "Critical Alert with Internal Lateral
-  Movement (Host)", edited the entity type to build the User variant, saved
-  successfully as a new 16th rule without touching the original).
+  throwing) and live on production (cloned "Critical Alert Sourced from Internal Network
+  (Host)" — all 3 conditions, points, and first-time bonus came through correctly, saved
+  as a new 16th rule with the original's 47/226 match counts untouched, then deleted the
+  test rule to clean up).
+
+Also live-tested Asset & Identity — confirmed solid (clean validation, no crash on an
+empty submit). Worth flagging to the user: it's currently empty on this deployment, so
+the criticality (×2) and privileged (×1.5) score multipliers it drives are a no-op for
+every entity right now, including the two real EDR hosts.
 
 ## 2026-09-11
 
