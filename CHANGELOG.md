@@ -31,17 +31,30 @@ confirmed by leaving the request running rather than assuming a slow screenshot.
   behaviorally identical, but now indexable. Left 'contains' (`INSTR`) as-is: substring
   search isn't index-friendly in SQLite regardless of COALESCE, so that operator was
   never the bug and gets no benefit from this change.
-- **Deliberately did not add a new index this time** — the UEBA Data Insights pass
-  earlier today already showed that a `CREATE INDEX` migration on this deployment's
-  7.6M-row `live_logs` can itself cause a multi-minute outage while it builds. The query
-  fix alone is enough: `host` and `event_id` searches already benefit from indexes that
-  exist today (`host` even gets the composite `idx_live_logs_host_timestamp` added in
-  that same UEBA pass), and `app` gets a real, verified improvement from its existing
-  single-column index. No schema change, no deploy risk.
+- First deploy attempt deliberately skipped adding a new index — the UEBA Data Insights
+  pass earlier today already showed that a `CREATE INDEX` migration on this deployment's
+  7.6M-row `live_logs` can itself cause a multi-minute outage while it builds, and
+  `host`/`event_id` previews already benefit from indexes that exist today (`host` even
+  gets the composite `idx_live_logs_host_timestamp` added in that same UEBA pass).
+  **Live-testing `App Name equals Sysmon` immediately after deploy showed this wasn't
+  enough**: `Sysmon` (4.47M rows) and `PowerShell` (3.07M rows) are ~99% of this
+  deployment's entire `live_logs` table between them, confirmed via a direct read-only
+  query — a single-column `idx_live_logs_app` index still forces a rowid lookup per
+  matching row across that app's *entire* history to test the timestamp condition, the
+  same shape of problem the UEBA pass hit. Drop Rules exists specifically to filter
+  noisy/common apps, so previewing exactly those two values is the *typical* case, not
+  an edge case — added `idx_live_logs_app_timestamp` (folded into the existing
+  `migrate_ueba_insights_indexes()` migration rather than a new one, since it's the same
+  composite-index-for-a-time-boxed-entity-filter pattern) to make it a covering-index
+  seek instead. Flagged the known outage risk to the user before this second deploy,
+  given the UEBA pass's `CREATE INDEX` had caused one minutes earlier in the same
+  session.
 - Verified with a SQLite fixture test (NULL-app and out-of-window rows correctly
-  excluded from the count; `EXPLAIN QUERY PLAN` confirms `idx_live_logs_app`/
-  `idx_live_logs_event_id` are used instead of a timestamp-only scan; 'contains'
-  behavior unchanged) and live on production.
+  excluded from the count; a simulated "common app with a long history" scenario
+  confirms a covering-index seek via `idx_live_logs_app_timestamp`, not a full-history
+  scan; 'contains' behavior unchanged) and live on production (`FIM` — zero matches,
+  instant; `Sysmon` — a real, common value, live-verified after the composite index
+  deployed).
 
 ### UEBA improvement pass 3/3: Clone Rule on Scoring & Rules
 
