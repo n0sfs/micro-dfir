@@ -360,6 +360,70 @@ def _case_lifecycle_metrics(conn, days):
         'escalation_rate_label': _pct_label(escalation_rate_pct),
     }
 
+# Ported from _agent_status_from_age/api_dashboard_agent_status (app.py:11000-11031)
+# and api_dashboard_fim_activity/api_dashboard_dns_activity (app.py:10857/3153) -- the
+# endpoint/infrastructure-health picture the Home dashboard already shows live, absent
+# from every report until now. Agent status is a real-time-only snapshot as of report
+# generation (same as the dashboard widget it mirrors, labeled "Live" there) -- it does
+# not reflect the report's days window, which only applies to FIM/DNS activity below.
+def _agent_status_from_age(age_seconds):
+    if age_seconds <= 45:
+        return 'Online'
+    if age_seconds <= 300:
+        return 'Idle'
+    return 'Offline'
+
+def _endpoint_health_context(conn, days):
+    window = f'-{days} days'
+
+    poll_rows = conn.execute(
+        "SELECT timestamp FROM agent_polls WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY ip_address)"
+    ).fetchall()
+    now = datetime.now()
+    status_counts = {'Online': 0, 'Idle': 0, 'Offline': 0, 'Unknown': 0}
+    for r in poll_rows:
+        try:
+            age = (now - datetime.strptime(r['timestamp'], '%Y-%m-%d %H:%M:%S')).total_seconds()
+            status_counts[_agent_status_from_age(age)] += 1
+        except (ValueError, TypeError):
+            status_counts['Unknown'] += 1
+
+    version_rows = conn.execute(
+        "SELECT version, COUNT(*) as count FROM agent_polls "
+        "WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY ip_address) AND version IS NOT NULL "
+        "GROUP BY version ORDER BY version DESC"
+    ).fetchall()
+    latest_version = version_rows[0]['version'] if version_rows else None
+    outdated_agent_count = sum(r['count'] for r in version_rows if r['version'] != latest_version)
+
+    fim_row = conn.execute(
+        "SELECT COUNT(*) as total FROM live_logs WHERE app = 'FIM' AND timestamp >= datetime('now', ?)", (window,)
+    ).fetchone()
+    fim_top_host = conn.execute(
+        "SELECT host, COUNT(*) as count FROM live_logs WHERE app = 'FIM' AND timestamp >= datetime('now', ?) "
+        "GROUP BY host ORDER BY count DESC LIMIT 1", (window,)
+    ).fetchone()
+
+    dns_row = conn.execute(
+        "SELECT COUNT(*) as total FROM live_logs WHERE app = 'dns_server' AND timestamp >= datetime('now', ?)", (window,)
+    ).fetchone()
+    cutoff_local = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+    dns_ti_matches = conn.execute(
+        "SELECT COUNT(DISTINCT s.id) as cnt FROM ioc_sightings s JOIN alerts a ON a.id = s.alert_id "
+        "WHERE a.log_app = 'dns_server' AND s.seen_at >= ?", (cutoff_local,)
+    ).fetchone()['cnt']
+
+    return {
+        'total_agents': len(poll_rows),
+        'status_counts': status_counts,
+        'outdated_agent_count': outdated_agent_count,
+        'latest_version': latest_version,
+        'fim_total': fim_row['total'],
+        'fim_top_host': dict(fim_top_host) if fim_top_host else None,
+        'dns_total': dns_row['total'],
+        'dns_ti_matches': dns_ti_matches,
+    }
+
 def generate_security_report(days=30):
     conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
     # Left as-is (UTC .isoformat() window, not this file's usual datetime.now() string) --
@@ -444,6 +508,8 @@ def generate_security_report(days=30):
         if len(coverage_snapshots) >= 2 else None
     )
 
+    endpoint_health = _endpoint_health_context(conn, days)
+
     context = {
         "date_generated": datetime.now().strftime("%B %d, %Y"),
         "report_title": "Managed Security Report",
@@ -460,6 +526,7 @@ def generate_security_report(days=30):
         "risk_trend_total": risk_trend_total, "risk_trend_direction": risk_trend_direction,
         "coverage_latest": coverage_latest, "coverage_delta": coverage_delta,
         "coverage_snapshots": coverage_snapshots,
+        "endpoint_health": endpoint_health,
     }
     conn.close()
     return _render_and_write('report_template.html', context, _report_filename('Security'))
