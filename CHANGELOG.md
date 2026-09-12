@@ -39,7 +39,8 @@ real production data.
   a cosmetic preference, not a confirmed bug — left as-is.
 - Verified with a `vm`-context test (empty countries hides the canvas and shows the
   message; real data shows the canvas and hides the message, matching the established
-  pattern).
+  pattern), then live on production: the widget now shows the message with the canvas
+  hidden, matching this deployment's actual (all-private-IP) alert data.
 
 ### Help & Reference updated to match the current app
 
