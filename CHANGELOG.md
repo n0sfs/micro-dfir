@@ -10,6 +10,37 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-12
 
+### Home (Dashboards) improvement pass: Top Source Countries looked broken when empty
+
+"Home" in the sidebar is just a label for the Dashboards page (`dashboards_page`) — Home
+was retired as its own template a while back and merged into Dashboards, with each
+role defaulting into its own dashboard (confirmed in `base.html`; no `templates/
+home.html` exists). Live-tested the `admin` role's default "Overview" dashboard with
+real production data.
+
+- **Top Source Countries rendered an empty bar chart with a meaningless 0–1.0 axis**
+  instead of any indication why. Root cause: `/api/dashboards/top-countries` deliberately
+  excludes private/reserved IPs from its GeoIP aggregation (`_aggregate_country_counts`'s
+  own comment: "private/reserved/unresolvable IPs excluded, not bucketed as 'Unknown'")
+  — correct behavior, but on this real deployment nearly every alert's `source_ip` is
+  internal (192.168.x/10.x), so the widget is *always* going to render this way here,
+  not just on a rare cold-start. `renderCountriesWidget` was the only chart widget in
+  `dashboards.html` not following the `.widget-empty` pattern three other widgets
+  (Agent Status, MITRE Coverage, Actor Summary) already use for exactly this situation.
+  Added the same pattern: hide the canvas and show "No public-IP alert sources in this
+  window — private/internal source IPs have no country to show" instead.
+- **Investigated and deliberately left alone**: the Severity Breakdown and Vulnerability
+  Summary donut charts render "High" and "Critical" in the identical color
+  (`severityColor()` maps both to `c.danger`). Looked like a bug at first glance, but
+  it's a consistent, deliberate convention repeated at 3+ call sites across this file
+  (including a separate case-severity badge helper) — top two severities share one
+  "urgent" red, only Medium/Low get distinct colors. Changing the shared helper would
+  make this one dashboard inconsistent with every other severity display in the app for
+  a cosmetic preference, not a confirmed bug — left as-is.
+- Verified with a `vm`-context test (empty countries hides the canvas and shows the
+  message; real data shows the canvas and hides the message, matching the established
+  pattern).
+
 ### Help & Reference updated to match the current app
 
 Reviewed every section against the actual app after this session's run of improvement
