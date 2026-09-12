@@ -183,6 +183,180 @@ SECURITY_SEVERITY_COLORS = {
     'Low': '#6c757d', 'Informational': '#6c757d',
 }
 
+# Mirrors app.py's DEFAULT_CASE_SLA_HOURS/CASE_SLA_SEVERITIES and the three
+# _case_sla_hours*() helpers -- same no-Flask-context duplication reasoning as every
+# other *_LABELS/*_FRAMEWORKS constant in this file. Needed so the SLA-breach count
+# below resolves each case's own per-queue/per-severity threshold instead of the single
+# global default the old, simpler query used.
+DEFAULT_CASE_SLA_HOURS = 24
+CASE_SLA_SEVERITIES = ('critical', 'high', 'medium', 'low')
+
+def _case_sla_hours(conn):
+    row = conn.execute("SELECT value FROM settings WHERE key = 'case_sla_hours'").fetchone()
+    try:
+        return int(row['value']) if row and row['value'] else DEFAULT_CASE_SLA_HOURS
+    except (ValueError, TypeError):
+        return DEFAULT_CASE_SLA_HOURS
+
+def _case_sla_hours_by_severity(conn):
+    row = conn.execute("SELECT value FROM settings WHERE key = 'case_sla_hours_by_severity'").fetchone()
+    try:
+        data = json.loads(row['value']) if row and row['value'] else {}
+        return {k: int(v) for k, v in data.items() if k in CASE_SLA_SEVERITIES}
+    except (ValueError, TypeError):
+        return {}
+
+def _case_sla_hours_for(conn, queue_id, severity):
+    if queue_id:
+        row = conn.execute("SELECT sla_hours FROM case_queues WHERE id = ?", (queue_id,)).fetchone()
+        if row and row['sla_hours']:
+            return row['sla_hours']
+    tiers = _case_sla_hours_by_severity(conn)
+    sev_key = (severity or '').strip().lower()
+    if sev_key in tiers:
+        return tiers[sev_key]
+    return _case_sla_hours(conn)
+
+# Python ports of dashboards.html's hoursLabel()/secondsLabel()/pctLabel() -- same
+# thresholds and rounding, so a metric reads identically whether seen live on the Home
+# dashboard or in a generated PDF.
+def _hours_label(h):
+    if h is None:
+        return '—'
+    if h < 1:
+        return f"{round(h * 60)}m"
+    if h < 48:
+        return f"{h:.1f}h"
+    return f"{h / 24:.1f}d"
+
+def _seconds_label(s):
+    if s is None:
+        return '—'
+    if s < 90:
+        return f"{round(s)}s"
+    if s < 5400:
+        return f"{round(s / 60)}m"
+    return _hours_label(s / 3600)
+
+def _pct_label(p):
+    return '—' if p is None else f"{p}%"
+
+# Ported from api_dashboard_case_stats (app.py:11119-11270) -- same queries, same
+# per-case SLA resolution (_case_sla_hours_for), so these numbers always match what the
+# Home dashboard's "Case Metrics & SLA" widget shows for the same window. Returns both
+# the raw values (for the narrative paragraph) and pre-formatted labels (for the metrics
+# table), rather than pushing hoursLabel-equivalent branching into Jinja.
+def _case_lifecycle_metrics(conn, days):
+    window = f'-{days} days'
+    cutoff_local = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+
+    closed_range_row = conn.execute(
+        "SELECT COUNT(*) as cnt, AVG((julianday(closed_at) - julianday(created_at)) * 24) as avg_hours FROM cases "
+        "WHERE status = 'closed' AND closed_at IS NOT NULL AND closed_at >= datetime('now', ?)", (window,)
+    ).fetchone()
+    avg_close_hours = closed_range_row['avg_hours']
+
+    avg_tta_hours = conn.execute(
+        "SELECT AVG((julianday(acknowledged_at) - julianday(created_at)) * 24) FROM cases "
+        "WHERE acknowledged_at IS NOT NULL AND acknowledged_at >= datetime('now', ?)", (window,)
+    ).fetchone()[0]
+
+    avg_mttd_seconds = conn.execute(
+        "SELECT AVG((julianday(datetime(a.timestamp, 'localtime')) - julianday(l.timestamp)) * 86400) "
+        "FROM alerts a JOIN live_logs l ON l.id = a.event_id "
+        "WHERE a.event_id IS NOT NULL AND a.import_id IS NULL AND datetime(a.timestamp, 'localtime') >= ? "
+        "AND datetime(a.timestamp, 'localtime') >= l.timestamp",
+        (cutoff_local,)
+    ).fetchone()[0]
+
+    avg_mtti_hours = conn.execute(
+        "SELECT AVG((julianday(first_resolved.ts) - julianday(c.acknowledged_at)) * 24) "
+        "FROM cases c JOIN ("
+        "  SELECT case_id, MIN(ts) as ts FROM case_events "
+        "  WHERE event_type = 'workflow_state_change' AND detail = 'resolved' GROUP BY case_id"
+        ") first_resolved ON first_resolved.case_id = c.id "
+        "WHERE c.acknowledged_at IS NOT NULL AND first_resolved.ts >= c.acknowledged_at "
+        "AND first_resolved.ts >= datetime('now', ?)",
+        (window,)
+    ).fetchone()[0]
+
+    avg_mttc_hours = conn.execute(
+        "SELECT AVG(hours_to_contain) FROM ("
+        "  SELECT ca.id, MIN((julianday(ac.completed_at) - julianday(ca.confirmed_at)) * 24) as hours_to_contain "
+        "  FROM case_assets ca "
+        "  JOIN case_items ci ON ci.case_id = ca.case_id AND ci.item_type = 'command_result' "
+        "  JOIN agent_commands ac ON ac.id = ci.item_id AND ac.hostname = ca.host "
+        "  WHERE ca.confirmed_at IS NOT NULL AND ac.completed_at IS NOT NULL "
+        "  AND ac.completed_at >= ca.confirmed_at AND ca.confirmed_at >= ? "
+        "  AND ac.label IN ('isolate_host', 'kill_process', 'kill_process_by_name', 'quarantine_file') "
+        "  GROUP BY ca.id"
+        ")",
+        (cutoff_local,)
+    ).fetchone()[0]
+
+    open_cases_for_sla = conn.execute(
+        "SELECT queue_id, severity, (julianday('now') - julianday(created_at)) * 24 as age_hours "
+        "FROM cases WHERE status = 'open'"
+    ).fetchall()
+    sla_breached_count = sum(
+        1 for c in open_cases_for_sla if c['age_hours'] > _case_sla_hours_for(conn, c['queue_id'], c['severity'])
+    )
+
+    fp_row = conn.execute(
+        "SELECT SUM(CASE WHEN status = 'false_positive' THEN 1 ELSE 0 END) as fp_count, COUNT(*) as triaged_count "
+        "FROM alerts WHERE status != 'new' AND timestamp >= datetime('now', ?)",
+        (window,)
+    ).fetchone()
+    false_positive_rate_pct = round(fp_row['fp_count'] / fp_row['triaged_count'] * 100, 1) if fp_row['triaged_count'] else None
+
+    closed_cases_for_sla = conn.execute(
+        "SELECT queue_id, severity, (julianday(closed_at) - julianday(created_at)) * 24 as hours_to_close "
+        "FROM cases WHERE status = 'closed' AND closed_at IS NOT NULL AND closed_at >= datetime('now', ?)",
+        (window,)
+    ).fetchall()
+    if closed_cases_for_sla:
+        within_sla = sum(
+            1 for c in closed_cases_for_sla if c['hours_to_close'] <= _case_sla_hours_for(conn, c['queue_id'], c['severity'])
+        )
+        sla_compliance_pct = round(within_sla / len(closed_cases_for_sla) * 100, 1)
+    else:
+        sla_compliance_pct = None
+
+    reopen_stats = conn.execute(
+        "SELECT COUNT(*) as ever_closed, SUM(CASE WHEN reopened_count > 0 THEN 1 ELSE 0 END) as reopened "
+        "FROM cases WHERE status = 'closed' OR reopened_count > 0"
+    ).fetchone()
+    reopen_rate_pct = round(reopen_stats['reopened'] / reopen_stats['ever_closed'] * 100, 1) if reopen_stats['ever_closed'] else None
+
+    esc_row = conn.execute(
+        "SELECT COUNT(*) as total_alerts, "
+        "(SELECT COUNT(DISTINCT a2.id) FROM alerts a2 JOIN case_items ci ON ci.item_type = 'alert' AND ci.item_id = CAST(a2.id AS TEXT) "
+        " WHERE a2.timestamp >= datetime('now', ?)) as escalated_alerts "
+        "FROM alerts WHERE timestamp >= datetime('now', ?)",
+        (window, window)
+    ).fetchone()
+    escalation_rate_pct = round(esc_row['escalated_alerts'] / esc_row['total_alerts'] * 100, 1) if esc_row['total_alerts'] else None
+
+    # Dwell Time: MTTD + MTTC combined -- only meaningful when both have real data (a
+    # missing half treated as 0 would understate it), same guard the dashboard widget uses.
+    dwell_label = '—'
+    if avg_mttd_seconds is not None and avg_mttc_hours is not None:
+        dwell_label = _seconds_label(avg_mttd_seconds + avg_mttc_hours * 3600)
+
+    return {
+        'sla_breached_count': sla_breached_count,
+        'mttd_label': _seconds_label(avg_mttd_seconds),
+        'mtta_label': _hours_label(avg_tta_hours),
+        'mtti_label': _hours_label(avg_mtti_hours),
+        'mttc_label': _hours_label(avg_mttc_hours),
+        'mttr_label': _hours_label(avg_close_hours),
+        'dwell_label': dwell_label,
+        'false_positive_rate_label': _pct_label(false_positive_rate_pct),
+        'sla_compliance_label': _pct_label(sla_compliance_pct),
+        'reopen_rate_label': _pct_label(reopen_rate_pct),
+        'escalation_rate_label': _pct_label(escalation_rate_pct),
+    }
+
 def generate_security_report(days=30):
     conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
     # Left as-is (UTC .isoformat() window, not this file's usual datetime.now() string) --
@@ -206,11 +380,7 @@ def generate_security_report(days=30):
 
     # Case load & SLA -- ported from api_dashboard_case_stats (app.py:6660-6683) and
     # _case_sla_hours (app.py:6653-6658).
-    sla_row = cursor.execute("SELECT value FROM settings WHERE key = 'case_sla_hours'").fetchone()
-    try:
-        sla_hours = int(sla_row['value']) if sla_row and sla_row['value'] else 24
-    except (ValueError, TypeError):
-        sla_hours = 24
+    sla_hours = _case_sla_hours(conn)
     open_cases = cursor.execute("SELECT COUNT(*) FROM cases WHERE status = 'open'").fetchone()[0]
     cases_closed_30d = cursor.execute(
         "SELECT COUNT(*) FROM cases WHERE status = 'closed' AND closed_at >= datetime('now', ?)", (window,)
@@ -219,10 +389,16 @@ def generate_security_report(days=30):
         "SELECT AVG((julianday(closed_at) - julianday(created_at)) * 24) FROM cases "
         "WHERE status = 'closed' AND closed_at IS NOT NULL AND closed_at >= datetime('now', ?)", (window,)
     ).fetchone()[0]
-    sla_breaches = cursor.execute(
-        "SELECT COUNT(*) FROM cases WHERE status = 'open' AND (julianday('now') - julianday(created_at)) * 24 > ?",
-        (sla_hours,)
-    ).fetchone()[0]
+
+    # SOC lifecycle/effectiveness metrics (MTTD/MTTA/MTTI/MTTC/MTTR, false-positive
+    # rate, SLA compliance, reopen rate, escalation rate, dwell time) -- the same numbers
+    # the Home dashboard's "Case Metrics & SLA" widget already shows, previously absent
+    # from this report entirely. sla_breached_count here resolves each open case's own
+    # per-queue/per-severity SLA threshold (_case_sla_hours_for), replacing the old
+    # single-global-threshold count above -- more accurate for the same reason the
+    # dashboard widget itself already does it this way.
+    lifecycle = _case_lifecycle_metrics(conn, days)
+    sla_breaches = lifecycle['sla_breached_count']
 
     # Top-firing UEBA anomaly rules -- ported from api_dashboard_top_anomaly_rules
     # (app.py:6525-6536).
@@ -276,6 +452,7 @@ def generate_security_report(days=30):
         "open_cases": open_cases, "cases_closed_30d": cases_closed_30d,
         "avg_close_hours": round(avg_close_hours, 1) if avg_close_hours else None,
         "sla_hours": sla_hours, "sla_breaches": sla_breaches,
+        "lifecycle": lifecycle,
         "top_anomaly_rules": top_anomaly_rules,
         "risk_trend_total": risk_trend_total, "risk_trend_direction": risk_trend_direction,
         "coverage_latest": coverage_latest, "coverage_delta": coverage_delta,

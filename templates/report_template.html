@@ -28,8 +28,32 @@
 
     <h2 class="section-title">Case Load &amp; SLA</h2>
     {% if open_cases or cases_closed_30d %}
-    <p>{{ open_cases }} case{{ '' if open_cases == 1 else 's' }} {{ 'is' if open_cases == 1 else 'are' }} currently open. {{ cases_closed_30d }} case{{ '' if cases_closed_30d == 1 else 's' }} {{ 'was' if cases_closed_30d == 1 else 'were' }} closed in the last {{ report_days }} days{% if avg_close_hours %}, averaging {{ avg_close_hours }} hours to close{% endif %}. {{ sla_breaches }} open case{{ '' if sla_breaches == 1 else 's' }} {{ 'has' if sla_breaches == 1 else 'have' }} breached the configured {{ sla_hours }}-hour SLA threshold.</p>
+    <p>{{ open_cases }} case{{ '' if open_cases == 1 else 's' }} {{ 'is' if open_cases == 1 else 'are' }} currently open. {{ cases_closed_30d }} case{{ '' if cases_closed_30d == 1 else 's' }} {{ 'was' if cases_closed_30d == 1 else 'were' }} closed in the last {{ report_days }} days{% if avg_close_hours %}, averaging {{ avg_close_hours }} hours to close{% endif %}. {{ sla_breaches }} open case{{ '' if sla_breaches == 1 else 's' }} {{ 'has' if sla_breaches == 1 else 'have' }} breached its own configured SLA threshold.</p>
     {% else %}<p>No case activity in the last {{ report_days }} days.</p>{% endif %}
+
+    <h2 class="section-title">SOC Effectiveness Metrics</h2>
+    <p style="font-size:9pt; color:#666;">The same lifecycle and quality metrics the in-app dashboard tracks live, computed over this same {{ report_days }}-day window.</p>
+    <table>
+        <thead><tr><th>MTTD</th><th>MTTA</th><th>MTTI</th><th>MTTC</th><th>MTTR</th><th>Dwell Time</th></tr></thead>
+        <tbody><tr>
+            <td>{{ lifecycle.mttd_label }}</td>
+            <td>{{ lifecycle.mtta_label }}</td>
+            <td>{{ lifecycle.mtti_label }}</td>
+            <td>{{ lifecycle.mttc_label }}</td>
+            <td>{{ lifecycle.mttr_label }}</td>
+            <td>{{ lifecycle.dwell_label }}</td>
+        </tr></tbody>
+    </table>
+    <p style="font-size:9pt; color:#666;">MTTD: detect-to-alert. MTTA: create-to-acknowledge. MTTI: acknowledge-to-first-determination. MTTC: confirmed-compromise-to-contained. MTTR: create-to-close. Dwell Time: MTTD + MTTC combined.</p>
+    <table>
+        <thead><tr><th>False Positive Rate</th><th>SLA Compliance</th><th>Reopen Rate</th><th>Escalation Rate</th></tr></thead>
+        <tbody><tr>
+            <td>{{ lifecycle.false_positive_rate_label }}</td>
+            <td>{{ lifecycle.sla_compliance_label }}</td>
+            <td>{{ lifecycle.reopen_rate_label }}</td>
+            <td>{{ lifecycle.escalation_rate_label }}</td>
+        </tr></tbody>
+    </table>
 
     <h2 class="section-title">Detection Signals (UEBA)</h2>
     {% if risk_trend_direction %}
