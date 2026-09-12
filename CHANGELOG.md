@@ -10,6 +10,39 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-11
 
+### UEBA improvement pass 2/3: Data Insights entity search hung indefinitely
+
+Live-tested the Data Insights tab's "By Entity" search against real production data
+(searched a genuinely busy host). The request never came back — still `pending` after
+75+ seconds with nothing on screen but a static "Loading…" (no spinner, no timeout, no
+error path), confirmed via network-request inspection rather than assumed from a slow
+screenshot.
+
+- **`/api/ueba/insights/entity/<type>/<id>` scanned an entity's entire history with no
+  time bound at all** — unlike every other UEBA view (Timeline and Risk Scoring are
+  always time-boxed), its 4 `live_logs`-derived queries (activity pattern, last-seen,
+  top source/destination IPs, related entities) ran `WHERE host = ?` (or `username = ?`)
+  across the full table. `live_logs` only carries single-column indexes on `host`/
+  `username` (confirmed in `schema.sql` / `migrate_log_search_indexes()`), so each
+  matching row needs a separate rowid lookup to read `timestamp`/`source_ip`/etc. — fine
+  for a host with a few thousand rows, but on a real deployment's busiest hosts this
+  compounds across 4 sequential queries into a multi-minute (observed: still not done
+  after 75s+) hang, with the UI giving no indication anything was wrong.
+- Bounded those 4 queries to the last 90 days (matching the existing `DASHBOARD_RANGES`
+  convention used elsewhere for the same "recent, not all-time" tradeoff) and surfaced
+  the window in the response (`window_days`) so the UI can label it honestly — the
+  Activity Pattern card header and the Top Source/Destination IPs / Related
+  Entities card titles now read "(last 90d)" instead of silently truncating history
+  the analyst would otherwise assume was complete. `top_alerts`/`risk_contributions`/
+  `admin_activity` stay unbounded — they read from `alerts`/`risk_score_events`/
+  `audit_log`, much smaller tables already curated by rule-fire or scoring logic, not
+  implicated in the hang.
+- Verified with a SQLite fixture test (a host with 3 recent + 5 rows older than 90 days:
+  activity pattern and top-IPs only count/include the 3 recent rows; an entity with zero
+  in-window activity returns empty, not an error) and a `vm`-context test of the new
+  window-label rendering (defaults to 90d when the field is absent, shows the real value
+  otherwise).
+
 ### UEBA improvement pass 1/3: process pivot link, unbounded risk-detail text
 
 Live-tested Timeline and Risk Scoring with real production data (a genuinely

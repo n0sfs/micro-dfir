@@ -1317,7 +1317,7 @@ function renderTimeOfWeek(activityPattern) {
     return `
         <div class="card bg-dark border-secondary mb-3">
             <div class="card-header py-2 small d-flex justify-content-between">
-                <span>Activity Pattern (day × hour)</span>
+                <span>Activity Pattern (day × hour, last ${activityPattern.window_days || 90}d)</span>
                 <span class="text-muted">${activityPattern.total_count} total event(s)${activityPattern.last_seen ? ` · last ${escHtml(activityPattern.last_seen)}` : ''}</span>
             </div>
             <div class="card-body py-2">
@@ -1341,12 +1341,13 @@ function loadEntityInsights(entityType, entityId) {
     fetch(`/api/ueba/insights/entity/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`)
         .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
         .then(data => {
-            let html = renderTimeOfWeek(data.activity_pattern);
+            const windowLabel = `(last ${data.window_days || 90}d)`;
+            let html = renderTimeOfWeek({...data.activity_pattern, window_days: data.window_days});
             html += renderTableHistogram('Risk Contributions', data.risk_contributions, {pointsMode: true});
             html += renderTableHistogram('Top Alerts', data.top_alerts);
-            html += renderTableHistogram(`Related ${data.related_entity_type === 'user' ? 'Users' : 'Hosts'}`, data.related_entities);
-            html += renderTableHistogram('Top Source IPs', data.top_source_ips);
-            html += renderTableHistogram('Top Destination IPs', data.top_destination_ips);
+            html += renderTableHistogram(`Related ${data.related_entity_type === 'user' ? 'Users' : 'Hosts'} ${windowLabel}`, data.related_entities);
+            html += renderTableHistogram(`Top Source IPs ${windowLabel}`, data.top_source_ips);
+            html += renderTableHistogram(`Top Destination IPs ${windowLabel}`, data.top_destination_ips);
             if (data.admin_activity) html += renderTableHistogram('Admin Activity', data.admin_activity);
             results.innerHTML = html;
         })
