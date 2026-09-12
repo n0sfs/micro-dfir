@@ -480,6 +480,52 @@ def _soar_automation_context(conn, days):
         'top_playbooks': top_playbooks,
     }
 
+# Ported from api_dashboard_readiness (app.py:11359-11411) -- a compact operational
+# health scorecard (fleet enrollment, rule enablement, backup recency, retention/
+# archiving configured) already shown on the Home dashboard's Readiness widget, but
+# never carried into a report. A snapshot as of report generation, like the Endpoint &
+# Infrastructure Health section's agent status above, not a days-window figure.
+def _appliance_health_context(conn):
+    agent_rows = conn.execute("SELECT MAX(timestamp) as last_seen FROM agent_polls GROUP BY user_agent").fetchall()
+    total_agents = len(agent_rows)
+    active_agents = 0
+    now = datetime.now()
+    for r in agent_rows:
+        if not r['last_seen']:
+            continue
+        try:
+            if (now - datetime.strptime(r['last_seen'], '%Y-%m-%d %H:%M:%S')).total_seconds() < 86400:
+                active_agents += 1
+        except (ValueError, TypeError):
+            pass
+
+    rule_counts = conn.execute(
+        "SELECT COUNT(*) as total, SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) as enabled FROM sigma_rules"
+    ).fetchone()
+
+    settings_map = {r['key']: r['value'] for r in conn.execute(
+        "SELECT key, value FROM settings WHERE key IN ('db_backup_last_run', 'log_retention_days', 'log_archive_days')"
+    ).fetchall()}
+    last_backup = settings_map.get('db_backup_last_run')
+    backup_recent = False
+    if last_backup:
+        try:
+            backup_recent = (now - datetime.strptime(last_backup, '%Y-%m-%d %H:%M:%S')).total_seconds() < 172800
+        except (ValueError, TypeError):
+            pass
+
+    assets_tracked = conn.execute("SELECT COUNT(*) as c FROM assets WHERE criticality IS NOT NULL AND criticality != ''").fetchone()['c']
+    user_count = conn.execute("SELECT COUNT(*) as c FROM users").fetchone()['c']
+
+    return {
+        'agents_active_24h': active_agents, 'agents_total': total_agents,
+        'rules_enabled': rule_counts['enabled'] or 0, 'rules_total': rule_counts['total'] or 0,
+        'last_backup': last_backup, 'backup_recent': backup_recent,
+        'retention_configured': bool(settings_map.get('log_retention_days')),
+        'archiving_configured': bool(settings_map.get('log_archive_days')),
+        'assets_tracked': assets_tracked, 'user_count': user_count,
+    }
+
 def generate_security_report(days=30):
     conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
     # Left as-is (UTC .isoformat() window, not this file's usual datetime.now() string) --
@@ -567,6 +613,7 @@ def generate_security_report(days=30):
     endpoint_health = _endpoint_health_context(conn, days)
     threat_intel = _threat_intel_context(conn, days)
     soar_automation = _soar_automation_context(conn, days)
+    appliance_health = _appliance_health_context(conn)
 
     context = {
         "date_generated": datetime.now().strftime("%B %d, %Y"),
@@ -587,6 +634,7 @@ def generate_security_report(days=30):
         "endpoint_health": endpoint_health,
         "threat_intel": threat_intel,
         "soar_automation": soar_automation,
+        "appliance_health": appliance_health,
     }
     conn.close()
     return _render_and_write('report_template.html', context, _report_filename('Security'))
