@@ -111,5 +111,24 @@
     <p>{{ endpoint_health.dns_total }} DNS quer{{ 'y' if endpoint_health.dns_total == 1 else 'ies' }} logged in the last {{ report_days }} days{% if endpoint_health.dns_ti_matches %}, including <strong>{{ endpoint_health.dns_ti_matches }}</strong> matching known threat intelligence{% else %}, none matching known threat intelligence{% endif %}.</p>
     {% else %}<p>No DNS query activity in the last {{ report_days }} days &mdash; enable Micro DFIR's DNS server under Log Pipeline &gt; DNS Query Logging to monitor this.</p>{% endif %}
 
+    <h2 class="section-title">Threat Intelligence Matches</h2>
+    {% if threat_intel.total %}
+    <p><strong>{{ threat_intel.total }}</strong> sighting{{ '' if threat_intel.total == 1 else 's' }} of a synced threat-intelligence indicator in real traffic or alerts over the last {{ report_days }} days.</p>
+    <table>
+        <thead><tr><th>Indicator</th><th>Type</th><th>Feed</th><th>Sightings</th><th>Last Seen</th></tr></thead>
+        <tbody>
+        {% for i in threat_intel.top_indicators %}
+            <tr>
+                <td>{{ i.name or i.pattern }}</td>
+                <td>{{ i.ioc_type }}</td>
+                <td>{{ i.feed_name or '—' }}</td>
+                <td>{{ i.sighting_count }}</td>
+                <td>{{ i.last_seen }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<p>No sightings of a synced threat-intelligence indicator in the last {{ report_days }} days.</p>{% endif %}
+
     {% include "_report_branding_footer.html" %}
 </body></html>
