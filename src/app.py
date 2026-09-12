@@ -10714,15 +10714,17 @@ def api_ueba_insights_entity(entity_type, entity_id):
     other_col = 'username' if entity_type == 'host' else 'host'
     result = {'entity_type': entity_type, 'entity_id': entity_id, 'related_entity_type': 'user' if other_col == 'username' else 'host'}
 
-    # live_logs on a real, busy deployment can hold well over a million rows for a single
-    # entity -- unlike every other UEBA view (Timeline and Risk Scoring are always
-    # time-boxed), this endpoint used to scan an entity's *entire* history, which was
-    # observed to hang a request for 90+ seconds against production data with no feedback
-    # beyond a static "Loading...". Bound the live_logs-derived views to a recent window.
-    # alerts/risk_score_events/audit_log are much smaller, already-curated tables (filtered
-    # down by rule-fire or scoring logic already) so they're left unbounded like before.
+    # Every table here can hold an entity's *entire* history with no bound -- unlike every
+    # other UEBA view (Timeline and Risk Scoring's own detail query, api_ueba_risk_score_
+    # detail, both always time-box by cfg['window_days']), this endpoint scanned all of it.
+    # On a real, long-lived deployment that's not just live_logs: an entity scored
+    # repeatedly over months can rack up hundreds of thousands of risk_score_events rows
+    # too (bounding only the live_logs queries here first was not enough on its own --
+    # confirmed live, the request still hung 20s+ afterwards until this was also bounded).
+    # Bound every query to the same recent window for one consistent "(last 90d)" label.
     window_days = 90
     since_clause = f"timestamp >= datetime('now', '-{window_days} days')"
+    computed_since_clause = f"computed_at >= datetime('now', '-{window_days} days')"
     result['window_days'] = window_days
 
     # Activity pattern: day-of-week (0=Sunday) x hour-of-day event counts.
@@ -10747,12 +10749,12 @@ def api_ueba_insights_entity(entity_type, entity_id):
 
     result['top_alerts'] = _histogram(db,
         f"SELECT rule_name as value, severity, COUNT(*) as count, MAX(timestamp) as last_seen FROM alerts "
-        f"WHERE {col} = ? GROUP BY rule_name, severity ORDER BY count DESC LIMIT 15",
+        f"WHERE {col} = ? AND {since_clause} GROUP BY rule_name, severity ORDER BY count DESC LIMIT 15",
         (entity_id,))
 
     result['risk_contributions'] = _histogram(db,
-        "SELECT indicator as value, SUM(points) as points, COUNT(*) as count, MAX(computed_at) as last_seen FROM risk_score_events "
-        "WHERE entity_type = ? AND entity_id = ? GROUP BY indicator ORDER BY points DESC",
+        f"SELECT indicator as value, SUM(points) as points, COUNT(*) as count, MAX(computed_at) as last_seen FROM risk_score_events "
+        f"WHERE entity_type = ? AND entity_id = ? AND {computed_since_clause} GROUP BY indicator ORDER BY points DESC",
         (entity_type, entity_id))
 
     result['related_entities'] = _histogram(db,
@@ -10763,8 +10765,8 @@ def api_ueba_insights_entity(entity_type, entity_id):
 
     if entity_type == 'user':
         result['admin_activity'] = _histogram(db,
-            "SELECT action as value, COUNT(*) as count, MAX(timestamp) as last_seen FROM audit_log "
-            "WHERE username = ? GROUP BY action ORDER BY count DESC",
+            f"SELECT action as value, COUNT(*) as count, MAX(timestamp) as last_seen FROM audit_log "
+            f"WHERE username = ? AND {since_clause} GROUP BY action ORDER BY count DESC",
             (entity_id,))
 
     return jsonify(result)

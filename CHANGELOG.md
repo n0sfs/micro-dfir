@@ -18,30 +18,30 @@ Live-tested the Data Insights tab's "By Entity" search against real production d
 error path), confirmed via network-request inspection rather than assumed from a slow
 screenshot.
 
-- **`/api/ueba/insights/entity/<type>/<id>` scanned an entity's entire history with no
-  time bound at all** — unlike every other UEBA view (Timeline and Risk Scoring are
-  always time-boxed), its 4 `live_logs`-derived queries (activity pattern, last-seen,
-  top source/destination IPs, related entities) ran `WHERE host = ?` (or `username = ?`)
-  across the full table. `live_logs` only carries single-column indexes on `host`/
-  `username` (confirmed in `schema.sql` / `migrate_log_search_indexes()`), so each
-  matching row needs a separate rowid lookup to read `timestamp`/`source_ip`/etc. — fine
-  for a host with a few thousand rows, but on a real deployment's busiest hosts this
-  compounds across 4 sequential queries into a multi-minute (observed: still not done
-  after 75s+) hang, with the UI giving no indication anything was wrong.
-- Bounded those 4 queries to the last 90 days (matching the existing `DASHBOARD_RANGES`
-  convention used elsewhere for the same "recent, not all-time" tradeoff) and surfaced
-  the window in the response (`window_days`) so the UI can label it honestly — the
-  Activity Pattern card header and the Top Source/Destination IPs / Related
-  Entities card titles now read "(last 90d)" instead of silently truncating history
-  the analyst would otherwise assume was complete. `top_alerts`/`risk_contributions`/
-  `admin_activity` stay unbounded — they read from `alerts`/`risk_score_events`/
-  `audit_log`, much smaller tables already curated by rule-fire or scoring logic, not
-  implicated in the hang.
-- Verified with a SQLite fixture test (a host with 3 recent + 5 rows older than 90 days:
-  activity pattern and top-IPs only count/include the 3 recent rows; an entity with zero
-  in-window activity returns empty, not an error) and a `vm`-context test of the new
+- **`/api/ueba/insights/entity/<type>/<id>` scanned an entity's entire history across
+  every table it touches, with no time bound at all** — unlike every other UEBA view
+  (Timeline, and Risk Scoring's own `api_ueba_risk_score_detail`, both always time-box by
+  `cfg['window_days']`), this endpoint's 6 queries ran unbounded. First fix attempt only
+  bounded the 4 `live_logs`-derived ones (activity pattern, last-seen, top source/
+  destination IPs, related entities — `live_logs` only carries single-column indexes on
+  `host`/`username`, so each matching row needs a separate rowid lookup, which compounds
+  badly on a busy host's full history); live-testing that fix against the same real host
+  still hung 20s+, because `top_alerts` (`alerts`) and especially `risk_contributions`
+  (`risk_score_events`) were *also* unbounded, and an entity scored repeatedly over
+  months can rack up hundreds of thousands of `risk_score_events` rows on its own — this
+  turned out to be the larger of the two costs, not `live_logs`.
+- All 6 queries are now bounded to the last 90 days, and the window is surfaced in the
+  response (`window_days`) so the UI labels every affected card honestly — "(last 90d)"
+  on Activity Pattern, Top Source/Destination IPs, Related Entities, Top Alerts, Risk
+  Contributions, and Admin Activity — instead of silently truncating history the analyst
+  would otherwise assume was complete.
+- Verified with a SQLite fixture test covering all 6 queries (a host with recent rows
+  plus rows/events well outside the 90-day window in `live_logs`, `risk_score_events`,
+  and `alerts`: each query includes only the in-window data; an entity with zero
+  in-window activity returns empty, not an error) and a `vm`-context test of the
   window-label rendering (defaults to 90d when the field is absent, shows the real value
-  otherwise).
+  otherwise). Caught the incompleteness of the first fix by re-testing live against
+  production after deploying it, rather than assuming a plausible-looking fix was done.
 
 ### UEBA improvement pass 1/3: process pivot link, unbounded risk-detail text
 

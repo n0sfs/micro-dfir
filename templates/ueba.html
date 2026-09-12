@@ -1343,12 +1343,12 @@ function loadEntityInsights(entityType, entityId) {
         .then(data => {
             const windowLabel = `(last ${data.window_days || 90}d)`;
             let html = renderTimeOfWeek({...data.activity_pattern, window_days: data.window_days});
-            html += renderTableHistogram('Risk Contributions', data.risk_contributions, {pointsMode: true});
-            html += renderTableHistogram('Top Alerts', data.top_alerts);
+            html += renderTableHistogram(`Risk Contributions ${windowLabel}`, data.risk_contributions, {pointsMode: true});
+            html += renderTableHistogram(`Top Alerts ${windowLabel}`, data.top_alerts);
             html += renderTableHistogram(`Related ${data.related_entity_type === 'user' ? 'Users' : 'Hosts'} ${windowLabel}`, data.related_entities);
             html += renderTableHistogram(`Top Source IPs ${windowLabel}`, data.top_source_ips);
             html += renderTableHistogram(`Top Destination IPs ${windowLabel}`, data.top_destination_ips);
-            if (data.admin_activity) html += renderTableHistogram('Admin Activity', data.admin_activity);
+            if (data.admin_activity) html += renderTableHistogram(`Admin Activity ${windowLabel}`, data.admin_activity);
             results.innerHTML = html;
         })
         .catch(err => {
