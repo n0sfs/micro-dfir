@@ -10714,10 +10714,21 @@ def api_ueba_insights_entity(entity_type, entity_id):
     other_col = 'username' if entity_type == 'host' else 'host'
     result = {'entity_type': entity_type, 'entity_id': entity_id, 'related_entity_type': 'user' if other_col == 'username' else 'host'}
 
+    # live_logs on a real, busy deployment can hold well over a million rows for a single
+    # entity -- unlike every other UEBA view (Timeline and Risk Scoring are always
+    # time-boxed), this endpoint used to scan an entity's *entire* history, which was
+    # observed to hang a request for 90+ seconds against production data with no feedback
+    # beyond a static "Loading...". Bound the live_logs-derived views to a recent window.
+    # alerts/risk_score_events/audit_log are much smaller, already-curated tables (filtered
+    # down by rule-fire or scoring logic already) so they're left unbounded like before.
+    window_days = 90
+    since_clause = f"timestamp >= datetime('now', '-{window_days} days')"
+    result['window_days'] = window_days
+
     # Activity pattern: day-of-week (0=Sunday) x hour-of-day event counts.
     tow_rows = db.execute(
         f"SELECT CAST(strftime('%w', timestamp) AS INTEGER) as dow, CAST(strftime('%H', timestamp) AS INTEGER) as hour, COUNT(*) as count "
-        f"FROM live_logs WHERE {col} = ? GROUP BY dow, hour",
+        f"FROM live_logs WHERE {col} = ? AND {since_clause} GROUP BY dow, hour",
         (entity_id,)
     ).fetchall()
     grid = [[0] * 24 for _ in range(7)]
@@ -10725,13 +10736,13 @@ def api_ueba_insights_entity(entity_type, entity_id):
     for r in tow_rows:
         grid[r['dow']][r['hour']] = r['count']
         total_events += r['count']
-    last_seen = db.execute(f"SELECT MAX(timestamp) as t FROM live_logs WHERE {col} = ?", (entity_id,)).fetchone()
+    last_seen = db.execute(f"SELECT MAX(timestamp) as t FROM live_logs WHERE {col} = ? AND {since_clause}", (entity_id,)).fetchone()
     result['activity_pattern'] = {'grid': grid, 'total_count': total_events, 'last_seen': last_seen['t'] if last_seen else None}
 
     for field, key in (('source_ip', 'top_source_ips'), ('destination_ip', 'top_destination_ips')):
         result[key] = _histogram(db,
             f"SELECT {field} as value, COUNT(*) as count, MAX(timestamp) as last_seen FROM live_logs "
-            f"WHERE {col} = ? AND {field} IS NOT NULL AND {field} != '' GROUP BY {field} ORDER BY count DESC LIMIT 15",
+            f"WHERE {col} = ? AND {since_clause} AND {field} IS NOT NULL AND {field} != '' GROUP BY {field} ORDER BY count DESC LIMIT 15",
             (entity_id,))
 
     result['top_alerts'] = _histogram(db,
@@ -10746,7 +10757,7 @@ def api_ueba_insights_entity(entity_type, entity_id):
 
     result['related_entities'] = _histogram(db,
         f"SELECT {other_col} as value, COUNT(*) as count, MAX(timestamp) as last_seen FROM live_logs "
-        f"WHERE {col} = ? AND {other_col} IS NOT NULL AND {other_col} NOT IN ('', '-', 'UNKNOWN') "
+        f"WHERE {col} = ? AND {since_clause} AND {other_col} IS NOT NULL AND {other_col} NOT IN ('', '-', 'UNKNOWN') "
         f"GROUP BY {other_col} ORDER BY count DESC LIMIT 15",
         (entity_id,))
 
