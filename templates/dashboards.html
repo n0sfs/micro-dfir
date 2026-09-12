@@ -310,7 +310,7 @@ function baseHBarOptions(c) {
         indexAxis: 'y', responsive: true, maintainAspectRatio: false,
         plugins: { legend: { display: false } },
         scales: {
-            x: { grid: { color: c.grid }, ticks: { color: c.text }, beginAtZero: true },
+            x: { grid: { color: c.grid }, ticks: { color: c.text, precision: 0 }, beginAtZero: true },
             y: { grid: { display: false }, ticks: { color: c.text, autoSkip: false } },
         },
     };
