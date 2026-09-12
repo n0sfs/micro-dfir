@@ -23,7 +23,11 @@ name/footer/accent-color/logo actually gets applied to. Corrected the descriptio
 list all 6. Schedule tab reviewed and confirmed correct (all cadences default Off, the
 email-recipients field held only its placeholder text, not real data) — left
 unexercised since toggling it on would need a configured SMTP server to verify
-meaningfully.
+meaningfully. Confirmed live: the Branding tab now lists all 6 report types. Note: the
+test Compliance/PCI DSS report generated during this pass was left in place —
+`report_history` has no delete route (reports are treated as a permanent audit trail,
+same as every other report on this page), so removing it would mean a direct DB/file
+edit on production outside `update.sh`, which is out of scope for a UX pass.
 ### Home (Dashboards) pass, continued: fractional axis ticks on small-integer bar charts
 
 Continuing the Home/Dashboards pass below the fold. `baseHBarOptions()` — the shared
