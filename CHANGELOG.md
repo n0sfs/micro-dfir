@@ -8,6 +8,34 @@ a new feature, a real architectural decision, an incident and its fix. Routine p
 fixes don't need their own line; group them into the feature they support. Newest first.
 Full commit-level detail is always available via `git log`.
 
+## 2026-09-12
+
+### UEBA improvement pass 3/3: Clone Rule on Scoring & Rules
+
+Live-tested Model Tuning (Baseline Model Parameters, Entity Baselines table, Exclusions)
+and Scoring & Rules (Dynamic Scoring, the anomaly-rules table). Model Tuning's
+"Exclude" button prefill + scroll-into-view already works correctly (confirmed after
+initially misreading a mid-animation screenshot as a bug — it just needed more time for
+the `smooth` scroll to finish). Toggle rows whose numeric/select fields stay fully
+interactive regardless of the toggle's own on/off state (Beaconing, Sequence Chain,
+Priority, Autocase) were investigated but left alone — no other toggle+field row
+anywhere in this codebase disables its siblings on toggle-off either, so this isn't a
+regression from an established pattern, just a possible future enhancement.
+
+- **Building one of the rule set's many near-duplicate rules meant re-entering the whole
+  condition set from scratch.** The seeded 15 rules already include 4 "Lateral
+  Movement" variants (Critical/High × Host/User) and several other Host/User pairs that
+  differ only by entity type or a severity keyword — a real, observed pattern, not a
+  hypothetical one. Added a **Clone** button (copy icon, next to Edit/Delete) that
+  pre-fills the Add Rule modal from an existing rule with a `(copy)`-suffixed name,
+  saving as a new rule (not overwriting the original) — cuts building the next variant
+  down to editing 2-3 fields instead of re-entering every condition. Verified with a
+  `vm`-context test (clone passes `id: null` + the suffixed name to the shared modal
+  opener with every other field preserved; cloning an unknown id no-ops rather than
+  throwing) and live on production (cloned "Critical Alert with Internal Lateral
+  Movement (Host)", edited the entity type to build the User variant, saved
+  successfully as a new 16th rule without touching the original).
+
 ## 2026-09-11
 
 ### UEBA improvement pass 2/3: Data Insights entity search hung indefinitely

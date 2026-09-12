@@ -1793,7 +1793,8 @@ function arRenderTable(rows) {
             ? `<input type="checkbox" class="form-check-input" ${r.enabled ? 'checked' : ''} onchange="toggleAnomalyRule(${r.id}, this.checked)">`
             : (r.enabled ? '<span class="badge bg-success">On</span>' : '<span class="badge bg-secondary">Off</span>')}</td>
         <td class="text-nowrap">${IS_ADMIN ? `
-            <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="openAnomalyRuleModalById(${r.id})"><i class="fa-solid fa-pen"></i></button>
+            <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" title="Edit rule" onclick="openAnomalyRuleModalById(${r.id})"><i class="fa-solid fa-pen"></i></button>
+            <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" title="Clone rule" onclick="cloneAnomalyRuleById(${r.id})"><i class="fa-solid fa-copy"></i></button>
             <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete rule" onclick="deleteAnomalyRule(${r.id})"><i class="fa-solid fa-trash"></i></button>
         ` : ''}</td>
     </tr>`).join('');
@@ -1819,6 +1820,18 @@ function loadAnomalyRules() {
 // onclick attribute would be an XSS vector the moment either field contained a quote.
 function openAnomalyRuleModalById(id) {
     openAnomalyRuleModal(anomalyRulesData.find(r => r.id === id));
+}
+
+// Several of the seeded rules only differ from each other by entity type or severity
+// tier (e.g. the 4 "Lateral Movement" Critical/High x Host/User variants) -- Clone lets
+// an admin build the next one by editing 2-3 fields instead of re-entering the whole
+// condition set. Passing id: null makes openAnomalyRuleModal set arEditingId to null,
+// so Save creates a new rule (POST) instead of updating the one that was cloned.
+function cloneAnomalyRuleById(id) {
+    const rule = anomalyRulesData.find(r => r.id === id);
+    if (!rule) return;
+    openAnomalyRuleModal({...rule, id: null, name: `${rule.name} (copy)`});
+    document.getElementById('anomalyRuleModalTitle').innerHTML = '<i class="fa-solid fa-copy me-2"></i>Clone Rule';
 }
 
 function openAnomalyRuleModal(rule) {
