@@ -62,7 +62,12 @@ a selection first, a dry-run correctly reports would-fire/would-not-fire with th
 skip reason, Run Now names the selected playbook in its confirm dialog and does nothing
 if declined, a real run executes against `activeCaseId` (not a re-picked case) and
 refreshes to show the result, and a `pending_approval` run status is styled distinctly
-from a plain success.
+from a plain success. Live-verified on production against a disposable test case:
+"Test" against the real (only existing) "New Case Checklist" playbook correctly showed
+"Would fire on trigger 'case_created'"; "Run Now" (confirmed) really executed it,
+adding the real "Generic Investigation" template's 5 tasks and logging a
+`playbook_run` Timeline event tagged "(run manually)" to distinguish it from the same
+playbook's earlier automatic case_created run — test case deleted afterward.
 
 ### Cross-screen triage friction, round 3 (3/3): bulk-add in the case's own Related Items tab
 
@@ -90,6 +95,18 @@ shows/updates the bar and count, a mixed-type bulk add (alert + ueba_event + fim
 fans out one POST per item and refreshes exactly once, a `"ueba_event:42"` selection
 key splits correctly on the first colon (not the type's own underscore), and a
 declined confirm or an empty selection makes zero network calls.
+
+**Caught live, fixed before shipping**: the bulk bar's initial class list included
+Bootstrap's `d-flex`, whose `display:flex !important` permanently overrode the plain
+inline `display:none`/`flex` toggle `toggleRelatedItemSelect()` sets at runtime — the
+bar rendered visibly ("0 selected") even with nothing checked. The exact same class of
+bug dashboard.html's own `bulkTriageBar` already had to avoid, just missed here since
+a `vm`-context test has no real CSS cascade to catch a `!important` conflict. Removed
+`d-flex` from the class list; live-verified afterward on production with a real
+disposable test case against real alert candidates on `WORKSTATION-A`: the bar now
+starts hidden, correctly shows "1 selected" / "2 selected" as real checkboxes are
+checked, and a real 2-item bulk add correctly linked both selected alerts — test case
+deleted afterward.
 
 ### Cross-screen triage friction, round 2 (1/4): EDR quick actions in the alert triage modal
 
