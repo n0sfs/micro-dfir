@@ -302,6 +302,10 @@
         <button class="btn btn-outline-danger btn-sm" onclick="bulkUpdateAlerts('false_positive')"><i class="fa-solid fa-ban me-1"></i>Mark False Positive</button>
         <button class="btn btn-outline-success btn-sm" onclick="bulkUpdateAlerts('resolved')"><i class="fa-solid fa-check me-1"></i>Mark Resolved</button>
         <button class="btn btn-outline-warning btn-sm" onclick="bulkUpdateAlerts('investigating')"><i class="fa-solid fa-magnifying-glass me-1"></i>Mark Investigating</button>
+        <select id="bulkAddToCaseSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:200px;">
+            <option value="">Add to case…</option>
+        </select>
+        <button class="btn btn-outline-primary btn-sm" onclick="bulkAddToCase()"><i class="fa-solid fa-folder-plus me-1"></i>Add to Case</button>
         <button class="btn btn-outline-secondary btn-sm" onclick="clearBulkSelection()">Clear</button>
     </div>
 </div>
@@ -2231,6 +2235,8 @@ function toggleAllBulkSelect(checked) {
 
 function clearBulkSelection() {
     bulkSelectedAlertIds.clear();
+    const select = document.getElementById('bulkAddToCaseSelect');
+    if (select) select.value = '';
     renderLogsTableRows(currentLogs);
 }
 
@@ -2241,6 +2247,85 @@ function renderBulkTriageBar() {
     bar.style.display = n > 0 ? 'flex' : 'none';
     const countEl = document.getElementById('bulkTriageCount');
     if (countEl) countEl.textContent = n;
+    if (n > 0) { populateBulkAddToCaseSelect(); }
+}
+
+// Same memoized-session-cache idea as loadAssetsCached()/loadTuningCached() -- cases
+// rarely change mid-triage-session, and re-fetching on every single checkbox click
+// (renderBulkTriageBar runs on each toggle) would be wasteful. Reset after this bar
+// itself creates a new case, so that case shows up next time the selector repopulates.
+let _openCasesCachePromise = null;
+function loadOpenCasesCached() {
+    if (!_openCasesCachePromise) {
+        _openCasesCachePromise = fetch('/api/cases').then(r => r.ok ? r.json() : []).catch(() => [])
+            .then(cases => (cases || []).filter(c => c.status === 'open'));
+    }
+    return _openCasesCachePromise;
+}
+
+// Populates the select's options exactly once per "bar becomes visible" -- a `data-loaded`
+// guard (not just checking option count) survives an analyst re-ticking checkboxes
+// without wiping out a case they'd already picked from this same dropdown mid-selection.
+async function populateBulkAddToCaseSelect() {
+    const select = document.getElementById('bulkAddToCaseSelect');
+    if (!select || select.dataset.loaded === '1') return;
+    select.dataset.loaded = '1';
+    const cases = await loadOpenCasesCached();
+    select.innerHTML = `<option value="">Add to case…</option>` +
+        cases.map(c => `<option value="${c.id}">${escHtml(c.title)}</option>`).join('') +
+        `<option value="__new__">+ New Case</option>`;
+}
+
+// Same Title-Case -> lowercase mapping caseSeverityFromAlert() already does for a
+// single-alert escalation, extended to "the worst of everything selected" -- a batch of
+// mixed-severity alerts shouldn't undersell itself by defaulting a brand-new case to
+// the schema's plain 'medium' just because severity picking got ambiguous.
+const CASE_SEVERITY_RANK = { critical: 4, high: 3, medium: 2, low: 1 };
+function highestCaseSeverityAmong(alertIds) {
+    let best = null, bestRank = 0;
+    for (const log of currentLogs) {
+        if (log.type !== 'alert' || !alertIds.includes(log.id)) continue;
+        const mapped = caseSeverityFromAlert(log.severity);
+        const rank = mapped ? CASE_SEVERITY_RANK[mapped] : 0;
+        if (rank > bestRank) { bestRank = rank; best = mapped; }
+    }
+    return best;
+}
+
+// Reuses the existing single-item /api/cases/<id>/items route (no dedicated bulk
+// endpoint) -- same fan-out-with-Promise.all pattern bulkUpdateAlerts() already uses,
+// since each add is independent and the route's UNIQUE(case_id, item_type, item_id)
+// check already makes re-adding an already-linked alert a safe no-op-with-error rather
+// than a duplicate.
+async function bulkAddToCase() {
+    const select = document.getElementById('bulkAddToCaseSelect');
+    let caseId = select.value;
+    if (!caseId) { toast('Pick a case first.', 'warning'); return; }
+    const ids = Array.from(bulkSelectedAlertIds);
+    if (!ids.length) return;
+    if (caseId === '__new__') {
+        const title = await promptDialog('New case title:', '', {title: 'New Case', confirmLabel: 'Create'});
+        if (!title || !title.trim()) return;
+        const payload = {title: title.trim()};
+        const mappedSeverity = highestCaseSeverityAmong(ids);
+        if (mappedSeverity) payload.severity = mappedSeverity;
+        const createResp = await fetch('/api/cases', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+        const createData = await createResp.json();
+        if (!createResp.ok) { toast(createData.error || 'Failed to create case.', 'danger'); return; }
+        caseId = createData.id;
+        _openCasesCachePromise = null;
+    }
+    if (!(await confirmDialog(`Add ${ids.length} alert(s) to this case?`, {title: 'Bulk add to case', confirmLabel: 'Add'}))) return;
+    const results = await Promise.all(ids.map(id =>
+        fetch(`/api/cases/${caseId}/items`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({item_type: 'alert', item_id: id})
+        }).then(r => ({id, ok: r.ok}))
+    ));
+    const succeeded = results.filter(r => r.ok).length;
+    const failed = results.length - succeeded;
+    if (failed) toast(`${succeeded} added, ${failed} failed (already in this case, or an error).`, 'warning');
+    else toast(`${succeeded} alert(s) added to case.`, 'success');
+    clearBulkSelection();
 }
 
 // Reuses the existing single-alert PUT route (no dedicated bulk endpoint) -- each alert

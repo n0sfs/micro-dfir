@@ -123,6 +123,31 @@ threshold): the triage modal correctly showed the Noisy badge and count, and cli
 "Tune This Rule" opened the real Detection Tuning modal for that exact rule with no
 stacked-modal glitches.
 
+### Analyst triage/investigation workflow improvements (5/7): bulk "add to case"
+
+Fifth fix from the same walkthrough: the alert list's bulk triage bar already supported
+Mark False Positive/Resolved/Investigating across a multi-select, but a case's Related
+Items tab only ever linked one alert at a time — even browsing "20 of 319" untriaged
+candidates for the same incident. Escalating a batch of related alerts (e.g. every
+occurrence of the same Noisy rule an analyst just decided to investigate together)
+meant opening each one's own triage modal individually just to link it.
+
+Added an "Add to Case…" picker + button to the existing bulk triage bar
+(`dashboard.html`), reusing the single-item `/api/cases/<id>/items` route with the same
+fan-out-via-`Promise.all` pattern `bulkUpdateAlerts()` already uses — no new backend
+route. The case picker lazily loads open cases once per session (memoized like
+`loadAssetsCached()`/`loadTuningCached()`), same `+ New Case` flow as the single-item
+Add-to-Case control. For a brand-new case, extended item 1's severity-inheritance
+precedent to pick the *highest* severity among every alert in the batch
+(`highestCaseSeverityAmong()`) rather than defaulting to Medium just because
+severity-picking got ambiguous with multiple alerts involved.
+
+Verified with a JS vm-context test (8 cases): highest-severity selection logic, the
+cases picker loading exactly once despite repeated calls, a required-case guard, the
+existing-case fan-out clearing selection on success, new-case creation using the
+batch's worst severity, a cancelled prompt making zero network calls, and Clear
+resetting both the checkbox selection and the picker's stale value.
+
 ## 2026-09-12
 
 ### Report content improvements (1/7): SOC effectiveness metrics in the Security Summary
