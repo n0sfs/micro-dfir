@@ -37,7 +37,12 @@ non-offline agent, disables both for an Offline one, renders nothing for an unkn
 host or a user without permission, Isolate Host uses the exact cases.html confirm
 wording, a declined confirm or cancelled PID prompt makes zero network calls, Kill
 Process validates the PID is numeric and trims whitespace, and a server-side queueing
-failure surfaces its real error message.
+failure surfaces its real error message. Live-verified on production against the real
+`WORKSTATION-A` alert: the panel rendered correctly with its real "Idle" agent
+status, and clicking both real buttons triggered the right confirm/prompt dialog with
+the right host — deliberately declining/cancelling each time (never actually isolating
+or killing anything on the user's real active laptop) and confirming via
+`agent_commands`'s latest row id that nothing was queued either time.
 
 ### Analyst triage/investigation workflow improvements (1/7): severity inheritance on escalation
 
