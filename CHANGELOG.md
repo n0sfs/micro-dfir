@@ -37,6 +37,60 @@ Isolate Host/Kill Process buttons, and clicking Isolate Host triggered the real 
 dialog — declined, confirmed via `agent_commands`'s unchanged latest row id that
 nothing was queued against the real host.
 
+### Cross-screen triage friction, round 3 (2/3): "Run Playbook" directly from a case
+
+Second finding from the same review: a working manual "Run Now" playbook-execution
+control already existed, but only on the standalone SOAR page, where it asks which
+*case* to run against via a dropdown. An analyst already looking at a case who wants to
+fire an existing playbook against it (e.g. "run the containment playbook now") had to
+leave the case, go to SOAR, find the playbook's row, then re-select the exact case they
+just left.
+
+Added a "Run Playbook" card to a case's Timeline tab (`cases.html`) — the natural
+pairing, since `playbook_run` events already surface there — with a playbook picker and
+the same Test (dry-run, no changes) / Run Now (real, confirmed) split soar.html's own
+control offers, reusing the identical `POST /api/playbooks/<id>/dry-run` and
+`/run` endpoints, just scoped to `activeCaseId` instead of a re-picked one. Gated by
+the same `soar.playbooks.manage` permission those endpoints already require
+server-side (and soar.html's own control already requires client-side), so this never
+shows to someone who'd just get a 403. A successful "Run Now" refreshes the case (same
+convention every other case mutation here already uses) to show the new Timeline entry.
+
+Verified with a JS vm-context test (8 cases): the card is hidden (and fetches nothing)
+without permission, populates real playbooks with disabled ones labeled, Test requires
+a selection first, a dry-run correctly reports would-fire/would-not-fire with the real
+skip reason, Run Now names the selected playbook in its confirm dialog and does nothing
+if declined, a real run executes against `activeCaseId` (not a re-picked case) and
+refreshes to show the result, and a `pending_approval` run status is styled distinctly
+from a plain success.
+
+### Cross-screen triage friction, round 3 (3/3): bulk-add in the case's own Related Items tab
+
+Third finding, and the same one flagged (but not actually fixed for this specific
+screen) back in round 1 item 5: a case's Related Items tab surfaces other alerts/UEBA
+anomalies/FIM events on the case's own hosts that aren't linked yet, capped to 20 rows
+per category with a "(showing X of Y)" note — but still only a single "+" button per
+row. Round 1's fix only added bulk-select to the SIEM alert list's own toolbar, a
+different screen entirely. Verified live: real case #8 currently shows "20 of 676"
+alert candidates and 6,041 UEBA anomaly candidates.
+
+Added a checkbox to each `relatedItemRow` (alongside its existing single-item Add
+button, not replacing it) plus a "Add Selected to Case" bar that only appears once
+something's checked. Reuses the same `Promise.all` fan-out pattern the SIEM bulk
+toolbar's `bulkAddToCase()` already uses, POSTing to the same generic
+`/api/cases/<id>/items` route — but with one `openCaseDetail()` refresh at the end
+instead of `addRelatedItem()`'s own per-row full-case-reload, which is what actually
+makes bulk-adding N items faster than clicking Add N times rather than just more
+convenient.
+
+Verified with a JS vm-context test (7 cases): each row keeps its existing single-add
+button and gains a working checkbox, a fresh render shows the real candidate scale and
+starts with the bulk bar hidden/selection cleared, checking/unchecking rows correctly
+shows/updates the bar and count, a mixed-type bulk add (alert + ueba_event + fim_event)
+fans out one POST per item and refreshes exactly once, a `"ueba_event:42"` selection
+key splits correctly on the first colon (not the type's own underscore), and a
+declined confirm or an empty selection makes zero network calls.
+
 ### Cross-screen triage friction, round 2 (1/4): EDR quick actions in the alert triage modal
 
 Asked to run the alert/case triage workflow through again looking for anything missed,

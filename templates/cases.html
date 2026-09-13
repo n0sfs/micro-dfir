@@ -368,6 +368,10 @@
 <script>
 const CAN_DELETE_CASES = hasPermission('cases.delete');
 const CAN_EDR_RESPOND = hasPermission('edr.command.basic');
+// Same permission soar.html's own Test/Run Now playbook controls already require --
+// matches server-side (api_playbook_run/-dry-run both require this too), so this
+// control is never shown to someone who'd just get a 403 clicking it.
+const CAN_MANAGE_PLAYBOOKS = hasPermission('soar.playbooks.manage');
 const CURRENT_USERNAME = {{ current_user.username|tojson }};
 let allCases = [];
 let allQueues = [];
@@ -790,6 +794,73 @@ function initEdrResponseCard() {
     if (!CAN_EDR_RESPOND) { card.style.display = 'none'; return; }
     card.style.display = '';
     renderEdrResponseActionSelect();
+}
+
+// Memoized per case-page-load (like loadKnownAgents() above) -- the playbook catalog
+// doesn't change mid-session, and this can be populated on every case open regardless
+// of which tab an analyst lands on first.
+let _casePlaybooksCache = null;
+function loadCasePlaybooksCached() {
+    if (!_casePlaybooksCache) {
+        _casePlaybooksCache = fetch('/api/playbooks').then(r => r.ok ? r.json() : []).catch(() => []);
+    }
+    return _casePlaybooksCache;
+}
+
+// Previously, firing an existing playbook against a case an analyst was already
+// looking at meant leaving for the standalone SOAR page and re-picking that same case
+// from a dropdown there. This reuses soar.html's own Test (dry-run, no changes) / Run
+// Now (real) endpoints, scoped to activeCaseId instead of a re-picked one -- same
+// permission floor (soar.playbooks.manage) as that page's own controls.
+async function initCaseRunPlaybookCard() {
+    const card = document.getElementById('caseRunPlaybookCard');
+    if (!card) return;
+    if (!CAN_MANAGE_PLAYBOOKS) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    const playbooks = await loadCasePlaybooksCached();
+    const select = document.getElementById('caseRunPlaybookSelect');
+    if (!select) return;
+    select.innerHTML = '<option value="">Select a playbook…</option>' +
+        (playbooks || []).map(p => `<option value="${p.id}">${escHtml(p.name)}${p.enabled ? '' : ' (disabled)'}</option>`).join('');
+    document.getElementById('caseRunPlaybookResult').innerHTML = '';
+}
+
+async function testCasePlaybook() {
+    const pid = document.getElementById('caseRunPlaybookSelect').value;
+    const resultEl = document.getElementById('caseRunPlaybookResult');
+    if (!pid) { resultEl.innerHTML = '<span class="text-danger">Select a playbook first.</span>'; return; }
+    resultEl.innerHTML = '<span class="text-muted"><i class="fa-solid fa-spinner fa-spin me-1"></i>Testing&hellip;</span>';
+    fetch(`/api/playbooks/${pid}/dry-run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ case_id: activeCaseId }) })
+        .then(r => r.json().then(data => ({ ok: r.ok, data })))
+        .then(({ ok, data }) => {
+            if (!ok) { resultEl.innerHTML = `<span class="text-danger">${escHtml(data.error || 'Test failed.')}</span>`; return; }
+            resultEl.innerHTML = data.would_fire
+                ? `<div class="alert alert-success py-2 px-2 mb-0 small"><i class="fa-solid fa-check me-1"></i>Would fire on trigger "${escHtml(data.trigger_event)}"</div>`
+                : `<div class="alert alert-secondary py-2 px-2 mb-0 small"><i class="fa-solid fa-circle-xmark me-1"></i>Would NOT fire — ${(data.skip_reasons || []).map(escHtml).join('; ')}</div>`;
+        }).catch(err => { resultEl.innerHTML = `<span class="text-danger">Error: ${err}</span>`; });
+}
+
+async function runCasePlaybookNow() {
+    const select = document.getElementById('caseRunPlaybookSelect');
+    const pid = select.value;
+    const resultEl = document.getElementById('caseRunPlaybookResult');
+    if (!pid) { resultEl.innerHTML = '<span class="text-danger">Select a playbook first.</span>'; return; }
+    const name = (select.options[select.selectedIndex] || {}).text || `playbook #${pid}`;
+    if (!(await confirmDialog(`Run "${name}" against this case right now? This executes its actions for real.`, { title: 'Run playbook now', danger: true, confirmLabel: 'Run Now' }))) return;
+    resultEl.innerHTML = '<span class="text-muted"><i class="fa-solid fa-spinner fa-spin me-1"></i>Running&hellip;</span>';
+    fetch(`/api/playbooks/${pid}/run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ case_id: activeCaseId }) })
+        .then(r => r.json().then(data => ({ ok: r.ok, data })))
+        .then(({ ok, data }) => {
+            if (!ok) { resultEl.innerHTML = `<span class="text-danger">${escHtml(data.error || 'Run failed.')}</span>`; return; }
+            const cls = data.run_status === 'success' ? 'alert-success' : (data.run_status === 'pending_approval' ? 'alert-warning' : 'alert-secondary');
+            const icon = data.run_status === 'success' ? 'fa-check' : (data.run_status === 'pending_approval' ? 'fa-hourglass-half' : 'fa-triangle-exclamation');
+            resultEl.innerHTML = `<div class="alert ${cls} py-2 px-2 mb-0 small"><i class="fa-solid ${icon} me-1"></i>Ran — ${escHtml(data.detail)}</div>`;
+            toast('Playbook run complete.', 'success');
+            // Same full-refresh-after-mutation convention every other case action here
+            // uses (addCaseNote, addCaseTask, etc.) -- picks up the new playbook_run
+            // Timeline entry and any case-field changes the playbook's actions made.
+            openCaseDetail(activeCaseId);
+        }).catch(err => { resultEl.innerHTML = `<span class="text-danger">Error: ${err}</span>`; });
 }
 
 function edrResponseSelectedOS() {
@@ -1318,6 +1389,11 @@ function itemSummaryLine(item) {
 // existing Items card already posts to.
 const RELATED_ITEM_LABELS = { alert: 'Alert', ueba_event: 'UEBA Anomaly', fim_event: 'FIM/EDR Event' };
 
+// Reset on every renderRelatedItems() call (each load fully replaces relatedItemsBody,
+// so any stale selection from a previous load/tab-switch would otherwise point at rows
+// that no longer exist).
+let _relatedItemsSelected = new Set();
+
 function loadRelatedItems(cid) {
     fetch(`/api/cases/${cid}/related-items`).then(r => {
         if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -1333,6 +1409,7 @@ function loadRelatedItems(cid) {
 }
 
 function renderRelatedItems(data) {
+    _relatedItemsSelected = new Set();
     const el = document.getElementById('relatedItemsBody');
     if (!el) return;
     if (!data.hosts.length && !data.usernames.length) {
@@ -1348,12 +1425,52 @@ function renderRelatedItems(data) {
         el.innerHTML = `<p class="text-muted small mb-0">Nothing else on ${escHtml(data.hosts.concat(data.usernames).join(', '))} in the last ${data.window_hours}h.</p>`;
         return;
     }
-    el.innerHTML = categories.filter(c => c.rows.length).map(c => `
+    // A real case here can show "20 of 319" candidates with only a one-at-a-time Add
+    // button each -- triaging a genuinely large batch (e.g. every hit of the same noisy
+    // rule on this case's host) meant clicking Add dozens of times, each one reloading
+    // the whole case. Hidden until at least one row is checked.
+    const bulkBar = `<div id="relatedItemsBulkBar" class="d-flex align-items-center gap-2 mb-2" style="display:none;">
+        <span class="small text-muted"><span id="relatedItemsSelCount">0</span> selected</span>
+        <button type="button" class="btn btn-sm btn-outline-primary" onclick="bulkAddRelatedItems()"><i class="fa-solid fa-plus me-1"></i>Add Selected to Case</button>
+    </div>`;
+    el.innerHTML = bulkBar + categories.filter(c => c.rows.length).map(c => `
         <div class="mb-2">
             <div class="text-muted small fw-bold mb-1">${c.label}${c.total > c.rows.length ? ` (showing ${c.rows.length} of ${c.total})` : ''}</div>
             ${c.rows.map(row => relatedItemRow(c.type, row)).join('')}
         </div>
     `).join('');
+}
+
+function toggleRelatedItemSelect(itemType, itemId, checked) {
+    const key = `${itemType}:${itemId}`;
+    if (checked) _relatedItemsSelected.add(key); else _relatedItemsSelected.delete(key);
+    const bar = document.getElementById('relatedItemsBulkBar');
+    const countEl = document.getElementById('relatedItemsSelCount');
+    if (bar) bar.style.display = _relatedItemsSelected.size > 0 ? 'flex' : 'none';
+    if (countEl) countEl.textContent = _relatedItemsSelected.size;
+}
+
+// Same fan-out-via-Promise.all pattern the SIEM alert list's own bulkAddToCase()
+// already uses -- each add is independent, and a single openCaseDetail() refresh at
+// the end (instead of addRelatedItem()'s own per-row full-case-reload) is what makes
+// this actually faster than clicking Add N times.
+async function bulkAddRelatedItems() {
+    const keys = Array.from(_relatedItemsSelected);
+    if (!keys.length) return;
+    if (!(await confirmDialog(`Add ${keys.length} item(s) to this case?`, {title: 'Bulk add related items', confirmLabel: 'Add'}))) return;
+    const results = await Promise.all(keys.map(key => {
+        const sep = key.indexOf(':');
+        const itemType = key.slice(0, sep);
+        const itemId = key.slice(sep + 1);
+        return fetch(`/api/cases/${activeCaseId}/items`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({item_type: itemType, item_id: itemId})
+        }).then(r => ({ok: r.ok}));
+    }));
+    const succeeded = results.filter(r => r.ok).length;
+    const failed = results.length - succeeded;
+    if (failed) toast(`${succeeded} added, ${failed} failed.`, 'warning');
+    else toast(`${succeeded} item(s) added to case.`, 'success');
+    openCaseDetail(activeCaseId);
 }
 
 // Closes a real, previously entirely-manual link: nothing ever connected "this incident
@@ -1399,11 +1516,14 @@ function relatedItemRow(itemType, row) {
     const kindLabel = RELATED_ITEM_LABELS[itemType] || itemType;
     const heading = row.label ? `<strong>${escHtml(row.label)}</strong> ` : '';
     return `<div class="d-flex justify-content-between align-items-start border border-secondary rounded p-2 mb-2">
-        <div>
-            <span class="badge ${severityBadgeClass(row.severity)} me-2">${escHtml((row.severity || '').toUpperCase())}</span>
-            ${heading}<span class="text-muted small">(${kindLabel})</span><br>
-            <span class="text-muted small">${escHtml(row.host || '')}${row.username ? ' · ' + escHtml(row.username) : ''} · ${escHtml(row.timestamp)}</span><br>
-            <span class="small">${escHtml((row.message || '').slice(0, 200))}</span>
+        <div class="d-flex gap-2">
+            <input type="checkbox" class="form-check-input mt-1" onchange="toggleRelatedItemSelect('${itemType}', ${row.id}, this.checked)">
+            <div>
+                <span class="badge ${severityBadgeClass(row.severity)} me-2">${escHtml((row.severity || '').toUpperCase())}</span>
+                ${heading}<span class="text-muted small">(${kindLabel})</span><br>
+                <span class="text-muted small">${escHtml(row.host || '')}${row.username ? ' · ' + escHtml(row.username) : ''} · ${escHtml(row.timestamp)}</span><br>
+                <span class="small">${escHtml((row.message || '').slice(0, 200))}</span>
+            </div>
         </div>
         <button type="button" class="btn btn-sm btn-outline-primary py-0 px-2 ms-2" title="Add to case" onclick="addRelatedItem('${itemType}', ${row.id})"><i class="fa-solid fa-plus"></i></button>
     </div>`;
@@ -2345,6 +2465,19 @@ function loadAndRenderCaseDetail(cid) {
             </div>
 
             <div id="caseTabPane-timeline" class="case-tab-pane" style="display:none;">
+                <div id="caseRunPlaybookCard" class="card bg-dark border-secondary mb-3" style="display:none;">
+                    <div class="card-header border-secondary">Run Playbook <span class="text-muted small">— execute an existing SOAR playbook against this case directly, without switching to the SOAR page and re-picking it</span></div>
+                    <div class="card-body">
+                        <div class="d-flex align-items-center gap-2 flex-wrap">
+                            <select id="caseRunPlaybookSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:260px;">
+                                <option value="">Select a playbook…</option>
+                            </select>
+                            <button type="button" class="btn btn-sm btn-outline-info" title="Preview what each action would do -- no changes made" onclick="testCasePlaybook()"><i class="fa-solid fa-flask me-1"></i>Test</button>
+                            <button type="button" class="btn btn-sm btn-outline-success" title="Execute for real" onclick="runCasePlaybookNow()"><i class="fa-solid fa-play me-1"></i>Run Now</button>
+                        </div>
+                        <div id="caseRunPlaybookResult" class="small mt-2"></div>
+                    </div>
+                </div>
                 <div class="card bg-dark border-secondary mb-3">
                     <div class="card-header border-secondary">Timeline</div>
                     <div class="card-body">
@@ -2380,6 +2513,7 @@ function loadAndRenderCaseDetail(cid) {
         loadCaseAttachments(c.id);
         loadForensicTimeline(c.id);
         initEdrResponseCard();
+        initCaseRunPlaybookCard();
         showDetailView();
         // Live-ish SLA/TTA chips -- re-render just that strip every 30s while the case
         // is open in the browser, rather than re-fetching/re-rendering the whole case.
