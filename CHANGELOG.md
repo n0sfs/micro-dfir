@@ -146,7 +146,11 @@ Verified with a JS vm-context test (8 cases): highest-severity selection logic, 
 cases picker loading exactly once despite repeated calls, a required-case guard, the
 existing-case fan-out clearing selection on success, new-case creation using the
 batch's worst severity, a cancelled prompt making zero network calls, and Clear
-resetting both the checkbox selection and the picker's stale value.
+resetting both the checkbox selection and the picker's stale value. Live-verified on
+production: bulk-selected 2 real Critical alerts, created a new case via the bulk
+picker, and confirmed the resulting case had `item_count: 2` and `severity: "critical"`
+— then deleted the test case and confirmed neither alert's own status/acknowledged
+state had been touched by the link.
 
 ## 2026-09-12
 
