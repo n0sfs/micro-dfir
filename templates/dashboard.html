@@ -1366,13 +1366,13 @@ function showLogDetail(idx) {
             <dt class="col-3">Dest IP</dt><dd class="col-9">${pivotLinkHtml('destination_ip', log.destination_ip, highlightText(log.destination_ip, termsFor('destination_ip')))}</dd>
         </dl>
         <div id="alertEnrichmentWrap"></div>
+        ${(log.type === 'alert' || log.type === 'anomaly') ? `<div id="alertEdrWrap" class="small mb-2"></div>` : ''}
         ${viewRuleBtn}
         ${log.type === 'alert' ? `
         <label class="form-label small text-muted mb-1">Triage</label>
         <div id="alertUrgencyChips" class="d-flex flex-wrap gap-3 small mb-2">${renderAlertUrgencyChips(log)}</div>
         <div id="alertHistoryWrap" class="small mb-2"></div>
         <div id="alertNoiseWrap" class="small mb-2"></div>
-        <div id="alertEdrWrap" class="small mb-2"></div>
         <div class="d-flex align-items-end gap-2 mb-2 flex-wrap">
             <div>
                 <label class="form-label small text-muted mb-1">Status</label>
@@ -1418,7 +1418,11 @@ function showLogDetail(idx) {
     if (canAddToCase) { renderAddToCaseControl(log); }
     if (canLinkToEntity) { renderLinkToEntityControl(log); }
     renderAlertEnrichment(log);
-    if (log.type === 'alert') { renderAlertHistory(log); renderAlertNoiseStatus(log); renderAlertEdrActions(log); }
+    if (log.type === 'alert') { renderAlertHistory(log); renderAlertNoiseStatus(log); }
+    // "Fired before"/"Noisy" stay alert-only (they're rule_id-driven, and UEBA
+    // anomalies have no rule_id) -- but EDR containment isn't inherently alert-specific,
+    // a UEBA anomaly carries a real host just as much as an alert does.
+    if (log.type === 'alert' || log.type === 'anomaly') { renderAlertEdrActions(log); }
     new bootstrap.Modal(document.getElementById('logDetailModal')).show();
 }
 

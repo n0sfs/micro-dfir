@@ -10,6 +10,28 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-13
 
+### Cross-screen triage friction, round 3 (1/3): EDR quick actions for UEBA anomalies too
+
+Asked to run the triage-workflow review through once more. First finding: the EDR
+quick-actions panel added in round 2 (Isolate Host/Kill Process) only ever rendered for
+`type === 'alert'` — a UEBA anomaly never got it, even though an anomaly carries a real
+host just as much as a Sigma alert does. Verified live against a real anomaly on
+`WORKSTATION-A` (which has an active EDR agent): the triage modal showed "Add to
+case"/"Link to entity" but nothing for containment.
+
+The gap was structural, not deliberate: `alertEdrWrap`'s `<div>` lived nested inside
+the alert-only "Triage" block (Status/Assignee/Save — genuinely alert-specific, UEBA
+anomalies have no triage-lifecycle columns), so it never even existed in the DOM for an
+anomaly. Moved the div out to render for `alert` or `anomaly` alike, right after the
+enrichment panel, and widened the `renderAlertEdrActions()` call site to match. "Fired
+before"/"Noisy" stay alert-only on purpose — both are `rule_id`-driven and don't map to
+an anomaly.
+
+Verified by confirming (via source inspection, since `renderAlertEdrActions()` itself
+was already fully covered by round 2's 10-case vm-context test) that the wrap div and
+call site both now gate on `alert || anomaly`, the old combined alert-only call site is
+gone, and `alertEdrWrap` no longer sits inside the alert-only Triage block.
+
 ### Cross-screen triage friction, round 2 (1/4): EDR quick actions in the alert triage modal
 
 Asked to run the alert/case triage workflow through again looking for anything missed,
