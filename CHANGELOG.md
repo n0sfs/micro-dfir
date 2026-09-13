@@ -31,6 +31,11 @@ Verified by confirming (via source inspection, since `renderAlertEdrActions()` i
 was already fully covered by round 2's 10-case vm-context test) that the wrap div and
 call site both now gate on `alert || anomaly`, the old combined alert-only call site is
 gone, and `alertEdrWrap` no longer sits inside the alert-only Triage block.
+Live-verified on production against the same real rare-process anomaly on
+`WORKSTATION-A`: the modal now shows UEBA Risk *and* EDR Agent (Idle) with working
+Isolate Host/Kill Process buttons, and clicking Isolate Host triggered the real confirm
+dialog — declined, confirmed via `agent_commands`'s unchanged latest row id that
+nothing was queued against the real host.
 
 ### Cross-screen triage friction, round 2 (1/4): EDR quick actions in the alert triage modal
 
