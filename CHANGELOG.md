@@ -35,6 +35,32 @@ JS vm-context test. Live-verified the manual escalation path on production: call
 real deployed `addToCase()` against an actual Critical alert and confirmed the
 resulting case's `severity` came back `"critical"`, not the old default `"medium"`.
 
+### Analyst triage/investigation workflow improvements (2/7): auto-track the host as a Case Asset
+
+Second fix from the same walkthrough: the case's "EDR Response" tab is unusable
+("Add a Case Asset above to run a response action against it") until a host is
+manually re-added as a Case Asset — even though every alert linked into the case
+already carries `hostname`. Real duplicate-data-entry friction on every one of 3
+case-creation/item-linking paths (`app.py`'s `api_case_add_item`, `sigma_engine.py`'s
+single-rule auto-case, `soar_alerts.py`'s playbook-driven case creation). A 4th,
+pre-existing path (`sigma_engine.py`'s multi-rule host-escalation case creation)
+already did this correctly — these 3 now match it.
+
+`api_case_add_item` reuses `_case_item_summary`'s existing per-item-type host
+resolution (alerts/agent_commands/live_logs/events each keep the hostname in a
+differently-named column) instead of re-deriving it. All 3 rely on `case_assets`'
+`UNIQUE(case_id, host)` via `INSERT OR IGNORE`, so linking a second item for an
+already-tracked host is a safe no-op — no duplicate asset row, no duplicate
+`asset_added` timeline event.
+
+Verified with real SQLite fixture tests: `soar_alerts.py` imported directly (light
+dependencies, unlike `sigma_engine.py`'s `pysigma` chain), `sigma_engine.py`'s function
+extracted/exec'd, and `api_case_add_item` ported line-for-line (a Flask route) —
+covering the auto-add itself, a no-host case that mustn't crash, and a second
+same-host item not duplicating anything. Live-verified on production: linking a real
+alert to a fresh test case immediately added `LAPTOP-1` as a tracked asset with no
+manual step.
+
 ## 2026-09-12
 
 ### Report content improvements (1/7): SOC effectiveness metrics in the Security Summary
