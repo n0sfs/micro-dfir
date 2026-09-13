@@ -1110,6 +1110,40 @@ def api_alert_update(aid):
     db.commit()
     return jsonify({"status": "success"})
 
+# Powers the triage modal's "fired before" panel -- distinct from an alert row's own
+# occurrence_count/last_seen (sigma_engine.py's dedup window collapses REPEATS of the
+# same detection into one row's counters). This counts other, separate alert ROWS for
+# the same rule+host, so an analyst triaging alert #5 of "same rule, once an hour, for
+# 5 hours" sees the other 4 (and how they were dispositioned last time) instead of just
+# this row's own within-window count.
+@app.route('/api/alerts/history')
+@login_required
+def api_alert_history():
+    rule_id = request.args.get('rule_id', type=int)
+    host = (request.args.get('host') or '').strip()
+    exclude_id = request.args.get('exclude_id', type=int)
+    empty = {"total": 0, "by_status": {}, "last_status": None, "last_timestamp": None}
+    if not rule_id or not host:
+        return jsonify(empty)
+    db = get_db()
+    where = "WHERE rule_id = ? AND host = ?"
+    params = [rule_id, host]
+    if exclude_id:
+        where += " AND id != ?"
+        params.append(exclude_id)
+    rows = db.execute(f"SELECT status, COUNT(*) as c FROM alerts {where} GROUP BY status", params).fetchall()
+    by_status = {(r['status'] or 'new'): r['c'] for r in rows}
+    total = sum(by_status.values())
+    if not total:
+        return jsonify(empty)
+    last_row = db.execute(f"SELECT status, timestamp FROM alerts {where} ORDER BY id DESC LIMIT 1", params).fetchone()
+    return jsonify({
+        "total": total,
+        "by_status": by_status,
+        "last_status": last_row['status'] if last_row else None,
+        "last_timestamp": last_row['timestamp'] if last_row else None,
+    })
+
 @app.route('/api/events')
 @login_required
 def api_ev(): return jsonify([dict(r) for r in get_db().execute("SELECT * FROM events ORDER BY timestamp DESC LIMIT ?", (request.args.get('limit', 50, type=int),)).fetchall()])

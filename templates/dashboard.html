@@ -1366,6 +1366,7 @@ function showLogDetail(idx) {
         ${log.type === 'alert' ? `
         <label class="form-label small text-muted mb-1">Triage</label>
         <div id="alertUrgencyChips" class="d-flex flex-wrap gap-3 small mb-2">${renderAlertUrgencyChips(log)}</div>
+        <div id="alertHistoryWrap" class="small mb-2"></div>
         <div class="d-flex align-items-end gap-2 mb-2 flex-wrap">
             <div>
                 <label class="form-label small text-muted mb-1">Status</label>
@@ -1411,7 +1412,38 @@ function showLogDetail(idx) {
     if (canAddToCase) { renderAddToCaseControl(log); }
     if (canLinkToEntity) { renderLinkToEntityControl(log); }
     renderAlertEnrichment(log);
+    if (log.type === 'alert') { renderAlertHistory(log); }
     new bootstrap.Modal(document.getElementById('logDetailModal')).show();
+}
+
+// Distinct from occurrence_count/last_seen shown above (those collapse REPEATS of the
+// same detection, within sigma_engine.py's dedup window, into this one row's own
+// counters) -- this surfaces OTHER alert rows for the same rule+host, and how they were
+// dispositioned, so an analyst triaging "alert #5 of the same rule firing hourly" isn't
+// starting from zero context each time.
+let _historyToken = 0;
+async function renderAlertHistory(log) {
+    const wrap = document.getElementById('alertHistoryWrap');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    if (!log.rule_id || !log.host || log.host === '-') return;
+    const myToken = ++_historyToken;
+    const params = new URLSearchParams({ rule_id: log.rule_id, host: log.host, exclude_id: log.id });
+    const res = await fetch(`/api/alerts/history?${params}`).then(r => r.ok ? r.json() : null).catch(() => null);
+    // Same stale-write guard as renderAlertEnrichment -- a slower lookup landing after
+    // the analyst has already clicked through to a different alert must not overwrite it.
+    if (myToken !== _historyToken || !res || !res.total) return;
+    const byStatus = res.by_status || {};
+    const dispositionParts = [];
+    if (byStatus.false_positive) dispositionParts.push(`${byStatus.false_positive} False Positive`);
+    if (byStatus.resolved) dispositionParts.push(`${byStatus.resolved} Resolved`);
+    if (byStatus.investigating) dispositionParts.push(`${byStatus.investigating} Investigating`);
+    if (byStatus.new) dispositionParts.push(`${byStatus.new} still New`);
+    wrap.innerHTML = `<div class="border border-secondary rounded p-2 mb-0">
+        <i class="fa-solid fa-clock-rotate-left me-1 text-muted"></i>
+        <strong class="text-muted me-1">Fired before:</strong>${res.total} other alert${res.total === 1 ? '' : 's'} for this rule on this host
+        ${dispositionParts.length ? ` <span class="text-muted">(${dispositionParts.join(', ')})</span>` : ''}
+    </div>`;
 }
 
 // Threat intel verdict / asset criticality / UEBA risk are today only visible by

@@ -61,6 +61,32 @@ same-host item not duplicating anything. Live-verified on production: linking a 
 alert to a fresh test case immediately added `LAPTOP-1` as a tracked asset with no
 manual step.
 
+### Analyst triage/investigation workflow improvements (3/7): surface "fired before" at triage time
+
+Third fix from the same walkthrough: the real recurring Critical alert used for this
+whole pass had fired 5 separate times (once an hour) on `LAPTOP-1`, but opening any one
+of those 5 alerts to triage it showed zero cross-reference to the other 4 — only
+`occurrence_count`/`last_seen`, which only track repeats collapsed into that *one* alert
+row within `sigma_engine.py`'s dedup window, not separate alert records. An analyst
+triaging alert #5 had no way to see, from the triage modal itself, that this exact
+rule+host combination had already fired (and been dispositioned) 4 other times without
+navigating away to search for it manually.
+
+Added `GET /api/alerts/history` (`rule_id` + `host` + optional `exclude_id`), returning
+a count of other alert rows sharing that rule+host plus a breakdown by disposition
+(`false_positive`/`resolved`/`investigating`/still-`new`). Wired into the triage modal
+(`dashboard.html`) as a new async panel (`renderAlertHistory`), following the same
+independent-fetch-into-its-own-DOM-slot pattern as the existing enrichment/add-to-case
+panels — e.g. "4 other alerts for this rule on this host (2 False Positive, 1 Resolved,
+1 Investigating)". Renders nothing for a genuinely first-time alert or one with no
+`rule_id` (legacy built-in heuristic alerts predate Sigma rules), rather than an empty
+placeholder panel.
+
+Verified with a Python fixture test (SQLite, grouping/exclusion logic) and a JS
+vm-context test (including a stale-response race: a slow lookup for an alert the
+analyst has already clicked past must not overwrite the panel for the alert they're
+now looking at — same guard pattern as `renderAlertEnrichment`'s existing token check).
+
 ## 2026-09-12
 
 ### Report content improvements (1/7): SOC effectiveness metrics in the Security Summary
