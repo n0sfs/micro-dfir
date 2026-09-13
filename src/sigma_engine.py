@@ -321,6 +321,15 @@ def _auto_create_case(cursor, rule_title, host, username, alert_id, template_id,
     cursor.execute("INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'system', 'created', ?)", (cid, title))
     cursor.execute("INSERT INTO case_items (case_id, item_type, item_id, added_by) VALUES (?, 'alert', ?, 'system')", (cid, str(alert_id)))
     cursor.execute("INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'system', 'item_added', ?)", (cid, f"alert:{alert_id}"))
+    # EDR Response (app.py) is unusable until a host is tracked as a Case Asset -- this
+    # rule already fired on `host`, so track it immediately instead of leaving the
+    # analyst to retype a hostname the system already knows. Same
+    # INSERT-OR-IGNORE-relying-on-UNIQUE(case_id, host) pattern app.py's
+    # api_case_add_item uses, and the same thing the multi-rule host-escalation path
+    # further down this file already does for its own auto-created cases.
+    if host:
+        cursor.execute("INSERT OR IGNORE INTO case_assets (case_id, host, added_by) VALUES (?, ?, 'system')", (cid, host))
+        cursor.execute("INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'system', 'asset_added', ?)", (cid, host))
     if template_id:
         tpl = cursor.execute("SELECT name, tasks FROM case_templates WHERE id = ?", (template_id,)).fetchone()
         if tpl:

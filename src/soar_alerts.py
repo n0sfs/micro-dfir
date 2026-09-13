@@ -64,6 +64,13 @@ def _create_case_from_alert(db, alert, run_case_playbooks_fn):
     if alert.get('id'):
         db.execute("INSERT INTO case_items (case_id, item_type, item_id, added_by) VALUES (?, 'alert', ?, 'playbook')", (cid, str(alert['id'])))
         db.execute("INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'playbook', 'item_added', ?)", (cid, f"alert:{alert['id']}"))
+    # EDR Response (app.py) is unusable until a host is tracked as a Case Asset -- same
+    # fix applied to sigma_engine.py's _auto_create_case() and app.py's
+    # api_case_add_item, for the same reason: don't make an analyst retype a hostname
+    # the system already knows.
+    if alert.get('host'):
+        db.execute("INSERT OR IGNORE INTO case_assets (case_id, host, added_by) VALUES (?, ?, 'playbook')", (cid, alert['host']))
+        db.execute("INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'playbook', 'asset_added', ?)", (cid, alert['host']))
     if run_case_playbooks_fn:
         try:
             run_case_playbooks_fn(cid, None, '', 'open', severity)

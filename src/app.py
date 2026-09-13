@@ -7210,6 +7210,22 @@ def api_case_add_item(cid):
         (cid, item_type, str(item_id), current_user.username)
     )
     _log_case_event(db, cid, 'item_added', f"{item_type}:{item_id}")
+    # EDR Response is unusable until a host is tracked as a Case Asset -- previously
+    # that meant retyping a hostname the system already knew the moment any item was
+    # linked. _case_item_summary already resolves the right host column per item type
+    # (alerts.host / agent_commands.hostname / live_logs.host / events.hostname), so
+    # reuse it rather than re-deriving. INSERT OR IGNORE relies on case_assets'
+    # UNIQUE(case_id, host) to no-op (and not double-log an event) when this host is
+    # already tracked -- e.g. a second alert linked for the same host.
+    item_summary = _case_item_summary(db, item_type, item_id)
+    host = (item_summary or {}).get('host')
+    if host:
+        cur = db.execute(
+            "INSERT OR IGNORE INTO case_assets (case_id, host, added_by) VALUES (?, ?, ?)",
+            (cid, host, current_user.username)
+        )
+        if cur.rowcount:
+            _log_case_event(db, cid, 'asset_added', host)
     db.commit()
     return jsonify({"status": "success"})
 
