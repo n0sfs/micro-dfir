@@ -8,6 +8,33 @@ a new feature, a real architectural decision, an incident and its fix. Routine p
 fixes don't need their own line; group them into the feature they support. Newest first.
 Full commit-level detail is always available via `git log`.
 
+## 2026-09-13
+
+### Analyst triage/investigation workflow improvements (1/7): severity inheritance on escalation
+
+Live-walked the full alert-fires → triage → escalate → investigate scenario end to end
+(a real recurring Critical alert, already flagged "Noisy" in Detection Tuning, on
+`LAPTOP-1`) to find friction worth smoothing out. First fix: escalating an alert to a
+**new** case (both the manual "Add to Case → New Case" UI flow and the single-rule
+auto-case automation in `sigma_engine.py`) always created the case with `severity`
+defaulting to the schema's `'medium'`, regardless of the triggering alert's real
+severity — a Critical alert silently became a Medium case, understating its SLA
+urgency (case SLA targets are tiered by severity). The backend's `POST /api/cases`
+already accepted an optional `severity` param; nothing populated it from context.
+
+Mapped alerts' Title-Case severity to cases' lowercase severity tier in both places,
+matching the convention a *third*, already-correct case-creation path
+(`soar_alerts.py`'s playbook-driven `_create_case_from_alert()`) already used —
+`'Informational'`/unrecognized falls back to `'medium'`, same as that existing
+precedent, rather than inventing a fourth convention. Adding evidence to an *existing*
+case is untouched; this only affects what a brand-new case is created with.
+
+Verified with a Python fixture test (function extracted and exec'd in isolation, since
+`sigma_engine.py`'s `pysigma` dependency isn't installed in this dev environment) and a
+JS vm-context test. Live-verified the manual escalation path on production: called the
+real deployed `addToCase()` against an actual Critical alert and confirmed the
+resulting case's `severity` came back `"critical"`, not the old default `"medium"`.
+
 ## 2026-09-12
 
 ### Report content improvements (1/7): SOC effectiveness metrics in the Security Summary
