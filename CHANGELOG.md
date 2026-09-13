@@ -203,7 +203,9 @@ already returned `priority` in its response; the frontend just wasn't using it h
 Verified with a JS vm-context test (4 cases): uses the normalized score when available,
 falls back to raw pts when no priority row exists yet, correctly treats a real
 `priority_score` of exactly `0` as a value (not "missing"), and escapes values before
-inlining.
+inlining. Live-verified on production against the same real Noisy-rule alert used for
+items 3-4: the enrichment panel now reads "UEBA Risk: Host Critical (10/10) User
+Critical (9.4/10)" instead of the old "Critical (879,728 pts)".
 
 This closes out all 7 findings from the alert-fires → triage → escalate → investigate
 walkthrough that started this pass — see the 2026-09-13 entries above for the full set.
