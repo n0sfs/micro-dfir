@@ -100,6 +100,27 @@ button, and confirmed the new tab landed on `/siem?item_id=855588&item_type=aler
 correctly resolved to `item_id:855588`, Type=Alerts, "All Time" — "Total Matches: 1"
 showing exactly that one alert — test case cleaned up afterward.
 
+### Cross-screen triage friction, round 2 (4/4, minor): entity info after "Link to Entity"
+
+Fourth and last fix from this follow-up pass: linking an alert to a threat entity
+(actor/malware family) only ever said "Linked to entity." — nothing about who or what
+that entity actually is. Understanding it still meant a trip to Threat Intel's
+Entities tab. Lower priority than the other 3 since entity-linking is a rarer action
+than escalating or containing.
+
+`renderLinkToEntityControl()` already fetches the full entity list to build the
+`<select>` options — `linkToEntity()` now reuses that same in-memory list (no second
+fetch) to show a compact summary card on success: the entity type badge (reusing
+`threat_intel.html`'s own `entityTypeBadge()` styling), name, aliases, associated
+technique count, and a truncated description. Falls back to the old plain text if the
+linked id somehow isn't in the cached list, so this never renders blank.
+
+Verified with a JS vm-context test (5 cases): the full summary renders correctly,
+singular "technique" grammar at a count of 1 with no aliases line when there are none,
+a cache-miss falls back to plain text, a failed link shows the plain server error with
+no summary card, and hostile entity field values are HTML-escaped before being
+inlined.
+
 ### Analyst triage/investigation workflow improvements (1/7): severity inheritance on escalation
 
 Live-walked the full alert-fires → triage → escalate → investigate scenario end to end
