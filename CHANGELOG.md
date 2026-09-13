@@ -119,7 +119,10 @@ Verified with a JS vm-context test (5 cases): the full summary renders correctly
 singular "technique" grammar at a count of 1 with no aliases line when there are none,
 a cache-miss falls back to plain text, a failed link shows the plain server error with
 no summary card, and hostile entity field values are HTML-escaped before being
-inlined.
+inlined. Live-verified on production: linked the same real Critical alert to the real
+seeded `APT28` entity and confirmed the card correctly showed the actor badge, name,
+"(aka Fancy Bear, Sofacy)", "3 associated techniques", and its real description — then
+deleted the test relationship (`ti_relationships` id 1) via its DELETE route.
 
 ### Analyst triage/investigation workflow improvements (1/7): severity inheritance on escalation
 
