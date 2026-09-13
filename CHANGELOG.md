@@ -182,6 +182,32 @@ now shows "Item added: Response Action — **collect_browser_artifacts**", while
 added and later removed from the same case correctly falls back to "Item added/removed:
 Response Action #113" instead of the old raw `command_result:113`.
 
+### Analyst triage/investigation workflow improvements (7/7, minor): normalized UEBA risk score in the triage modal
+
+Seventh and last fix from the same walkthrough: the alert triage modal's UEBA Risk
+enrichment panel showed a raw, unbounded cumulative point sum — e.g. "Critical (861,106
+pts)" for a busy real host in this deployment — with no sense of scale. `ueba.html`'s
+own risk detail modal had already solved exactly this: it leads with the normalized
+0-10 `priority_score` (a peak-severity/signal-breadth/recency blend, comparable across
+entities) and demotes the raw sum to "supporting detail, not the headline," with an
+explicit comment explaining why. The triage modal's enrichment panel just never got the
+same treatment.
+
+Added `riskScoreDisplay()` to `dashboard.html`, applying that exact same precedent:
+shows `priority_score/10` when a priority row exists for the entity, falling back to the
+raw `N pts` only when it doesn't yet (new entities before `ueba_engine.py`'s next scoring
+pass) — mirroring `api_ueba_risk_score_detail`'s own priority-first-with-fallback tier
+logic server-side. No backend change: the `/api/ueba/risk-scores/<type>/<id>` route
+already returned `priority` in its response; the frontend just wasn't using it here.
+
+Verified with a JS vm-context test (4 cases): uses the normalized score when available,
+falls back to raw pts when no priority row exists yet, correctly treats a real
+`priority_score` of exactly `0` as a value (not "missing"), and escapes values before
+inlining.
+
+This closes out all 7 findings from the alert-fires → triage → escalate → investigate
+walkthrough that started this pass — see the 2026-09-13 entries above for the full set.
+
 ## 2026-09-12
 
 ### Report content improvements (1/7): SOC effectiveness metrics in the Security Summary
