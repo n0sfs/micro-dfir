@@ -94,7 +94,11 @@ unaffected, `item_id`+`item_type` resolves both new types to the right checkbox,
 unrecognized item_type falls back to `alert` rather than checking nothing, a normal
 page load resolves to nothing, an alert/ueba_event item gets the right link,
 command_result keeps only its existing modal button (no duplicate link), and a
-deleted-underlying-record item shows no dead link.
+deleted-underlying-record item shows no dead link. Live-verified on production: linked
+a real Critical alert into a fresh test case, clicked its new "View Full Detail"
+button, and confirmed the new tab landed on `/siem?item_id=855588&item_type=alert`
+correctly resolved to `item_id:855588`, Type=Alerts, "All Time" — "Total Matches: 1"
+showing exactly that one alert — test case cleaned up afterward.
 
 ### Analyst triage/investigation workflow improvements (1/7): severity inheritance on escalation
 
