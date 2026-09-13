@@ -1626,14 +1626,29 @@ function renderAddToCaseControl(log) {
                     ${options}
                     <option value="__new__">+ New Case</option>
                 </select>
-                <button type="button" class="btn btn-sm btn-outline-primary" onclick="addToCase('${itemType}', '${log.id}')"><i class="fa-solid fa-folder-plus me-1"></i>Add</button>
+                <button type="button" class="btn btn-sm btn-outline-primary" onclick="addToCase('${itemType}', '${log.id}', '${escHtml(log.severity || '')}')"><i class="fa-solid fa-folder-plus me-1"></i>Add</button>
             </div>
             <div id="addToCaseMsg" class="small mt-1" style="display:none;"></div>
         `;
     }).catch(() => { wrap.innerHTML = '<span class="text-muted small">Could not load cases.</span>'; });
 }
 
-async function addToCase(itemType, itemId) {
+// Alerts/anomalies store severity Title-Case ('Critical'/'High'/'Medium'/'Low'/
+// 'Informational'); cases.severity is lowercase with no 'informational' tier
+// (CASE_SEVERITY_VALUES in app.py: critical/high/medium/low). Mapped here so
+// escalating a Critical alert into a brand-new case doesn't silently default to
+// Medium (the schema default, applied whenever severity is omitted from the create
+// payload) -- an existing case's own severity is never touched by this, only what a
+// *new* case gets created with. 'Informational' (and anything unrecognized) falls
+// through to null (server-side 'medium' default) -- same convention
+// soar_alerts.py's _create_case_from_alert() already uses for its own playbook-driven
+// case creation, kept consistent rather than inventing a fourth one.
+function caseSeverityFromAlert(sev) {
+    const s = (sev || '').trim().toLowerCase();
+    return ['critical', 'high', 'medium', 'low'].includes(s) ? s : null;
+}
+
+async function addToCase(itemType, itemId, logSeverity) {
     const select = document.getElementById('addToCaseSelect');
     const msg = document.getElementById('addToCaseMsg');
     let caseId = select.value;
@@ -1643,7 +1658,10 @@ async function addToCase(itemType, itemId) {
     if (caseId === '__new__') {
         const title = await promptDialog('New case title:', '', {title: 'New Case', confirmLabel: 'Create'});
         if (!title || !title.trim()) return;
-        const createResp = await fetch('/api/cases', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title: title.trim()})});
+        const payload = {title: title.trim()};
+        const mappedSeverity = caseSeverityFromAlert(logSeverity);
+        if (mappedSeverity) payload.severity = mappedSeverity;
+        const createResp = await fetch('/api/cases', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
         const createData = await createResp.json();
         if (!createResp.ok) {
             msg.className = 'small mt-1 text-danger'; msg.innerText = createData.error || 'Failed to create case.'; msg.style.display = 'block'; return;

@@ -298,12 +298,24 @@ def _queue_case_created_playbooks(cursor, cid):
     cursor.execute("INSERT INTO case_playbook_outbox (case_id, trigger_event) VALUES (?, 'case_created')", (cid,))
 
 
-def _auto_create_case(cursor, rule_title, host, username, alert_id, template_id):
+# Maps alerts.severity's Title-Case values ('Critical'/'High'/'Medium'/'Low'/
+# 'Informational') to cases.severity's lowercase, narrower set (CASE_SEVERITY_VALUES in
+# app.py: critical/high/medium/low -- no 'informational' tier) so an auto-created case
+# doesn't silently fall back to the schema's 'medium' default regardless of how urgent
+# the triggering alert actually was. Same mapping (and 'informational' -> 'medium'
+# fallback, since there's no lower tier to demote it to) as soar_alerts.py's
+# _create_case_from_alert() -- kept consistent with that existing precedent rather than
+# inventing a third convention.
+def _case_severity_from_alert(severity):
+    s = (severity or 'medium').strip().lower()
+    return s if s in ('critical', 'high', 'medium', 'low') else 'medium'
+
+def _auto_create_case(cursor, rule_title, host, username, alert_id, template_id, severity=None):
     title = f"{rule_title} — {host}"
     detail = f"Auto-created because rule '{rule_title}' fired on {host}" + (f" (user: {username})" if username else "") + "."
     cursor.execute(
-        "INSERT INTO cases (title, status, description, created_by, tlp, pap) VALUES (?, 'open', ?, 'system:auto-case', 'amber', 'amber')",
-        (title, detail)
+        "INSERT INTO cases (title, status, description, created_by, tlp, pap, severity) VALUES (?, 'open', ?, 'system:auto-case', 'amber', 'amber', ?)",
+        (title, detail, _case_severity_from_alert(severity))
     )
     cid = cursor.lastrowid
     cursor.execute("INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'system', 'created', ?)", (cid, title))
@@ -913,7 +925,7 @@ def run_detection_cycle():
                 if rule_id in rule_autocase:
                     try:
                         auto_cid = _auto_create_case(cursor, rule_titles.get(rule_id, 'Custom/YARA Rule'), host, username,
-                                                      new_alert_id, rule_autocase[rule_id])
+                                                      new_alert_id, rule_autocase[rule_id], severity)
                         _queue_case_created_playbooks(cursor, auto_cid)
                     except Exception as e:
                         print(f"[-] Auto-case creation failed for rule '{rule_titles.get(rule_id)}': {e}")
