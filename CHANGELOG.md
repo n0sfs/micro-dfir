@@ -117,7 +117,11 @@ Normal rule renders nothing, a legacy alert with no `rule_id` skips the fetch en
 the `allTuning` back-fill only happens when it's actually empty (never clobbering a
 fresher fetch Detection Tuning already made), and the shortcut hides the triage modal
 before opening the tuning modal (avoiding Bootstrap's stacked-modal glitches, the same
-pattern the existing `openRuleFromTuneModal()` uses).
+pattern the existing `openRuleFromTuneModal()` uses). Live-verified on production
+against the same real Noisy rule used for item 3 (73 alerts/7d, well over the 50
+threshold): the triage modal correctly showed the Noisy badge and count, and clicking
+"Tune This Rule" opened the real Detection Tuning modal for that exact rule with no
+stacked-modal glitches.
 
 ## 2026-09-12
 
