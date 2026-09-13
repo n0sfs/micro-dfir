@@ -1428,8 +1428,12 @@ function renderRelatedItems(data) {
     // A real case here can show "20 of 319" candidates with only a one-at-a-time Add
     // button each -- triaging a genuinely large batch (e.g. every hit of the same noisy
     // rule on this case's host) meant clicking Add dozens of times, each one reloading
-    // the whole case. Hidden until at least one row is checked.
-    const bulkBar = `<div id="relatedItemsBulkBar" class="d-flex align-items-center gap-2 mb-2" style="display:none;">
+    // the whole case. Hidden until at least one row is checked. No `d-flex` in the
+    // class list here -- Bootstrap's utility classes set display with `!important`,
+    // which would permanently win over the plain inline display:none/flex toggle
+    // toggleRelatedItemSelect() does below (same fix dashboard.html's own
+    // bulkTriageBar already needed for this exact reason).
+    const bulkBar = `<div id="relatedItemsBulkBar" class="align-items-center gap-2 mb-2" style="display:none;">
         <span class="small text-muted"><span id="relatedItemsSelCount">0</span> selected</span>
         <button type="button" class="btn btn-sm btn-outline-primary" onclick="bulkAddRelatedItems()"><i class="fa-solid fa-plus me-1"></i>Add Selected to Case</button>
     </div>`;
