@@ -86,6 +86,9 @@ Verified with a Python fixture test (SQLite, grouping/exclusion logic) and a JS
 vm-context test (including a stale-response race: a slow lookup for an alert the
 analyst has already clicked past must not overwrite the panel for the alert they're
 now looking at — same guard pattern as `renderAlertEnrichment`'s existing token check).
+Live-verified on production against a real recurring rule+host pair (`WORKSTATION-A`,
+111 other alert rows for the same rule): the triage modal's new panel correctly showed
+"Fired before: 111 other alerts for this rule on this host (111 still New)".
 
 ## 2026-09-12
 
