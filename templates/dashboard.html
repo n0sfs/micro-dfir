@@ -2799,6 +2799,16 @@ function initSearchTab() {
     // hand. Same ?param-read-on-init idiom as Detection Rules' ?rule_id= deep link.
     const _params = new URLSearchParams(window.location.search);
     const _deepLinkAlertId = _params.get('alert_id');
+    // Generalizes the alert_id case above to any case-linkable item type -- a case's
+    // Items tab can now link straight to the full triage view for a linked
+    // ueba_event/fim_event, not just an alert. item_id-space isn't unique across the
+    // logs/alerts/anomalies union (see app.py's UNIFIED_LOGS item_id: field comment),
+    // so this must always resolve to exactly one type checkbox, same as alert_id does.
+    // command_result is deliberately not in this map -- that item type already gets its
+    // own inline "View Full Result" modal in cases.html, no Log Search view needed.
+    const _deepLinkItemId = _params.get('item_id');
+    const DEEP_LINK_ITEM_TYPE_CHK = { alert: 'alert', ueba_event: 'anomaly', fim_event: 'log' };
+    const _deepLinkItemTypeChk = DEEP_LINK_ITEM_TYPE_CHK[_params.get('item_type')] || 'alert';
     // General-purpose pivot: any page can link to /siem?tab=search&q=<query> to land
     // directly on a prefiltered Log Search (e.g. host:WKS-01, or a bare IOC value) --
     // previously only the one hardcoded alert_id case above could do this at all, so a
@@ -2818,7 +2828,7 @@ function initSearchTab() {
         setTimeRangeLabel();
         markActivePresetBtn(null);
     }
-    if (_deepLinkAlertId) {
+    if (_deepLinkAlertId || _deepLinkItemId) {
         // buildLogQueryParams() ignores #searchQuery entirely unless this is checked --
         // loadSearchModePrefs() (just above) may have just turned it off from a saved
         // preference, so the deep link's query would otherwise be silently dropped.
@@ -2829,8 +2839,11 @@ function initSearchTab() {
         // user asked to keep for next time.
         document.getElementById('toggleAdvancedQuery').checked = true;
         updateSearchModeVisibility(false);
-        document.getElementById('searchQuery').value = `item_id:${_deepLinkAlertId}`;
-        document.querySelectorAll('.type-chk').forEach(c => { c.checked = (c.value === 'alert'); });
+        document.getElementById('searchQuery').value = `item_id:${_deepLinkAlertId || _deepLinkItemId}`;
+        // alert_id is always the alert type (its own dedicated param, unchanged from
+        // before); item_id resolves via DEEP_LINK_ITEM_TYPE_CHK above.
+        const _chkValue = _deepLinkAlertId ? 'alert' : _deepLinkItemTypeChk;
+        document.querySelectorAll('.type-chk').forEach(c => { c.checked = (c.value === _chkValue); });
         // The default 5-minute window would hide any alert not fired in the last few
         // minutes -- widen to "All" so the deep-linked alert is never invisible just
         // because it's not brand new. updateFilters() -> loadDashboardData() runs after.

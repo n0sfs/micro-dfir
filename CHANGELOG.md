@@ -71,6 +71,31 @@ clicked the resulting "Go to case" link, and confirmed it opened case #20 in a n
 (SIEM tab stayed put) with the right title, Critical severity, the alert already
 linked, and its host already tracked as an Asset — test case cleaned up afterward.
 
+### Cross-screen triage friction, round 2 (3/4): "View Full Detail" on a case's linked items
+
+Third fix from the same follow-up pass: a case's linked `command_result` items already
+got a "View Full Result" button opening a rich inline modal, but the other 3 item
+types (`alert`/`ueba_event`/`fim_event`) were a dead end — only a 200-char message
+excerpt, no way to see the full triage view (raw message, process details, enrichment)
+without leaving the case to search Log Search by hand for a record with no obvious
+search terms to find it by.
+
+Generalized the existing `?alert_id=` Log Search deep link (previously hardcoded to
+MITRE Coverage's "View Alert" popup, alert-only) into a `?item_id=&item_type=` pair
+that also resolves `ueba_event` → the `anomaly` type checkbox and `fim_event` → the
+`log` type checkbox (matching the already-documented "fim_event is really just a raw
+live_logs row" naming quirk) — `?alert_id=` keeps working exactly as before for its
+existing caller, unchanged. `itemSummaryLine()` (cases.html) now shows a "View Full
+Detail" link using this deep link for the 3 item types that don't already have their
+own modal, opened `target="_blank"` so the case stays open behind it.
+
+Verified with a JS vm-context test (9 cases): the existing `alert_id` path is
+unaffected, `item_id`+`item_type` resolves both new types to the right checkbox, an
+unrecognized item_type falls back to `alert` rather than checking nothing, a normal
+page load resolves to nothing, an alert/ueba_event item gets the right link,
+command_result keeps only its existing modal button (no duplicate link), and a
+deleted-underlying-record item shows no dead link.
+
 ### Analyst triage/investigation workflow improvements (1/7): severity inheritance on escalation
 
 Live-walked the full alert-fires → triage → escalate → investigate scenario end to end

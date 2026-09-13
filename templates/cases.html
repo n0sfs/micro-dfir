@@ -1297,7 +1297,14 @@ function itemSummaryLine(item) {
     const countryBadge = s.country_name ? ` <span class="badge bg-secondary" title="${escHtml(s.country_code)}">${escHtml(s.country_name)}</span>` : '';
     const viewResultBtn = item.item_type === 'command_result'
         ? ` <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 ms-2" onclick="viewCaseCommandResult(${item.item_id})"><i class="fa-solid fa-magnifying-glass me-1"></i>View Full Result</button>`
-        : '';
+        // command_result already gets its own inline modal above -- for the other 3
+        // item types, this was previously a dead end: only a 200-char message excerpt
+        // here, with no way to see the full triage view (raw message, process details,
+        // enrichment) without leaving the case to search Log Search by hand. Reuses the
+        // ?item_id=/?item_type= deep link Log Search already resolves (same mechanism
+        // MITRE Coverage's "View Alert" popup uses for the alert-only ?alert_id= case),
+        // opened in a new tab so the case stays open behind it.
+        : ` <a href="/siem?item_id=${encodeURIComponent(item.item_id)}&item_type=${encodeURIComponent(item.item_type)}" target="_blank" class="btn btn-sm btn-outline-secondary py-0 px-2 ms-2"><i class="fa-solid fa-magnifying-glass me-1"></i>View Full Detail</a>`;
     return `<span class="badge ${severityBadgeClass(s.severity)} me-2">${escHtml((s.severity || '').toUpperCase())}</span>` +
            `<strong>${escHtml(s.label)}</strong> <span class="text-muted small">(${kind})</span>${viewResultBtn}<br>` +
            `<span class="text-muted small">${escHtml(s.host || '')}${s.username ? ' · ' + escHtml(s.username) : ''} · ${escHtml(s.timestamp)}${countryBadge}</span><br>` +
