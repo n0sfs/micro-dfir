@@ -1372,6 +1372,7 @@ function showLogDetail(idx) {
         <div id="alertUrgencyChips" class="d-flex flex-wrap gap-3 small mb-2">${renderAlertUrgencyChips(log)}</div>
         <div id="alertHistoryWrap" class="small mb-2"></div>
         <div id="alertNoiseWrap" class="small mb-2"></div>
+        <div id="alertEdrWrap" class="small mb-2"></div>
         <div class="d-flex align-items-end gap-2 mb-2 flex-wrap">
             <div>
                 <label class="form-label small text-muted mb-1">Status</label>
@@ -1417,7 +1418,7 @@ function showLogDetail(idx) {
     if (canAddToCase) { renderAddToCaseControl(log); }
     if (canLinkToEntity) { renderLinkToEntityControl(log); }
     renderAlertEnrichment(log);
-    if (log.type === 'alert') { renderAlertHistory(log); renderAlertNoiseStatus(log); }
+    if (log.type === 'alert') { renderAlertHistory(log); renderAlertNoiseStatus(log); renderAlertEdrActions(log); }
     new bootstrap.Modal(document.getElementById('logDetailModal')).show();
 }
 
@@ -1495,6 +1496,77 @@ async function renderAlertNoiseStatus(log) {
 function openTuneModalFromAlert(ruleId) {
     bootstrap.Modal.getInstance(document.getElementById('logDetailModal'))?.hide();
     openTuneModal(ruleId);
+}
+
+// Same /api/agent/checkins source cases.html's EDR Response card already uses for its
+// own knownAgentsByHost -- resolves a raw alert host string to a currently-enrolled
+// agent so Isolate Host/Kill Process only offer themselves for a host EDR actually
+// knows about, not any arbitrary hostname a log happens to carry. Memoized like
+// loadAssetsCached()/loadTuningCached() -- the fleet doesn't change mid-triage-session.
+const CAN_EDR_RESPOND = hasPermission('edr.command.basic');
+let knownAgentsByHost = {};
+let _knownAgentsPromise = null;
+function loadKnownAgentsCached() {
+    if (!CAN_EDR_RESPOND) return Promise.resolve();
+    if (!_knownAgentsPromise) {
+        _knownAgentsPromise = fetch('/api/agent/checkins').then(r => r.ok ? r.json() : []).catch(() => [])
+            .then(data => { (Array.isArray(data) ? data : []).forEach(a => { knownAgentsByHost[a.hostname] = a; }); });
+    }
+    return _knownAgentsPromise;
+}
+
+// Previously, containing a host mid-triage meant leaving Log Search entirely -- either
+// to the standalone EDR page, or escalating to a case first just to reach its EDR
+// Response tab. Only these two Tier 1 actions (edr.command.basic) are offered here,
+// matching the two quick-shortcut icons cases.html's own Case Assets rows already
+// expose (vs. that page's fuller CASE_EDR_ACTIONS catalog, reserved for a case already
+// in progress) -- this is a fast "contain it now" shortcut, not a replacement for the
+// full response console.
+async function renderAlertEdrActions(log) {
+    const wrap = document.getElementById('alertEdrWrap');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    if (!CAN_EDR_RESPOND || !log.host || log.host === '-') return;
+    await loadKnownAgentsCached();
+    const agent = knownAgentsByHost[log.host];
+    if (!agent) return;
+    const offline = agent.status === 'Offline';
+    wrap.innerHTML = `<div class="border border-secondary rounded p-2 mb-0">
+        <span class="text-muted small me-2"><i class="fa-solid fa-laptop-medical me-1"></i>EDR Agent (${escHtml(agent.status)}):</span>
+        <button type="button" class="btn btn-sm btn-outline-warning me-1" data-host="${escHtml(log.host)}" ${offline ? 'disabled' : ''} onclick="triageIsolateHost(this.dataset.host)"><i class="fa-solid fa-network-wired me-1"></i>Isolate Host</button>
+        <button type="button" class="btn btn-sm btn-outline-danger" data-host="${escHtml(log.host)}" ${offline ? 'disabled' : ''} onclick="triageKillProcess(this.dataset.host)"><i class="fa-solid fa-skull-crossbones me-1"></i>Kill Process</button>
+    </div>`;
+}
+
+// Same POST /api/agent/commands cases.html's queueCaseAssetCommand() already uses,
+// minus the case-linking step -- there's no case here yet, this is a bare "act on it
+// now" shortcut, the same effect as running the action from the EDR page's own console.
+async function queueTriageEdrCommand(hostname, label, params, confirmMsg) {
+    if (confirmMsg && !(await confirmDialog(confirmMsg, {title: 'Confirm action', danger: true}))) return;
+    const res = await fetch('/api/agent/commands', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({hostname, label, params: params || {}})
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+        toast(`"${label}" queued for ${hostname}. It will run on the endpoint's next check-in.`, 'success');
+    } else {
+        toast(data.error || 'Failed to queue command.', 'danger');
+    }
+}
+
+// Same confirm text as cases.html's caseIsolateHost()/caseKillProcess() -- kept
+// word-for-word identical so an analyst sees the same warning regardless of which
+// screen they triggered the action from.
+function triageIsolateHost(host) {
+    queueTriageEdrCommand(host, 'isolate_host', {}, `Isolate ${host} from the network? Only traffic to/from this SOC server will be allowed.`);
+}
+
+async function triageKillProcess(host) {
+    const pid = await promptDialog(`PID to terminate on ${host}:`, '', {title: 'Kill Process', confirmLabel: 'Continue'});
+    if (pid === null) return;
+    if (!/^\d+$/.test(pid.trim())) { toast('PID must be a whole number.', 'danger'); return; }
+    queueTriageEdrCommand(host, 'kill_process', {pid: pid.trim()}, `Terminate PID ${pid.trim()} on ${host}? This cannot be undone.`);
 }
 
 // Threat intel verdict / asset criticality / UEBA risk are today only visible by

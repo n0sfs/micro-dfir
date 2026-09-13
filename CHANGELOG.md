@@ -10,6 +10,35 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-13
 
+### Cross-screen triage friction, round 2 (1/4): EDR quick actions in the alert triage modal
+
+Asked to run the alert/case triage workflow through again looking for anything missed,
+this time specifically hunting for places an analyst has to jump to a different screen
+to do something. Found the sharpest example: the alert triage modal (Log Search's Log
+Detail view) had zero EDR response capability at all — verified live against a real
+Critical alert on `WORKSTATION-A` (which has an active, online enrolled agent) that
+containing the host meant closing the modal and either navigating to the standalone EDR
+page, or escalating to a case first just to reach its EDR Response tab.
+
+Added a small quick-actions panel (`renderAlertEdrActions()`) to the triage modal,
+offering only the two Tier 1 (`edr.command.basic`) actions — Isolate Host and Kill
+Process — matching the same two quick-shortcut icons cases.html's own Case Assets rows
+already expose (not the fuller response-console catalog, which stays reserved for a
+case already in progress). Reuses the exact same `POST /api/agent/commands` endpoint
+and `/api/agent/checkins` host-resolution `cases.html`'s `queueCaseAssetCommand()`/
+`knownAgentsByHost` already use — same confirm-dialog wording, same permission gate,
+same "no agent found" / "Offline disables the buttons" behavior — just without the
+case-linking step, since there may be no case yet. Renders nothing for a host with no
+matching enrolled agent, and nothing at all for a user without `edr.command.basic`
+(skips the fetch entirely rather than showing disabled buttons).
+
+Verified with a JS vm-context test (10 cases): renders enabled actions for a known
+non-offline agent, disables both for an Offline one, renders nothing for an unknown
+host or a user without permission, Isolate Host uses the exact cases.html confirm
+wording, a declined confirm or cancelled PID prompt makes zero network calls, Kill
+Process validates the PID is numeric and trims whitespace, and a server-side queueing
+failure surfaces its real error message.
+
 ### Analyst triage/investigation workflow improvements (1/7): severity inheritance on escalation
 
 Live-walked the full alert-fires → triage → escalate → investigate scenario end to end
