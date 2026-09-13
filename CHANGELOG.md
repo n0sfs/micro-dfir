@@ -176,7 +176,11 @@ Verified with a JS vm-context test (6 cases): resolves to a real label when stil
 linked, falls back to "Kind #id" when not in the lookup or the underlying record's
 summary is gone, an unrecognized item_type still renders using the raw type name, a
 non-matching detail shape passes through untouched, and an item label containing HTML
-is properly escaped before being inlined into the Timeline row.
+is properly escaped before being inlined into the Timeline row. Live-verified on
+production against a real case's actual history: a still-linked EDR response action
+now shows "Item added: Response Action — **collect_browser_artifacts**", while an item
+added and later removed from the same case correctly falls back to "Item added/removed:
+Response Action #113" instead of the old raw `command_result:113`.
 
 ## 2026-09-12
 
