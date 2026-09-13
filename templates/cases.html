@@ -1624,7 +1624,29 @@ function pirNotes(c, isClosed) {
     `).join('');
 }
 
-function caseEventLabel(e) {
+// Reuses ITEM_KIND_LABELS (the same catalog the Items card already uses) instead of a
+// second type->label mapping. case_events.detail for item_added/item_removed is written
+// as the raw "{item_type}:{item_id}" string across all 4 linking paths (app.py,
+// sigma_engine.py's two auto-case paths, soar_alerts.py) -- e.g. "alert:855164" -- which
+// read fine as an internal join key but meant nothing to an analyst reading the
+// Timeline. `itemLookup` (built once per case render from c.items, keyed the same
+// "type:id" way) resolves it to the item's real label (e.g. the alert's rule title)
+// when that item is still linked -- an item since removed, or a lookup miss, falls back
+// to a plain "Kind #id" instead of the fully raw string, and a detail that doesn't even
+// match the expected shape falls back untouched so an unexpected format never renders
+// blank or throws.
+function prettifyItemDetail(detail, itemLookup) {
+    const m = /^(\w+):(\d+)$/.exec(detail || '');
+    if (!m) return escHtml(detail);
+    const kind = ITEM_KIND_LABELS[m[1]] || m[1];
+    const item = itemLookup && itemLookup[detail];
+    if (item && item.summary && item.summary.label) {
+        return `${escHtml(kind)} — <strong>${escHtml(item.summary.label)}</strong>`;
+    }
+    return `${escHtml(kind)} #${escHtml(m[2])}`;
+}
+
+function caseEventLabel(e, itemLookup) {
     const map = {
         created: 'Case created',
         status_change: e.detail === 'open' ? 'Case reopened' : (e.detail === 'closed' ? 'Case closed' : `Status changed to <strong>${escHtml(e.detail)}</strong>`),
@@ -1634,8 +1656,8 @@ function caseEventLabel(e) {
         severity_change: `Severity changed to <strong>${escHtml((e.detail || '').toUpperCase())}</strong>`,
         workflow_state_change: `Workflow state changed to <strong>${escHtml(WORKFLOW_STATE_LABELS[e.detail] || e.detail)}</strong>`,
         queue_change: `Queue changed to <strong>${escHtml(e.detail)}</strong>`,
-        item_added: `Item added: ${escHtml(e.detail)}`,
-        item_removed: `Item removed: ${escHtml(e.detail)}`,
+        item_added: `Item added: ${prettifyItemDetail(e.detail, itemLookup)}`,
+        item_removed: `Item removed: ${prettifyItemDetail(e.detail, itemLookup)}`,
         task_added: `Task added: "${escHtml(e.detail)}"`,
         task_done: `Task completed: "${escHtml(e.detail)}"`,
         task_reopened: `Task reopened: "${escHtml(e.detail)}"`,
@@ -1667,14 +1689,14 @@ function caseEventLabel(e) {
     return map[e.event_type] || escHtml(e.event_type);
 }
 
-function eventRow(e) {
+function eventRow(e, itemLookup) {
     const icon = e.event_type === 'note' ? 'fa-note-sticky text-info' : (e.event_type === 'analysis' ? 'fa-magnifying-glass-chart text-info' : 'fa-circle text-muted');
     // A deterministic host/user analysis (see analyzeCaseEntity()) is multi-line and
     // meant to be read as a block, not squeezed into the same single-line label every
     // other event type uses -- rendered as a collapsible <pre> instead.
     const body = e.event_type === 'analysis'
         ? `<details><summary style="cursor:pointer;">${escHtml(caseEventLabel(e))}</summary><pre class="small mt-2 mb-0 bg-black border border-secondary rounded p-2" style="white-space:pre-wrap;">${escHtml(e.detail)}</pre></details>`
-        : caseEventLabel(e);
+        : caseEventLabel(e, itemLookup);
     return `
         <div class="d-flex gap-2 small mb-2">
             <i class="fa-solid ${icon} mt-1" style="font-size:.5rem;"></i>
@@ -1976,6 +1998,12 @@ function loadAndRenderCaseDetail(cid) {
         if (!c || c.error) { toast((c && c.error) || 'Case not found.', 'danger'); backToList(); return; }
         const isClosed = c.status === 'closed';
         activeCaseClosed = isClosed;
+        // Keyed the same "type:id" way case_events.detail is already written, so the
+        // Timeline can resolve "alert:855164" to that item's real, still-current label
+        // (the same summary the Items tab shows) with no extra fetch -- both c.items and
+        // c.events already arrive together in this one case payload.
+        const itemLookup = {};
+        (c.items || []).forEach(it => { itemLookup[`${it.item_type}:${it.item_id}`] = it; });
         document.getElementById('caseDetailTitleHeading').innerHTML = `<i class="fa-solid fa-folder-open me-2"></i>${escHtml(c.title)} <span class="text-muted" style="font-size:.6em;font-weight:normal;">${caseNumberLabel(c)}</span>`;
         // Everything besides the case-info form used to sit in a narrow col-lg-5 right
         // column stacked 11 cards deep -- moved into tabs below the info card instead
@@ -2318,7 +2346,7 @@ function loadAndRenderCaseDetail(cid) {
                             <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addCaseNote()" ${isClosed ? 'disabled' : ''}><i class="fa-solid fa-plus"></i></button>
                         </div>
                         <div style="max-height:500px; overflow-y:auto;">
-                            ${c.events.length ? c.events.map(eventRow).join('') : '<p class="text-muted small">No timeline events yet.</p>'}
+                            ${c.events.length ? c.events.map(e => eventRow(e, itemLookup)).join('') : '<p class="text-muted small">No timeline events yet.</p>'}
                         </div>
                     </div>
                 </div>

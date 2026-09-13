@@ -152,6 +152,32 @@ picker, and confirmed the resulting case had `item_count: 2` and `severity: "cri
 — then deleted the test case and confirmed neither alert's own status/acknowledged
 state had been touched by the link.
 
+### Analyst triage/investigation workflow improvements (6/7): human-readable Timeline entries
+
+Sixth fix from the same walkthrough: a case's Timeline tab logged item links as the raw
+internal join key it's stored as — `"Item added: alert:855164"` — across all 4 places
+that write it (`app.py`'s `api_case_add_item`, `sigma_engine.py`'s two auto-case paths,
+`soar_alerts.py`). Meant nothing to an analyst reading the case history without cross-
+referencing the Items tab by hand.
+
+`caseEventLabel()` (`cases.html`) now resolves `item_added`/`item_removed` details
+through a new `itemLookup` map — built once per case render from `c.items` (already
+loaded in the same payload as `c.events`, no extra fetch) keyed the identical
+`"item_type:item_id"` way the backend already writes `case_events.detail`. A still-linked
+item now shows its real label (e.g. "Alert — Antivirus - Exploitation Framework
+Signature") reusing `ITEM_KIND_LABELS`, the same catalog the Items tab itself uses — no
+second type-name mapping. Falls back to a plain `"Kind #id"` (never the fully raw
+string) when the item's since been removed or isn't in this render's lookup, and passes
+an unrecognized detail shape through untouched, so nothing renders blank or throws.
+Historical rows written before this change render exactly the same way — no backfill
+needed, no schema change made.
+
+Verified with a JS vm-context test (6 cases): resolves to a real label when still
+linked, falls back to "Kind #id" when not in the lookup or the underlying record's
+summary is gone, an unrecognized item_type still renders using the raw type name, a
+non-matching detail shape passes through untouched, and an item label containing HTML
+is properly escaped before being inlined into the Timeline row.
+
 ## 2026-09-12
 
 ### Report content improvements (1/7): SOC effectiveness metrics in the Security Summary
