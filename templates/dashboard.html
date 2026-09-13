@@ -1842,7 +1842,16 @@ async function addToCase(itemType, itemId, logSeverity) {
         method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({item_type: itemType, item_id: itemId})
     }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
         msg.className = 'small mt-1 ' + (ok ? 'text-success' : 'text-danger');
-        msg.innerText = ok ? 'Added to case.' : (data.error || 'Failed to add.');
+        if (ok) {
+            // Previously just said "Added to case." -- an analyst who just escalated a
+            // Critical alert had to close this modal, go to the Cases page, and find the
+            // case by title/scrolling to keep working it. target="_blank" (same convention
+            // as the "View Rule" button above) keeps this Log Search view open rather than
+            // navigating away from it.
+            msg.innerHTML = `Added to case. <a href="/cases?case=${encodeURIComponent(caseId)}" target="_blank" class="text-info">Go to case <i class="fa-solid fa-arrow-up-right-from-square ms-1"></i></a>`;
+        } else {
+            msg.innerText = data.error || 'Failed to add.';
+        }
         msg.style.display = 'block';
     }).catch(err => { msg.className = 'small mt-1 text-danger'; msg.innerText = 'Error: ' + err; msg.style.display = 'block'; });
 }
@@ -2410,8 +2419,12 @@ async function bulkAddToCase() {
     ));
     const succeeded = results.filter(r => r.ok).length;
     const failed = results.length - succeeded;
-    if (failed) toast(`${succeeded} added, ${failed} failed (already in this case, or an error).`, 'warning');
-    else toast(`${succeeded} alert(s) added to case.`, 'success');
+    // Same "Go to case" follow-up as the single-item addToCase() -- toast() has no HTML
+    // support, so this uses its existing actionLabel/onAction button mechanism (already
+    // established in threat_intel.html's sweep-hit toast) instead of building a link.
+    const goToCase = { actionLabel: 'Go to case', onAction: () => window.open(`/cases?case=${encodeURIComponent(caseId)}`, '_blank') };
+    if (failed) toast(`${succeeded} added, ${failed} failed (already in this case, or an error).`, 'warning', goToCase);
+    else toast(`${succeeded} alert(s) added to case.`, 'success', goToCase);
     clearBulkSelection();
 }
 

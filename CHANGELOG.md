@@ -44,6 +44,29 @@ the right host — deliberately declining/cancelling each time (never actually i
 or killing anything on the user's real active laptop) and confirming via
 `agent_commands`'s latest row id that nothing was queued either time.
 
+### Cross-screen triage friction, round 2 (2/4): "Go to case" after escalating
+
+Second fix from this same follow-up pass: escalating an alert to a case (single-item
+"Add to Case" and the bulk toolbar's "Add to Case" from the last pass) only ever said
+"Added to case." — no link back to it. An analyst who just escalated a Critical alert
+had to close the modal, go to the Cases page, and find the case by title/scrolling to
+keep working it.
+
+`addToCase()` (dashboard.html) now shows a "Go to case" link alongside the success
+message, pointing at `/cases?case=<id>` — the exact deep-link param format
+`cases.html` already reads on load — opened `target="_blank"` (same convention as the
+"View Rule" button) so the current Log Search view stays open rather than navigating
+away from it. `bulkAddToCase()` gets the equivalent via `toast()`'s existing
+`actionLabel`/`onAction` mechanism (already established in `threat_intel.html`'s
+sweep-hit toast) instead of a link, since `toast()` has no HTML support. Both correctly
+target the *actual* case used — the just-created case's own id when "+ New Case" was
+picked, not whatever was in the dropdown before creation.
+
+Verified with a JS vm-context test (5 cases): the link/action targets the right
+existing case, targets a brand-new case's own id (not the stale `__new__` select
+value), a failed add shows the plain error with no case link, and the bulk toast's
+action opens the right case in a new tab for both the existing-case and new-case paths.
+
 ### Analyst triage/investigation workflow improvements (1/7): severity inheritance on escalation
 
 Live-walked the full alert-fires → triage → escalate → investigate scenario end to end
