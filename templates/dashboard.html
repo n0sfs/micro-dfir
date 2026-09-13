@@ -1367,6 +1367,7 @@ function showLogDetail(idx) {
         <label class="form-label small text-muted mb-1">Triage</label>
         <div id="alertUrgencyChips" class="d-flex flex-wrap gap-3 small mb-2">${renderAlertUrgencyChips(log)}</div>
         <div id="alertHistoryWrap" class="small mb-2"></div>
+        <div id="alertNoiseWrap" class="small mb-2"></div>
         <div class="d-flex align-items-end gap-2 mb-2 flex-wrap">
             <div>
                 <label class="form-label small text-muted mb-1">Status</label>
@@ -1412,7 +1413,7 @@ function showLogDetail(idx) {
     if (canAddToCase) { renderAddToCaseControl(log); }
     if (canLinkToEntity) { renderLinkToEntityControl(log); }
     renderAlertEnrichment(log);
-    if (log.type === 'alert') { renderAlertHistory(log); }
+    if (log.type === 'alert') { renderAlertHistory(log); renderAlertNoiseStatus(log); }
     new bootstrap.Modal(document.getElementById('logDetailModal')).show();
 }
 
@@ -1444,6 +1445,52 @@ async function renderAlertHistory(log) {
         <strong class="text-muted me-1">Fired before:</strong>${res.total} other alert${res.total === 1 ? '' : 's'} for this rule on this host
         ${dispositionParts.length ? ` <span class="text-muted">(${dispositionParts.join(', ')})</span>` : ''}
     </div>`;
+}
+
+// Reuses the Detection Tuning tab's own /api/rules/tuning + classifyNoise() rather than
+// a second noise-threshold definition -- memoized like loadAssetsCached() so clicking
+// through several alerts in one session only fetches this once, independent of whether
+// the analyst has ever actually opened the Detection Tuning tab (which populates the
+// same-shaped `allTuning` global lazily, only on that tab's own first render).
+let _tuningCachePromise = null;
+function loadTuningCached() {
+    if (!_tuningCachePromise) {
+        _tuningCachePromise = fetch('/api/rules/tuning').then(r => r.ok ? r.json() : []).catch(() => []);
+    }
+    return _tuningCachePromise;
+}
+
+// Previously, spotting that a rule was already "Noisy" (and doing anything about it --
+// disabling, excluding, tuning severity) meant leaving the alert entirely to search for
+// it by name in Detection Tuning. Only surfaces for rules that actually cross the
+// Noisy threshold -- a Normal/Quiet/Never-Triggered rule shows nothing here, since that
+// status is only actionable, not informative, on every single alert.
+async function renderAlertNoiseStatus(log) {
+    const wrap = document.getElementById('alertNoiseWrap');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    if (!log.rule_id) return;
+    const tuning = await loadTuningCached();
+    const rule = (tuning || []).find(r => r.id === log.rule_id);
+    if (!rule || classifyNoise(rule).label !== 'Noisy') return;
+    // Detection Tuning's own openTuneModal() reads from `allTuning`, populated only once
+    // that tab has rendered -- back-filling it here (only if still empty, so we never
+    // stomp on a fresher fetch that tab already made) lets "Tune This Rule" work even
+    // when an analyst opens this straight from Log Search/Home and never visits that tab.
+    if (!allTuning.length) allTuning = tuning;
+    wrap.innerHTML = `<div class="border border-danger rounded p-2 mb-0">
+        <span class="badge bg-danger me-2">Noisy</span>
+        <span class="text-muted">${rule.alerts_7d} alerts in the last 7 days (&ge; 50 threshold)</span>
+        <button type="button" class="btn btn-sm btn-outline-warning ms-2" onclick="openTuneModalFromAlert(${rule.id})"><i class="fa-solid fa-sliders me-1"></i>Tune This Rule</button>
+    </div>`;
+}
+
+// Same hide-current-then-show-the-other-modal pattern openRuleFromTuneModal() already
+// uses -- stacking two Bootstrap modals at once is a known source of backdrop/z-index
+// glitches, so close this one first rather than layering them.
+function openTuneModalFromAlert(ruleId) {
+    bootstrap.Modal.getInstance(document.getElementById('logDetailModal'))?.hide();
+    openTuneModal(ruleId);
 }
 
 // Threat intel verdict / asset criticality / UEBA risk are today only visible by

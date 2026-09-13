@@ -90,6 +90,35 @@ Live-verified on production against a real recurring rule+host pair (`WORKSTATIO
 111 other alert rows for the same rule): the triage modal's new panel correctly showed
 "Fired before: 111 other alerts for this rule on this host (111 still New)".
 
+### Analyst triage/investigation workflow improvements (4/7): surface a rule's "Noisy" status + a tuning shortcut at triage time
+
+Fourth fix from the same walkthrough: the real recurring Critical alert this whole pass
+is based on was already flagged "Noisy" in Detection Tuning (72 alerts/7d against a
+50-alert threshold) — but nothing on the alert's own triage view said so. An analyst
+had to already know to check Detection Tuning, then search for the rule there by name,
+before discovering the alert they were triaging was a known-noisy one worth tuning
+rather than investigating fresh each time.
+
+Added `renderAlertNoiseStatus()` to the triage modal (`dashboard.html`), reusing the
+existing `/api/rules/tuning` endpoint and `classifyNoise()` threshold logic Detection
+Tuning's own table already uses — no new backend route, no second noise-threshold
+definition. Only renders for a rule that's actually crossed the Noisy threshold (a
+Normal/Quiet/Never-Triggered rule shows nothing, so this stays informative rather than
+cluttering every alert), showing the badge, the 7-day count, and a "Tune This Rule"
+button that opens the same Detection Tuning modal analysts already use for severity
+overrides and exclusions — reachable directly from the alert instead of a separate
+navigate-and-search. `openTuneModal()` reads from the `allTuning` global that Detection
+Tuning's own tab lazily populates on its first render; the new code back-fills it from
+the same fetch if still empty, so the shortcut works even when an analyst opens this
+straight from Log Search/Home and has never visited that tab this session.
+
+Verified with a JS vm-context test covering: a Noisy rule renders the badge/shortcut, a
+Normal rule renders nothing, a legacy alert with no `rule_id` skips the fetch entirely,
+the `allTuning` back-fill only happens when it's actually empty (never clobbering a
+fresher fetch Detection Tuning already made), and the shortcut hides the triage modal
+before opening the tuning modal (avoiding Bootstrap's stacked-modal glitches, the same
+pattern the existing `openRuleFromTuneModal()` uses).
+
 ## 2026-09-12
 
 ### Report content improvements (1/7): SOC effectiveness metrics in the Security Summary
