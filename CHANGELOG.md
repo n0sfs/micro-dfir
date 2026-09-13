@@ -66,6 +66,10 @@ Verified with a JS vm-context test (5 cases): the link/action targets the right
 existing case, targets a brand-new case's own id (not the stale `__new__` select
 value), a failed add shows the plain error with no case link, and the bulk toast's
 action opens the right case in a new tab for both the existing-case and new-case paths.
+Live-verified on production: escalated the same real Critical alert via "+ New Case",
+clicked the resulting "Go to case" link, and confirmed it opened case #20 in a new tab
+(SIEM tab stayed put) with the right title, Critical severity, the alert already
+linked, and its host already tracked as an Asset — test case cleaned up afterward.
 
 ### Analyst triage/investigation workflow improvements (1/7): severity inheritance on escalation
 
