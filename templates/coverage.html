@@ -172,7 +172,7 @@
     <div class="card-body">
         <div class="table-responsive">
             <table class="table table-dark table-hover table-sm align-middle">
-                <thead><tr><th>Technique</th><th>Tactic</th><th>Known to be used by</th></tr></thead>
+                <thead><tr><th>Technique</th><th>Tactic</th><th>Known to be used by</th><th></th></tr></thead>
                 <tbody id="coverageGapBody"></tbody>
             </table>
         </div>
@@ -644,6 +644,23 @@ function renderCoverageGrid(d) {
     }).join('');
 }
 
+// Same deep-link convention Atomic Testing's own "Create Detection Rule" button
+// already uses (threat_intel.html's atomicGapWorkflowHtml, consumed by
+// dashboard.html's new_rule=1 handler) -- opens Detection Rules with a fresh rule
+// pre-filled from the technique instead of leaving the analyst to retype context they
+// already had on this page. tech.id has no "T" prefix (T1589 is rendered as
+// tech.id === '1589' elsewhere on this page), so the attack.tNNNN Sigma tag format
+// needs it added back.
+function buildRuleUrlForGap(tech) {
+    const mitreTag = 'attack.t' + String(tech.id).toLowerCase();
+    const title = `Detect: T${tech.id}${tech.name ? ' ' + tech.name : ''}`;
+    const description = `Written to close a coverage gap on T${tech.id}${tech.name ? ' (' + tech.name + ')' : ''} -- no rule was mapped to this technique.`;
+    return '/siem?tab=rules&new_rule=1'
+        + '&title=' + encodeURIComponent(title)
+        + '&mitre=' + encodeURIComponent(mitreTag)
+        + '&description=' + encodeURIComponent(description);
+}
+
 function renderCoverageGaps(d) {
     const card = document.getElementById('coverageGapCard');
     const body = document.getElementById('coverageGapBody');
@@ -665,6 +682,7 @@ function renderCoverageGaps(d) {
             <td>T${escHtml(g.tech.id)}${g.tech.name ? ' — ' + escHtml(g.tech.name) : ''}</td>
             <td class="text-muted small">${escHtml(g.tactic)}</td>
             <td>${g.tech.threat_actors.map(a => `<a href="/threat-intel?tab=entities&entity=${a.id}" target="_blank" class="badge bg-secondary text-decoration-none me-1">${escHtml(a.name)}</a>`).join('')}</td>
+            <td class="text-end"><a href="${buildRuleUrlForGap(g.tech)}" target="_blank" class="btn btn-sm btn-outline-primary py-0 px-2"><i class="fa-solid fa-plus me-1"></i>Build a rule</a></td>
         </tr>`).join('');
 }
 
@@ -692,7 +710,8 @@ function openCoverageDrilldown(tactic, techId) {
     }
 
     if (!tech.rules.length) {
-        html += '<div class="text-muted small">No rules are mapped to this technique.</div>';
+        html += `<div class="text-muted small mb-2">No rules are mapped to this technique.</div>
+                 <a href="${buildRuleUrlForGap(tech)}" target="_blank" class="btn btn-sm btn-outline-primary"><i class="fa-solid fa-plus me-1"></i>Build a rule</a>`;
     } else {
         const moreEntry = tech.rules.find(r => r.more);
         const realRules = tech.rules.filter(r => !r.more);

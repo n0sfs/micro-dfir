@@ -6194,12 +6194,7 @@ def download_report(history_id):
 
 REPORT_TYPES = ('security', 'compliance', 'audit', 'vulnerability', 'tabletop')
 
-@app.route('/reports/generate', methods=['POST'])
-@login_required
-def trigger_report():
-    if not validate_csrf():
-        return redirect(url_for('reports_page'))
-    report_type = request.form.get('type', 'security')
+def _validated_report_params(report_type, framework_key, days):
     if report_type not in REPORT_TYPES:
         report_type = 'security'
     # Only meaningful (and only sent by the form) for report_type == 'compliance' --
@@ -6207,7 +6202,6 @@ def trigger_report():
     # survey. Validated against the real framework keys rather than trusted as-is, even
     # though subprocess.run's list argv is already shell-injection-safe, so a bad value
     # can't silently produce a report with an empty/garbage framework label.
-    framework_key = request.form.get('framework') or None
     if framework_key not in COMPLIANCE_FRAMEWORKS:
         framework_key = None
     # Validated the same defensive way as report_type/framework_key above -- an admin
@@ -6215,22 +6209,61 @@ def trigger_report():
     # before it reaches a subprocess argv. Clamped, not rejected, since a garbage value
     # here isn't attacker-meaningful (it only narrows/widens the caller's own report).
     try:
-        days = max(1, min(int(request.form.get('days', 30)), 365))
+        days = max(1, min(int(days), 365))
     except (TypeError, ValueError):
         days = 30
+    return report_type, framework_key, days
+
+# Shared by both trigger_report() (the original form-POST-and-redirect path, kept for
+# whatever might still hit it directly) and api_generate_report() (the fetch()-driven
+# path reports.html now actually calls, added so "Generate Report" can show a spinner
+# instead of leaving the whole page frozen/unresponsive for up to subprocess.run's own
+# 120s timeout with zero feedback). subprocess.run itself still blocks the WORKER
+# synchronously either way -- this app has no background-job mechanism (see CLAUDE.md's
+# own note on that) -- the fix here is purely that the BROWSER no longer has to sit on a
+# frozen full-page navigation to find out.
+def _generate_report_now(report_type, framework_key, days, username):
+    report_type, framework_key, days = _validated_report_params(report_type, framework_key, days)
     try:
         cmd = ["/opt/micro-dfir/venv/bin/python3", "/opt/micro-dfir/src/generate_report.py",
-               report_type, f"--user={current_user.username}", "--source=manual", f"--days={days}"]
+               report_type, f"--user={username}", "--source=manual", f"--days={days}"]
         if framework_key:
             cmd.append(f"--framework={framework_key}")
         subprocess.run(cmd, check=True, timeout=120)
         log_audit('report_generate', 'report', report_type, framework_key)
-        flash("Report successfully generated!", "success")
+        return True, "Report successfully generated!"
     except subprocess.TimeoutExpired:
-        flash("Report generation timed out.", "danger")
+        return False, "Report generation timed out."
     except Exception as e:
-        flash(f"Failed to generate report: {str(e)}", "danger")
+        return False, f"Failed to generate report: {str(e)}"
+
+@app.route('/reports/generate', methods=['POST'])
+@login_required
+def trigger_report():
+    if not validate_csrf():
+        return redirect(url_for('reports_page'))
+    ok, message = _generate_report_now(
+        request.form.get('type', 'security'), request.form.get('framework') or None,
+        request.form.get('days', 30), current_user.username
+    )
+    flash(message, "success" if ok else "danger")
     return redirect(url_for('reports_page'))
+
+# fetch()-driven counterpart to trigger_report() above -- same generation logic via
+# _generate_report_now(), but returns JSON instead of a flash+redirect so reports.html
+# can show a spinner on the button and refresh just the history table in place, rather
+# than the browser sitting on an unresponsive full-page POST for up to 2 minutes. No
+# CSRF token check, matching every other JSON API route in this file (session-cookie +
+# @login_required is this app's existing convention for fetch()-originated POSTs).
+@app.route('/api/reports/generate', methods=['POST'])
+@login_required
+def api_generate_report():
+    data = request.get_json() or {}
+    ok, message = _generate_report_now(
+        data.get('type', 'security'), data.get('framework') or None,
+        data.get('days', 30), current_user.username
+    )
+    return jsonify({'success': ok, 'message': message}), (200 if ok else 500)
 
 @app.route('/api/reports/history', methods=['GET'])
 @login_required
@@ -6394,6 +6427,16 @@ def get_report_schedule_config(db):
             # Kept out of the per-type loop above since it isn't itself a frequency value.
             if isinstance(saved.get('email_recipients'), str):
                 cfg['email_recipients'] = saved['email_recipients']
+            # Stamped by api_report_schedule()'s POST branch only when
+            # apply_report_schedule_to_crontab() actually succeeds -- distinct from
+            # "the frequency selections were saved" (which happens regardless of
+            # crontab success, unchanged). Lets the Schedule tab show an analyst when
+            # the crontab was last confirmed rewritten, not just what's configured, so
+            # a silent later failure (crontab wiped by something external, cron itself
+            # broken) has *something* on the page hinting at why a scheduled report
+            # never showed up in history.
+            if isinstance(saved.get('last_applied_at'), str):
+                cfg['last_applied_at'] = saved['last_applied_at']
         except (json.JSONDecodeError, TypeError):
             pass
     return cfg
@@ -6454,9 +6497,14 @@ def api_report_schedule():
         if bad:
             return jsonify({'error': f"Not a valid email address: {', '.join(bad)}"}), 400
         cfg['email_recipients'] = ', '.join(addrs)
+    ok, err = apply_report_schedule_to_crontab(cfg)
+    # Only stamped on a confirmed-successful crontab rewrite -- a failed apply leaves
+    # whatever last_applied_at was already there, correctly reflecting "last time this
+    # was actually confirmed applied", not "last time it was attempted".
+    if ok:
+        cfg['last_applied_at'] = datetime.now().isoformat()
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('report_schedule_config', ?)", (json.dumps(cfg),))
     db.commit()
-    ok, err = apply_report_schedule_to_crontab(cfg)
     log_audit('report_schedule_change', 'settings', None, json.dumps(cfg) + ('' if ok else f' (crontab write failed: {err})'))
     if not ok:
         return jsonify({'status': 'partial', 'config': cfg, 'warning': f'Settings saved but crontab update failed: {err}'})

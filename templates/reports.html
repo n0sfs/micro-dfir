@@ -44,31 +44,57 @@
     <div class="card shadow-sm border-secondary bg-dark text-light mb-4">
         <div class="card-header border-secondary d-flex justify-content-between align-items-center">
             <h5 class="mb-0 text-info"><i class="fa-solid fa-folder-open"></i> Generated PDF Reports</h5>
-            <form method="POST" action="{{ url_for('trigger_report') }}" class="m-0 d-flex gap-2 align-items-center">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <select name="type" id="reportTypeSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" onchange="onReportTypeChange()">
+            <!-- Was a plain method="POST" form -- generation itself still runs
+                 synchronously server-side (subprocess.run, up to 120s -- this app has
+                 no background-job mechanism), but a real form POST left the WHOLE PAGE
+                 frozen/unresponsive for that entire wait with no feedback at all. Now a
+                 fetch() to /api/reports/generate instead, so the button can show a
+                 spinner and the page stays interactive; the history table refreshes in
+                 place via the same loadReports() the initial page load already uses. -->
+            <div class="m-0 d-flex gap-2 align-items-center">
+                <select id="reportTypeSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" onchange="onReportTypeChange()">
                     <option value="security">Security Summary</option>
                     <option value="compliance">Compliance Report</option>
                     <option value="audit">Audit Trail Report</option>
                     <option value="vulnerability">Vulnerability Report</option>
                     <option value="tabletop">Tabletop Exercise Report</option>
                 </select>
-                <select name="framework" id="reportFrameworkSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto; display:none;" title="Narrow the Compliance Report to one framework instead of the all-frameworks survey">
+                <select id="reportFrameworkSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto; display:none;" title="Narrow the Compliance Report to one framework instead of the all-frameworks survey">
                     <option value="">All Frameworks</option>
                     {% for key, label in compliance_frameworks.items() %}
                     <option value="{{ key }}">{{ label }}</option>
                     {% endfor %}
                 </select>
-                <select name="days" id="reportDaysSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" title="How far back the report's time-windowed sections look">
+                <select id="reportDaysSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" title="How far back the report's time-windowed sections look">
                     <option value="7">Last 7 days</option>
                     <option value="30" selected>Last 30 days</option>
                     <option value="90">Last 90 days</option>
                     <option value="180">Last 180 days</option>
                 </select>
-                <button type="submit" class="btn btn-sm btn-outline-success"><i class="fa-solid fa-bolt"></i> Generate Report</button>
-            </form>
+                <button type="button" id="generateReportBtn" class="btn btn-sm btn-outline-success" onclick="submitGenerateReport()"><i class="fa-solid fa-bolt"></i> Generate Report</button>
+            </div>
         </div>
         <div class="card-body">
+            <!-- Client-side filters over the already-loaded 100-row history (same
+                 "no server round-trip for a page already holding the full result set"
+                 approach the rest of this app uses for small lists) -- with 28+ real
+                 reports already piling up in production, finding "the last Compliance
+                 report" meant scrolling and eyeballing before this. -->
+            <div class="d-flex gap-2 mb-3">
+                <select id="historyTypeFilter" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" onchange="applyReportHistoryFilters()">
+                    <option value="">All Types</option>
+                    <option value="security">Security Summary</option>
+                    <option value="compliance">Compliance Report</option>
+                    <option value="audit">Audit Trail Report</option>
+                    <option value="vulnerability">Vulnerability Report</option>
+                    <option value="tabletop">Tabletop Exercise Report</option>
+                </select>
+                <select id="historyStatusFilter" class="form-select form-select-sm bg-dark text-light border-secondary" style="width:auto;" onchange="applyReportHistoryFilters()">
+                    <option value="">All Statuses</option>
+                    <option value="success">Success</option>
+                    <option value="failed">Failed</option>
+                </select>
+            </div>
             <div class="table-responsive">
                 <table class="table table-dark table-hover table-sm align-middle">
                     <thead>
@@ -181,6 +207,15 @@
             <p class="text-muted small mb-0"><i class="fa-solid fa-lock me-1"></i>Tier 3 (Senior Analyst) or Admin role required to change the report schedule.</p>
             {% endif %}
             <p class="text-muted small mt-2 mb-0">Daily reports run 05:00; weekly reports run Monday 06:00; monthly reports run the 1st at 01:00 — the appliance's own local system time.</p>
+            <!-- Saving this form rewrites the crontab directly with no other trace of
+                 whether it actually worked -- if cron silently stops picking up a
+                 change (or something external clobbers the crontab), there was
+                 previously nothing on this page to explain why a scheduled report
+                 never showed up in history. This is a persisted "last confirmed
+                 applied" timestamp, not a live cron-health check -- it can't detect
+                 cron itself being broken, only whether THIS app's last write attempt
+                 to the crontab succeeded. -->
+            <p class="text-muted small mt-1 mb-0" id="scheduleLastAppliedNote"></p>
             <div id="scheduleMsg" class="mt-2 small" style="display:none;"></div>
         </div>
     </div>
@@ -239,6 +274,35 @@ function onReportTypeChange() {
     document.getElementById('reportDaysSelect').style.display = type === 'vulnerability' ? 'none' : '';
 }
 
+// Generation can take up to 120s (subprocess.run's own timeout) -- the button stays
+// disabled with a spinner for the whole wait so it's obvious something is happening
+// and a second click can't fire an overlapping generation, but nothing else on the
+// page is blocked. Reuses loadReports() (the same fetch the initial page load already
+// does) to refresh the history table + stat tiles in place afterward, instead of the
+// old form-POST's full-page reload.
+function submitGenerateReport() {
+    const btn = document.getElementById('generateReportBtn');
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Generating…';
+    const payload = {
+        type: document.getElementById('reportTypeSelect').value,
+        framework: document.getElementById('reportFrameworkSelect').value || null,
+        days: parseInt(document.getElementById('reportDaysSelect').value, 10) || 30,
+    };
+    fetch('/api/reports/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+        .then(r => r.json().then(d => ({ ok: r.ok, d })))
+        .then(({ ok, d }) => {
+            toast(d.message || (ok ? 'Report successfully generated!' : 'Failed to generate report.'), ok ? 'success' : 'danger');
+            loadReports();
+        })
+        .catch(err => toast('Error generating report: ' + err, 'danger'))
+        .finally(() => {
+            btn.disabled = false;
+            btn.innerHTML = original;
+        });
+}
+
 let reportHistoryData = [];
 
 function updateReportStats() {
@@ -280,13 +344,30 @@ function formatReportTimestamp(ts) {
     return ts.replace('T', ' ').split('.')[0];
 }
 
+function getFilteredReportHistory() {
+    const typeFilter = document.getElementById('historyTypeFilter').value;
+    const statusFilter = document.getElementById('historyStatusFilter').value;
+    return reportHistoryData.filter(h =>
+        (!typeFilter || h.report_type === typeFilter) && (!statusFilter || h.status === statusFilter)
+    );
+}
+
+function applyReportHistoryFilters() {
+    renderReportHistory();
+}
+
 function renderReportHistory() {
     const body = document.getElementById('reportHistoryBody');
     if (!reportHistoryData.length) {
         body.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4"><i class="fa-solid fa-circle-info text-info me-1"></i>No reports generated yet.</td></tr>';
         return;
     }
-    body.innerHTML = reportHistoryData.map(h => `
+    const rows = getFilteredReportHistory();
+    if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">No reports match these filters.</td></tr>';
+        return;
+    }
+    body.innerHTML = rows.map(h => `
         <tr>
             <td><i class="fa-regular fa-file-pdf text-danger me-2"></i>${escHtml(REPORT_TYPE_LABELS[h.report_type] || h.report_type)}${h.framework_label ? ' — ' + escHtml(h.framework_label) : ''}${h.report_days ? ` <span class="text-muted small">(${h.report_days}d)</span>` : ''}</td>
             <td class="small text-muted">${escHtml(formatReportTimestamp(h.completed_at || h.started_at))}</td>
@@ -362,6 +443,19 @@ function saveBranding() {
         });
 }
 
+function renderScheduleLastAppliedNote(cfg) {
+    const el = document.getElementById('scheduleLastAppliedNote');
+    if (!el) return;
+    const anyOn = ['security', 'compliance', 'audit', 'vulnerability', 'tabletop'].some(t => cfg[t] && cfg[t] !== 'off');
+    if (!anyOn) {
+        el.innerHTML = '';
+    } else if (cfg.last_applied_at) {
+        el.innerHTML = `<i class="fa-solid fa-circle-check text-success me-1"></i>Crontab last confirmed applied: ${escHtml(formatReportTimestamp(cfg.last_applied_at))}`;
+    } else {
+        el.innerHTML = '<i class="fa-solid fa-triangle-exclamation text-warning me-1"></i>A schedule is set, but it has never been confirmed applied to the crontab -- click Save Schedule to apply it.';
+    }
+}
+
 // ---- Report Schedule logic (moved from Settings > Reports) ----
 function loadReportSchedule() {
     fetch('/api/settings/report-schedule')
@@ -375,6 +469,7 @@ function loadReportSchedule() {
             });
             const recipientsEl = document.getElementById('reportScheduleRecipients');
             if (recipientsEl) recipientsEl.value = cfg.email_recipients || '';
+            renderScheduleLastAppliedNote(cfg);
         })
         .catch(e => {
             console.error('Error loading report schedule:', e);
@@ -405,6 +500,7 @@ function saveReportSchedule() {
                 msg.className = 'mt-2 small text-danger';
                 msg.innerText = res.error || 'Failed to save schedule.';
             }
+            if (res.config) renderScheduleLastAppliedNote(res.config);
         })
         .catch(err => {
             msg.style.display = 'block';
