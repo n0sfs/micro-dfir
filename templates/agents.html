@@ -999,8 +999,13 @@ function relativeTimeUtc(ts) {
 // the database actually holds.
 function queuedAtCell(ts) {
     if (!ts) return '<span class="text-muted">—</span>';
-    const title = `${utcToLocalStr(ts)} local\n${ts} UTC (as stored)`;
-    return `<span title="${escHtml(title)}">${escHtml(relativeTimeUtc(ts) || ts)}</span>`;
+    // escHtml() round-trips through innerText -> innerHTML, which turns a newline into a
+    // literal <br>. That's correct inside element content and wrong inside an attribute
+    // value, where the tooltip then renders the characters "<br>" between the two lines
+    // (caught live). Escape each line separately and join with a raw newline -- the same
+    // shape the fleet table's hostname title already uses.
+    const title = `${escHtml(utcToLocalStr(ts))} local\n${escHtml(ts)} UTC (as stored)`;
+    return `<span title="${title}">${escHtml(relativeTimeUtc(ts) || ts)}</span>`;
 }
 
 function lastLogReceivedCell(dev) {
