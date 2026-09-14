@@ -78,6 +78,31 @@ real risk breakdown now carries the ⓘ info icon with that text — left in pla
 afterward as genuinely useful documentation, not reverted like the session's usual
 disposable test data.
 
+### UEBA usability pass 1 (items 1-2 of 4): Add Identity grid overflow, inaccurate Rare Process label
+
+Asked to run two more usability passes over UEBA. A live walkthrough plus a background
+research pass surfaced 7 findings; user approved doing 4 now (this entry covers the
+first 2) and 3 next.
+
+Fixed a Bootstrap grid overflow in the Asset & Identity "Add Identity" form: a prior
+pass added the Departing checkbox as `col-md-2` without rebalancing Username/Department
+(each `col-md-3`), pushing the row to 14 of 12 grid columns and wrapping the Add button
+onto its own line below the fields on every md+ screen. Rebalanced all six fields to
+`col-md-2` (12 total). Pure CSS grid math, no JS logic involved — verified live in the
+browser rather than with a fixture/vm test, same as the earlier `d-flex`/`!important`
+bug this session.
+
+Also corrected the "Rare Process" Model Tuning label, which said "Flag processes rare
+across the whole fleet" — factually wrong. The underlying model
+(`_run_rare_process_population_model` in `ueba_engine.py`) is tier-aware: it compares a
+host's process rarity against its own `assets.criticality`-tier peers first, only
+falling back to fleet-wide when that tier doesn't have enough hosts to compare against.
+The Dynamic Scoring config field for this same model already described it accurately
+("Rare Process (Peer-Tier or Fleet-Wide)") — the admin-facing tuning control just hadn't
+been updated to match. Corrected that label plus the two other "(Fleet-Wide)"-only
+labels (Data Insights model dropdown, `INSIGHTS_MODEL_LABELS`) for consistency.
+Live-verified all three on production.
+
 ### Insider threat workflow review (1/2): quick "Watch This User" from the risk detail modal
 
 Asked to run through the insider-threat process specifically. Live-verified current
