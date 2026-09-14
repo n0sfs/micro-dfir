@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS stix_indicators (stix_id TEXT PRIMARY KEY, type TEXT 
 CREATE INDEX IF NOT EXISTS idx_stix_pattern ON stix_indicators(pattern);
 CREATE TABLE IF NOT EXISTS ti_feeds (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, feed_type TEXT NOT NULL, discovery_url TEXT, collection_id TEXT, username TEXT, password TEXT, api_key TEXT, sync_interval_minutes INTEGER, enabled BOOLEAN DEFAULT 1, last_sync DATETIME, last_status TEXT, last_count INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 INSERT OR IGNORE INTO ti_feeds (id, name, feed_type, enabled) VALUES (1, 'ThreatFox Recent (Public)', 'threatfox', 1);
-CREATE TABLE IF NOT EXISTS agent_commands (id INTEGER PRIMARY KEY AUTOINCREMENT, hostname TEXT NOT NULL, label TEXT NOT NULL, script TEXT NOT NULL, status TEXT DEFAULT 'pending', queued_by TEXT, queued_at DATETIME DEFAULT CURRENT_TIMESTAMP, completed_at DATETIME, exit_code INTEGER, stdout TEXT, stderr TEXT);
+CREATE TABLE IF NOT EXISTS agent_commands (id INTEGER PRIMARY KEY AUTOINCREMENT, hostname TEXT NOT NULL, label TEXT NOT NULL, script TEXT NOT NULL, status TEXT DEFAULT 'pending', queued_by TEXT, queued_at DATETIME DEFAULT CURRENT_TIMESTAMP, sent_at DATETIME, completed_at DATETIME, exit_code INTEGER, stdout TEXT, stderr TEXT);
 CREATE INDEX IF NOT EXISTS idx_agent_commands_host_status ON agent_commands(hostname, status);
 CREATE INDEX IF NOT EXISTS idx_agent_commands_queued_at ON agent_commands(queued_at);
 CREATE TABLE IF NOT EXISTS ueba_exclusions (id INTEGER PRIMARY KEY AUTOINCREMENT, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, description TEXT, enabled BOOLEAN DEFAULT 1, created_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);

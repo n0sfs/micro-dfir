@@ -50,20 +50,50 @@ foreach ($p in $targets) {{
 @{{killed=$killed; failed=$failed}} | ConvertTo-Json -Compress
 """
 
+# The allow-SOC rules and the default-policy flip are wrapped together so a partial
+# apply can't be reported as a clean isolation. Without -ErrorAction Stop these cmdlets
+# only warn on failure (e.g. no admin rights) and the script would still fall through to
+# its hardcoded success string with exit 0 -- which api_agent_result turns into a green
+# "Done", telling an analyst a host is contained when it is not. Same false-positive
+# class block_ip() below already documents; `exit 1` is the part that actually makes it
+# surface as Failed, since status is decided purely by exit code.
 def isolate_host(soc_ip):
     if not _IPV4_RE.match(soc_ip):
         raise ValueError(f"Invalid SOC IP address: {soc_ip!r}")
-    return f"""Remove-NetFirewallRule -DisplayName "MicroDFIR-Isolation-*" -ErrorAction SilentlyContinue
-New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Allow-SOC-Out" -Direction Outbound -RemoteAddress {soc_ip} -Action Allow -Profile Any | Out-Null
-New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Allow-SOC-In" -Direction Inbound -RemoteAddress {soc_ip} -Action Allow -Profile Any | Out-Null
-Set-NetFirewallProfile -Profile Domain,Public,Private -DefaultInboundAction Block -DefaultOutboundAction Block
-"Host isolated. Only traffic to/from {soc_ip} is permitted."
+    return f"""try {{
+    Remove-NetFirewallRule -DisplayName "MicroDFIR-Isolation-*" -ErrorAction SilentlyContinue
+    New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Allow-SOC-Out" -Direction Outbound -RemoteAddress {soc_ip} -Action Allow -Profile Any -ErrorAction Stop | Out-Null
+    New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Allow-SOC-In" -Direction Inbound -RemoteAddress {soc_ip} -Action Allow -Profile Any -ErrorAction Stop | Out-Null
+    Set-NetFirewallProfile -Profile Domain,Public,Private -DefaultInboundAction Block -DefaultOutboundAction Block -ErrorAction Stop
+    "Host isolated. Only traffic to/from {soc_ip} is permitted."
+}} catch {{
+    $errMsg = $_.Exception.Message -replace '"', "'"
+    Write-Error "isolate_host FAILED -- host is NOT contained: $errMsg"
+    exit 1
+}}
 """
 
+# -DefaultInboundAction/-DefaultOutboundAction are restored to NotConfigured, not Allow.
+# Windows' own stock default is *Block* inbound / Allow outbound, so the previous
+# hardcoded "Allow Allow" left every isolate->restore cycle with the host's firewall
+# permanently more open than it was before containment -- a security regression caused by
+# the containment tooling itself. NotConfigured hands the decision back to Windows (or to
+# GPO on a domain-joined host) instead of this script guessing. It cannot know a prior
+# explicitly-set Allow, so in that one case it errs *closed* -- the right direction for a
+# response action. Failure is reported loudly because a silently-failed restore leaves a
+# host isolated, which is worse than a failed isolate.
 def restore_network():
-    return """Set-NetFirewallProfile -Profile Domain,Public,Private -DefaultInboundAction Allow -DefaultOutboundAction Allow
-Remove-NetFirewallRule -DisplayName "MicroDFIR-Isolation-*" -ErrorAction SilentlyContinue
-"Network isolation removed. Host restored to normal connectivity."
+    return """try {
+    Set-NetFirewallProfile -Profile Domain,Public,Private -DefaultInboundAction NotConfigured -DefaultOutboundAction NotConfigured -ErrorAction Stop
+    Remove-NetFirewallRule -DisplayName "MicroDFIR-Isolation-*" -ErrorAction SilentlyContinue
+    $left = @(Get-NetFirewallRule -DisplayName "MicroDFIR-Isolation-*" -ErrorAction SilentlyContinue)
+    if ($left.Count -gt 0) { throw "$($left.Count) MicroDFIR-Isolation-* rule(s) still present after removal" }
+    "Network isolation removed. Host restored to normal connectivity."
+} catch {
+    $errMsg = $_.Exception.Message -replace '"', "'"
+    Write-Error "restore_network FAILED -- host may STILL be isolated: $errMsg"
+    exit 1
+}
 """
 
 # A lighter-touch containment than isolate_host: adds two DENY rules for one specific
@@ -81,6 +111,9 @@ Remove-NetFirewallRule -DisplayName "MicroDFIR-Isolation-*" -ErrorAction Silentl
 # print its hardcoded success message regardless of whether the rule was actually
 # created, a false-positive an analyst could act on (believing a host is contained when
 # it isn't). Wrapped in try/catch here so a real failure is reported as one, not masked.
+# The catch prints the error but used to still fall off the end with exit 0, which
+# api_agent_result reads as success -- so the row went green "Done" with an error buried
+# in its stdout. `exit 1` is what actually makes it land as Failed.
 def block_ip(target_ip):
     if not _IPV4_RE.match(target_ip):
         raise ValueError(f"Invalid target IP address: {target_ip!r}")
@@ -93,6 +126,7 @@ try {{
 }} catch {{
     $errMsg = $_.Exception.Message -replace '"', "'"
     "{{`"error`":`"failed to create firewall block rule for $ip -- $errMsg`"}}"
+    exit 1
 }}
 """
 
@@ -1537,27 +1571,48 @@ PYEOF
 # other firewall rules that were already on the host before isolation.
 _ISOLATION_CHAIN = "MICRODFIR_ISOLATION"
 
+# Same false-success fix as the Windows isolate_host(): without `set -e` this script
+# ran straight past a failing `iptables -N` (no root, iptables missing, nf_tables-only
+# host) to its final echo and exited 0, which api_agent_result reads as a successful
+# containment. The four teardown lines are *expected* to fail on a first run (the chain
+# doesn't exist yet), so they keep `|| true` and only the real work is fatal. The final
+# verification is the actual proof of containment -- the chain existing and being
+# referenced from both INPUT and OUTPUT -- rather than trusting that the commands ran.
 def isolate_host_linux(soc_ip):
     if not _IPV4_RE.match(soc_ip):
         raise ValueError(f"Invalid SOC IP address: {soc_ip!r}")
-    return f"""iptables -D INPUT -j {_ISOLATION_CHAIN} 2>/dev/null
-iptables -D OUTPUT -j {_ISOLATION_CHAIN} 2>/dev/null
-iptables -F {_ISOLATION_CHAIN} 2>/dev/null
-iptables -X {_ISOLATION_CHAIN} 2>/dev/null
-iptables -N {_ISOLATION_CHAIN}
-iptables -A {_ISOLATION_CHAIN} -d {soc_ip} -j ACCEPT
-iptables -A {_ISOLATION_CHAIN} -s {soc_ip} -j ACCEPT
-iptables -A {_ISOLATION_CHAIN} -j DROP
-iptables -I INPUT 1 -j {_ISOLATION_CHAIN}
-iptables -I OUTPUT 1 -j {_ISOLATION_CHAIN}
+    return f"""set -e
+fail() {{ echo "isolate_host FAILED -- host is NOT contained: $1" >&2; exit 1; }}
+command -v iptables >/dev/null 2>&1 || fail "iptables not found"
+iptables -D INPUT -j {_ISOLATION_CHAIN} 2>/dev/null || true
+iptables -D OUTPUT -j {_ISOLATION_CHAIN} 2>/dev/null || true
+iptables -F {_ISOLATION_CHAIN} 2>/dev/null || true
+iptables -X {_ISOLATION_CHAIN} 2>/dev/null || true
+iptables -N {_ISOLATION_CHAIN} || fail "could not create chain {_ISOLATION_CHAIN} (need root?)"
+iptables -A {_ISOLATION_CHAIN} -d {soc_ip} -j ACCEPT || fail "could not allow outbound to SOC"
+iptables -A {_ISOLATION_CHAIN} -s {soc_ip} -j ACCEPT || fail "could not allow inbound from SOC"
+iptables -A {_ISOLATION_CHAIN} -j DROP || fail "could not add default DROP"
+iptables -I INPUT 1 -j {_ISOLATION_CHAIN} || fail "could not attach chain to INPUT"
+iptables -I OUTPUT 1 -j {_ISOLATION_CHAIN} || fail "could not attach chain to OUTPUT"
+iptables -C INPUT -j {_ISOLATION_CHAIN} 2>/dev/null || fail "chain not referenced from INPUT after apply"
+iptables -C OUTPUT -j {_ISOLATION_CHAIN} 2>/dev/null || fail "chain not referenced from OUTPUT after apply"
 echo "Host isolated. Only traffic to/from {soc_ip} is permitted."
 """
 
+# A silently-failed restore is worse than a silently-failed isolate -- it leaves a host
+# cut off while the console says it was restored. Every teardown line is tolerant (the
+# host may legitimately not be isolated), so the meaningful check is the end state: the
+# isolation chain must be gone. Not-isolated-to-begin-with and successfully-restored are
+# both "chain absent", which is exactly the condition worth reporting success on.
 def restore_network_linux():
-    return f"""iptables -D INPUT -j {_ISOLATION_CHAIN} 2>/dev/null
-iptables -D OUTPUT -j {_ISOLATION_CHAIN} 2>/dev/null
-iptables -F {_ISOLATION_CHAIN} 2>/dev/null
-iptables -X {_ISOLATION_CHAIN} 2>/dev/null
+    return f"""fail() {{ echo "restore_network FAILED -- host may STILL be isolated: $1" >&2; exit 1; }}
+command -v iptables >/dev/null 2>&1 || fail "iptables not found"
+iptables -L -n >/dev/null 2>&1 || fail "cannot read iptables rules (need root?)"
+iptables -D INPUT -j {_ISOLATION_CHAIN} 2>/dev/null || true
+iptables -D OUTPUT -j {_ISOLATION_CHAIN} 2>/dev/null || true
+iptables -F {_ISOLATION_CHAIN} 2>/dev/null || true
+iptables -X {_ISOLATION_CHAIN} 2>/dev/null || true
+if iptables -L {_ISOLATION_CHAIN} -n >/dev/null 2>&1; then fail "chain {_ISOLATION_CHAIN} still present after removal"; fi
 echo "Network isolation removed. Host restored to normal connectivity."
 """
 

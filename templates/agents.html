@@ -77,7 +77,13 @@
                 <span class="text-muted small text-nowrap" id="endpointCountLabel"></span>
             </div>
             <div class="d-flex align-items-center gap-2">
-                <div id="bulkActionBar" class="d-flex align-items-center gap-2" style="display:none;">
+                <!-- No `d-flex` in the class list -- Bootstrap's display utilities are
+                     `!important`, which permanently beats the plain inline
+                     style.display toggle renderEndpointSelection() does, so this bar
+                     (and its Upgrade Selected button) sat visible on page load reading
+                     "0 selected". Fourth instance of this exact bug class in this
+                     codebase; only a live browser check ever catches it. -->
+                <div id="bulkActionBar" class="align-items-center gap-2" style="display:none;">
                     <span class="text-muted small text-nowrap" id="bulkSelectedLabel"></span>
                     {% if has_permission('settings.system.manage') %}
                     <button class="btn btn-outline-info btn-sm" onclick="bulkUpgradeSelected()"><i class="fa-solid fa-rotate me-1"></i> Upgrade Selected</button>
@@ -499,6 +505,10 @@ document.addEventListener("DOMContentLoaded", function() {
     loadFleetVersionNote();
     renderConsoleActionSelect();
     renderConsoleFavSelect();
+    // Nothing is selected at load, so this is what puts the action buttons into their
+    // real disabled state up front -- previously only the wrapper's markup class did,
+    // leaving the buttons themselves enabled until the first host-select change event.
+    onConsoleHostChange();
     initEndpointFilterDropdowns();
     loadFimPaths();
     loadFimInterval();
@@ -1609,6 +1619,12 @@ function onConsoleHostChange() {
     const wrap = document.getElementById('consoleActionsWrap');
     const active = !!consoleSelectedHost;
     wrap.classList.toggle('disabled', !active);
+    // The wrapper's .disabled class (opacity + pointer-events:none) already blocks mouse
+    // clicks, and consoleRun/consoleUpgrade/etc. each early-return without a host -- but
+    // pointer-events:none doesn't stop keyboard activation, and it gives no cursor or
+    // focus feedback either. Setting the real disabled attribute makes "no host selected"
+    // an actual button state rather than a CSS illusion.
+    document.querySelectorAll('.console-action-btn').forEach(btn => { btn.disabled = !active; });
     document.getElementById('consoleHostDetailLink').style.display = active ? '' : 'none';
     // Free-text commands always queue as label 'custom', which requires
     // edr.command.advanced server-side -- so the input stays disabled for anyone
@@ -1762,7 +1778,15 @@ function queueConsoleCommand(hostname, label, params, display, script) {
 
 async function consoleRun(label, params, confirmMsg) {
     if (!consoleSelectedHost) return;
-    if (confirmMsg && !(await confirmDialog(confirmMsg, {title: 'Confirm action', danger: true}))) return;
+    // The per-button confirm strings are static ("Isolate this host from the network?")
+    // and never named the host. During a multi-host incident -- the only time anyone is
+    // clicking Isolate in a hurry -- which host is precisely the fact worth confirming,
+    // and the console's target is a dropdown well away from the button being clicked.
+    // Added here rather than in each of the eight onclick strings so every action that
+    // confirms gets it, including any added later.
+    if (confirmMsg && !(await confirmDialog(
+            `${confirmMsg}\n\nTarget host: ${consoleSelectedHost}`,
+            {title: `Confirm action on ${consoleSelectedHost}`, danger: true}))) return;
     document.getElementById('consoleParamForm').style.display = 'none';
     queueConsoleCommand(consoleSelectedHost, label, params || {}, CONSOLE_ACTION_DISPLAY[consoleSelectedOS()][label] || label);
 }

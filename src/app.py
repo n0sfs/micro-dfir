@@ -11966,6 +11966,27 @@ def migrate_agent_commands():
     except Exception:
         pass
 
+# The 5-minute "sent but never reported a result" requeue had no dispatch timestamp to
+# measure against and was aging off queued_at instead -- so a command queued while its
+# host was offline (the normal containment case: you isolate a laptop that isn't awake
+# yet) was already older than the cutoff the instant it was finally sent, got flipped
+# straight back to 'pending', and was re-dispatched on the very next check-in, over and
+# over until a result happened to land. For a non-idempotent action -- kill_process,
+# quarantine_file, collect_triage -- that means real repeated execution on the endpoint.
+# sent_at records when the command actually left the server so the retry window measures
+# the thing it was always meant to.
+def migrate_agent_commands_sent_at():
+    try:
+        import sqlite3
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(agent_commands)").fetchall()}
+        if 'sent_at' not in cols:
+            conn.execute("ALTER TABLE agent_commands ADD COLUMN sent_at DATETIME")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_alerts_columns():
     # alerts predates the wider schema (rule_name/host/message added alongside the
     # rule_id/event_id FK columns for the inline keyword-detection path) — on any database
@@ -16616,9 +16637,18 @@ def agent_config():
     # UTC offset, e.g. on an EDT (UTC-4) host this made the 5-minute stale check
     # effectively require ~4+ hours of real elapsed time before ever firing, since a
     # local cutoff is always "earlier-looking" than any recent UTC-stored queued_at.
+    # Ages off sent_at (when the command actually left the server), NOT queued_at. Using
+    # queued_at meant a command queued while the host was offline -- exactly what happens
+    # when you isolate a machine that isn't awake yet -- was already past the cutoff the
+    # moment it was first sent, so it was requeued and re-dispatched on the next check-in
+    # ~8s later, looping until some result landed. A non-idempotent action
+    # (kill_process/quarantine_file/collect_triage) really did run repeatedly on the
+    # endpoint. COALESCE keeps pre-migration rows (sent_at NULL, already dispatched under
+    # the old code) on the previous queued_at behavior rather than stranding them as
+    # permanently-'sent' with no way to ever retry.
     stale_cutoff = (datetime.datetime.utcnow() - datetime.timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S')
     db.execute(
-        "UPDATE agent_commands SET status = 'pending' WHERE hostname = ? AND status = 'sent' AND queued_at < ?",
+        "UPDATE agent_commands SET status = 'pending' WHERE hostname = ? AND status = 'sent' AND COALESCE(sent_at, queued_at) < ?",
         (ua, stale_cutoff)
     )
     db.commit()
@@ -16641,7 +16671,13 @@ def agent_config():
         if cmd_row['label'] in ('uninstall', 'upgrade'):
             db.execute("UPDATE agent_commands SET status = 'done', completed_at = ? WHERE id = ?", (now, cmd_row['id']))
         else:
-            db.execute("UPDATE agent_commands SET status = 'sent' WHERE id = ?", (cmd_row['id'],))
+            # UTC, deliberately -- `now` above is local (datetime.now()), and sent_at is
+            # only ever compared against the UTC stale_cutoff. Writing local here would
+            # recreate the exact mixed-clock bug the requeue comment above documents,
+            # except worse: on a UTC-4 host every freshly-sent command would look ~4h old
+            # and be requeued immediately, re-dispatching in a tight loop.
+            sent_now = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+            db.execute("UPDATE agent_commands SET status = 'sent', sent_at = ? WHERE id = ?", (sent_now, cmd_row['id']))
         db.commit()
         if cmd_row['label'] == 'uninstall':
             return jsonify({'command': 'uninstall'})
@@ -19840,6 +19876,7 @@ migrate_settings()
 migrate_ti_feeds()
 migrate_stix_indicators()
 migrate_agent_commands()
+migrate_agent_commands_sent_at()
 migrate_alerts_columns()
 migrate_alerts_enrichment()
 migrate_alerts_dedup_columns()
