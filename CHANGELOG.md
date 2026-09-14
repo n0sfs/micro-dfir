@@ -10,6 +10,66 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-14
 
+### Reporting/Coverage usability review, Pass A (5 of 9 findings)
+
+Started the final pass of the user's original multi-part request — Reporting and
+Coverage tabs, after UEBA and Cases/SOAR. Checked CHANGELOG first (two Reports passes
+already happened this session: SOC lifecycle metrics/content additions, then a UX pass
+on Branding/Email/Schedule) so these are genuinely new gaps, not re-flags. A live
+walkthrough plus a background Explore agent produced 9 findings, split into two passes;
+user approved "Pass A now, Pass B next."
+
+- Coverage-by-Tactic grid technique names were truncated with ellipsis and no hover
+  tooltip — confirmed live via DOM inspection (`<span class="cov-cell-name">Gather
+  Victim Identity Information</span>` rendered as "Gather Vi..." with `title: null`).
+  Added a `title` attribute carrying the full name.
+- Vulnerability tab's 5 stat tiles were a Bootstrap grid bug: `col-6 col-md-3` × 5 = 15
+  of 12 columns at the `md` breakpoint, wrapping "Still Open" — the most actionable
+  number — onto its own row. Switched to `row-cols-md-5`, the correct Bootstrap idiom
+  for N equal tiles when N doesn't factor into 12 (same recurring grid-math bug class
+  fixed 3× elsewhere this session, this time the fix reaches for the right primitive
+  instead of hand-balancing column counts).
+- Vulnerability severity chips shared `.cov-chip`'s cursor-pointer/hover styling with
+  the genuine filter chips elsewhere on the same page, but had no `onclick` — implying
+  a filter that didn't exist. Wired them to actually filter the Findings table, with a
+  filter-aware empty state ("No Critical findings. Clear filter") instead of the
+  generic "no CVEs at all" message.
+- The per-row Email button on the Reports tab was shown to everyone in JS, but
+  `/api/reports/<id>/email` requires `settings.reports.manage` — every other
+  permission-gated control on the same page (Branding inputs, Schedule selects) is
+  properly hidden/disabled server-side via `has_permission()`; this was the one
+  exception, only failing with a toast after a click. Gated it the same way using the
+  existing client-side `hasPermission()` mirror (base.html).
+- `report_history` had no column recording which lookback window (7/30/90/180 days) a
+  report was generated with, even though the Reports tab lets an analyst pick one per
+  generation — two same-day same-type rows were indistinguishable. Added
+  `migrate_report_history_days()` (exact mirror of the existing
+  `migrate_report_history_framework()`), threaded `report_days` through
+  `_record_history()`/`run_report()` (NULL for `vulnerability`/`case` report types,
+  which genuinely aren't day-windowed — a live inventory snapshot and a
+  not-time-bounded case summary respectively), and surfaced it next to the type/
+  framework label ("Security Summary (7d)").
+
+Verified with 18 tests across 3 files: 6 SQLite fixture tests for the days-persistence
+logic (security/compliance reports persist their window, vulnerability/case reports
+correctly store NULL even when a days value was resolved, a failed generation still
+records its attempted window, the migration is idempotent across two runs); 6 JS
+vm-context tests for `covCellHtml()`'s title attribute and the severity-chip filter
+(real filtering, toggle-off, the filter-aware empty state); 6 JS vm-context tests for
+`renderReportHistory()`'s Email-button permission gating and the report_days display
+(shown when present, omitted when null, shown alongside a framework label). Live-
+verified on production: the real "Gather Victim Identity Information" technique cell
+carries its full name in `title`; the Vulnerability tab's 5 tiles now sit on one row;
+clicking the real "Critical" chip (0 findings currently) shows the active state and the
+filter-aware empty message; generated a real 7-day Security Summary report and
+confirmed it landed in history as "Security Summary (7d)" with the Email button present
+for the admin account. That real report (`report_history` id for 2026-09-14 08:13:41,
+29 total reports now) stays in history — no delete route exists for reports (permanent
+audit trail by design, same as flagged for earlier test reports this session).
+
+**Pass A complete (5/5). Pass B (4 items, including the biggest UX win — async report
+generation with progress feedback) next.**
+
 ### Cases/SOAR usability review, Pass B (5 of 5, review complete: 10/10 findings)
 
 - Case list showed SLA breach status only as one aggregate stat tile — `api_cases()`
