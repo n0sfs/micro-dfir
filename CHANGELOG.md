@@ -10,6 +10,65 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-14
 
+### Cases/SOAR usability review, Pass B (5 of 5, review complete: 10/10 findings)
+
+- Case list showed SLA breach status only as one aggregate stat tile — `api_cases()`
+  now computes `sla_breached` per row (reusing `_case_sla_hours_for`'s own
+  queue/severity-tier precedence), rendered as a red "SLA Breached" badge next to
+  Status. Clicking the SLA Breaches tile now filters the list down to just those
+  cases; click again to clear it.
+- **Safety-relevant**: Pending Approvals showed a raw JSON params dump instead of a
+  human-readable description, right when an analyst decides whether to approve a
+  potentially destructive action (`quarantine_file`, `kill_process_by_name`).
+  `api_playbook_approvals` now computes the same dry-run preview text the Test modal
+  already shows, by calling the existing `_run_playbook_action(..., dry_run=True)` per
+  row (read-only for every action type) — falls back to the raw dump only if that
+  computation itself fails.
+- A real playbook run's outcome landed in the case Timeline as one flat
+  semicolon-joined string, unlike the dry-run preview's clean per-step cards for the
+  exact same actions. `_execute_playbook_actions` now also returns a structured
+  per-action list; the 3 real-run call sites log a JSON `{label, flat, actions}` blob
+  instead of plain text (`playbook_runs.detail` and the Recent Runs modal are
+  untouched — still the flat string). `caseEventLabel`'s `playbook_run` handler
+  renders per-action cards when the detail parses as that JSON shape, and falls back
+  to plain text for the still-flat rate-limit-tripped event and any pre-existing row
+  written before this change.
+- Alert-triggered playbook runs showed plain text with no click-through, unlike
+  case-triggered runs which already link to the case. Wrapped in the same
+  `?item_id=&item_type=alert` deep link already used elsewhere (Log Search's existing
+  single-row resolution).
+- Playbook actions had no reorder control — fixing an out-of-order step meant deleting
+  and re-adding every action after it. Added move-up/move-down buttons;
+  `savePlaybook()` already derives each action's position purely from DOM order, so
+  this is just a DOM-node swap, no other state to keep in sync.
+
+Verified with 15 tests across 3 files: 6 SQLite fixture tests for `sla_breached`
+(open-past-default, open-within-SLA, closed-never-breached, queue override wins over
+default, severity tier applies with no queue override, multiple cases evaluated
+independently); 4 fixture tests for the Pending Approvals preview computation (success,
+exception swallowed to null, null-params handling, one row's failure doesn't affect
+others); 5 fixture tests for `_execute_playbook_actions`'s structured output (all
+succeed, gated action queued not run, failure marks partial, pending_approval beats
+partial, the JSON blob shape); JS vm-context tests for the SLA-filter toggle, the
+Pending Approvals frontend fallback, `playbookRunLabel()` (structured cards, status
+colors, the still-plain-text rate-limit event, a pre-existing flat-string row), and
+`movePlaybookActionRow()` (swap up/down, no-op at either end, repeated moves walking a
+row to the top).
+
+Live-verified on production: all 5 real open cases correctly show "SLA Breached"
+badges matching the aggregate count of 5; clicking the tile filters the list to those 5
+and back; the playbook action-reorder buttons correctly swapped two real rows in the
+Edit Playbook modal; ran the real "New Case Checklist" playbook against the disposable
+`TEST: SOC Metrics Demo Data` case via Run Now and confirmed its case Timeline rendered
+a clean "Apply Template" card instead of flat text; added a temporary `add_note`
+approval-gated action, ran it, and confirmed Pending Approvals showed the actual note
+text ("would add a note: ...") instead of raw JSON — then rejected it and removed the
+temporary action, restoring the playbook to its original single step. Test data (the
+temporary playbook action, the approval, and 10 duplicate tasks from two verification
+runs) all cleaned up afterward; the test case was briefly reopened to remove the
+duplicate tasks (its own deletion endpoint correctly 403s on a closed/read-only case)
+and closed again to its original state.
+
 ### Cases/SOAR usability review, Pass A (5 of 10 findings)
 
 Asked to run through Cases/Investigations and SOAR for simplification/
