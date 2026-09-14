@@ -540,6 +540,16 @@ function tierBadgeClass(tier) {
     return { Critical: 'bg-danger', High: 'bg-danger', Medium: 'bg-warning text-dark', Low: 'bg-secondary' }[tier] || 'bg-secondary';
 }
 
+// Previously these two widgets (this one and renderWatchlistWidget below) were fully
+// static -- spotting a Critical-risk entity here meant separately opening UEBA and
+// searching for that exact entity by hand in the Risk Scoring table. Reuses the same
+// ?tab= deep-link convention already used elsewhere (e.g. ?tab=timeline&host=) plus a
+// new entity_type/entity_id pair ueba.html's own init code resolves straight to that
+// entity's detail modal.
+function pivotToRiskDetail(entityType, entityId) {
+    window.location.href = `/ueba?tab=risk&entity_type=${encodeURIComponent(entityType)}&entity_id=${encodeURIComponent(entityId)}`;
+}
+
 function renderTopRiskWidget(container, widgetId, config) {
     container.innerHTML = `
         <table class="table table-dark table-hover table-sm align-middle mb-0">
@@ -563,7 +573,7 @@ function renderTopRiskWidget(container, widgetId, config) {
             const title = `${e.raw_score} raw point${e.raw_score === 1 ? '' : 's'} across ${e.event_count} event${e.event_count === 1 ? '' : 's'} in this window`;
             const priorityDisplay = e.priority_score != null ? e.priority_score.toFixed(1) : '—';
             return `
-            <tr title="${escHtml(title)}">
+            <tr title="${escHtml(title)}" style="cursor:pointer;" data-entity-type="${escHtml(e.entity_type)}" data-entity-id="${escHtml(e.entity_id)}" onclick="pivotToRiskDetail(this.dataset.entityType, this.dataset.entityId)">
                 <td class="small">${entityIcon(e.entity_type)}${escHtml(e.entity_id)}</td>
                 <td>${priorityDisplay}${e.priority_score != null ? '<span class="text-muted small">/10</span>' : ''}</td>
                 <td><span class="badge ${tierBadgeClass(e.tier)}">${escHtml(e.tier)}</span></td>
@@ -598,7 +608,7 @@ function renderWatchlistWidget(container, widgetId, config) {
             const priorityDisplay = w.priority_score != null ? w.priority_score.toFixed(1) : '—';
             const tierHtml = w.tier ? ` <span class="badge ${tierBadgeClass(w.tier)}">${escHtml(w.tier)}</span>` : '';
             return `
-            <tr title="${escHtml(w.watched_at ? 'Watched since ' + w.watched_at + (w.watched_by ? ' by ' + w.watched_by : '') : '')}">
+            <tr title="${escHtml(w.watched_at ? 'Watched since ' + w.watched_at + (w.watched_by ? ' by ' + w.watched_by : '') : '')}" style="cursor:pointer;" data-entity-id="${escHtml(w.username)}" onclick="pivotToRiskDetail('user', this.dataset.entityId)">
                 <td class="small">${entityIcon('user')}${escHtml(w.username)}</td>
                 <td class="small text-muted">${escHtml(w.department || '')}</td>
                 <td>${priorityDisplay}${w.priority_score != null ? '<span class="text-muted small">/10</span>' : ''}${tierHtml}</td>

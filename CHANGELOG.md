@@ -50,6 +50,44 @@ returned them with the real priority score and `watched_by: "admin"` — then cl
 "Remove from Watchlist" and deleted the test identity row, restoring the table to its
 original empty state.
 
+### Insider threat workflow review (2/2): drill-down from the Insider Threat dashboard, plus a real display bug found along the way
+
+Second finding from the same review: the Insider Threat dashboard's two flagship
+widgets — Watchlist and Top Risky Entities — were fully static, confirmed via source
+(neither `renderTopRiskWidget()` nor `renderWatchlistWidget()` in `dashboards.html` had
+an `onclick` anywhere). An analyst scanning the dashboard for who's risky (it showed
+the real user `noslo` at a genuine 9.4/10 Critical) had no way to click through — they
+had to separately open UEBA and search for that exact entity by hand.
+
+Added `pivotToRiskDetail(entityType, entityId)` and wired it to both widgets' rows,
+navigating to `/ueba?tab=risk&entity_type=&entity_id=` — a new pair of params
+`ueba.html`'s existing `?tab=` deep-link init code now resolves straight to that
+entity's risk detail modal (opening the same "Watch This User" panel added in 1/2).
+`loadRiskScores()` now returns (and stashes in `_riskScoresLoadPromise`) its fetch
+chain so the deep-link handler can await whichever load `switchUebaTab('risk')` itself
+already triggered, instead of firing a second redundant fetch just to know when it's
+safe to open the modal.
+
+**Bug found and fixed along the way, unrelated to the drill-down feature itself**: the
+risk detail modal's contributing-events table was showing the literal text `&middot;`
+instead of a bullet separator between grouped detail samples — a real display bug an
+analyst pointed out directly from a screenshot during this work. Root cause: `viewRiskScoreDetail()`
+joined multiple detail strings with the literal `&middot;` HTML entity *before* passing
+the combined string through `escHtml()`, which escaped the entity's own `&` into
+`&amp;middot;` — every other `&middot;`/`&times;` use in this codebase is written as
+raw literal HTML outside any `escHtml()` call for exactly this reason. Fixed by
+escaping each detail piece individually first, then joining with the raw (correctly
+unescaped) entity.
+
+Verified with a JS vm-context test (6 cases across both files): the pivot link builds
+the correct deep-link URL and URI-encodes the entity id, the fixed `&middot;` join
+renders as a real entity (not literal text) while still HTML-escaping each piece
+individually (XSS safety unchanged), and a regression-baseline test confirms the old
+join-then-escape expression really did double-escape. Source-inspection checks confirm
+the `?entity_type=&entity_id=` deep link correctly switches to the risk tab, awaits the
+right load promise without double-fetching, and the plain `?tab=` path is unaffected
+when no entity is specified.
+
 ### Cross-screen triage friction, round 3 (1/3): EDR quick actions for UEBA anomalies too
 
 Asked to run the triage-workflow review through once more. First finding: the EDR

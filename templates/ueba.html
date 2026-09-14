@@ -932,8 +932,13 @@ function setRiskSort(mode) {
     renderRiskScores();
 }
 
+// Returns (and stashes in _riskScoresLoadPromise) the fetch chain -- lets the
+// ?entity_type=&entity_id= deep link below await whichever load is already in flight
+// (e.g. the one switchUebaTab('risk') itself just triggered) instead of firing a
+// second redundant fetch just to know when it's safe to open the detail modal.
+let _riskScoresLoadPromise = null;
 function loadRiskScores() {
-    fetch('/api/ueba/risk-scores')
+    _riskScoresLoadPromise = fetch('/api/ueba/risk-scores')
         .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
         .then(data => {
             riskScoresData = data.entities || [];
@@ -946,6 +951,7 @@ function loadRiskScores() {
             console.error('Error loading risk scores:', err);
             renderLoadError('riskScoresTableBody', 6, 'Failed to load risk scores.');
         });
+    return _riskScoresLoadPromise;
 }
 
 function renderRiskScores() {
@@ -1023,7 +1029,14 @@ function viewRiskScoreDetail(entityType, entityId) {
             const rows = groups.map(g => {
                 const count = g.details.length;
                 const sampleDetails = g.details.slice(0, 2).filter(Boolean);
-                const shown = sampleDetails.map(truncateDetail).join(' &middot; ');
+                // Each piece is escaped individually, THEN joined with the raw &middot;
+                // entity -- joining first and escHtml-ing the combined string (the
+                // previous code) double-escapes the entity's own "&" into "&amp;middot;",
+                // which the browser shows as the literal text "&middot;" instead of a
+                // bullet. Same bug class as any HTML-entity separator swept into a
+                // pre-escape join; every other &middot;/&times; use in this codebase is
+                // written as raw literal HTML outside escHtml() for exactly this reason.
+                const shown = sampleDetails.map(d => escHtml(truncateDetail(d))).join(' &middot; ');
                 const shownTitle = sampleDetails.join(' | ');
                 const more = count > 2 ? ` <span class="text-muted">and ${count - 2} more</span>` : '';
                 return `
@@ -1031,7 +1044,7 @@ function viewRiskScoreDetail(entityType, entityId) {
                     <td class="text-nowrap small text-muted">${escHtml(g.computed_at)}</td>
                     <td class="small">${escHtml(g.indicator)}${count > 1 ? ` <span class="badge bg-secondary">&times;${count}</span>` : ''}</td>
                     <td class="fw-bold">${g.points}${count > 1 ? '<span class="text-muted small fw-normal"> each</span>' : ''}</td>
-                    <td class="small text-muted" style="max-width:400px;" title="${escHtml(shownTitle)}">${escHtml(shown)}${more}</td>
+                    <td class="small text-muted" style="max-width:400px;" title="${escHtml(shownTitle)}">${shown}${more}</td>
                 </tr>
             `;
             }).join('');
@@ -2168,7 +2181,23 @@ if (_uebaUrlHost) document.getElementById('tlSearch').value = _uebaUrlHost;
 // fall through here and land on Timeline -- its merged replacement, and already the
 // default active pane -- instead of matching nothing.
 const _uebaUrlTab = _uebaUrlParams.get('tab');
-if (_uebaUrlTab && UEBA_TABS.includes(_uebaUrlTab)) switchUebaTab(_uebaUrlTab);
+// Insider Threat dashboard's Watchlist/Top Risky Entities widgets pivot here --
+// previously fully static, so spotting a risky user there meant separately opening
+// UEBA and searching for that exact entity by hand. switchUebaTab('risk') already
+// triggers loadRiskScores() once (guarded by riskScoresLoadedOnce) when the tab isn't
+// loaded yet; awaiting _riskScoresLoadPromise (that same call's own promise, stashed
+// as a side effect) opens the detail modal the moment real data is in, without firing
+// a second redundant fetch just to know when it's safe to do so.
+const _uebaUrlEntityType = _uebaUrlParams.get('entity_type');
+const _uebaUrlEntityId = _uebaUrlParams.get('entity_id');
+if (_uebaUrlEntityType && _uebaUrlEntityId) {
+    switchUebaTab('risk');
+    (riskScoresLoadedOnce ? Promise.resolve() : _riskScoresLoadPromise).then(() => {
+        viewRiskScoreDetail(_uebaUrlEntityType, _uebaUrlEntityId);
+    });
+} else if (_uebaUrlTab && UEBA_TABS.includes(_uebaUrlTab)) {
+    switchUebaTab(_uebaUrlTab);
+}
 
 // The Timeline filters column ships collapsed by default (server-rendered with the
 // tl-collapsed class already on it) -- expand it back out if this viewer had
