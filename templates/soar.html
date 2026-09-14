@@ -406,7 +406,7 @@
                         <label class="form-label small text-muted mb-1" for="pbTrigger">Trigger Event</label>
                         <select id="pbTrigger" class="form-select bg-dark text-light border-secondary" onchange="onPlaybookTriggerChange()">
                             <option value="case_created">Case created</option>
-                            <option value="status_changed">Status changed</option>
+                            <option value="status_changed">Status changed (Open/Closed only -- not New/Investigating/Resolved)</option>
                             <option value="queue_changed">Queue changed</option>
                             <option value="assignee_changed">Assignee changed</option>
                             <option value="severity_changed">Severity changed</option>
@@ -760,7 +760,7 @@ async function useSoarPlaybookTemplate(key) {
 }
 
 const TRIGGER_LABELS = {
-    case_created: 'Case created', status_changed: 'Status changed',
+    case_created: 'Case created', status_changed: 'Status changed (Open/Closed)',
     queue_changed: 'Queue changed', assignee_changed: 'Assignee changed',
     severity_changed: 'Severity changed', asset_confirmed: 'Case asset confirmed compromised',
     scheduled: 'Scheduled', alert_created: 'Alert created', sla_breached: 'SLA breached',

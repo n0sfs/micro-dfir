@@ -1149,11 +1149,12 @@ function csvEscapeField(val) {
 function exportCasesCsv() {
     const rows = getFilteredCases();
     if (!rows.length) { toast('No cases match the current filters to export.', 'danger'); return; }
-    const headers = ['Case Number', 'ID', 'Title', 'Severity', 'Status', 'Queue', 'TLP', 'Assignee', 'Items', 'Tasks Done', 'Tasks Total', 'Created At'];
+    const headers = ['Case Number', 'ID', 'Title', 'Severity', 'Status', 'Workflow State', 'Queue', 'TLP', 'Assignee', 'Items', 'Tasks Done', 'Tasks Total', 'Created At'];
     const lines = [headers.map(csvEscapeField).join(',')];
     rows.forEach(c => {
         lines.push([
             c.case_number || '', c.id, c.title, c.severity || 'medium', c.status,
+            WORKFLOW_STATE_LABELS[c.workflow_state] || c.workflow_state || 'New',
             c.queue_name || '', c.tlp || '', c.assignee || '', c.item_count,
             c.task_done_count, c.task_count, c.created_at,
         ].map(csvEscapeField).join(','));
@@ -1184,7 +1185,7 @@ function renderCases() {
         <tr style="cursor:pointer;" onclick="openCaseDetail(${c.id})">
             <td class="ps-3 fw-bold"><span class="text-muted small fw-normal me-1">${caseNumberLabel(c)}</span>${escHtml(c.title)}</td>
             <td>${caseSeverityBadge(c.severity)}</td>
-            <td>${caseStatusBadge(c.status)}</td>
+            <td>${caseStatusBadge(c.status)} ${workflowStateBadge(c.workflow_state)}</td>
             <td class="small">${c.queue_name ? `<span class="badge bg-secondary">${escHtml(c.queue_name)}</span>` : '<span class="text-muted">—</span>'}</td>
             <td>${tlpBadge(c.tlp)}</td>
             <td class="text-muted small">${escHtml(c.assignee || '-')}</td>
@@ -1410,6 +1411,7 @@ function loadRelatedItems(cid) {
 
 function renderRelatedItems(data) {
     _relatedItemsSelected = new Set();
+    setCaseTabCount('related', 'Related Items', (data.alerts_total || 0) + (data.ueba_events_total || 0) + (data.fim_events_total || 0));
     const el = document.getElementById('relatedItemsBody');
     if (!el) return;
     if (!data.hosts.length && !data.usernames.length) {
@@ -1617,9 +1619,10 @@ function loadCaseLinks(cid) {
 }
 
 function renderCaseLinks(links) {
+    setCaseTabCount('relatedCases', 'Case Links', links.length);
     const el = document.getElementById('linkedCasesBody');
     const formEl = document.getElementById('addCaseLinkForm');
-    if (formEl) formEl.style.display = activeCaseClosed ? 'none' : '';
+    if (formEl) formEl.style.display = activeCaseClosed ? 'none' : 'flex';
     if (!el) return;
     if (!links.length) {
         el.innerHTML = '<p class="text-muted small mb-0">No cases explicitly linked yet.</p>';
@@ -1787,6 +1790,8 @@ function caseEventLabel(e, itemLookup) {
         severity_change: `Severity changed to <strong>${escHtml((e.detail || '').toUpperCase())}</strong>`,
         workflow_state_change: `Workflow state changed to <strong>${escHtml(WORKFLOW_STATE_LABELS[e.detail] || e.detail)}</strong>`,
         queue_change: `Queue changed to <strong>${escHtml(e.detail)}</strong>`,
+        case_linked: `<i class="fa-solid fa-link text-info me-1"></i>Case link added: ${escHtml(e.detail)}`,
+        case_unlinked: `<i class="fa-solid fa-link-slash text-muted me-1"></i>Case link removed: ${escHtml(e.detail)}`,
         item_added: `Item added: ${prettifyItemDetail(e.detail, itemLookup)}`,
         item_removed: `Item removed: ${prettifyItemDetail(e.detail, itemLookup)}`,
         task_added: `Task added: "${escHtml(e.detail)}"`,
@@ -2098,6 +2103,18 @@ function switchCaseDetailTab(key) {
     });
 }
 
+// Related Items (candidates not yet linked) and Case Links (explicit case-to-case
+// links) both fetch separately from the main case payload, after the tab strip is
+// already rendered with a static label -- so unlike Tasks/Linked Items/Assets/
+// Indicators (whose counts are baked into caseTabs' initial label since they come from
+// that one payload), these two only get a count once their own fetch resolves. Without
+// this, an analyst had no way to tell "3 unlinked alerts exist" or "1 duplicate case is
+// linked" without clicking into the tab first.
+function setCaseTabCount(key, baseLabel, count) {
+    const el = document.getElementById('caseTabLabel-' + key);
+    if (el) el.textContent = `${baseLabel} (${count})`;
+}
+
 function backToList() {
     activeCaseId = null;
     if (caseTimerInterval) { clearInterval(caseTimerInterval); caseTimerInterval = null; }
@@ -2247,7 +2264,7 @@ function loadAndRenderCaseDetail(cid) {
             <div id="caseCoverageGapsCard" class="mb-3"></div>
 
             <ul class="nav nav-tabs border-secondary mb-3 flex-nowrap overflow-auto" id="caseDetailTabs">
-                ${caseTabs.map((t, i) => `<li class="nav-item"><button type="button" class="nav-link text-nowrap ${i === 0 ? 'active' : ''}" id="caseTabBtn-${t.key}" onclick="switchCaseDetailTab('${t.key}')"><i class="fa-solid ${t.icon} me-1"></i>${t.label}</button></li>`).join('')}
+                ${caseTabs.map((t, i) => `<li class="nav-item"><button type="button" class="nav-link text-nowrap ${i === 0 ? 'active' : ''}" id="caseTabBtn-${t.key}" onclick="switchCaseDetailTab('${t.key}')"><i class="fa-solid ${t.icon} me-1"></i><span id="caseTabLabel-${t.key}">${t.label}</span></button></li>`).join('')}
             </ul>
 
             <div id="caseTabPane-tasks" class="case-tab-pane" style="display:block;">
@@ -2300,7 +2317,12 @@ function loadAndRenderCaseDetail(cid) {
                     <div class="card-header border-secondary">Linked Cases <span class="text-muted small">— explicit, analyst-asserted links (duplicates, campaigns, parent/child) that persist even if the underlying shared data changes</span></div>
                     <div class="card-body">
                         <div id="linkedCasesBody"><p class="text-muted small mb-0">Loading&hellip;</p></div>
-                        <div id="addCaseLinkForm" class="d-flex gap-2 mt-3 flex-wrap" style="display:none;">
+                        <!-- No d-flex in the class list -- Bootstrap's utility classes set
+                             display with !important, which would permanently win over the
+                             plain inline display:none/flex toggle renderCaseLinks() does below
+                             (same fix relatedItemsBulkBar above already needed for this exact
+                             reason). -->
+                        <div id="addCaseLinkForm" class="gap-2 mt-3 flex-wrap" style="display:none;">
                             <input type="number" id="caseLinkTargetId" class="form-control form-control-sm bg-dark text-light border-secondary" style="max-width:110px;" placeholder="Case #">
                             <select id="caseLinkType" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;">
                                 <option value="duplicate_of">Duplicate of</option>
