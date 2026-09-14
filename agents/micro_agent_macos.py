@@ -21,7 +21,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, ssl, threading, 
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.08.31.3"
+AGENT_VERSION = "2026.09.14.1"
 
 _OS_DETAIL_CACHE = None
 
@@ -46,6 +46,37 @@ SERVER_URL = 'https://__HOST_URL__/api/agent/config'
 INGEST_URL = 'https://__HOST_URL__/api/ingest'
 RESULT_URL = 'https://__HOST_URL__/api/agent/result'
 SOC_TOKEN = '__SOC_TOKEN__'
+
+def _api_urls(path):
+    """Every base this appliance might answer `path` on, primary first.
+
+    The appliance can bind the UI and the ingest listener to different addresses/ports,
+    and gunicorn is given BOTH (`--bind ui_ip:ui_port --bind ingest_ip:ingest_port`), so
+    either one serves the whole API -- the split is about which interface, not which
+    routes. That makes the other base a genuine fallback whenever the primary is
+    unreachable.
+
+    Which turned out to matter a great deal: a host isolation whose firewall allowlist
+    covered only the ingest address left an endpoint able to ship logs but unable to check
+    in, so it could never be handed the restore_network that would undo the isolation. The
+    server-side allowlist bug is fixed, but the agent having exactly one way to reach us
+    is what turned that bug into an unrecoverable host. Now a blocked or dead primary
+    costs a retry instead of the command channel.
+
+    Derived from the URL strings (substituted at download time) rather than from separate
+    host values, and computed per call because zero-touch routing rewrites INGEST_URL at
+    runtime."""
+    bases, urls = [], []
+    for url in (SERVER_URL, INGEST_URL):
+        base = url.rsplit('/api/', 1)[0]
+        if base and base not in bases:
+            bases.append(base)
+    for base in bases:
+        candidate = f'{base}{path}'
+        if candidate not in urls:
+            urls.append(candidate)
+    return urls or [f'https://__HOST_URL__{path}']
+
 # The server's own cert, pinned so the agent can verify it without a real CA (it's
 # self-signed) — see build_ssl_context() below. Left as the literal placeholder if the
 # script is run without ever going through the server's build step (e.g. tampered with
@@ -170,14 +201,16 @@ def run_remote_script(context, cmd_id, script):
     # "Sent" forever with nothing to show for it -- retry the report a couple of times
     # before giving up, rather than one transient network hiccup silently losing it.
     payload = json.dumps({'id': cmd_id, 'exit_code': exit_code, 'stdout': stdout, 'stderr': stderr}).encode('utf-8')
+    urls = _api_urls('/api/agent/result')
     for attempt in range(3):
+        url = urls[attempt % len(urls)]
         try:
-            req = urllib.request.Request(RESULT_URL, data=payload, headers={'Content-Type': 'application/json', 'X-Agent-Token': SOC_TOKEN})
+            req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json', 'X-Agent-Token': SOC_TOKEN})
             urllib.request.urlopen(req, context=context, timeout=10)
             print(f"[+] Result for command #{cmd_id} reported (exit {exit_code}).", flush=True)
             return
         except Exception as e:
-            print(f"[-] Failed to report result for command #{cmd_id} (attempt {attempt + 1}/3): {e}", flush=True)
+            print(f"[-] Failed to report result for command #{cmd_id} via {url} (attempt {attempt + 1}/3): {e}", flush=True)
             if attempt < 2:
                 time.sleep(2)
 
@@ -328,11 +361,16 @@ def run_agent():
 
         # 1. Config Check with Retry Loop & Custom Hostname Header
         if current_time - last_config_check > CONFIG_INTERVAL:
+            # Alternate across every base the appliance answers on (see _api_urls) instead
+            # of hammering one. With two bases the three attempts go primary / fallback /
+            # primary, so a blocked or down primary still gets the check-in through.
+            checkin_urls = _api_urls('/api/agent/config')
             for attempt in range(3):
+                checkin_url = checkin_urls[attempt % len(checkin_urls)]
                 try:
-                    print(f"[*] Checking in with {SERVER_URL} (Attempt {attempt + 1})...", flush=True)
+                    print(f"[*] Checking in with {checkin_url} (Attempt {attempt + 1})...", flush=True)
                     headers = {'X-Agent-Hostname': socket.gethostname(), 'X-Agent-Token': SOC_TOKEN, 'X-Agent-Version': AGENT_VERSION, 'X-Agent-OS': 'macos', 'X-Agent-OS-Detail': _get_os_detail()}
-                    req = urllib.request.Request(SERVER_URL, headers=headers)
+                    req = urllib.request.Request(checkin_url, headers=headers)
                     with urllib.request.urlopen(req, context=context, timeout=5) as response:
                         data = json.loads(response.read().decode())
 

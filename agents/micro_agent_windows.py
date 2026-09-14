@@ -4,7 +4,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, tem
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.09.05.2"
+AGENT_VERSION = "2026.09.14.1"
 
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
