@@ -607,9 +607,10 @@ function renderWatchlistWidget(container, widgetId, config) {
         body.innerHTML = d.watchlist.map(w => {
             const priorityDisplay = w.priority_score != null ? w.priority_score.toFixed(1) : '—';
             const tierHtml = w.tier ? ` <span class="badge ${tierBadgeClass(w.tier)}">${escHtml(w.tier)}</span>` : '';
+            const departingHtml = w.departing ? ` <span class="badge bg-danger" title="${escHtml(w.departing_note || '')}">Departing</span>` : '';
             return `
             <tr title="${escHtml(w.watched_at ? 'Watched since ' + w.watched_at + (w.watched_by ? ' by ' + w.watched_by : '') : '')}" style="cursor:pointer;" data-entity-id="${escHtml(w.username)}" onclick="pivotToRiskDetail('user', this.dataset.entityId)">
-                <td class="small">${entityIcon('user')}${escHtml(w.username)}</td>
+                <td class="small">${entityIcon('user')}${escHtml(w.username)}${departingHtml}</td>
                 <td class="small text-muted">${escHtml(w.department || '')}</td>
                 <td>${priorityDisplay}${w.priority_score != null ? '<span class="text-muted small">/10</span>' : ''}${tierHtml}</td>
                 <td class="small text-muted">${escHtml(w.watch_reason || '')}</td>

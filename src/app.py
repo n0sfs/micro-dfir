@@ -11011,6 +11011,7 @@ def api_dashboard_watchlist():
     db = get_db()
     rows = db.execute(
         "SELECT i.username, i.department, i.watch_reason, i.watched_at, i.watched_by, "
+        "i.departing, i.departing_note, "
         "ps.priority_score as priority_score "
         "FROM identities i "
         "LEFT JOIN ueba_priority_scores ps ON ps.entity_type = 'user' AND ps.entity_id = i.username "
