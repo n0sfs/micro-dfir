@@ -957,6 +957,52 @@ function relativeTime(ts) {
     return `${Math.round(s / 86400)}d ago`;
 }
 
+// agent_commands.queued_at is stored in **UTC** (schema DEFAULT CURRENT_TIMESTAMP, never
+// written explicitly), while agent_polls.timestamp and agent_commands.completed_at are
+// local server time (datetime.now()). Both were rendered raw, side by side, so a command
+// queued a minute ago showed a "Queued" stamp hours off from the "Last Check-in" in the
+// row above it -- and on a UTC-4 host a fresh command looked four hours old. Everything
+// below converts the UTC value once, up front, and never hands a raw one to the eye.
+//
+// The conversion lands in the *viewer's* timezone rather than the server's. On this
+// appliance (one box, analyst on the same LAN) those are the same; where they aren't,
+// browser-local is the more defensible of the two, and the tooltip always carries the
+// raw UTC so the stored value is never lost.
+function utcToLocalDate(ts) {
+    if (!ts) return null;
+    const d = new Date(String(ts).replace(' ', 'T') + 'Z');
+    return isNaN(d.getTime()) ? null : d;
+}
+
+function utcToLocalStr(ts) {
+    const d = utcToLocalDate(ts);
+    if (!d) return ts || '';
+    const p = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+// Same shape as relativeTime() but for a UTC-stored value. relativeTime() parses
+// "YYYY-MM-DD HH:MM:SS" with no zone suffix, which JS reads as *local* -- correct for
+// agent_polls.timestamp, silently wrong by the UTC offset for queued_at.
+function relativeTimeUtc(ts) {
+    const d = utcToLocalDate(ts);
+    if (!d) return '';
+    const s = Math.max(0, Math.round((Date.now() - d.getTime()) / 1000));
+    if (s < 60) return `${s}s ago`;
+    if (s < 3600) return `${Math.round(s / 60)}m ago`;
+    if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+    return `${Math.round(s / 86400)}d ago`;
+}
+
+// Matches the fleet table's Last Check-in cell: relative time in the cell, the exact
+// timestamp in the tooltip -- here carrying both the local conversion and the raw UTC
+// the database actually holds.
+function queuedAtCell(ts) {
+    if (!ts) return '<span class="text-muted">—</span>';
+    const title = `${utcToLocalStr(ts)} local\n${ts} UTC (as stored)`;
+    return `<span title="${escHtml(title)}">${escHtml(relativeTimeUtc(ts) || ts)}</span>`;
+}
+
 function lastLogReceivedCell(dev) {
     if (!dev.last_log_received) {
         const checkingIn = dev.status === 'Online' || dev.status === 'Idle';
@@ -1060,7 +1106,13 @@ let heartbeatHistoryChart = null;
 
 function openHostDetailModal(hostname) {
     const dev = allEndpoints.find(e => e.hostname === hostname);
-    if (!dev) return;
+    // Was a bare `return` -- every caller that reached it produced an entirely silent
+    // click. The one case that actually gets here is a host with no current check-ins,
+    // which is a real answer worth saying out loud rather than swallowing.
+    if (!dev) {
+        toast(`No current agent check-ins from ${hostname} — the agent was uninstalled, or the endpoint was decommissioned. There are no live host details to show.`, 'warning');
+        return;
+    }
     document.getElementById('hostDetailTitle').innerHTML = `<i class="fa-solid fa-laptop-medical me-2"></i>${escHtml(hostname)} <a href="/ueba?tab=timeline&host=${encodeURIComponent('host:' + hostname)}" class="small ms-2" title="View this host's activity on the UEBA Timeline"><i class="fa-solid fa-timeline me-1"></i>Timeline</a>`;
     const body = document.getElementById('hostDetailBody');
     body.innerHTML = `
@@ -1083,11 +1135,18 @@ function openHostDetailModal(hostname) {
             const extra = document.getElementById('hostDetailExtra');
             if (!extra) return; // modal closed before this resolved
             if (data.error) { extra.innerHTML = `<span class="text-muted">${escHtml(data.error)}</span>`; return; }
+            // statusBadgeCmd() is the one mapping that matches what the server actually
+            // writes. This table had its own inline copy testing for 'error', a status
+            // api_agent_result never produces -- it only ever writes 'done' or 'failed' --
+            // so every failed action here rendered as a grey secondary badge reading
+            // "failed", visually indistinguishable from a still-pending one. The single
+            // status a responder most needs to spot in a host's history was the one status
+            // this table greyed out.
             const actionsRows = (data.recent_actions || []).map(a => `
                 <tr>
-                    <td class="text-nowrap">${escHtml(a.queued_at || '')}</td>
+                    <td class="text-nowrap">${queuedAtCell(a.queued_at)}</td>
                     <td>${escHtml(a.label || '')}</td>
-                    <td>${a.status === 'done' ? '<span class="badge bg-success">Done</span>' : a.status === 'error' ? '<span class="badge bg-danger">Error</span>' : `<span class="badge bg-secondary">${escHtml(a.status || '')}</span>`}</td>
+                    <td>${statusBadgeCmd(a.status)}</td>
                     <td class="text-muted">${escHtml(a.queued_by || '')}</td>
                 </tr>`).join('');
             extra.className = '';
@@ -1196,7 +1255,9 @@ function loadUniqueEndpoints() {
         })
         .catch(err => {
             console.error('Error loading agent endpoints:', err);
-            renderLoadError('endpointsTableBody', 11, 'Failed to load agent endpoints.');
+            // 12 columns, not 11 -- an undersized colspan leaves the error message
+            // short of the table width and the last column visibly empty beside it.
+            renderLoadError('endpointsTableBody', 12, 'Failed to load agent endpoints.');
         });
 }
 
@@ -1446,12 +1507,49 @@ async function queueCommand(hostname, label, params, confirmMsg) {
         body: JSON.stringify({hostname, label, params: params || {}})
     }).then(r => r.json().then(data => ({ok: r.ok, data}))).then(({ok, data}) => {
         if (ok) {
-            toast(`"${label}" queued for ${hostname}. It will run on the endpoint's next check-in (usually within ${agentConfigIntervalSecondsValue}s).`, 'success');
+            const q = queueOutcomeFor(hostname, label);
+            toast(q.message, q.level, q.level === 'success' ? undefined : {duration: 9000});
             loadCommandHistory();
         } else {
             toast(data.error || 'Failed to queue command.', 'danger');
         }
     }).catch(err => toast('Error queuing command: ' + err, 'danger'));
+}
+
+// Queuing always succeeded the same way: a green toast promising the action "will run on
+// the endpoint's next check-in (usually within Ns)". For an Offline host that promise is
+// simply false -- the row it was fired from said Offline, the toast said 15 seconds, and
+// nothing reconciled the two. During an incident that's the difference between believing
+// a machine is contained and knowing it isn't; the three stale commands found sitting in
+// this queue from August are what that looks like weeks later.
+//
+// The command is still queued either way -- that's correct and deliberate, you isolate a
+// machine that isn't awake yet and it applies when it wakes. The toast just has to say so
+// instead of implying it already happened.
+function queueOutcomeFor(hostname, label) {
+    const dev = allEndpoints.find(e => e.hostname === hostname);
+    const status = dev ? dev.status : '';
+    // Only an actually-Online host earns the confident message. Written as an allowlist
+    // rather than "warn if Offline" on purpose: a host missing from the fleet list
+    // entirely (a group dispatch to a member that has since dropped out, a stale page)
+    // has no status at all, and the confident toast is exactly the wrong default for it.
+    if (status === 'Online') {
+        return {
+            level: 'success',
+            message: `"${label}" queued for ${hostname}. It will run on the endpoint's next check-in (usually within ${agentConfigIntervalSecondsValue}s).`
+        };
+    }
+    if (status === 'Idle') {
+        return {
+            level: 'warning',
+            message: `"${label}" queued for ${hostname}. The host is Idle (it has missed recent check-ins), so this may take longer than the usual ${agentConfigIntervalSecondsValue}s to run.`
+        };
+    }
+    const last = dev && dev.last_check_in ? ` Last check-in ${relativeTime(dev.last_check_in) || dev.last_check_in}.` : '';
+    return {
+        level: 'warning',
+        message: `"${label}" is queued for ${hostname}, but that host is ${status || 'not checking in'} — it will not run until the agent checks in again, which may be a long time or never.${last}`
+    };
 }
 
 // ---- Interactive response console ----
@@ -1715,7 +1813,21 @@ function consoleEntryHtml(entry) {
     } else if (entry.status === 'queue_failed') {
         out += `<div class="term-line text-danger">${escHtml(entry.stderr)}</div>`;
     } else if (entry.status === 'pending' || entry.status === 'sent') {
-        out += `<div class="term-line text-muted">[waiting for endpoint check-in...]</div>`;
+        // "[waiting for endpoint check-in...]" is true of an Offline host too, and sits
+        // there unchanged forever while the analyst reads it as "any second now". Say
+        // which wait this actually is. Read fresh on every render, so it corrects itself
+        // the moment the host comes back.
+        // Allowlist, same reasoning as queueOutcomeFor(): a host that has dropped out of
+        // allEndpoints has no status, and the reassuring line is the wrong default for it.
+        const dev = allEndpoints.find(e => e.hostname === consoleSelectedHost);
+        const status = dev ? dev.status : '';
+        if (status === 'Online') {
+            out += `<div class="term-line text-muted">[waiting for endpoint check-in...]</div>`;
+        } else if (status === 'Idle') {
+            out += `<div class="term-line text-warning">[waiting for endpoint check-in — host is Idle, so this may take longer than usual...]</div>`;
+        } else {
+            out += `<div class="term-line text-warning">[queued, but ${escHtml(consoleSelectedHost)} is ${escHtml(status || 'not checking in')} — this will not run until the agent checks in again]</div>`;
+        }
     } else {
         if (entry.stdout) {
             const formatted = formatCommandOutput(entry.stdout);
@@ -2218,6 +2330,32 @@ function statusBadgeCmd(status) {
 
 let cmdHistoryCache = [];
 
+// The history table's host column was plain bold text -- a dead end. Reading "isolate_host
+// failed on X" and then wanting to know anything about X meant scrolling back to the fleet
+// table and finding the row by hand.
+//
+// It can't just be a blanket link, though: this table is the one place in the app that
+// routinely lists hosts which no longer exist. Command history outlives enrollment, so
+// rows for uninstalled or decommissioned endpoints sit here indefinitely, and
+// openHostDetailModal() takes its data from allEndpoints -- for those hosts it would find
+// nothing and return silently, making the pivot a link that does nothing at all. So the
+// cell only offers the modal for a host that's actually still enrolled, and says plainly
+// why it can't for one that isn't.
+function historyHostCell(hostname) {
+    const enrolled = allEndpoints.some(e => e.hostname === hostname);
+    if (enrolled) {
+        return `<strong class="hostname-cell" style="cursor:pointer; text-decoration:underline dotted;" title="Click for full host details" onclick="pivotToHost(rowHost(this));">${escHtml(hostname)}</strong>`;
+    }
+    return `<span class="text-muted" title="No current agent check-ins from this host -- the agent was uninstalled, or the endpoint was decommissioned. Its command history is kept regardless.">${escHtml(hostname)}</span>`
+        + ` <a href="/ueba?tab=timeline&host=${encodeURIComponent('host:' + hostname)}" class="small ms-1" title="This host's activity on the UEBA Timeline -- still available even with no agent enrolled"><i class="fa-solid fa-timeline"></i></a>`;
+}
+
+function pivotToHost(hostname) {
+    if (!hostname) return;
+    switchAgentsTab('agents');
+    openHostDetailModal(hostname);
+}
+
 // The stat tiles used to be counted client-side out of the same 50-row page of history
 // the table renders, which made "Completed Actions" mean "of the most recent 50" -- the
 // three tiles always summed to 50 on any fleet that had run more than that, and a burst
@@ -2290,10 +2428,14 @@ function loadCommandHistory() {
                     ? '<tr><td colspan="6" class="text-center text-muted py-4">No response actions match the current filters.</td></tr>'
                     : '<tr><td colspan="6" class="text-center text-muted py-4">No response actions have been run yet.</td></tr>';
             } else {
+                // data-hostname on the row, read back via rowHost(this) -- same
+                // anti-injection convention the fleet table documents: hostnames originate
+                // from client-supplied agent headers and never get interpolated into an
+                // onclick body.
                 tbody.innerHTML = rows.map(c => `
-                    <tr>
-                        <td class="ps-3 text-nowrap small">${escHtml(c.queued_at)}</td>
-                        <td><strong>${escHtml(c.hostname)}</strong></td>
+                    <tr data-hostname="${escHtml(c.hostname)}">
+                        <td class="ps-3 text-nowrap small">${queuedAtCell(c.queued_at)}</td>
+                        <td>${historyHostCell(c.hostname)}</td>
                         <td><code>${escHtml(c.label)}</code></td>
                         <td class="small text-muted">${escHtml(c.queued_by || '')}</td>
                         <td>${statusBadgeCmd(c.status)}</td>
