@@ -1901,7 +1901,7 @@ function arRenderTable(rows) {
         return;
     }
     tbody.innerHTML = rows.map(r => `<tr>
-        <td>${escHtml(r.name)}</td>
+        <td>${escHtml(r.name)}${r.description ? ` <i class="fa-solid fa-circle-info text-muted" title="${escHtml(r.description)}"></i>` : ''}</td>
         <td class="small text-muted">${anomalyRuleSourceLabel(r.source)}</td>
         <td class="small"><code>${conditionSummaryHtml(r.conditions || [])}</code></td>
         <td class="small">${entityTypeBadge(r.entity_type)}${escHtml(r.entity_field)}</td>
@@ -1910,7 +1910,7 @@ function arRenderTable(rows) {
         <td class="small text-muted">${r.sequence_name ? `<span class="badge bg-secondary">${escHtml(r.sequence_name)} · stage ${r.sequence_stage}</span>` : '—'}</td>
         <td>${r.matches_7d}</td>
         <td>${r.matches_30d}</td>
-        <td class="small text-muted">${r.last_matched ? escHtml(r.last_matched) : '—'}</td>
+        <td class="small text-muted">${r.last_matched ? escHtml(r.last_matched) : (r.matches_total === 0 ? '<span class="badge bg-secondary">Never Matched</span>' : '—')}</td>
         <td>${IS_ADMIN
             ? `<input type="checkbox" class="form-check-input" ${r.enabled ? 'checked' : ''} onchange="toggleAnomalyRule(${r.id}, this.checked)">`
             : (r.enabled ? '<span class="badge bg-success">On</span>' : '<span class="badge bg-secondary">Off</span>')}</td>
