@@ -8535,11 +8535,15 @@ def _run_playbook_action(db, cid, action_type, params, dry_run=False):
             triage_note = " (a collect_triage bundle is queued ahead of each isolation)" if auto_triage else ""
             return f"would isolate {len(confirmed_hosts)} confirmed host(s){triage_note}: {', '.join(confirmed_hosts)}"
         # Same soc_ip auto-fill api_agent_commands() applies when the caller (there, the
-        # EDR console UI; here, an approved playbook action) doesn't supply one.
+        # EDR console UI; here, an approved playbook action) doesn't supply one. Must stay
+        # in step with that path: a playbook-driven isolation that allowlisted only the
+        # ingest address would strand the host exactly the same way -- and a playbook can
+        # isolate several hosts at once, so getting it wrong here strands all of them.
         settings_map = {r[0]: r[1] for r in db.execute("SELECT key, value FROM settings").fetchall()}
-        soc_ip = settings_map.get('ingest_bind_ip', '0.0.0.0')
-        if soc_ip == '0.0.0.0':
-            soc_ip = request.host.split(':')[0]
+        soc_ips = _soc_allowlist_ips(settings_map, request.host)
+        if not soc_ips:
+            return "isolate_host skipped: cannot determine this server's address for the isolation allowlist -- set the UI Bind IP under Settings > Network."
+        soc_ip = ','.join(soc_ips)
         queued = []
         for host in confirmed_hosts:
             # Order-of-volatility: when requested, queue collect_triage BEFORE
@@ -19665,6 +19669,44 @@ def api_fim_path_detail(fid):
 # heavier hunt-flavored sweeps/collections) stays gated to Tier 3+ below.
 AGENT_COMMAND_TIER1_LABELS = {'isolate_host', 'restore_network', 'block_ip', 'unblock_ip', 'collect_triage', 'kill_process', 'quarantine_file', 'kill_scheduled_task'}
 
+def _soc_allowlist_ips(settings_map, request_host=None):
+    """Every address an isolated endpoint must still be able to reach us on.
+
+    This used to be a single value read from ingest_bind_ip, and on a dual-homed
+    appliance that was the wrong one. The agent does not treat our addresses
+    interchangeably:
+
+      ui_bind_ip:ui_port         -> /api/agent/config  (check-in, command delivery)
+                                    /api/agent/result  (command results)
+      ingest_bind_ip:ingest_port -> /api/ingest        (log shipping)
+
+    Allowing only the ingest address produced the worst possible outcome, confirmed in
+    production: the isolated host kept shipping logs and looked healthy and contained,
+    while its check-in was blocked -- so it could never be handed the restore_network
+    that undoes the isolation, and the isolate's own result never came back either. The
+    containment was real, complete and unreachable by any remote means, because the one
+    channel recovery travels on is the one it cut. Recovery required physical access.
+
+    Both bind addresses are included, plus the address this request arrived on (which is
+    how an operator reaches the UI, and the only clue available when a bind is the
+    0.0.0.0 wildcard). Duplicates collapse, so a single-homed appliance still emits
+    exactly one address and behaves exactly as before."""
+    ips = []
+    for key in ('ui_bind_ip', 'ingest_bind_ip'):
+        val = (settings_map.get(key) or '').strip()
+        # 0.0.0.0 means "every interface" -- it is not an address an endpoint can send to.
+        if val and val != '0.0.0.0':
+            ips.append(val)
+    if request_host:
+        host_only = request_host.split(':')[0].strip()
+        if host_only and host_only != '0.0.0.0':
+            ips.append(host_only)
+    deduped = []
+    for ip in ips:
+        if ip not in deduped:
+            deduped.append(ip)
+    return deduped
+
 def _queue_agent_command(db, hostname, label, params, script_in, queued_by):
     """Builds and queues one command for one host -- the exact per-host logic
     api_agent_commands()'s POST branch always ran, now shared between the single-host
@@ -19697,10 +19739,12 @@ def _queue_agent_command(db, hostname, label, params, script_in, queued_by):
             params['rule_conditions'] = _get_live_yara_rule_conditions()
         if label == 'isolate_host' and not params.get('soc_ip'):
             s = {r[0]: r[1] for r in db.execute("SELECT key, value FROM settings").fetchall()}
-            soc_ip = s.get('ingest_bind_ip', '0.0.0.0')
-            if soc_ip == '0.0.0.0':
-                soc_ip = request.host.split(':')[0]
-            params['soc_ip'] = soc_ip
+            # Every address the agent may need, not just the ingest one -- see
+            # _soc_allowlist_ips() for the production incident that forced this.
+            ips = _soc_allowlist_ips(s, request.host)
+            if not ips:
+                return None, "Cannot determine this server's address for the isolation allowlist -- set the UI Bind IP under Settings > Network."
+            params['soc_ip'] = ','.join(ips)
         missing = [p for p in required if not params.get(p)]
         if missing:
             return None, f"Missing required parameter(s): {', '.join(missing)}"
@@ -19845,7 +19889,7 @@ def api_agent_commands():
             # tile counts. 'pending' alone would under-report it by whatever the agents
             # have already picked up but not finished.
             conditions.append("status IN ('pending', 'sent')")
-        elif status_filter in ('pending', 'sent', 'done', 'failed'):
+        elif status_filter in ('pending', 'sent', 'done', 'failed', 'cancelled'):
             conditions.append("status = ?")
             params.append(status_filter)
         if since_days is not None and since_days > 0:

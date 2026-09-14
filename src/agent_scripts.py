@@ -8,6 +8,34 @@
 import re
 
 _IPV4_RE = re.compile(r'^(\d{1,3}\.){3}\d{1,3}$')
+
+def _normalize_soc_ips(soc_ips):
+    """One IP, a comma-separated string, or any iterable of them -> a deduped ordered list.
+
+    Every value still goes through _IPV4_RE individually: these are interpolated straight
+    into a PowerShell -RemoteAddress list / an iptables rule / a pf anchor, so the
+    validation that made the single-IP form injection-safe has to apply per element, not
+    to the joined string. A bare '10.0.0.1,8.8.8.8; rm -rf /' must fail, not sneak through
+    because the whole thing was checked as one token.
+
+    Order is preserved and duplicates dropped, so a single-homed appliance (every setting
+    the same address) still emits exactly one address and behaves as it always did."""
+    if isinstance(soc_ips, str):
+        candidates = soc_ips.split(',')
+    else:
+        candidates = list(soc_ips or [])
+    out = []
+    for raw in candidates:
+        ip = str(raw).strip()
+        if not ip:
+            continue
+        if not _IPV4_RE.match(ip):
+            raise ValueError(f"Invalid SOC IP address: {ip!r}")
+        if ip not in out:
+            out.append(ip)
+    if not out:
+        raise ValueError("At least one SOC IP address is required for isolation")
+    return out
 _SHA256_RE = re.compile(r'^[0-9a-fA-F]{64}$')
 _MD5_RE = re.compile(r'^[0-9a-fA-F]{32}$')
 _SHA1_RE = re.compile(r'^[0-9a-fA-F]{40}$')
@@ -57,15 +85,31 @@ foreach ($p in $targets) {{
 # "Done", telling an analyst a host is contained when it is not. Same false-positive
 # class block_ip() below already documents; `exit 1` is the part that actually makes it
 # surface as Failed, since status is decided purely by exit code.
-def isolate_host(soc_ip):
-    if not _IPV4_RE.match(soc_ip):
-        raise ValueError(f"Invalid SOC IP address: {soc_ip!r}")
+# Accepts one IP or several (comma-separated, or any iterable of them), because an
+# appliance can legitimately answer on more than one address and the agent does not use
+# them interchangeably: it polls for commands and reports results on the **UI** bind
+# address (ui_bind_ip:ui_port -> /api/agent/config and /api/agent/result) while shipping
+# logs to the **ingest** bind address (ingest_bind_ip:ingest_port -> /api/ingest). See
+# _build_agent_source() and _load_external_config() in the agent.
+#
+# This took a production incident to find. soc_ip was a single value read from
+# ingest_bind_ip, so on a dual-homed appliance isolation allowlisted the ingest address
+# and blocked the UI one. The isolated host went on shipping logs perfectly -- it looked
+# alive and contained -- while its check-in was cut off, so it could never receive the
+# restore_network that would undo the isolation, and the isolate's own result never came
+# back either. Containment was real and irreversible by any remote means: the one channel
+# recovery depends on is the one isolation severed. Every address the agent might need is
+# now allowed, and _soc_allowlist_ips() in app.py is what assembles them.
+def isolate_host(soc_ips):
+    ips = _normalize_soc_ips(soc_ips)
+    joined = ','.join(ips)          # PowerShell -RemoteAddress takes a comma-separated array
+    human = ' / '.join(ips)
     return f"""try {{
     Remove-NetFirewallRule -DisplayName "MicroDFIR-Isolation-*" -ErrorAction SilentlyContinue
-    New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Allow-SOC-Out" -Direction Outbound -RemoteAddress {soc_ip} -Action Allow -Profile Any -ErrorAction Stop | Out-Null
-    New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Allow-SOC-In" -Direction Inbound -RemoteAddress {soc_ip} -Action Allow -Profile Any -ErrorAction Stop | Out-Null
+    New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Allow-SOC-Out" -Direction Outbound -RemoteAddress {joined} -Action Allow -Profile Any -ErrorAction Stop | Out-Null
+    New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Allow-SOC-In" -Direction Inbound -RemoteAddress {joined} -Action Allow -Profile Any -ErrorAction Stop | Out-Null
     Set-NetFirewallProfile -Profile Domain,Public,Private -DefaultInboundAction Block -DefaultOutboundAction Block -ErrorAction Stop
-    "Host isolated. Only traffic to/from {soc_ip} is permitted."
+    "Host isolated. Only traffic to/from {human} is permitted."
 }} catch {{
     $errMsg = $_.Exception.Message -replace '"', "'"
     Write-Error "isolate_host FAILED -- host is NOT contained: $errMsg"
@@ -1578,9 +1622,17 @@ _ISOLATION_CHAIN = "MICRODFIR_ISOLATION"
 # doesn't exist yet), so they keep `|| true` and only the real work is fatal. The final
 # verification is the actual proof of containment -- the chain existing and being
 # referenced from both INPUT and OUTPUT -- rather than trusting that the commands ran.
-def isolate_host_linux(soc_ip):
-    if not _IPV4_RE.match(soc_ip):
-        raise ValueError(f"Invalid SOC IP address: {soc_ip!r}")
+# soc_ips is every address the agent may need (see isolate_host() for why a single one
+# silently made isolation irreversible on a dual-homed appliance) -- one ACCEPT pair per
+# address, emitted before the chain's default DROP.
+def isolate_host_linux(soc_ips):
+    ips = _normalize_soc_ips(soc_ips)
+    accepts = '\n'.join(
+        f'iptables -A {_ISOLATION_CHAIN} -d {ip} -j ACCEPT || fail "could not allow outbound to SOC {ip}"\n'
+        f'iptables -A {_ISOLATION_CHAIN} -s {ip} -j ACCEPT || fail "could not allow inbound from SOC {ip}"'
+        for ip in ips
+    )
+    human = ' / '.join(ips)
     return f"""set -e
 fail() {{ echo "isolate_host FAILED -- host is NOT contained: $1" >&2; exit 1; }}
 command -v iptables >/dev/null 2>&1 || fail "iptables not found"
@@ -1589,14 +1641,13 @@ iptables -D OUTPUT -j {_ISOLATION_CHAIN} 2>/dev/null || true
 iptables -F {_ISOLATION_CHAIN} 2>/dev/null || true
 iptables -X {_ISOLATION_CHAIN} 2>/dev/null || true
 iptables -N {_ISOLATION_CHAIN} || fail "could not create chain {_ISOLATION_CHAIN} (need root?)"
-iptables -A {_ISOLATION_CHAIN} -d {soc_ip} -j ACCEPT || fail "could not allow outbound to SOC"
-iptables -A {_ISOLATION_CHAIN} -s {soc_ip} -j ACCEPT || fail "could not allow inbound from SOC"
+{accepts}
 iptables -A {_ISOLATION_CHAIN} -j DROP || fail "could not add default DROP"
 iptables -I INPUT 1 -j {_ISOLATION_CHAIN} || fail "could not attach chain to INPUT"
 iptables -I OUTPUT 1 -j {_ISOLATION_CHAIN} || fail "could not attach chain to OUTPUT"
 iptables -C INPUT -j {_ISOLATION_CHAIN} 2>/dev/null || fail "chain not referenced from INPUT after apply"
 iptables -C OUTPUT -j {_ISOLATION_CHAIN} 2>/dev/null || fail "chain not referenced from OUTPUT after apply"
-echo "Host isolated. Only traffic to/from {soc_ip} is permitted."
+echo "Host isolated. Only traffic to/from {human} is permitted."
 """
 
 # A silently-failed restore is worse than a silently-failed isolate -- it leaves a host
@@ -2505,16 +2556,20 @@ PYEOF
 # rules -a microdfir/isolation` on the host is the first thing to check.
 _PF_ANCHOR = "microdfir/isolation"
 
-def isolate_host_macos(soc_ip):
-    if not _IPV4_RE.match(soc_ip):
-        raise ValueError(f"Invalid SOC IP address: {soc_ip!r}")
+# soc_ips, plural, for the same reason as isolate_host() -- one pass pair per address.
+def isolate_host_macos(soc_ips):
+    ips = _normalize_soc_ips(soc_ips)
+    passes = '\n'.join(
+        f'pass out quick proto tcp from any to {ip}\npass in quick proto tcp from {ip} to any'
+        for ip in ips
+    )
+    human = ' / '.join(ips)
     return f"""cat <<'PFRULES' | pfctl -a {_PF_ANCHOR} -f - 2>&1
 block all
-pass out quick proto tcp from any to {soc_ip}
-pass in quick proto tcp from {soc_ip} to any
+{passes}
 PFRULES
 pfctl -e 2>&1 | grep -v 'already enabled'
-echo "Host isolated (pfctl anchor {_PF_ANCHOR}). Only traffic to/from {soc_ip} is permitted."
+echo "Host isolated (pfctl anchor {_PF_ANCHOR}). Only traffic to/from {human} is permitted."
 """
 
 def restore_network_macos():
