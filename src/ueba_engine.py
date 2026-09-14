@@ -1177,13 +1177,15 @@ def run_autocase_check():
         # reached Critical also qualifies -- even if its flat windowed sum hasn't crossed
         # the admin's numeric threshold yet. Same wiring api_ueba_risk_scores/the
         # dashboard's top-risk-entities widget already use for the tier badge itself.
+        # departing multiplies on top of privileged, kept in sync by hand with the
+        # same expression in app.py's api_ueba_risk_scores/_run_case_analysis.
         rows = conn.execute(
             "SELECT rse.entity_type as entity_type, rse.entity_id as entity_id, "
             "ROUND(SUM(rse.points) * COALESCE("
             "    CASE WHEN rse.entity_type = 'host' THEN "
             "        CASE a.criticality WHEN 'critical' THEN 2.0 WHEN 'important' THEN 1.5 ELSE 1.0 END "
             "    WHEN rse.entity_type = 'user' THEN "
-            "        CASE WHEN i.privileged = 1 THEN 1.5 ELSE 1.0 END "
+            "        CASE WHEN i.privileged = 1 THEN 1.5 ELSE 1.0 END * CASE WHEN i.departing = 1 THEN 1.5 ELSE 1.0 END "
             "    END, 1.0), 1) as score, "
             "ps.priority_score as priority_score "
             "FROM risk_score_events rse "

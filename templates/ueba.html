@@ -507,15 +507,21 @@
             <hr class="border-secondary my-4">
 
             <h6 class="text-info mb-3">Identities</h6>
-            <p class="text-muted small mb-3">Mark a user as privileged so their UEBA risk score is weighted up (&times;1.5) -- an admin account is a higher-value target than a standard one. Mark someone as <strong>watched</strong> to keep them on the standing list below and on the Insider Threat dashboard, independent of whatever their score happens to be this week -- a real investigation often runs for weeks past any one spike.</p>
+            <p class="text-muted small mb-3">Mark a user as privileged so their UEBA risk score is weighted up (&times;1.5) -- an admin account is a higher-value target than a standard one. Mark someone as <strong>departing</strong> (also &times;1.5, stacking with privileged) for the classic insider-threat window -- data exfiltration risk is well known to spike on the way out. Mark someone as <strong>watched</strong> to keep them on the standing list below and on the Insider Threat dashboard, independent of whatever their score happens to be this week -- a real investigation often runs for weeks past any one spike.</p>
             {% if has_permission('assets.manage') %}
-            <div class="row g-2 mb-3" style="max-width:760px;">
+            <div class="row g-2 mb-3" style="max-width:900px;">
                 <div class="col-md-3"><input type="text" id="newIdentityUsername" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Username"></div>
                 <div class="col-md-3"><input type="text" id="newIdentityDepartment" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Department (optional)"></div>
                 <div class="col-md-2 d-flex align-items-center">
                     <div class="form-check">
                         <input class="form-check-input" type="checkbox" id="newIdentityPrivileged">
                         <label class="form-check-label small" for="newIdentityPrivileged">Privileged</label>
+                    </div>
+                </div>
+                <div class="col-md-2 d-flex align-items-center">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="newIdentityDeparting">
+                        <label class="form-check-label small" for="newIdentityDeparting">Departing</label>
                     </div>
                 </div>
                 <div class="col-md-2 d-flex align-items-center">
@@ -530,8 +536,8 @@
             {% endif %}
             <div class="table-responsive">
                 <table class="table table-dark table-sm align-middle mb-0">
-                    <thead><tr><th>Username</th><th>Department</th><th>Privileged</th><th>Watch</th><th>Reason</th><th></th></tr></thead>
-                    <tbody id="identitiesTableBody"><tr><td colspan="6" class="text-center text-muted py-3">Loading…</td></tr></tbody>
+                    <thead><tr><th>Username</th><th>Department</th><th>Privileged</th><th>Departing</th><th>Departing Note</th><th>Watch</th><th>Reason</th><th></th></tr></thead>
+                    <tbody id="identitiesTableBody"><tr><td colspan="8" class="text-center text-muted py-3">Loading…</td></tr></tbody>
                 </table>
             </div>
         </div>
@@ -557,6 +563,12 @@
                 <select id="arSource" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onAnomalyRuleSourceChange()">
                     <option value="alerts">Sigma Alert</option>
                 </select>
+            </div>
+        </div>
+        <div class="row g-3 mt-1">
+            <div class="col-12">
+                <label class="form-label small text-muted mb-1" for="arDescription">Description / Rationale (optional) <span class="fw-normal">— shown to analysts reviewing a fired match, not just this rule's bare name</span></label>
+                <textarea id="arDescription" class="form-control form-control-sm bg-dark text-light border-secondary" rows="2" placeholder="Why this rule exists / what it's meant to catch"></textarea>
             </div>
         </div>
         <div class="mt-3">
@@ -976,7 +988,7 @@ function renderRiskScores() {
     tbody.innerHTML = rows.map(r => `
         <tr style="cursor:pointer;" onclick="viewRiskScoreDetail('${r.entity_type}', '${escHtml(r.entity_id).replace(/'/g, "\\'")}')">
             <td class="ps-3">${entityBadge(r.entity_type)}<strong>${escHtml(r.entity_id)}</strong></td>
-            <td class="fw-bold">${r.score}${r.multiplier && r.multiplier !== 1.0 ? ` <span class="badge bg-secondary" title="Raw score ${r.raw_score} &times; ${r.multiplier} criticality/privileged multiplier">&times;${r.multiplier}</span>` : ''}</td>
+            <td class="fw-bold">${r.score}${r.multiplier && r.multiplier !== 1.0 ? ` <span class="badge bg-secondary" title="Raw score ${r.raw_score} &times; ${r.multiplier} criticality/privileged/departing multiplier">&times;${r.multiplier}</span>` : ''}</td>
             <td>${r.priority_score != null ? `<span class="badge bg-info text-dark">${r.priority_score}</span>` : '<span class="text-muted small">—</span>'}</td>
             <td>${riskTierBadge(r.tier)}</td>
             <td class="text-muted small">${r.event_count}</td>
@@ -1010,11 +1022,22 @@ function viewRiskScoreDetail(entityType, entityId) {
             for (const e of (data.events || [])) {
                 const key = `${e.indicator}|${e.computed_at}`;
                 if (!byKey.has(key)) {
-                    const g = {indicator: e.indicator, computed_at: e.computed_at, points: e.points, details: [e.detail || '']};
+                    // rule_description only ever comes back non-null for rule-derived
+                    // indicators (custom_alert_rule, first_time_action,
+                    // sequence_chain_progression) -- every built-in behavioral model
+                    // (sigma_alert, off_hours_activity, etc.) has none. A grouped row
+                    // could in principle span more than one distinct custom rule (the
+                    // grouping key is indicator+timestamp, not rule_id), so this takes
+                    // the first description seen rather than trying to show several --
+                    // same "simplify the display, not the underlying data" tradeoff the
+                    // existing 2-sample detail truncation above already makes.
+                    const g = {indicator: e.indicator, computed_at: e.computed_at, points: e.points, details: [e.detail || ''], ruleDescription: e.rule_description || null};
                     byKey.set(key, g);
                     groups.push(g);
                 } else {
-                    byKey.get(key).details.push(e.detail || '');
+                    const g = byKey.get(key);
+                    g.details.push(e.detail || '');
+                    if (!g.ruleDescription && e.rule_description) g.ruleDescription = e.rule_description;
                 }
             }
             // A single indicator's own detail text is unbounded -- e.g. rare_process_population
@@ -1039,10 +1062,11 @@ function viewRiskScoreDetail(entityType, entityId) {
                 const shown = sampleDetails.map(d => escHtml(truncateDetail(d))).join(' &middot; ');
                 const shownTitle = sampleDetails.join(' | ');
                 const more = count > 2 ? ` <span class="text-muted">and ${count - 2} more</span>` : '';
+                const ruleInfo = g.ruleDescription ? ` <i class="fa-solid fa-circle-info text-muted" title="${escHtml(g.ruleDescription)}"></i>` : '';
                 return `
                 <tr>
                     <td class="text-nowrap small text-muted">${escHtml(g.computed_at)}</td>
-                    <td class="small">${escHtml(g.indicator)}${count > 1 ? ` <span class="badge bg-secondary">&times;${count}</span>` : ''}</td>
+                    <td class="small">${escHtml(g.indicator)}${count > 1 ? ` <span class="badge bg-secondary">&times;${count}</span>` : ''}${ruleInfo}</td>
                     <td class="fw-bold">${g.points}${count > 1 ? '<span class="text-muted small fw-normal"> each</span>' : ''}</td>
                     <td class="small text-muted" style="max-width:400px;" title="${escHtml(shownTitle)}">${shown}${more}</td>
                 </tr>
@@ -1094,10 +1118,13 @@ async function renderIdentityQuickActions(entityType, entityId) {
     if (entityType !== 'user') return;
     const identities = await fetch('/api/identities').then(r => r.ok ? r.json() : []).catch(() => []);
     const identity = (identities || []).find(i => i.username === entityId);
-    // Only the button is gated -- privileged/watched status itself is useful read
-    // context for anyone (GET /api/identities is already ungated), matching the
-    // Asset & Identity tab's own read-only-badges-for-non-admins convention.
+    // Only the button is gated -- privileged/departing/watched status itself is useful
+    // read context for anyone (GET /api/identities is already ungated), matching the
+    // Asset & Identity tab's own read-only-badges-for-non-admins convention. Setting
+    // departing itself still only happens on that tab -- same as privileged, this
+    // panel only surfaces it and offers the watch/unwatch action.
     const privilegedBadge = identity && identity.privileged ? '<span class="badge bg-warning text-dark me-1">Privileged</span>' : '';
+    const departingBadge = identity && identity.departing ? `<span class="badge bg-danger me-1" title="${escHtml(identity.departing_note || '')}">Departing</span>` : '';
     const watchedBadge = identity && identity.watched ? '<span class="badge bg-danger me-1">Watched</span>' : '';
     let actionHtml = '';
     if (ASSET_IS_ADMIN) {
@@ -1111,7 +1138,7 @@ async function renderIdentityQuickActions(entityType, entityId) {
     }
     const noneYet = !identity ? '<span class="text-muted small">Not tracked as an identity yet</span>' : '';
     wrap.innerHTML = `<div class="border border-secondary rounded p-2 d-flex align-items-center gap-2 flex-wrap">
-        <span class="text-muted small me-1">Identity:</span>${privilegedBadge}${watchedBadge}${noneYet}
+        <span class="text-muted small me-1">Identity:</span>${privilegedBadge}${departingBadge}${watchedBadge}${noneYet}
         ${actionHtml}
     </div>`;
 }
@@ -1920,6 +1947,7 @@ function openAnomalyRuleModal(rule) {
     document.getElementById('anomalyRuleModalTitle').innerHTML = rule
         ? '<i class="fa-solid fa-pen me-2"></i>Edit Rule' : '<i class="fa-solid fa-list-check me-2"></i>Add Rule';
     document.getElementById('arName').value = rule ? rule.name : '';
+    document.getElementById('arDescription').value = (rule && rule.description) ? rule.description : '';
     document.getElementById('arSource').value = rule ? rule.source : 'alerts';
     const src = ANOMALY_RULE_SOURCES_JS[document.getElementById('arSource').value];
     arConditions = (rule && rule.conditions && rule.conditions.length)
@@ -1942,6 +1970,7 @@ function saveAnomalyRuleModal() {
     const conditions = arConditions.map(c => ({ field: c.field, operator: c.operator, value: String(c.value || '').trim(), logic: c.logic || 'AND' }));
     const payload = {
         name: document.getElementById('arName').value.trim(),
+        description: document.getElementById('arDescription').value.trim(),
         source: document.getElementById('arSource').value,
         conditions,
         entity_field: document.getElementById('arEntityField').value,
@@ -2086,7 +2115,7 @@ function loadIdentities() {
         updateAssetIdentityEmptyBanner();
         const tbody = document.getElementById('identitiesTableBody');
         if (!rows.length) {
-            tbody.innerHTML = '<tr><td colspan="6" class="text-muted small">No identities yet. Fill in the form above to flag a privileged or watched user.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="8" class="text-muted small">No identities yet. Fill in the form above to flag a privileged, departing, or watched user.</td></tr>';
             return;
         }
         tbody.innerHTML = rows.map(i => `<tr>
@@ -2095,6 +2124,12 @@ function loadIdentities() {
             <td>${ASSET_IS_ADMIN
                 ? `<input type="checkbox" class="form-check-input" ${i.privileged ? 'checked' : ''} onchange="updateIdentityPrivileged(${i.id}, this.checked)">`
                 : (i.privileged ? '<span class="badge bg-warning text-dark">Privileged</span>' : '<span class="badge bg-secondary">Standard</span>')}</td>
+            <td>${ASSET_IS_ADMIN
+                ? `<input type="checkbox" class="form-check-input" ${i.departing ? 'checked' : ''} onchange="updateIdentityDeparting(${i.id}, this.checked)" title="Weights this user's risk score up (&times;1.5, stacks with Privileged) -- data exfiltration risk is well known to spike on the way out">`
+                : (i.departing ? '<span class="badge bg-danger">Departing</span>' : '')}</td>
+            <td>${ASSET_IS_ADMIN
+                ? `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" style="min-width:180px;" value="${escHtml(i.departing_note || '')}" placeholder="e.g. 2 weeks' notice given" onblur="updateIdentityDepartingNote(${i.id}, this.value)" onkeydown="if(event.key==='Enter') this.blur()">`
+                : `<span class="small text-muted">${escHtml(i.departing_note || '')}</span>`}</td>
             <td>${ASSET_IS_ADMIN
                 ? `<input type="checkbox" class="form-check-input" ${i.watched ? 'checked' : ''} onchange="updateIdentityWatched(${i.id}, this.checked)" title="${i.watched && i.watched_at ? 'Watched since ' + escHtml(i.watched_at) + (i.watched_by ? ' by ' + escHtml(i.watched_by) : '') : 'Not currently watched'}">`
                 : (i.watched ? '<span class="badge bg-danger">Watched</span>' : '')}</td>
@@ -2105,7 +2140,7 @@ function loadIdentities() {
         </tr>`).join('');
     }).catch(err => {
         console.error('Error loading identities:', err);
-        renderLoadError('identitiesTableBody', 4, 'Failed to load identities.');
+        renderLoadError('identitiesTableBody', 8, 'Failed to load identities.');
         throw err;
     });
 }
@@ -2115,6 +2150,7 @@ function addIdentity() {
         username: document.getElementById('newIdentityUsername').value.trim(),
         department: document.getElementById('newIdentityDepartment').value.trim(),
         privileged: document.getElementById('newIdentityPrivileged').checked,
+        departing: document.getElementById('newIdentityDeparting').checked,
         watched: document.getElementById('newIdentityWatched').checked
     };
     const errBox = document.getElementById('identityError');
@@ -2129,6 +2165,7 @@ function addIdentity() {
             document.getElementById('newIdentityUsername').value = '';
             document.getElementById('newIdentityDepartment').value = '';
             document.getElementById('newIdentityPrivileged').checked = false;
+            document.getElementById('newIdentityDeparting').checked = false;
             document.getElementById('newIdentityWatched').checked = false;
             loadIdentities();
         } else {
@@ -2140,6 +2177,23 @@ function addIdentity() {
 function updateIdentityPrivileged(iid, privileged) {
     fetch(`/api/identities/${iid}`, {
         method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({privileged})
+    }).then(() => loadIdentities())
+      .catch(err => toast('Error updating identity: ' + err, 'danger'));
+}
+
+// Same plain boolean+note pair as privileged/watch_reason -- no timestamp stamping,
+// since departing is a standing state fact, not a "when did this transition happen"
+// event.
+function updateIdentityDeparting(iid, departing) {
+    fetch(`/api/identities/${iid}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({departing})
+    }).then(() => loadIdentities())
+      .catch(err => toast('Error updating identity: ' + err, 'danger'));
+}
+
+function updateIdentityDepartingNote(iid, departing_note) {
+    fetch(`/api/identities/${iid}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({departing_note})
     }).then(() => loadIdentities())
       .catch(err => toast('Error updating identity: ' + err, 'danger'));
 }

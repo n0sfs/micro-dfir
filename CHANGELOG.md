@@ -10,6 +10,64 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-13
 
+### UEBA ideas from Exabeam screenshots (1/2): departing-employee risk signal
+
+User shared Exabeam UEBA screenshots and asked what's learnable/adaptable. One
+screenshot showed an actual scored risk reason: "HR Risk: Gary Hardin gave notice." —
+a real, well-known insider-threat pattern (data exfiltration risk spikes on the way
+out) with no equivalent here. Confirmed via research: `identities` had no
+termination/offboarding field at all, and the demo case title "Potential data
+exfiltration by departing employee jdoe" had nothing behind it.
+
+Added `identities.departing` (boolean) + `departing_note` (free text, e.g. "2 weeks'
+notice given"), migrated the same one-column-at-a-time way `watched`/`watch_reason`
+were. Weighted the same way `privileged` already is — a ×1.5 multiplier — and
+*compounds* with privileged rather than replacing it (×2.25 for a departing privileged
+account, exactly the highest-risk case this exists for). Updated all three places that
+independently compute this multiplier (`app.py`'s `_run_case_analysis` and
+`api_ueba_risk_scores`, `ueba_engine.py`'s `run_autocase_check`) to keep them in sync,
+matching this codebase's existing dual-definition-config convention. Surfaced as a
+checkbox + note field on the Asset & Identity tab (same pattern as Privileged/Watch)
+and as a read-only "Departing" badge in the risk detail modal's identity panel (added
+last pass) and the Risk Scoring table's multiplier tooltip.
+
+Verified with a real SQLite fixture test (12 cases): create/update correctly
+store/toggle the flag and note without clobbering unrelated fields, un-flagging keeps
+the note (same convention as `watch_reason` surviving unwatch), and the multiplier
+expression itself correctly computes 1.0x/1.5x/1.5x/2.25x for
+neither/departing-only/privileged-only/both — including the LEFT JOIN case where a
+user has no `identities` row at all. Plus a JS vm-context test (3 cases) for the badge
+rendering in the identity quick-actions panel.
+
+### UEBA ideas from Exabeam screenshots (2/2): rule rationale shown to analysts
+
+A second screenshot (a case's Threat Timeline) showed each fired detection's own
+descriptive rationale text, not just its rule name. Confirmed via research: Micro
+DFIR's custom UEBA rules (`anomaly_rules`) had no `description` field at all — the risk
+detail modal only ever showed "Matched rule 'X'", never why an admin built it.
+
+Added `anomaly_rules.description` (optional free text), a textarea in the rule
+create/edit modal, and a JOIN in `api_ueba_risk_score_detail` (via the already-existing
+`risk_score_events.rule_id` — the plumbing to look up which specific rule produced an
+event already existed for the Scoring & Rules tab's match-count columns) so the
+detail modal can show an info icon carrying the rule's rationale as a tooltip next to
+the indicator name. Only ever appears for rule-derived indicators
+(`custom_alert_rule`/`first_time_action`/`sequence_chain_progression`) — every built-in
+behavioral model (`sigma_alert`, `off_hours_activity`, etc.) has no matching rule and
+correctly shows nothing. A grouped row spanning more than one distinct custom rule
+(the grouping key is indicator+timestamp, not `rule_id`) takes the first description
+seen rather than trying to show several — same simplify-the-display tradeoff the
+existing 2-sample detail truncation already makes.
+
+Verified with a real SQLite fixture test (3 of the 12 total cases in this pass): a
+rule's description is stored on create, the detail query's LEFT JOIN correctly
+resolves a rule-derived event's description via `rule_id`, and a built-in indicator
+(no `rule_id`) correctly comes back with `rule_description = NULL` rather than an
+error. Plus a JS vm-context test (5 cases): the info icon appears with the right
+tooltip for a rule-derived event, no icon for a built-in one, first-non-null-wins
+across grouped events, and the rule modal correctly prefills/clears the description
+field on open for an existing vs. brand-new rule.
+
 ### Insider threat workflow review (1/2): quick "Watch This User" from the risk detail modal
 
 Asked to run through the insider-threat process specifically. Live-verified current

@@ -6666,7 +6666,7 @@ def api_identities():
     if request.method == 'GET':
         rows = db.execute(
             "SELECT id, username, department, privileged, watched, watch_reason, watched_at, watched_by, "
-            "created_by, created_at FROM identities ORDER BY username"
+            "departing, departing_note, created_by, created_at FROM identities ORDER BY username"
         ).fetchall()
         return jsonify([dict(r) for r in rows])
 
@@ -6678,16 +6678,21 @@ def api_identities():
     privileged = bool(data.get('privileged'))
     watched = bool(data.get('watched'))
     watch_reason = (data.get('watch_reason') or '').strip()
+    # departing is a standing risk-elevation flag, same kind of thing privileged
+    # already is (not a timestamped event) -- no watched_at/watched_by-style stamping
+    # needed, just a boolean + a free-text note (e.g. "2 weeks' notice given 2026-09-01").
+    departing = bool(data.get('departing'))
+    departing_note = (data.get('departing_note') or '').strip()
     if not username:
         return jsonify({"error": "Username is required"}), 400
     if db.execute("SELECT 1 FROM identities WHERE username = ?", (username,)).fetchone():
         return jsonify({"error": f"'{username}' already has an identity entry -- edit it instead of adding a duplicate"}), 400
     db.execute(
-        "INSERT INTO identities (username, department, privileged, watched, watch_reason, watched_at, watched_by, created_by) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO identities (username, department, privileged, watched, watch_reason, watched_at, watched_by, departing, departing_note, created_by) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (username, department, privileged, watched, watch_reason,
          datetime.now().strftime('%Y-%m-%d %H:%M:%S') if watched else None,
-         current_user.username if watched else None, current_user.username)
+         current_user.username if watched else None, departing, departing_note, current_user.username)
     )
     db.commit()
     return jsonify({"status": "success"})
@@ -6698,7 +6703,7 @@ def api_identity_detail(iid):
     err = require_permission('assets.manage')
     if err: return err
     db = get_db()
-    existing = db.execute("SELECT department, privileged, watched, watch_reason FROM identities WHERE id = ?", (iid,)).fetchone()
+    existing = db.execute("SELECT department, privileged, watched, watch_reason, departing, departing_note FROM identities WHERE id = ?", (iid,)).fetchone()
     if not existing:
         return jsonify({"error": "Identity not found"}), 404
 
@@ -6712,6 +6717,10 @@ def api_identity_detail(iid):
     privileged = bool(data['privileged']) if 'privileged' in data else bool(existing['privileged'])
     watch_reason = data['watch_reason'].strip() if 'watch_reason' in data else (existing['watch_reason'] or '')
     watched = bool(data['watched']) if 'watched' in data else bool(existing['watched'])
+    # No watched_at/watched_by-style stamping needed here -- departing is a plain
+    # boolean + note, same as privileged, not a timestamped transition like watched.
+    departing = bool(data['departing']) if 'departing' in data else bool(existing['departing'])
+    departing_note = data['departing_note'].strip() if 'departing_note' in data else (existing['departing_note'] or '')
     # watched_at/watched_by are stamped only on the 0->1 transition (when this person is
     # newly put under watch, not on every unrelated field edit while already watched) and
     # cleared on 1->0 -- watch_reason itself is left alone on unwatch, so the context for
@@ -6726,13 +6735,13 @@ def api_identity_detail(iid):
         watched_at, watched_by = None, None  # left unchanged below when already watched and staying watched
     if watched and existing['watched']:
         db.execute(
-            "UPDATE identities SET department = ?, privileged = ?, watched = ?, watch_reason = ? WHERE id = ?",
-            (department, privileged, watched, watch_reason, iid)
+            "UPDATE identities SET department = ?, privileged = ?, watched = ?, watch_reason = ?, departing = ?, departing_note = ? WHERE id = ?",
+            (department, privileged, watched, watch_reason, departing, departing_note, iid)
         )
     else:
         db.execute(
-            "UPDATE identities SET department = ?, privileged = ?, watched = ?, watch_reason = ?, watched_at = ?, watched_by = ? WHERE id = ?",
-            (department, privileged, watched, watch_reason, watched_at, watched_by, iid)
+            "UPDATE identities SET department = ?, privileged = ?, watched = ?, watch_reason = ?, watched_at = ?, watched_by = ?, departing = ?, departing_note = ? WHERE id = ?",
+            (department, privileged, watched, watch_reason, watched_at, watched_by, departing, departing_note, iid)
         )
     db.commit()
     return jsonify({"status": "success"})
@@ -8076,8 +8085,14 @@ def _run_case_analysis(db, cid, entity_type, entity_id):
             (entity_id, window)
         ).fetchone()
     else:
+        # departing multiplies on top of privileged (both apply independently to the
+        # same user) rather than replacing it -- a departing privileged account is
+        # exactly the compounded-risk case this exists for. Kept in sync by hand with
+        # the same expression in api_ueba_risk_scores below and
+        # ueba_engine.py's run_autocase_check, per this file's existing
+        # dual-definition-config convention.
         score_row = db.execute(
-            "SELECT ROUND(SUM(rse.points) * COALESCE(CASE WHEN i.privileged = 1 THEN 1.5 ELSE 1.0 END, 1.0), 1) as score "
+            "SELECT ROUND(SUM(rse.points) * COALESCE(CASE WHEN i.privileged = 1 THEN 1.5 ELSE 1.0 END * CASE WHEN i.departing = 1 THEN 1.5 ELSE 1.0 END, 1.0), 1) as score "
             "FROM risk_score_events rse LEFT JOIN identities i ON rse.entity_id = i.username "
             "WHERE rse.entity_type = 'user' AND rse.entity_id = ? AND rse.computed_at >= datetime('now', ?)",
             (entity_id, window)
@@ -10494,6 +10509,10 @@ def api_ueba_risk_scores():
     # here must match CRITICALITY_MULTIPLIERS above exactly (see test coverage) --
     # duplicated rather than parameterized since SQLite has no clean way to join a
     # Python dict in as a lookup table for 4 fixed values.
+    # departing multiplies on top of privileged (both can apply to the same user
+    # independently -- a departing privileged account is exactly the compounded-risk
+    # case this exists for), kept in sync by hand with the same expression in
+    # _run_case_analysis and ueba_engine.py's run_autocase_check.
     rows = db.execute(
         "SELECT rse.entity_type as entity_type, rse.entity_id as entity_id, "
         "SUM(rse.points) as raw_score, "
@@ -10501,12 +10520,12 @@ def api_ueba_risk_scores():
         "    CASE WHEN rse.entity_type = 'host' THEN "
         "        CASE a.criticality WHEN 'critical' THEN 2.0 WHEN 'important' THEN 1.5 ELSE 1.0 END "
         "    WHEN rse.entity_type = 'user' THEN "
-        "        CASE WHEN i.privileged = 1 THEN 1.5 ELSE 1.0 END "
+        "        CASE WHEN i.privileged = 1 THEN 1.5 ELSE 1.0 END * CASE WHEN i.departing = 1 THEN 1.5 ELSE 1.0 END "
         "    END, 1.0), 1) as score, "
         "COALESCE(CASE WHEN rse.entity_type = 'host' THEN "
         "    CASE a.criticality WHEN 'critical' THEN 2.0 WHEN 'important' THEN 1.5 ELSE 1.0 END "
         "WHEN rse.entity_type = 'user' THEN "
-        "    CASE WHEN i.privileged = 1 THEN 1.5 ELSE 1.0 END END, 1.0) as multiplier, "
+        "    CASE WHEN i.privileged = 1 THEN 1.5 ELSE 1.0 END * CASE WHEN i.departing = 1 THEN 1.5 ELSE 1.0 END END, 1.0) as multiplier, "
         "COUNT(*) as event_count, MAX(rse.computed_at) as last_event, "
         "ps.priority_score as priority_score "
         "FROM risk_score_events rse "
@@ -10534,9 +10553,16 @@ def api_ueba_risk_scores():
 def api_ueba_risk_score_detail(entity_type, entity_id):
     db = get_db()
     cfg = get_risk_score_config(db)
+    # rule_id is only ever set for rule-derived indicators (custom_alert_rule,
+    # first_time_action, sequence_chain_progression); every other indicator (sigma_alert,
+    # off_hours_activity, etc.) has no matching row and rule_description comes back NULL
+    # via the LEFT JOIN, same as any built-in behavioral model that was never an
+    # admin-authored rule in the first place.
     rows = db.execute(
-        "SELECT indicator, points, detail, source_table, source_id, computed_at FROM risk_score_events "
-        "WHERE entity_type = ? AND entity_id = ? AND computed_at >= datetime('now', ?) ORDER BY id DESC",
+        "SELECT rse.indicator, rse.points, rse.detail, rse.source_table, rse.source_id, rse.computed_at, "
+        "ar.description as rule_description FROM risk_score_events rse "
+        "LEFT JOIN anomaly_rules ar ON rse.rule_id = ar.id "
+        "WHERE rse.entity_type = ? AND rse.entity_id = ? AND rse.computed_at >= datetime('now', ?) ORDER BY rse.id DESC",
         (entity_type, entity_id, f"-{cfg['window_days']} days")
     ).fetchall()
     events = [dict(r) for r in rows]
@@ -10694,10 +10720,11 @@ def api_anomaly_rules():
     bonus = int(bonus) if bonus not in (None, '') else None
     seq_name = (d.get('sequence_name') or '').strip() or None
     seq_stage = int(d['sequence_stage']) if d.get('sequence_stage') not in (None, '') else None
+    description = (d.get('description') or '').strip() or None
     cur = db.execute(
-        "INSERT INTO anomaly_rules (name, source, entity_field, entity_type, points, first_time_bonus_points, sequence_name, sequence_stage, enabled, created_by) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
-        (d['name'].strip(), d['source'], d['entity_field'], d['entity_type'], int(d['points']), bonus, seq_name, seq_stage, current_user.username)
+        "INSERT INTO anomaly_rules (name, source, entity_field, entity_type, points, first_time_bonus_points, sequence_name, sequence_stage, description, enabled, created_by) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+        (d['name'].strip(), d['source'], d['entity_field'], d['entity_type'], int(d['points']), bonus, seq_name, seq_stage, description, current_user.username)
     )
     _replace_anomaly_rule_conditions(db, cur.lastrowid, d['conditions'])
     db.commit()
@@ -10736,11 +10763,12 @@ def api_anomaly_rule_detail(rid):
     bonus = int(bonus) if bonus not in (None, '') else None
     seq_name = (d.get('sequence_name') or '').strip() or None
     seq_stage = int(d['sequence_stage']) if d.get('sequence_stage') not in (None, '') else None
+    description = (d.get('description') or '').strip() or None
     db.execute(
         "UPDATE anomaly_rules SET name=?, source=?, entity_field=?, entity_type=?, points=?, "
-        "first_time_bonus_points=?, sequence_name=?, sequence_stage=?, enabled=?, updated_by=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        "first_time_bonus_points=?, sequence_name=?, sequence_stage=?, description=?, enabled=?, updated_by=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
         (d['name'].strip(), d['source'], d['entity_field'], d['entity_type'],
-         int(d['points']), bonus, seq_name, seq_stage, 1 if d.get('enabled', True) else 0, current_user.username, rid)
+         int(d['points']), bonus, seq_name, seq_stage, description, 1 if d.get('enabled', True) else 0, current_user.username, rid)
     )
     _replace_anomaly_rule_conditions(db, rid, d['conditions'])
     db.commit()
@@ -12416,6 +12444,25 @@ def migrate_identities_watchlist():
             conn.execute("ALTER TABLE identities ADD COLUMN watched_at DATETIME")
         if 'watched_by' not in cols:
             conn.execute("ALTER TABLE identities ADD COLUMN watched_by TEXT")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# A departing/terminated employee is a genuine, well-known elevated insider-threat
+# risk factor (data exfiltration on the way out is the classic scenario -- see the
+# demo case "Potential data exfiltration by departing employee jdoe") that this
+# deployment had no way to actually flag before now. Same "extend what already
+# exists on this table" reasoning migrate_identities_watchlist() itself used for
+# `watched` -- a second boolean+note pair, not a parallel table.
+def migrate_identities_departing():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(identities)").fetchall()}
+        if 'departing' not in cols:
+            conn.execute("ALTER TABLE identities ADD COLUMN departing INTEGER DEFAULT 0")
+        if 'departing_note' not in cols:
+            conn.execute("ALTER TABLE identities ADD COLUMN departing_note TEXT")
         conn.commit()
         conn.close()
     except Exception:
@@ -14619,6 +14666,21 @@ def migrate_anomaly_rules_sequence_columns():
             conn.execute("ALTER TABLE anomaly_rules ADD COLUMN sequence_name TEXT")
         if 'sequence_stage' not in cols:
             conn.execute("ALTER TABLE anomaly_rules ADD COLUMN sequence_stage INTEGER")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# An analyst reviewing a fired custom rule in the risk detail modal previously only
+# ever saw "Matched rule 'X'" -- the rule's own name, never why an admin built it in
+# the first place. Optional free-text rationale, same one-column-addition pattern as
+# migrate_anomaly_rules_sequence_columns() above.
+def migrate_anomaly_rules_description():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(anomaly_rules)").fetchall()]
+        if 'description' not in cols:
+            conn.execute("ALTER TABLE anomaly_rules ADD COLUMN description TEXT")
         conn.commit()
         conn.close()
     except Exception:
@@ -19690,6 +19752,7 @@ migrate_ueba_entities()
 migrate_ueba_math_v2()
 migrate_assets_identities()
 migrate_identities_watchlist()
+migrate_identities_departing()
 migrate_cases()
 migrate_case_upgrade()
 migrate_case_template_fields()
@@ -19740,6 +19803,7 @@ migrate_audit_log()
 migrate_risk_scoring()
 migrate_anomaly_rules()
 migrate_anomaly_rules_sequence_columns()
+migrate_anomaly_rules_description()
 migrate_anomaly_rule_conditions()
 migrate_anomaly_rule_conditions_logic()
 migrate_seed_ueba_rules()
