@@ -76,6 +76,40 @@ be reached physically, precisely because the failure being tested for is loss of
 access. Testing it on a remote endpoint made the blast radius of a bad outcome the same
 as the bug itself.
 
+**Hardening, after the fact.** The allowlist bug is fixed, but two structural weaknesses
+are what turned one wrong IP into an unrecoverable host, and each is worth closing on its
+own merits.
+
+*Isolation now proves it kept its own command channel, and rolls itself back if it
+didn't.* After the rules are applied the script makes a real TCP connection back to each
+SOC endpoint; if none answers, it tears the isolation down and exits 1. Only the endpoint
+can detect this — by definition the server stops hearing from it — so this has to live in
+the script, not the server. A host briefly isolated and then released beats one contained
+and unreachable, and the analyst gets a red "Failed" naming the cause instead of a host
+that quietly stops answering. Three rounds with a pause, so a transient failure doesn't
+tear down a working isolation. All three platforms (`TcpClient` / bash `/dev/tcp` / `nc`).
+Endpoints became `ip:port`; a bare address still produces a rule but no probe, and the
+script says out loud that it could not verify rather than letting silence read as proof.
+
+One trap worth recording: the Linux probe is written entirely as `if` conditions because
+`[ cond ] && break` is a complete AND-list, so under `set -e` a false condition aborts the
+script — which here would mean exiting *before* the rollback could run, producing exactly
+the outcome the check exists to prevent. There is a test asserting no bare `test && break`
+survives in that block.
+
+*The agent now has more than one way to reach us.* gunicorn binds both the UI and ingest
+addresses and serves the whole API on each, so the other bind address is a genuine
+fallback rather than a separate service. Check-ins and result reports now alternate across
+them (primary / fallback / primary across the three attempts). During the incident the
+ingest base stayed reachable the whole time — with this in place the host would have
+checked in on it, received `restore_network`, and recovered itself without anyone touching
+the machine. Computed per call so zero-touch routing rewrites are picked up; single-homed
+deployments collapse to one URL and make no extra requests.
+
+26 further tests (17 isolation self-check, 9 agent failover). The isolation change is
+server-side and applies to the next isolate on any agent version; the agent change reaches
+endpoints only via Upgrade Agent.
+
 ### EDR workflow/agent review, Pass C — polish (4 of 14, review complete: 14/14)
 
 - **Failed actions were greyed out in the host-detail popup.** That table carried its own
