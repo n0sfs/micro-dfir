@@ -10,6 +10,58 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-14
 
+### Reporting/Coverage usability review, Pass B (4 of 4, review complete: 9/9 findings)
+
+- **Biggest UX win**: "Generate Report" was a synchronous form POST that froze the
+  whole page for up to 120s with zero feedback (`subprocess.run(..., timeout=120)`
+  inside the request handler). Extracted the shared generation logic into
+  `_generate_report_now()` (used by both the original form route, kept intact for
+  anything still hitting it directly, and a new `/api/reports/generate` JSON route).
+  reports.html now calls the new route with the button showing a spinner while
+  disabled, then refreshes the history table in place via the same `loadReports()` the
+  initial page load already uses — no more frozen unresponsive page, even though
+  generation itself is still synchronous server-side (this app has no background-job
+  mechanism, per its own documented convention).
+- Coverage's gap analysis had no click-through to build a rule. Added
+  `buildRuleUrlForGap()`, reusing the exact same `?new_rule=1&mitre=&title=&
+  description=` deep link Atomic Testing's own "Create Detection Rule" button already
+  uses — wired into both the Prioritized Gaps table (a new "Build a rule" column) and
+  the drilldown modal's "No rules are mapped" message.
+- Report history had no type/status filter despite 28+ real reports already in
+  production. Added two dropdown filters (`getFilteredReportHistory()`), with a
+  filter-aware empty state distinct from the genuine "no reports yet" one.
+- No visibility into whether the report schedule was actually running — saving
+  rewrote the crontab with no persisted trace of success. Added a `last_applied_at`
+  timestamp (stamped only on a confirmed-successful crontab rewrite, survives a later
+  failed save, read back via `get_report_schedule_config()`) shown on the Schedule tab:
+  a green confirmation with the timestamp, or a warning if a schedule is active but has
+  never been confirmed applied.
+
+Verified with 33 tests across 5 files: 10 fixture tests for `_generate_report_now()`'s
+validation/branching (param clamping, successful/timeout/generic-error paths, the form
+route and JSON route sharing identical results by construction); 5 fixture tests for
+the schedule's `last_applied_at` persistence (fresh install has none, a successful
+apply stamps it and it survives a reload, a failed apply neither stamps it nor erases a
+prior successful stamp); 3 JS vm-context tests for `buildRuleUrlForGap()` and the
+Prioritized Gaps table's new column; 6 JS vm-context tests for the report history
+filters (type/status/combined AND semantics, filtered-empty vs. genuinely-empty
+messaging); 9 JS vm-context tests for `submitGenerateReport()`'s spinner/disable
+lifecycle, payload shape, and success/failure/network-error toast handling, plus the
+schedule note's three states. Live-verified on production: clicked Generate Report and
+watched the button show "Generating…" while the rest of the page — sidebar, filters,
+the existing table — stayed fully interactive (no page freeze), then confirmed a real
+new "Security Summary (30d)" row appeared in place (29→30 total) with no navigation;
+turned on Security Summary's daily schedule, saved, and confirmed "✅ Crontab last
+confirmed applied: 2026-09-14 08:41:53" appeared, then turned it back off (restored to
+original all-off state); opened the real gap-tier technique T1589.001 (Credentials, 0
+rules mapped) and confirmed its new "Build a rule" button correctly deep-linked into a
+fully pre-filled New Custom Rule builder (title, description, and `attack.t1589.001`
+MITRE tag all populated) — canceled without saving.
+
+**Pass B complete (4/4). Reporting/Coverage usability review complete (9/9 findings) —
+this closes out the user's full multi-part request across UEBA, Cases/SOAR, and
+Reporting/Coverage.**
+
 ### Reporting/Coverage usability review, Pass A (5 of 9 findings)
 
 Started the final pass of the user's original multi-part request — Reporting and
