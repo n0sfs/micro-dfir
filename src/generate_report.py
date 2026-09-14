@@ -1222,7 +1222,7 @@ REPORT_GENERATORS = {
 
 def _record_history(conn, report_type, filename, status, started_at, completed_at,
                      triggered_by, trigger_source, error_message=None, case_id=None, case_title=None,
-                     framework_key=None, framework_label=None):
+                     framework_key=None, framework_label=None, report_days=None):
     file_size = None
     if status == 'success' and filename:
         try:
@@ -1231,10 +1231,10 @@ def _record_history(conn, report_type, filename, status, started_at, completed_a
             pass
     conn.execute(
         "INSERT INTO report_history (report_type, filename, status, triggered_by, trigger_source, "
-        "started_at, completed_at, file_size_bytes, error_message, case_id, case_title, framework_key, framework_label) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "started_at, completed_at, file_size_bytes, error_message, case_id, case_title, framework_key, framework_label, report_days) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (report_type, filename, status, triggered_by, trigger_source, started_at, completed_at, file_size, error_message,
-         case_id, case_title, framework_key, framework_label)
+         case_id, case_title, framework_key, framework_label, report_days)
     )
     conn.commit()
 
@@ -1267,7 +1267,7 @@ def run_report(report_type, triggered_by=None, trigger_source='manual', case_id=
             id INTEGER PRIMARY KEY AUTOINCREMENT, report_type TEXT NOT NULL, filename TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'success', triggered_by TEXT, trigger_source TEXT NOT NULL DEFAULT 'manual',
             started_at DATETIME, completed_at DATETIME, file_size_bytes INTEGER, error_message TEXT,
-            case_id INTEGER, case_title TEXT, framework_key TEXT, framework_label TEXT,
+            case_id INTEGER, case_title TEXT, framework_key TEXT, framework_label TEXT, report_days INTEGER,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )''')
         if report_type == 'case':
@@ -1287,9 +1287,13 @@ def run_report(report_type, triggered_by=None, trigger_source='manual', case_id=
             filename = generate_vulnerability_report()
         else:
             filename = REPORT_GENERATORS.get(report_type, generate_security_report)(days=days)
+        # NULL (not the resolved `days`) for the two report types that don't actually
+        # use a lookback window -- see the vulnerability comment above and case reports'
+        # own generate_case_report(case_id) call, neither of which is passed `days`.
+        report_days = days if report_type not in ('vulnerability', 'case') else None
         _record_history(conn, report_type, filename, 'success', started_at,
                          datetime.now().isoformat(), triggered_by, trigger_source, case_id=case_id, case_title=case_title,
-                         framework_key=framework_key, framework_label=framework_label)
+                         framework_key=framework_key, framework_label=framework_label, report_days=report_days)
         # Auto-email only for scheduled (cron) runs -- a manual "Generate Report" click
         # during testing/preview should never unexpectedly spam the configured
         # distribution list; that path gets its own explicit "Email Report" button
@@ -1314,9 +1318,10 @@ def run_report(report_type, triggered_by=None, trigger_source='manual', case_id=
             except Exception as e:
                 print(f"[-] Report email step errored (report itself still generated successfully): {e}")
     except Exception as e:
+        report_days = days if report_type not in ('vulnerability', 'case') else None
         _record_history(conn, report_type, '', 'failed', started_at,
                          datetime.now().isoformat(), triggered_by, trigger_source, str(e), case_id=case_id, case_title=case_title,
-                         framework_key=framework_key, framework_label=framework_label)
+                         framework_key=framework_key, framework_label=framework_label, report_days=report_days)
         conn.close()
         raise
     conn.close()

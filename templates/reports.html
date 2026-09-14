@@ -288,12 +288,12 @@ function renderReportHistory() {
     }
     body.innerHTML = reportHistoryData.map(h => `
         <tr>
-            <td><i class="fa-regular fa-file-pdf text-danger me-2"></i>${escHtml(REPORT_TYPE_LABELS[h.report_type] || h.report_type)}${h.framework_label ? ' — ' + escHtml(h.framework_label) : ''}</td>
+            <td><i class="fa-regular fa-file-pdf text-danger me-2"></i>${escHtml(REPORT_TYPE_LABELS[h.report_type] || h.report_type)}${h.framework_label ? ' — ' + escHtml(h.framework_label) : ''}${h.report_days ? ` <span class="text-muted small">(${h.report_days}d)</span>` : ''}</td>
             <td class="small text-muted">${escHtml(formatReportTimestamp(h.completed_at || h.started_at))}</td>
             <td class="small">${h.triggered_by ? escHtml(h.triggered_by) : '<span class="text-muted">scheduled</span>'}</td>
             <td>${h.status === 'success' ? '<span class="badge bg-success">Success</span>' : `<span class="badge bg-danger" title="${escHtml(h.error_message || '')}">Failed</span>`}</td>
             <td class="small text-muted">${h.file_size_bytes ? formatReportSize(h.file_size_bytes) : '—'}</td>
-            <td class="text-end">${h.file_exists ? `<a href="/reports/download/${h.id}" class="btn btn-sm btn-outline-primary"><i class="fa-solid fa-download"></i> Download</a> <button type="button" class="btn btn-sm btn-outline-secondary" title="Email this report to the configured recipients" onclick="emailReport(${h.id}, this)"><i class="fa-solid fa-envelope"></i></button>` : '<span class="text-muted small">File deleted</span>'}</td>
+            <td class="text-end">${h.file_exists ? `<a href="/reports/download/${h.id}" class="btn btn-sm btn-outline-primary"><i class="fa-solid fa-download"></i> Download</a> ${hasPermission('settings.reports.manage') ? `<button type="button" class="btn btn-sm btn-outline-secondary" title="Email this report to the configured recipients" onclick="emailReport(${h.id}, this)"><i class="fa-solid fa-envelope"></i></button>` : ''}` : '<span class="text-muted small">File deleted</span>'}</td>
         </tr>`).join('');
 }
 

@@ -219,12 +219,16 @@
         <div class="text-muted small">Live snapshot of fleet software-inventory coverage and known CVE matches — no historical trend yet. To browse the underlying CVE/EPSS/KEV database itself (not host-correlated), see <a href="/threat-intel?tab=vulns">Threat Intel &amp; Hunting &gt; Vulnerabilities</a>.</div>
     </div>
     <div class="card-body">
-        <div class="row g-3 mb-3" id="vulnHero">
-            <div class="col-6 col-md-3 text-center"><div class="fs-3 fw-bold" id="vulnCoveragePct">—</div><div class="text-muted small">Fleet Assessed</div></div>
-            <div class="col-6 col-md-3 text-center"><div class="fs-3 fw-bold" id="vulnHostsAssessed">—</div><div class="text-muted small">Hosts</div></div>
-            <div class="col-6 col-md-3 text-center"><div class="fs-3 fw-bold" id="vulnCveCount">—</div><div class="text-muted small">Unique CVEs</div></div>
-            <div class="col-6 col-md-3 text-center"><div class="fs-3 fw-bold" id="vulnLastSync">—</div><div class="text-muted small">CVE Data Synced</div></div>
-            <div class="col-6 col-md-3 text-center"><div class="fs-3 fw-bold text-warning" id="vulnOpenCount">—</div><div class="text-muted small">Still Open</div></div>
+        <!-- row-cols-md-5 (not col-md-3 x5, which sums to 15/12 and wraps the 5th tile
+             -- "Still Open", the most actionable number -- onto its own row) divides
+             evenly into 5 regardless of column count, the correct Bootstrap idiom for
+             "N equal tiles" when N doesn't factor into 12. -->
+        <div class="row row-cols-2 row-cols-md-5 g-3 mb-3" id="vulnHero">
+            <div class="col text-center"><div class="fs-3 fw-bold" id="vulnCoveragePct">—</div><div class="text-muted small">Fleet Assessed</div></div>
+            <div class="col text-center"><div class="fs-3 fw-bold" id="vulnHostsAssessed">—</div><div class="text-muted small">Hosts</div></div>
+            <div class="col text-center"><div class="fs-3 fw-bold" id="vulnCveCount">—</div><div class="text-muted small">Unique CVEs</div></div>
+            <div class="col text-center"><div class="fs-3 fw-bold" id="vulnLastSync">—</div><div class="text-muted small">CVE Data Synced</div></div>
+            <div class="col text-center"><div class="fs-3 fw-bold text-warning" id="vulnOpenCount">—</div><div class="text-muted small">Still Open</div></div>
         </div>
         <div class="d-flex gap-2 flex-wrap" id="vulnSeverityChips"></div>
     </div>
@@ -582,7 +586,7 @@ function groupTechniquesForNesting(techniques) {
 
 function covCellHtml(tech, leadingBadge) {
     return `
-        <span class="cov-cell-name">${escHtml(tech.name || ('T' + tech.id))}</span>
+        <span class="cov-cell-name" title="${escHtml(tech.name || ('T' + tech.id))}">${escHtml(tech.name || ('T' + tech.id))}</span>
         <span class="d-flex align-items-center flex-shrink-0">
             ${leadingBadge || ''}${tech.threat_actors && tech.threat_actors.length ? '<i class="fa-solid fa-triangle-exclamation text-warning" title="A known threat actor/malware uses this technique"></i>' : ''}${tech.log_source_gap ? '<i class="fa-solid fa-plug-circle-xmark text-warning" title="Enabled, but its rule(s) need a log source this appliance does not ingest"></i>' : ''}
             <span class="cov-cell-id ms-1">T${escHtml(tech.id)}</span>
@@ -892,13 +896,23 @@ function loadVulnerabilityTab() {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
     }).then(d => {
+        _vulnFindingsAll = d.findings || [];
+        _vulnSeverityFilter = null;
         renderVulnerabilityHero(d);
-        renderVulnerabilityFindings(d.findings);
+        renderVulnerabilityFindings(_vulnFindingsAll);
     }).catch(err => {
         renderLoadError('vulnFindingsBody', 8, 'Error loading vulnerability data.');
         console.error('Error loading vulnerability coverage:', err);
     });
 }
+
+// The severity chips share .cov-chip (cursor:pointer, hover highlight) with the
+// genuine filter chips elsewhere on this page -- they used to just display counts with
+// no onclick, implying a filter that didn't exist. Wired to actually filter the
+// Findings table below, same active-tier toggle convention #coverageChips's own chips
+// already use.
+let _vulnFindingsAll = [];
+let _vulnSeverityFilter = null;
 
 function renderVulnerabilityHero(d) {
     document.getElementById('vulnCoveragePct').textContent = (d.coverage_pct === null || d.coverage_pct === undefined) ? '—' : `${d.coverage_pct}%`;
@@ -908,8 +922,21 @@ function renderVulnerabilityHero(d) {
     document.getElementById('vulnOpenCount').textContent = (d.open_count != null ? d.open_count : '—');
     const sevOrder = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
     document.getElementById('vulnSeverityChips').innerHTML = sevOrder.map(s => `
-        <div class="cov-chip"><span class="num">${(d.severity_counts && d.severity_counts[s]) || 0}</span><span class="lbl">${s.charAt(0) + s.slice(1).toLowerCase()}</span></div>
+        <div class="cov-chip ${_vulnSeverityFilter === s ? 'active-tier' : ''}" onclick="toggleVulnSeverityFilter('${s}')" title="Click to filter Findings by ${s.charAt(0) + s.slice(1).toLowerCase()}"><span class="num">${(d.severity_counts && d.severity_counts[s]) || 0}</span><span class="lbl">${s.charAt(0) + s.slice(1).toLowerCase()}</span></div>
     `).join('');
+}
+
+function toggleVulnSeverityFilter(sev) {
+    _vulnSeverityFilter = (_vulnSeverityFilter === sev) ? null : sev;
+    document.querySelectorAll('#vulnSeverityChips .cov-chip').forEach(el => el.classList.remove('active-tier'));
+    if (_vulnSeverityFilter) {
+        const chip = Array.from(document.querySelectorAll('#vulnSeverityChips .cov-chip')).find(el => el.querySelector('.lbl').textContent.toUpperCase() === _vulnSeverityFilter);
+        if (chip) chip.classList.add('active-tier');
+    }
+    const filtered = _vulnSeverityFilter
+        ? _vulnFindingsAll.filter(f => (f.severity || '').toUpperCase() === _vulnSeverityFilter)
+        : _vulnFindingsAll;
+    renderVulnerabilityFindings(filtered);
 }
 
 // Status is analyst triage of an already-computed finding (same posture as alert
@@ -921,7 +948,9 @@ const VULN_REMEDIATION_STATUS_LABELS = {open: 'Open', acknowledged: 'Acknowledge
 function renderVulnerabilityFindings(findings) {
     const body = document.getElementById('vulnFindingsBody');
     if (!findings.length) {
-        body.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-4">No known CVE matches against currently-assessed hosts.</td></tr>';
+        body.innerHTML = _vulnSeverityFilter
+            ? `<tr><td colspan="8" class="text-center text-muted py-4">No ${escHtml(_vulnSeverityFilter.charAt(0) + _vulnSeverityFilter.slice(1).toLowerCase())} findings. <a href="#" onclick="toggleVulnSeverityFilter('${_vulnSeverityFilter}'); return false;">Clear filter</a></td></tr>`
+            : '<tr><td colspan="8" class="text-center text-muted py-4">No known CVE matches against currently-assessed hosts.</td></tr>';
         return;
     }
     body.innerHTML = findings.map((f, i) => `

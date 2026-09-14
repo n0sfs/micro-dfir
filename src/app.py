@@ -6241,7 +6241,7 @@ def api_report_history():
     # 100-row cap by a busy caseload.
     rows = [dict(r) for r in get_db().execute(
         "SELECT id, report_type, filename, status, triggered_by, trigger_source, "
-        "started_at, completed_at, file_size_bytes, error_message, framework_label "
+        "started_at, completed_at, file_size_bytes, error_message, framework_label, report_days "
         "FROM report_history WHERE case_id IS NULL ORDER BY id DESC LIMIT 100"
     ).fetchall()]
     for r in rows:
@@ -15011,6 +15011,23 @@ def migrate_report_history_framework():
     except Exception:
         pass
 
+# Exact mirror of migrate_report_history_framework() above, for the same reason: the
+# Reports tab lets an analyst pick a 7/30/90/180-day lookback per generation, but two
+# same-day rows of the same report type used to be indistinguishable in the history
+# table once generated. NULL for report types the lookback genuinely doesn't apply to
+# (vulnerability is a live inventory snapshot, case reports aren't day-windowed) --
+# see run_report()'s own report_days=None handling for those two, generate_report.py.
+def migrate_report_history_days():
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(report_history)").fetchall()}
+        if 'report_days' not in cols:
+            conn.execute("ALTER TABLE report_history ADD COLUMN report_days INTEGER")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_log_search_indexes():
     # _build_log_filters() (Log Search / UEBA Timeline) filters on host/app/severity/
     # username/event_id constantly, but only `timestamp` was ever indexed on live_logs/
@@ -19857,6 +19874,7 @@ migrate_risk_score_events_rule_id()
 migrate_report_history()
 migrate_report_history_case_id()
 migrate_report_history_framework()
+migrate_report_history_days()
 migrate_log_search_indexes()
 migrate_ueba_insights_indexes()
 migrate_alerts_triage()
