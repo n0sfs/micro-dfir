@@ -979,7 +979,13 @@ function renderRiskScores() {
     `).join('');
 }
 
+// Set here so toggleRiskDetailWatch()/createAndWatchIdentity() (triggered later by a
+// button click inside this same modal) can re-render just the identity block without
+// needing the entity threaded through their own onclick attributes.
+let _riskDetailCurrentEntity = null;
+
 function viewRiskScoreDetail(entityType, entityId) {
+    _riskDetailCurrentEntity = {type: entityType, id: entityId};
     document.getElementById('riskDetailModalTitle').innerHTML =
         `<i class="fa-solid fa-gauge-high text-warning me-2"></i>${entityBadge(entityType)}${escHtml(entityId)}`;
     document.getElementById('riskDetailModalBody').innerHTML = '<p class="text-muted small">Loading…</p>';
@@ -1042,6 +1048,7 @@ function viewRiskScoreDetail(entityType, entityId) {
                     <div class="small text-muted mt-1">Peak single indicator: <b>${p.peak_points}</b> pts &middot; Distinct signal types: <b>${p.distinct_indicators}</b> &middot; Recency-weighted total: <b>${p.decay_score}</b></div>
                 </div>` : '';
             document.getElementById('riskDetailModalBody').innerHTML = `
+                <div id="riskDetailIdentityWrap" class="mb-3"></div>
                 ${priorityHtml}
                 <div class="mb-3 small text-muted">Raw cumulative score: <b class="text-body">${data.score}</b> ${riskTierBadge(data.tier)}
                     <span class="ms-2">over the trailing ${data.window_days} day(s) — unbounded sum of every point below, not normalized</span></div>
@@ -1052,11 +1059,72 @@ function viewRiskScoreDetail(entityType, entityId) {
                     </table>
                 </div>
             `;
+            renderIdentityQuickActions(entityType, entityId);
         })
         .catch(err => {
             console.error('Error loading risk score detail:', err);
             document.getElementById('riskDetailModalBody').innerHTML = `<div class="text-center text-danger small py-3"><i class="fa-solid fa-triangle-exclamation me-1"></i>Failed to load risk breakdown. <a href="#" onclick="location.reload(); return false;">Reload</a></div>`;
         });
+}
+
+// Previously, watchlisting a user spotted here meant leaving this modal, navigating to
+// Asset & Identity, and retyping the exact username into a blank form. Reuses the same
+// /api/identities routes that tab's own controls already use, pre-filled with the
+// entity already on screen. Identities are username-only (no host column -- see
+// _watchlist_case_implicated_users's own comment on this server-side), so this only
+// applies to entity_type 'user'; a host's equivalent is Asset criticality, managed
+// separately on the same tab.
+async function renderIdentityQuickActions(entityType, entityId) {
+    const wrap = document.getElementById('riskDetailIdentityWrap');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    if (entityType !== 'user') return;
+    const identities = await fetch('/api/identities').then(r => r.ok ? r.json() : []).catch(() => []);
+    const identity = (identities || []).find(i => i.username === entityId);
+    // Only the button is gated -- privileged/watched status itself is useful read
+    // context for anyone (GET /api/identities is already ungated), matching the
+    // Asset & Identity tab's own read-only-badges-for-non-admins convention.
+    const privilegedBadge = identity && identity.privileged ? '<span class="badge bg-warning text-dark me-1">Privileged</span>' : '';
+    const watchedBadge = identity && identity.watched ? '<span class="badge bg-danger me-1">Watched</span>' : '';
+    let actionHtml = '';
+    if (ASSET_IS_ADMIN) {
+        if (identity && identity.watched) {
+            actionHtml = `<button type="button" class="btn btn-sm btn-outline-secondary" data-identity-id="${identity.id}" onclick="toggleRiskDetailWatch(this.dataset.identityId, false)">Remove from Watchlist</button>`;
+        } else if (identity) {
+            actionHtml = `<button type="button" class="btn btn-sm btn-outline-danger" data-identity-id="${identity.id}" onclick="toggleRiskDetailWatch(this.dataset.identityId, true)">Watch This User</button>`;
+        } else {
+            actionHtml = `<button type="button" class="btn btn-sm btn-outline-danger" data-username="${escHtml(entityId)}" onclick="createAndWatchIdentity(this.dataset.username)">Watch This User</button>`;
+        }
+    }
+    const noneYet = !identity ? '<span class="text-muted small">Not tracked as an identity yet</span>' : '';
+    wrap.innerHTML = `<div class="border border-secondary rounded p-2 d-flex align-items-center gap-2 flex-wrap">
+        <span class="text-muted small me-1">Identity:</span>${privilegedBadge}${watchedBadge}${noneYet}
+        ${actionHtml}
+    </div>`;
+}
+
+async function toggleRiskDetailWatch(identityId, watched) {
+    const res = await fetch(`/api/identities/${identityId}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({watched})
+    }).catch(() => null);
+    if (!res || !res.ok) { toast('Failed to update watchlist status.', 'danger'); return; }
+    toast(watched ? 'Added to watchlist.' : 'Removed from watchlist.', 'success');
+    if (_riskDetailCurrentEntity) renderIdentityQuickActions(_riskDetailCurrentEntity.type, _riskDetailCurrentEntity.id);
+    // Keep the Asset & Identity tab's own table in sync if it's already been loaded
+    // this session -- avoids it showing stale watched/privileged state if the analyst
+    // switches there next without a full page reload.
+    if (assetIdentityLoadedOnce) loadIdentities();
+}
+
+async function createAndWatchIdentity(username) {
+    const res = await fetch('/api/identities', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ username, watched: true })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { toast(data.error || 'Failed to add to watchlist.', 'danger'); return; }
+    toast('Added to watchlist.', 'success');
+    if (_riskDetailCurrentEntity) renderIdentityQuickActions(_riskDetailCurrentEntity.type, _riskDetailCurrentEntity.id);
+    if (assetIdentityLoadedOnce) loadIdentities();
 }
 
 // Collapsed by default -- the labeled fields to its left already show every value in

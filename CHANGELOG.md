@@ -10,6 +10,41 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-13
 
+### Insider threat workflow review (1/2): quick "Watch This User" from the risk detail modal
+
+Asked to run through the insider-threat process specifically. Live-verified current
+state: the `identities` table is completely empty on this deployment (the Insider
+Threat dashboard's Watchlist widget literally says so), but the same dashboard's Top
+Risky Entities widget shows real live data — including the real user `noslo` at a
+genuine 9.4/10 Critical priority score. Investigating that gap surfaced the actual
+friction: UEBA's Risk Scoring detail modal (`viewRiskScoreDetail`) shows a full score
+breakdown for any entity, including users, but had zero identity/watchlist context or
+actions — the *only* place to flag someone as watched was the separate Asset & Identity
+tab, and that tab's Add Identity form is entirely blank with no prefill, forcing an
+analyst who just spotted a risky user to retype the exact username from memory on a
+different screen.
+
+Added `renderIdentityQuickActions()` to the risk detail modal — for `entity_type ===
+'user'` only (identities are username-only, no host column; a host's equivalent is
+Asset criticality, unaffected). Fetches the existing identity list (already used by the
+Asset & Identity tab) and shows real Privileged/Watched badges plus a single
+context-appropriate action: "Watch This User" (creates the identity as watched in one
+step if none exists yet, or flips the flag if one does) or "Remove from Watchlist".
+Gated to `assets.manage` for the button, same as the Asset & Identity tab's own
+controls — a non-admin still sees the real badges (informational, matching that tab's
+own read-only-for-non-admins convention and the already-ungated `GET /api/identities`),
+just no button. Keeps the Asset & Identity tab's own table in sync afterward if it's
+already been loaded this session.
+
+Verified with a JS vm-context test (9 cases): renders nothing for a host entity, an
+untracked user shows "Watch This User" with the username prefilled via a data
+attribute (no raw-string interpolation into the onclick), an existing unwatched
+identity shows its real Privileged badge and a Watch button keyed to its real id, an
+already-watched one shows Remove instead, a non-admin sees badges but no buttons,
+creating a new watched identity in one step succeeds and toasts, a create failure
+(e.g. a race where the identity already exists) surfaces the real server error, and a
+toggle failure shows an error toast rather than a false success.
+
 ### Cross-screen triage friction, round 3 (1/3): EDR quick actions for UEBA anomalies too
 
 Asked to run the triage-workflow review through once more. First finding: the EDR
