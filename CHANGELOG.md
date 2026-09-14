@@ -8,6 +8,57 @@ a new feature, a real architectural decision, an incident and its fix. Routine p
 fixes don't need their own line; group them into the feature they support. Newest first.
 Full commit-level detail is always available via `git log`.
 
+## 2026-09-14
+
+### Cases/SOAR usability review, Pass A (5 of 10 findings)
+
+Asked to run through Cases/Investigations and SOAR for simplification/
+analyst-friendliness, same as the UEBA passes. A live walkthrough plus a background
+Explore agent's code research (52 tool calls) produced 10 findings, split into two
+passes by risk/depth; user approved "Pass A now, Pass B next." Pass A covers the
+lower-risk labeling/visibility fixes plus one confirmed bug:
+
+- **Confirmed live bug**: the "Link Case" form on the case-detail Case Links tab
+  stayed visible and enabled on a closed, read-only case. Same `d-flex` + inline
+  `style="display:none"` Bootstrap bug already fixed once this session (the Related
+  Items bulk bar) — Bootstrap's `!important` utility class was permanently winning
+  over the plain inline toggle `renderCaseLinks()` does. Dropped `d-flex` from the
+  static class list; the toggle now sets `display:flex`/`none` directly. Caught by
+  the research pass, confirmed live on the real closed case #9 (Delete/Link form was
+  fully interactive there before the fix).
+- The case list showed only binary Open/Closed, hiding the New/Investigating/Awaiting
+  Input/Resolved `workflow_state` the case-detail view treats as primary — added the
+  already-existing `workflowStateBadge()` next to Status in both the list table and
+  the CSV export.
+- Timeline entries for `case_linked`/`case_unlinked` events showed raw internal
+  event-type strings ("case_unlinked") instead of human-readable text, inconsistent
+  with every other Timeline entry type. Added both to `caseEventLabel()`'s map.
+- "Related Items" and "Case Links" case-detail tabs showed no count badge unlike
+  their siblings (Tasks/Linked Items/Assets/Indicators), even though both are fetched
+  before the tab is ever opened — added `setCaseTabCount()` to update each tab's
+  label once its own data loads, e.g. "Related Items (4809)" on a real noisy case.
+- SOAR's "Status changed" trigger was labeled ambiguously — it only fires on Status
+  (Open/Closed), never on the `workflow_state` moves (New/Investigating/Resolved) the
+  case-detail edit UI visually presents as one merged "Status" dropdown. Relabeled to
+  "Status changed (Open/Closed only — not New/Investigating/Resolved)" so an admin
+  building a workflow-state trigger doesn't reach for this one and get nothing.
+
+Verified with 11 JS vm-context tests across two files: `workflowStateBadge()`'s
+label/color per state and null fallback; `case_linked`/`case_unlinked` render human-
+readable text while an unmapped event type still falls back to its raw name unaffected;
+`setCaseTabCount()` updates the right label span and no-ops safely when the element
+isn't found; `renderCaseLinks()`'s display toggle is `flex` on an open case and `none`
+on a closed one (the actual bug-fix assertion); the CSV export gains a Workflow State
+column with the humanized label and a null-safe "New" fallback. Live-verified on
+production against real cases: the list now shows both badges per row; case #9's Link
+Case form is correctly hidden now (previously always visible); its tabs read "Related
+Items (4809)" and "Case Links (0)"; case #8's Timeline shows "🔗 Case link added:
+Related to case #5" / "🔗 Case link removed: case #5" instead of the old raw strings;
+and the SOAR trigger dropdown shows the corrected label.
+
+**Pass A complete (5/5). Pass B (5 items, including a safety-relevant Pending Approvals
+fix) next.**
+
 ## 2026-09-13
 
 ### UEBA ideas from Exabeam screenshots (1/2): departing-employee risk signal
