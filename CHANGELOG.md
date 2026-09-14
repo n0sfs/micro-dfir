@@ -78,6 +78,42 @@ real risk breakdown now carries the ⓘ info icon with that text — left in pla
 afterward as genuinely useful documentation, not reverted like the session's usual
 disposable test data.
 
+### UEBA usability pass 2 (item 1 of 3): Data Insights histograms are now click-through
+
+Started Pass 2, the second of two approved UEBA usability passes. Every histogram row
+in Data Insights (By Entity's Top Alerts/Related Entities/Top Source & Destination
+IPs/Admin Activity, and By Model's Top Entities) rendered as plain text — an analyst
+spotting something worth chasing had to retype the value into Log Search or the entity
+search box by hand rather than clicking straight there.
+
+Added an optional `linkFn` to `renderTableHistogram()`: Top Alerts and Admin Activity
+rows do a raw-text Log Search pivot (matching the existing Top-Firing Anomaly Rules
+chart convention already in `dashboards.html`); Top Source/Destination IP rows pivot
+field-scoped to `source_ip`/`destination_ip`; Related Entities and Top Entities (By
+Model) rows open that entity's own risk detail modal in place (the modal lives outside
+any tab-pane, so it opens regardless of which UEBA tab is active). Risk Contributions
+rows get no link — they're already the selected entity's own breakdown, nothing
+external to jump to.
+
+Added `escJs()` (this file's own copy of the helper already duplicated per-file
+elsewhere, e.g. `cases.html`) because the existing `escHtml`-only pattern used
+elsewhere in this file is actually unsafe for building an onclick's JS-string argument:
+`escHtml` turns a literal `'` into the HTML entity `&#39;`, which the browser decodes
+back to a literal `'` *before* the onclick body is compiled as JS — still closing the
+string early for any value containing an apostrophe (e.g. a rule or alert name).
+
+Verified with a JS vm-context test (6 cases): `escJs` itself neutralizes apostrophes
+and backslashes; a Top Alerts row (including one with an apostrophe in its name) links
+to an escaped raw-text pivot; a Related Entities row links to that entity's risk detail
+modal; IP rows link field-scoped; Risk Contributions rows get no link; a Top Entities
+(By Model) row pivots using the raw entity id, not the emoji-prefixed display text.
+Live-verified on production against the real `noslo` user: clicked the real
+`WORKSTATION-A` row under Related Hosts and confirmed its own risk detail modal
+opened with real data (Priority 10/10, `rare_process_population`/`process_lineage`/
+`new_destination_ip` events), then clicked the real "Suspicious PowerShell Execution"
+row under Top Alerts and confirmed it landed on Log Search with that exact query
+pre-filled and loading.
+
 ### UEBA usability pass 1 (item 4 of 4): description info-icon + Never Matched badge on Scoring & Rules
 
 The Scoring & Rules list table had no indicator for a rule's `description` field
