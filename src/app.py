@@ -8922,7 +8922,7 @@ def _run_scheduled_agent_sweeps(db):
     cutoff = (datetime.now() - timedelta(seconds=300)).strftime('%Y-%m-%d %H:%M:%S')
     hosts = db.execute(
         "SELECT user_agent as hostname, os FROM agent_polls "
-        "WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY ip_address) AND timestamp >= ?",
+        "WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY user_agent) AND timestamp >= ?",
         (cutoff,)
     ).fetchall()
     if not hosts:
@@ -11188,7 +11188,7 @@ def api_dashboard_agent_status():
                       # import with the actual module, same as agent_checkins() does --
                       # needed for datetime.datetime.strptime below.
     db = get_db()
-    rows = db.execute('SELECT * FROM agent_polls WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY ip_address)').fetchall()
+    rows = db.execute('SELECT * FROM agent_polls WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY user_agent)').fetchall()
     now = datetime.datetime.now()
     counts = {'Online': 0, 'Idle': 0, 'Offline': 0, 'Unknown': 0}
     for r in rows:
@@ -11227,14 +11227,14 @@ def api_dashboard_agent_health_trend():
         f"WHERE timestamp >= ? GROUP BY t_bucket ORDER BY t_bucket ASC",
         (cutoff,)
     ).fetchall()
-    # Latest poll per host (same MAX(id) GROUP BY ip_address shape api_dashboard_agent_status
+    # Latest poll per host (same MAX(id) GROUP BY user_agent shape api_dashboard_agent_status
     # uses above), not every poll ever -- a host that upgraded mid-window shouldn't count
     # under both its old and new version. version DESC works because every real
     # AGENT_VERSION is a zero-padded YYYY.MM.DD.N date stamp, so the lexicographic max
     # is the real latest -- not a majority-vote guess.
     version_rows = db.execute(
         "SELECT version, COUNT(*) as count FROM agent_polls "
-        "WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY ip_address) AND version IS NOT NULL "
+        "WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY user_agent) AND version IS NOT NULL "
         "GROUP BY version ORDER BY version DESC"
     ).fetchall()
     versions = [dict(r) for r in version_rows]
@@ -19276,7 +19276,15 @@ def agent_checkins():
     import datetime
     db = get_db()
     try:
-        rows = db.execute('SELECT * FROM agent_polls WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY ip_address) ORDER BY id DESC LIMIT 20').fetchall()
+        # Deduped by user_agent (the hostname), not ip_address: on IP the same host
+        # appears twice the moment its DHCP lease changes, and two hosts behind one NAT
+        # collapse into one row -- the second silently vanishing from this table, the
+        # console's host picker and bulk selection. Uncapped, matching the three sibling
+        # queries that already were (api_dashboard_agent_status, the fleet version
+        # rollup, the sweep host list); the old LIMIT 20 silently truncated the fleet
+        # here while those counted every host, so the page and the dashboard tile
+        # disagreed with no indication which was right.
+        rows = db.execute('SELECT * FROM agent_polls WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY user_agent) ORDER BY id DESC').fetchall()
         now = datetime.datetime.now()
         mapped = []
         hostnames = []
@@ -19313,7 +19321,8 @@ def agent_checkins():
                 "os_detail": os_detail,
                 "group": "",
                 "recent_polls": [],
-                "alerts_24h": 0
+                "alerts_24h": 0,
+                "isolated": False
             })
 
         if hostnames:
@@ -19393,11 +19402,36 @@ def agent_checkins():
             for m in mapped:
                 m['alerts_24h'] = alerts_by_host.get(m['hostname'], 0)
 
+        # Whether each host is currently network-isolated. Nothing in the app surfaced
+        # this before -- the only isolation-aware view anywhere was SOAR's scheduled
+        # auto-revert list -- so the one piece of state a responder most needs at a
+        # glance ("is this host still contained?") required reading command history by
+        # hand. Fully derivable: the newest *successfully completed* isolate_host or
+        # restore_network for that host decides it, no new column or tracking needed.
+        # status = 'done' is load-bearing here and only became trustworthy with the
+        # Pass A fix: a failed isolate used to exit 0 and record 'done', which would
+        # have made this badge claim containment that never happened. Conversely a
+        # failed restore stays non-'done', so the host correctly keeps showing Isolated
+        # rather than being quietly marked safe.
+        if hostnames:
+            placeholders = ','.join('?' * len(hostnames))
+            iso_rows = db.execute(
+                f"SELECT hostname, label FROM agent_commands WHERE id IN ("
+                f"  SELECT MAX(id) FROM agent_commands "
+                f"  WHERE hostname IN ({placeholders}) AND status = 'done' "
+                f"    AND label IN ('isolate_host', 'restore_network') "
+                f"  GROUP BY hostname)",
+                hostnames
+            ).fetchall()
+            isolated_hosts = {r['hostname'] for r in iso_rows if r['label'] == 'isolate_host'}
+            for m in mapped:
+                m['isolated'] = m['hostname'] in isolated_hosts
+
         # Last log actually ingested from this host, distinct from the agent_polls
         # heartbeat above -- an agent can check in fine while its log shipping is
         # silently broken (wrong channel config, EDR service down, etc.), and today
         # nothing on this page distinguishes those two failure modes. One point
-        # lookup per visible host (max 20): `ORDER BY id DESC LIMIT 1` rides the
+        # lookup per visible host: `ORDER BY id DESC LIMIT 1` rides the
         # existing idx_live_logs_host index's implicit (host, rowid) ordering to seek
         # directly to the newest matching row, rather than `MAX(timestamp)` (or a
         # timestamp-range filter) which would force a scan of every row for that
@@ -19661,6 +19695,43 @@ def _queue_agent_command(db, hostname, label, params, script_in, queued_by):
     )
     return cur.lastrowid, None
 
+@app.route('/api/agent/commands/summary', methods=['GET'])
+@login_required
+def api_agent_commands_summary():
+    """Fleet-wide response-action counts for the stat tiles on templates/agents.html.
+
+    The tiles used to be derived client-side from the same `limit=50` page of history the
+    table below them renders, so "Completed Actions" really meant "how many of the most
+    recent 50 commands succeeded" -- on a busy fleet the three tiles summed to exactly 50
+    no matter how many actions had actually run, and a burst of pending work could push
+    every completed action out of the window and read as 0. These are real COUNT(*)s.
+
+    Pending is deliberately all-time (a command queued for a host that's been offline for
+    a week is still outstanding work), while done/failed are windowed -- an all-time
+    "Completed" only ever grows and stops meaning anything operationally."""
+    err = require_permission('edr.command.basic')
+    if err: return err
+    db = get_db()
+    from datetime import timedelta
+    days = min(max(request.args.get('days', 7, type=int) or 7, 1), 365)
+    # queued_at is UTC (schema DEFAULT CURRENT_TIMESTAMP, never written explicitly) --
+    # same reasoning, and the same past bug, as the since_days filter in the GET below.
+    cutoff = (datetime.utcnow() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+    pending = db.execute(
+        "SELECT COUNT(*) AS c FROM agent_commands WHERE status IN ('pending', 'sent')"
+    ).fetchone()['c']
+    windowed = db.execute(
+        "SELECT status, COUNT(*) AS c FROM agent_commands WHERE queued_at >= ? AND status IN ('done', 'failed') GROUP BY status",
+        (cutoff,)
+    ).fetchall()
+    counts = {r['status']: r['c'] for r in windowed}
+    return jsonify({
+        'days': days,
+        'pending': pending,
+        'done': counts.get('done', 0),
+        'failed': counts.get('failed', 0),
+    })
+
 @app.route('/api/agent/commands', methods=['GET', 'POST'])
 @login_required
 def api_agent_commands():
@@ -19690,7 +19761,12 @@ def api_agent_commands():
         if cmd_id is not None:
             conditions.append("id = ?")
             params.append(cmd_id)
-        if status_filter in ('pending', 'sent', 'done', 'failed'):
+        if status_filter == 'outstanding':
+            # Everything queued with no result back yet -- the set the "Pending Actions"
+            # tile counts. 'pending' alone would under-report it by whatever the agents
+            # have already picked up but not finished.
+            conditions.append("status IN ('pending', 'sent')")
+        elif status_filter in ('pending', 'sent', 'done', 'failed'):
             conditions.append("status = ?")
             params.append(status_filter)
         if since_days is not None and since_days > 0:

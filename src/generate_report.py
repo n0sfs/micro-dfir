@@ -378,7 +378,7 @@ def _endpoint_health_context(conn, days):
     window = f'-{days} days'
 
     poll_rows = conn.execute(
-        "SELECT timestamp FROM agent_polls WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY ip_address)"
+        "SELECT timestamp FROM agent_polls WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY user_agent)"
     ).fetchall()
     now = datetime.now()
     status_counts = {'Online': 0, 'Idle': 0, 'Offline': 0, 'Unknown': 0}
@@ -391,7 +391,7 @@ def _endpoint_health_context(conn, days):
 
     version_rows = conn.execute(
         "SELECT version, COUNT(*) as count FROM agent_polls "
-        "WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY ip_address) AND version IS NOT NULL "
+        "WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY user_agent) AND version IS NOT NULL "
         "GROUP BY version ORDER BY version DESC"
     ).fetchall()
     latest_version = version_rows[0]['version'] if version_rows else None

@@ -162,6 +162,35 @@ def run_remote_script(context, cmd_id, script):
 _sent_event_sigs = set()
 _SENT_SIG_CAP = 5000
 
+# ---- Ingest spool ----
+# An entry's journald cursor lands in _sent_event_sigs the moment it's *collected*, not
+# when the server confirms it -- so before this spool existed, a single failed POST to
+# /api/ingest meant that batch was gone for good: never retried, never re-collected, and
+# nothing on the server side to notice the gap. The window that matters most isn't
+# exotic: update.sh restarts gunicorn on every deploy, so every agent in the fleet
+# silently dropped whatever it had collected during that restart.
+#
+# Command *results* already got three attempts with backoff (report_result above). Logs
+# got one attempt with a 5s timeout. This closes that gap: a failed batch is held and
+# prepended to the next cycle's send, so a transient outage costs latency, not data.
+_pending_logs = []
+# Bounded so a long SOC outage can't grow the agent's memory without limit on a busy
+# host. On overflow the OLDEST entries are dropped (newest logs are the ones an analyst
+# is most likely to still be acting on) and the drop is printed -- silent loss is the
+# exact failure this whole mechanism exists to remove.
+_PENDING_LOG_CAP = 5000
+_pending_dropped = 0
+
+def _spool_failed_logs(logs):
+    global _pending_dropped
+    _pending_logs.extend(logs)
+    overflow = len(_pending_logs) - _PENDING_LOG_CAP
+    if overflow > 0:
+        del _pending_logs[:overflow]
+        _pending_dropped += overflow
+        print(f"[-] Ingest spool full ({_PENDING_LOG_CAP}) -- dropped {overflow} oldest log(s); {_pending_dropped} dropped in total since start.", flush=True)
+    print(f"[*] {len(_pending_logs)} log(s) held for retry on the next cycle.", flush=True)
+
 # journald's own __CURSOR field is a stable, globally unique per-entry identifier —
 # a cleaner dedup key than the Windows agent's build-your-own event signature, since
 # there's no risk of two distinct entries ever colliding on it.
@@ -601,12 +630,36 @@ def run_agent():
                 except Exception as e:
                     print(f"[-] Linux channel audit log fetch failed: {e}", flush=True)
 
-            if new_logs:
-                print(f"[*] Sending {len(new_logs)} logs to {INGEST_URL}...", flush=True)
-                payload = json.dumps({"logs": new_logs}).encode('utf-8')
-                req = urllib.request.Request(INGEST_URL, data=payload, headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {SOC_TOKEN}'})
-                urllib.request.urlopen(req, context=context, timeout=5)
-                print("[+] Logs sent successfully!", flush=True)
+            # Anything a previous cycle failed to deliver goes out first, in collection
+            # order, so a recovered outage replays chronologically instead of interleaving.
+            batch = _pending_logs + new_logs
+            if batch:
+                if _pending_logs:
+                    print(f"[*] Retrying {len(_pending_logs)} spooled log(s) alongside {len(new_logs)} new one(s).", flush=True)
+                print(f"[*] Sending {len(batch)} logs to {INGEST_URL}...", flush=True)
+                payload = json.dumps({"logs": batch}).encode('utf-8')
+                sent = False
+                # Same 3-attempt/2s-backoff shape report_result() uses. Worst case this
+                # stretches one cycle to ~34s, which only happens when the SOC is
+                # unreachable -- in which case the check-in above has already failed and
+                # there's nothing useful to be prompt about.
+                for attempt in range(3):
+                    try:
+                        req = urllib.request.Request(INGEST_URL, data=payload, headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {SOC_TOKEN}'})
+                        urllib.request.urlopen(req, context=context, timeout=10)
+                        sent = True
+                        break
+                    except Exception as e:
+                        print(f"[-] Ingest attempt {attempt + 1}/3 failed: {e}", flush=True)
+                        if attempt < 2:
+                            time.sleep(2)
+                if sent:
+                    # Only clear the spool once the server has actually accepted it.
+                    _pending_logs.clear()
+                    print("[+] Logs sent successfully!", flush=True)
+                else:
+                    _pending_logs.clear()
+                    _spool_failed_logs(batch)
             else:
                 print("[*] No new logs to send right now.", flush=True)
         except Exception as e:

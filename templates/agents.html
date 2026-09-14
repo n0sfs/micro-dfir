@@ -31,20 +31,20 @@
         </div>
     </div>
     <div class="col-6 col-lg-3">
-        <div class="stat-tile">
+        <div class="stat-tile" style="cursor:pointer;" title="Every response action still queued or awaiting its result, fleet-wide. Click to list them." onclick="showCommandHistoryFor('outstanding', '')">
             <div class="stat-label">Pending Actions</div>
             <div class="stat-value" id="statPendingActions">&hellip;</div>
         </div>
     </div>
     <div class="col-6 col-lg-3">
-        <div class="stat-tile">
-            <div class="stat-label">Completed Actions</div>
+        <div class="stat-tile" style="cursor:pointer;" title="Response actions that completed successfully in the last 7 days, fleet-wide. Click to list them." onclick="showCommandHistoryFor('done', '7')">
+            <div class="stat-label">Completed Actions <span class="text-muted">(7d)</span></div>
             <div class="stat-value" id="statDoneActions">&hellip;</div>
         </div>
     </div>
     <div class="col-6 col-lg-3">
-        <div class="stat-tile">
-            <div class="stat-label">Failed Actions</div>
+        <div class="stat-tile" style="cursor:pointer;" title="Response actions that exited non-zero in the last 7 days, fleet-wide. Click to list them." onclick="showCommandHistoryFor('failed', '7')">
+            <div class="stat-label">Failed Actions <span class="text-muted">(7d)</span></div>
             <div class="stat-value" id="statFailedActions">&hellip;</div>
         </div>
     </div>
@@ -338,6 +338,9 @@
                     <option value="">All statuses</option>
                     <option value="failed">Failed</option>
                     <option value="done">Completed</option>
+                    <!-- Matches what the "Pending Actions" tile counts: queued but no
+                         result back yet, whether or not the agent has picked it up. -->
+                    <option value="outstanding">Pending or Sent</option>
                     <option value="pending">Pending</option>
                     <option value="sent">Sent</option>
                 </select>
@@ -600,6 +603,11 @@ function renderLoadError(tbodyId, colspan, message) {
 // Deployment tab and its backend routes are gated behind) -- distinct from the rest of
 // "agent management" (group assignment, etc), which stays available at edr.agent.manage.
 const CAN_DEPLOY_AGENTS = hasPermission('settings.system.manage');
+
+// Tier-1 response actions (isolate/restore/triage) -- the same permission
+// AGENT_COMMAND_TIER1_LABELS maps to server-side in api_agent_commands(). UI-only, as
+// always: the POST re-checks it regardless of what this hides.
+const CAN_RESPOND_BASIC = hasPermission('edr.command.basic');
 
 // ---- File Integrity Monitoring ----
 const FIM_IS_ADMIN = hasPermission('edr.fim.manage');
@@ -1252,7 +1260,7 @@ function renderEndpoints() {
                     </td>
                     <td>${osIcon(dev.os, dev.os_detail)}</td>
                     <td><span class="text-info">${escHtml(dev.endpoint_ip)}</span></td>
-                    <td>${endpointStatusBadge(dev.status)}</td>
+                    <td class="text-nowrap">${endpointStatusBadge(dev.status)}${dev.isolated ? ' <span class="badge bg-danger" title="This host is network-isolated: its last completed containment action was isolate_host, with no restore_network since. Only this SOC server can reach it.">Isolated</span>' : ''}</td>
                     <td class="text-nowrap"><span title="${escHtml(dev.last_check_in)}">${escHtml(relativeTime(dev.last_check_in)) || escHtml(dev.last_check_in)}</span></td>
                     <td class="text-nowrap">${lastLogReceivedCell(dev)}</td>
                     <td class="text-nowrap">${versionBadge(dev)}</td>
@@ -1264,6 +1272,15 @@ function renderEndpoints() {
                             <button class="btn btn-sm btn-outline-primary py-0 px-2 dropdown-toggle" type="button" data-bs-toggle="dropdown">Respond</button>
                             <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
                                 <li><a class="dropdown-item text-primary" href="#" onclick="openInConsole(rowHost(this)); return false;"><i class="fa-solid fa-terminal me-2"></i>Interact in Console</a></li>
+                                ${CAN_RESPOND_BASIC ? `
+                                <li><hr class="dropdown-divider"></li>
+                                ${dev.isolated ? `
+                                <li><a class="dropdown-item text-success" href="#" onclick="queueCommand(rowHost(this), 'restore_network', {}, 'Restore network connectivity on this host?\\n\\nThe isolation firewall rules are removed and the host can reach the network normally again.'); return false;"><i class="fa-solid fa-plug-circle-check me-2"></i>Restore Network</a></li>
+                                ` : `
+                                <li><a class="dropdown-item text-danger" href="#" onclick="queueCommand(rowHost(this), 'isolate_host', {}, 'Isolate this host from the network?\\n\\nAll traffic except this SOC server is blocked. The user loses internet, email, file shares and remote access until you run Restore Network.'); return false;"><i class="fa-solid fa-plug-circle-xmark me-2"></i>Isolate Host</a></li>
+                                `}
+                                <li><a class="dropdown-item text-warning" href="#" onclick="queueCommand(rowHost(this), 'collect_triage', {}, 'Collect a triage bundle from this host? It gathers processes, connections, autoruns, users and startup items -- read-only, nothing on the endpoint is changed.'); return false;"><i class="fa-solid fa-briefcase-medical me-2"></i>Collect Triage</a></li>
+                                ` : ''}
                                 ${CAN_DEPLOY_AGENTS ? `
                                 <li><hr class="dropdown-divider"></li>
                                 <li><a class="dropdown-item text-info" href="#" onclick="queueCommand(rowHost(this), 'upgrade', {}, 'Upgrade the MicroDFIR agent on this host to the latest version? It restarts itself automatically.'); return false;"><i class="fa-solid fa-rotate me-2"></i>Upgrade Agent</a></li>
@@ -1417,7 +1434,12 @@ async function removeEndpoint(hostname) {
 
 // ---- Response actions (per-row dropdown on the Agents pane) ----
 async function queueCommand(hostname, label, params, confirmMsg) {
-    if (confirmMsg && !(await confirmDialog(confirmMsg, {title: 'Confirm action', danger: true}))) return;
+    if (!hostname) return;
+    // Same reasoning as consoleRun(): by the time the dialog opens the dropdown has
+    // closed and the pointer has left the row, so a prompt reading "this host" gives the
+    // analyst nothing to check a containment decision against. Name the target in both
+    // the title and the body.
+    if (confirmMsg && !(await confirmDialog(`${confirmMsg}\n\nTarget host: ${hostname}`, {title: `Confirm action on ${hostname}`, danger: true}))) return;
     fetch('/api/agent/commands', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -2196,6 +2218,46 @@ function statusBadgeCmd(status) {
 
 let cmdHistoryCache = [];
 
+// The stat tiles used to be counted client-side out of the same 50-row page of history
+// the table renders, which made "Completed Actions" mean "of the most recent 50" -- the
+// three tiles always summed to 50 on any fleet that had run more than that, and a burst
+// of queued work could push every completed action out of view and show 0. These are
+// server-side COUNT(*)s now (pending all-time, done/failed over 7 days).
+const CMD_STATS_WINDOW_DAYS = 7;
+
+function loadCommandStats() {
+    return fetch(`/api/agent/commands/summary?days=${CMD_STATS_WINDOW_DAYS}`)
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
+        .then(d => {
+            document.getElementById('statPendingActions').innerText = d.pending;
+            document.getElementById('statDoneActions').innerText = d.done;
+            document.getElementById('statFailedActions').innerText = d.failed;
+        })
+        .catch(err => {
+            console.error('Error loading response-action stats:', err);
+            // A dash, not a stale/zero number -- "0 failed actions" is a claim, and this
+            // one would be unfounded.
+            ['statPendingActions', 'statDoneActions', 'statFailedActions'].forEach(id => {
+                document.getElementById(id).innerText = '—';
+            });
+        });
+}
+
+// Tiles are the natural entry point into the history they summarize -- clicking one
+// drops the analyst on the Response Actions tab with the matching filters already set.
+function showCommandHistoryFor(status, sinceDays) {
+    switchAgentsTab('response');
+    const statusSel = document.getElementById('cmdHistoryStatusFilter');
+    const sinceSel = document.getElementById('cmdHistorySinceFilter');
+    if (statusSel) statusSel.value = status || '';
+    if (sinceSel) sinceSel.value = sinceDays || '';
+    loadCommandHistory();
+    document.getElementById('cmdHistoryBody')?.closest('.card, .tab-pane')?.scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
 function loadCommandHistory() {
     const statusFilter = document.getElementById('cmdHistoryStatusFilter')?.value || '';
     const sinceFilter = document.getElementById('cmdHistorySinceFilter')?.value || '';
@@ -2203,25 +2265,14 @@ function loadCommandHistory() {
     let qs = 'limit=50';
     if (statusFilter) qs += `&status=${encodeURIComponent(statusFilter)}`;
     if (sinceFilter) qs += `&since_days=${encodeURIComponent(sinceFilter)}&limit=500`;
-    // The 3 stat tiles above the table are fleet-wide totals, not "whatever's currently
-    // filtered into view" -- filtering the table to Failed-only must not make the
-    // Completed/Pending tiles read as zero. When no filter is active the same single
-    // fetch already serves both (unchanged from before this feature), so this only adds
-    // a second request in the filtered case.
-    const statsPromise = filterActive
-        ? fetch('/api/agent/commands?limit=50').then(r => r.ok ? r.json() : []).catch(() => [])
-        : Promise.resolve(null); // null signals "use the main fetch's own rows for stats too"
+    loadCommandStats();
     fetch(`/api/agent/commands?${qs}`)
         .then(r => {
             if (!r.ok) throw new Error('HTTP ' + r.status);
             return r.json();
         })
-        .then(rows => statsPromise.then(statsRows => ({ rows, statsRows: statsRows === null ? rows : statsRows })))
-        .then(({ rows, statsRows }) => {
+        .then(rows => {
             cmdHistoryCache = rows;
-            document.getElementById('statPendingActions').innerText = (statsRows || []).filter(c => c.status === 'pending' || c.status === 'sent').length;
-            document.getElementById('statDoneActions').innerText = (statsRows || []).filter(c => c.status === 'done').length;
-            document.getElementById('statFailedActions').innerText = (statsRows || []).filter(c => c.status === 'failed').length;
             const tbody = document.getElementById('cmdHistoryBody');
             if (!rows || rows.length === 0) {
                 tbody.innerHTML = filterActive

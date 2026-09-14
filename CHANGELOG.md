@@ -10,6 +10,64 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-14
 
+### EDR workflow/agent review, Pass B — containment visibility & data loss (5 of 14)
+
+- **Nothing in the app told you which hosts were currently isolated.** The only
+  isolation-aware view anywhere was SOAR's scheduled auto-revert list, so the single
+  piece of state a responder most needs at a glance — *is this host still contained?* —
+  meant reading command history by hand. It turned out to be fully derivable with no new
+  column: the newest **successfully completed** `isolate_host`/`restore_network` per host
+  decides it. `/api/agent/checkins` now returns an `isolated` flag and the fleet table
+  badges it. The `status = 'done'` condition is load-bearing and only became trustworthy
+  because of Pass A — a failed isolate used to exit 0 and record `done`, which would have
+  made this badge claim containment that never happened. It also fails safe in the other
+  direction: a failed *restore* stays non-`done`, so the host keeps showing Isolated
+  rather than being quietly marked reachable.
+- **You couldn't isolate from the fleet list.** The per-row Respond menu offered only
+  Console / Upgrade / Uninstall — every containment action required a detour through the
+  Response Console. Added Isolate Host, Restore Network and Collect Triage, gated on
+  `edr.command.basic` (the permission `AGENT_COMMAND_TIER1_LABELS` already maps to
+  server-side). The menu swaps Isolate for Restore on an already-isolated host, so it
+  only ever offers the action that would change something. All three use `rowHost(this)`
+  per the file's own stated anti-injection convention — hostnames come from
+  client-supplied agent headers and are never interpolated into an `onclick` body.
+  `queueCommand()` also picked up Pass A's host-naming fix for its confirm dialog.
+- **The fleet list deduped by IP and capped at 20.** Grouping the check-in query by
+  `ip_address` meant one host rendered as *two* rows the moment its DHCP lease changed,
+  and two hosts behind one NAT collapsed into one — the second silently vanishing from
+  the table, the console's host picker and bulk selection. This turned out to be
+  systemic rather than a single site: five queries in `app.py` and two in
+  `generate_report.py`, all now grouping by hostname. Separately, this one query carried
+  a `LIMIT 20` its three siblings didn't, so on a fleet above 20 hosts the Agents page
+  and the dashboard tile disagreed with no indication which was right.
+- **Agents silently lost logs on every deploy.** An event was added to the
+  already-sent set at *collection* time, then shipped with a single POST and a 5s
+  timeout — no retry, no spool. So one failed ingest meant that batch was gone for good:
+  never retried, never re-collected, nothing server-side to notice the gap. The window
+  that matters isn't exotic — `update.sh` restarts gunicorn on every deploy, so every
+  agent in the fleet dropped whatever it had collected during that restart. Command
+  *results* already got three attempts with backoff; logs got one. Both agents now retry
+  3× and hold a failed batch in a bounded spool (5000 entries) that's prepended to the
+  next cycle, so a transient outage costs latency rather than data. On overflow the
+  oldest entries go and the drop is *printed* — silent loss is the exact failure this
+  exists to remove.
+- **The stat tiles were labelled fleet-wide but counted a 50-row page.** They were
+  derived client-side from the same most-recent-50 history the table renders, so on any
+  fleet past that they always summed to exactly 50, and a burst of queued work could
+  push every completed action out of the window and read as `0 Completed`. Replaced with
+  a real `/api/agent/commands/summary` (`COUNT(*)`s; Pending all-time since a command
+  queued for a host that's been offline a week is still outstanding, Completed/Failed
+  windowed to 7 days and now *saying so* on the tile face). Tiles are also clickable
+  into exactly the rows they counted — which needed a new "Pending or Sent" history
+  filter, since the existing `pending` option would have shown fewer rows than the
+  Pending tile's own number.
+
+Verified with 39 tests: 15 SQLite fixture tests (the DHCP-duplicate and NAT-collapse
+bugs are **reproduced** against `GROUP BY ip_address` before being fixed; likewise the
+old tile derivation summing to 50 and reading 0-completed under a queue burst), 6 tests
+exercising the extracted spool helper from both agent sources, and 18 vm-context tests
+that run the real `renderEndpoints()` against a stubbed DOM and assert on rendered HTML.
+
 ### EDR workflow/agent review, Pass A — response-action correctness (5 of 14 findings)
 
 Asked to run through the EDR workflow and agent again. A live walkthrough plus a
