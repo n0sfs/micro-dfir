@@ -2258,6 +2258,15 @@ function showCommandHistoryFor(status, sinceDays) {
     document.getElementById('cmdHistoryBody')?.closest('.card, .tab-pane')?.scrollIntoView({behavior: 'smooth', block: 'start'});
 }
 
+// This table auto-refreshes every 8s (see the setInterval in page init), so at any
+// moment a periodic *unfiltered* request can already be in flight when the user changes
+// a filter or clicks a stat tile. Whichever response lands last wins, and the stale one
+// frequently does -- caught live: clicking "Pending Actions" applied the filter to the
+// select but left 50 unfiltered rows in the table, because the refresh that had fired
+// moments earlier resolved afterwards and overwrote them. A monotonic sequence number
+// makes every response but the newest request's a no-op.
+let cmdHistorySeq = 0;
+
 function loadCommandHistory() {
     const statusFilter = document.getElementById('cmdHistoryStatusFilter')?.value || '';
     const sinceFilter = document.getElementById('cmdHistorySinceFilter')?.value || '';
@@ -2266,12 +2275,14 @@ function loadCommandHistory() {
     if (statusFilter) qs += `&status=${encodeURIComponent(statusFilter)}`;
     if (sinceFilter) qs += `&since_days=${encodeURIComponent(sinceFilter)}&limit=500`;
     loadCommandStats();
-    fetch(`/api/agent/commands?${qs}`)
+    const seq = ++cmdHistorySeq;
+    return fetch(`/api/agent/commands?${qs}`)
         .then(r => {
             if (!r.ok) throw new Error('HTTP ' + r.status);
             return r.json();
         })
         .then(rows => {
+            if (seq !== cmdHistorySeq) return;  // a newer request has already been issued
             cmdHistoryCache = rows;
             const tbody = document.getElementById('cmdHistoryBody');
             if (!rows || rows.length === 0) {
@@ -2293,6 +2304,7 @@ function loadCommandHistory() {
             reconcileConsoleSessions();
         })
         .catch(err => {
+            if (seq !== cmdHistorySeq) return;  // a superseded request's failure isn't news
             console.error('Error loading command history:', err);
             renderLoadError('cmdHistoryBody', 6, 'Failed to load command history.');
         });
