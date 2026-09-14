@@ -10,6 +10,66 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-14
 
+### EDR workflow/agent review, Pass C — polish (4 of 14, review complete: 14/14)
+
+- **Failed actions were greyed out in the host-detail popup.** That table carried its own
+  inline status mapping testing for `'error'` — a status `api_agent_result` never
+  produces, since it only ever writes `'done'` or `'failed'` — so every failed action
+  rendered as a grey secondary badge reading "failed", visually identical to a pending
+  one. The single status a responder most needs to spot in a host's history was the one
+  the table greyed out. Now reuses `statusBadgeCmd()`; the duplication is what let the
+  two drift apart in the first place.
+- **The Queued column printed raw UTC beside local-clock values.** `queued_at` is UTC
+  (schema `DEFAULT CURRENT_TIMESTAMP`), while `agent_polls.timestamp` and `completed_at`
+  are local server time — both were rendered raw, side by side. Added
+  `utcToLocalStr`/`relativeTimeUtc`/`queuedAtCell`; the history table and the popup both
+  route through it, showing a relative time with the local conversion and the raw stored
+  UTC each labelled on its own tooltip line. Measured on the live page: a value stored
+  `20:19:39 UTC` now reads `16:19:39 local` on this UTC-4 host, and the old local-parse
+  helper read a 30-minute-old stamp as "0s ago".
+- **The history table's host column was a dead end** — plain bold text, so reading
+  "isolate_host failed on X" and wanting anything about X meant scrolling back to the
+  fleet table and finding the row by hand. It can't be a blanket link, though: this table
+  is the one place in the app that routinely lists hosts which no longer exist (command
+  history outlives enrollment), and `openHostDetailModal()` returns silently for those,
+  so a link would be a click that does nothing. Enrolled hosts pivot into the modal;
+  decommissioned ones are muted, explain themselves, and still link to their UEBA
+  timeline — the one view that doesn't need a live agent. `openHostDetailModal()`'s own
+  silent return now toasts instead.
+- **Queueing against an Offline host gave the same green "will run within 120s" toast as
+  an online one**, which is simply false — the row it was fired from said Offline. The
+  command is still queued either way (contain-now-apply-later is the point, you isolate a
+  machine that isn't awake yet); the toast and the console transcript now say which wait
+  this actually is. Both status checks are written as allowlists on `Online` rather than
+  "warn if Offline", so a host missing from the fleet list entirely can never fall through
+  to the reassuring message — a gap the tests caught before deploy.
+- `renderLoadError` on the endpoints table used `colspan 11` on a 12-column table.
+
+22 new vm-context tests; full regression green across all seven EDR suites.
+Live-verified on production: the tooltip conversion measured against the real UTC-4
+offset, the pivot cells rendering correctly for both live hosts *and* the three
+decommissioned ones (muted, explained, timeline link present), and all three queue
+messages generated from the real fleet state — Idle for the laptop, "Last check-in 5d
+ago" for the offline desktop, cautious for a host absent from the list. Previously all
+three were the identical green success toast.
+
+**Live verification caught a fifth bug.** The Queued tooltip rendered a literal `<br>`
+between its two lines: `escHtml()` is `d.innerText = str; return d.innerHTML`, so a
+newline passed *through* it comes back as `<br>` — correct inside element content, wrong
+inside an attribute value. Fixed by escaping each line separately and joining with a raw
+newline (the shape the fleet table's hostname title already used). The test had asserted
+the tooltip carried both clocks but used a tidy regex-based `escHtml` stub that escaped
+quotes and left newlines alone, so it passed a bug the browser renders; the stub now
+matches the real `innerText`/`innerHTML` behaviour, and reverting the fix under it
+reproduces the exact string seen in the browser.
+
+**Not queued, deliberately**: there is no cancel or delete route for `agent_commands`,
+so a command queued by mistake cannot be withdrawn and nothing ages one out. Rather than
+add a permanent row to the stale backlog Pass B had just surfaced, the offline-toast
+path was verified by generating the messages from live fleet data without the POST, and
+the failed-badge rendering by driving the real popup against a stubbed response. Nothing
+was created: the command count was 125 before and after.
+
 ### EDR workflow/agent review, Pass B — containment visibility & data loss (5 of 14)
 
 - **Nothing in the app told you which hosts were currently isolated.** The only
