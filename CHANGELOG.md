@@ -10,6 +10,76 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-14
 
+### EDR workflow/agent review, Pass A — response-action correctness (5 of 14 findings)
+
+Asked to run through the EDR workflow and agent again. A live walkthrough plus a
+background Explore agent's code research produced 14 findings — notably more *real
+bugs* than the three prior review areas. User approved safety/correctness first.
+
+- **Commands could execute repeatedly on an endpoint.** The 5-minute "sent but never
+  reported a result" requeue aged off `queued_at` because there was no dispatch
+  timestamp at all. So a command queued while its host was offline — the normal
+  containment case, you isolate a machine that isn't awake yet — was already older than
+  the cutoff the instant it was finally sent, got flipped straight back to `pending`,
+  and was re-dispatched on the very next check-in ~8s later, looping until some result
+  happened to land. For a non-idempotent action (`kill_process`, `quarantine_file`,
+  `collect_triage`) that meant real repeated execution on the endpoint. Added a
+  `sent_at` column (`migrate_agent_commands_sent_at()` + schema), stamped at dispatch
+  **in UTC** to match the UTC cutoff — writing local there would have recreated the
+  exact mixed-clock bug the surrounding comment already documents, except worse (on a
+  UTC-4 host every fresh dispatch would look 4h old and requeue immediately) — and aged
+  the requeue off `COALESCE(sent_at, queued_at)` so pre-migration rows aren't stranded
+  as permanently-`sent` with no way to retry.
+- **`isolate_host` reported success even when it silently failed.** No
+  `-ErrorAction Stop`, no try/catch, an unconditional success string, exit 0 — and
+  `api_agent_result` decides done-vs-failed purely from the exit code, so a host that
+  was never contained showed a green "Done". The Linux variant had the same shape (no
+  `set -e`, so the final `echo` ran regardless of whether `iptables` worked). Both now
+  fail loudly and `exit 1`; Linux additionally verifies the isolation chain is actually
+  referenced from INPUT *and* OUTPUT rather than assuming, and tolerates first-run
+  teardown of a chain that doesn't exist yet. `block_ip` already had the try/catch (it
+  documents this exact false-positive class as fixed *for itself only*) but never
+  exited non-zero, so its error also landed as a green Done — completed that fix too.
+- **`restore_network` left Windows more open than it found it.** It forced
+  `-DefaultInboundAction Allow`, but Windows' stock default is *Block* inbound, so
+  every isolate→restore cycle permanently weakened that host's firewall — a security
+  regression caused by the containment tooling itself. Now restores `NotConfigured`,
+  handing the decision back to Windows/GPO instead of guessing, which errs *closed* in
+  the one case it can't know (a prior explicitly-set Allow). It also verifies the
+  isolation rules are gone and warns loudly if the host may still be cut off — a
+  silently-failed restore is worse than a failed isolate.
+- **The bulk action bar never hid** — `class="d-flex"` alongside a `style.display`
+  toggle, so Bootstrap's `!important` kept it permanently visible reading "0 selected".
+  Confirmed live before the fix (inline `none`, computed `flex`) and after (computed
+  `none`, not visible). Fourth instance of this exact bug class in this codebase; only
+  a live browser check ever catches it.
+- Response-action confirms never named the host ("Isolate this host from the network?")
+  even though the target is a dropdown well away from the button being clicked — they
+  now name it in both dialog title and body. Separately, the action buttons relied on a
+  container's `pointer-events:none` for their "no host selected" state rather than a
+  real `disabled` attribute, which keyboard activation bypasses; they now carry the
+  attribute and are initialized at page load instead of only after the first change
+  event. (Note: the original walkthrough characterized these buttons as having *no*
+  guard — that was wrong. Two guards existed, the CSS one and an early-return in
+  `consoleRun`; this change hardens a working guard rather than adding a missing one.)
+
+Verified with 26 tests: a SQLite fixture that **reproduces** the re-dispatch loop
+(5 of 5 consecutive check-ins re-send the same command under the old `queued_at` logic,
+exactly 1 under the new `sent_at` logic) and covers the genuine-retry, recent-dispatch,
+legacy-NULL, result-ends-cycle and queue-ordering paths; 12 assertions on the generated
+PowerShell/bash for every isolate/restore/block_ip failure path; 7 vm-context tests for
+the UI changes. Live-verified on production: the bulk bar is now genuinely hidden, all
+8 action buttons report `disabled` at load and enable on host selection, and the confirm
+renders "Confirm action on WORKSTATION-B" / "Target host: WORKSTATION-B" — cancelled
+without queueing anything (Pending Actions stayed 0). The requeue fix runs on *every*
+agent check-in, so `WORKSTATION-A` returning to **Online** after the deploy is itself
+proof the migration applied and the new SQL executes cleanly against the production
+database — a missing `sent_at` column would have errored every check-in.
+
+Per explicit user instruction, `WORKSTATION-A` was never isolated; `WORKSTATION-B`
+was the authorized test host and was Offline throughout, so no live end-to-end
+containment test was possible — hence the generated-script assertions.
+
 ### Reporting/Coverage usability review, Pass B (4 of 4, review complete: 9/9 findings)
 
 - **Biggest UX win**: "Generate Report" was a synchronous form POST that froze the
