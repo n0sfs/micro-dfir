@@ -37,7 +37,12 @@ the note (same convention as `watch_reason` surviving unwatch), and the multipli
 expression itself correctly computes 1.0x/1.5x/1.5x/2.25x for
 neither/departing-only/privileged-only/both — including the LEFT JOIN case where a
 user has no `identities` row at all. Plus a JS vm-context test (3 cases) for the badge
-rendering in the identity quick-actions panel.
+rendering in the identity quick-actions panel. Live-verified on production against the
+real `noslo` user: flagged privileged+departing, confirmed `/api/ueba/risk-scores`
+returned `multiplier: 2.25` and `score: 15754.5` (exactly `7002 raw × 2.25`), confirmed
+the Risk Scoring table rendered "15754.5 ×2.25" with the updated tooltip wording, and
+confirmed the risk detail modal's identity panel showed both real badges — test
+identity deleted afterward, restoring the table to its original empty state.
 
 ### UEBA ideas from Exabeam screenshots (2/2): rule rationale shown to analysts
 
@@ -66,7 +71,12 @@ resolves a rule-derived event's description via `rule_id`, and a built-in indica
 error. Plus a JS vm-context test (5 cases): the info icon appears with the right
 tooltip for a rule-derived event, no icon for a built-in one, first-non-null-wins
 across grouped events, and the rule modal correctly prefills/clears the description
-field on open for an existing vs. brand-new rule.
+field on open for an existing vs. brand-new rule. Live-verified on production: wrote a
+real rationale for the actual "Named-User Alert Sourced from Internal Network" rule
+(125 real historical matches), confirmed every `custom_alert_rule` row in `noslo`'s
+real risk breakdown now carries the ⓘ info icon with that text — left in place
+afterward as genuinely useful documentation, not reverted like the session's usual
+disposable test data.
 
 ### Insider threat workflow review (1/2): quick "Watch This User" from the risk detail modal
 
