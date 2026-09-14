@@ -10,6 +10,72 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-14
 
+### Incident: host isolation was irreversible on a dual-homed appliance
+
+Running the first real end-to-end containment test (a genuine `isolate_host` on the one
+endpoint authorised for disruptive testing) turned up the most serious defect this
+codebase has had.
+
+Settings > Network offers **separate bind addresses for the UI and for ingestion**, and
+the deployed appliance uses both — UI on `…100:5001`, ingestion on `…101:5000`. The agent
+does not treat them interchangeably: it checks in and receives commands on the **UI**
+address (`/api/agent/config`, `/api/agent/result`) and ships logs to the **ingest**
+address (`/api/ingest`). But `soc_ip` for the isolation firewall rule was a single value
+read from `ingest_bind_ip`.
+
+So isolation allowlisted the ingest address and blocked the check-in address — and the
+failure mode is the worst one available. The host stayed **visibly healthy**: logs kept
+arriving on the allowed path, every few seconds, for the full hour the test ran. What had
+actually happened is that its command channel was severed, so it could never be handed
+the `restore_network` that undoes the isolation, and the isolate's own result never came
+back either. **The containment was real, complete, and unreachable by any remote means,
+because the one channel recovery travels on is the one isolation cuts.** Recovery
+required physical access to the endpoint.
+
+Observed split, an hour after the isolate landed — the whole bug in two numbers:
+
+    last log received   12:59:13   (ingest address, allowed)
+    last check-in       11:59:36   (UI address, blocked)
+
+`isolate_host` (+ the Linux and macOS variants) now take one or more addresses, and
+`_soc_allowlist_ips()` assembles both bind addresses plus the request host — deduped,
+with `0.0.0.0` dropped since a wildcard bind is not an address an endpoint can send to.
+Both callers use it (the EDR queue route and the SOAR playbook action, which can isolate
+several hosts at once) and both now **refuse to queue an isolation** rather than strand a
+host when no address can be determined. Each address is validated individually, so a
+payload can't ride along in the comma-separated list. A single-homed appliance collapses
+to one address and is byte-for-byte unchanged.
+
+16 tests, including a reproduction from the real production settings and an assertion
+that the old rule never mentions the check-in address at all. Pass A's isolate/restore
+suite still green.
+
+Two supporting gaps this exposed, both now closed:
+
+- **No way to cancel a queued command.** A `sent` isolate that never reported stays
+  `sent`, and the 5-minute stale requeue flips it back to `pending` — so repairing the
+  endpoint by hand would have brought it back online only to be **re-isolated on its next
+  check-in**, the recovery undone by the queue. `POST /api/agent/commands/<id>/cancel`
+  now withdraws an unfinished command (`pending`/`sent` only; `done`/`failed` is history).
+  `cancelled` is terminal and no longer matches the requeue's `status = 'sent'` filter.
+  This also clears the three August strays Pass B surfaced.
+- **Agent status cutoffs didn't track the check-in interval.** Noticed while checking
+  fleet state before the test: both hosts read "Idle" although one was checking in
+  perfectly regularly. The 45s/300s cutoffs were tuned for the 8s default interval and
+  never revisited when it became configurable; at this appliance's 120s the agent
+  (measured 122–139s across 8 consecutive polls) sat outside the 45s window ~68% of every
+  cycle. The fleet looked half-dead, the Endpoints Online tile flickered 0↔1, and the
+  Offline/Idle queue warnings added in Pass C hours earlier would have fired on every
+  queue against a healthy endpoint. Now `max(45, interval × 1.5 + 15)` /
+  `max(300, interval × 5)`, with `generate_report.py` kept in step. The floors reproduce
+  the original behaviour exactly at the 8s default. Verified live: both hosts Online,
+  dashboard tile agreeing 2/2. 12 tests.
+
+Process note worth keeping: isolation should have been proven first on a host that could
+be reached physically, precisely because the failure being tested for is loss of remote
+access. Testing it on a remote endpoint made the blast radius of a bad outcome the same
+as the bug itself.
+
 ### EDR workflow/agent review, Pass C — polish (4 of 14, review complete: 14/14)
 
 - **Failed actions were greyed out in the host-detail popup.** That table carried its own
