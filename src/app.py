@@ -11167,12 +11167,39 @@ def api_dashboard_top_countries():
     _TOP_COUNTRIES_CACHE[days] = (time.time(), result)
     return jsonify(result)
 
-# Reuses agent_checkins()'s exact 45s/300s thresholds (see that route for why those
-# specific numbers) so this widget's numbers agree with the EDR page's own.
-def _agent_status_from_age(age_seconds):
-    if age_seconds <= 45:
+# The Online/Idle cutoffs derive from the configured check-in interval instead of the
+# fixed 45s/300s they used to be. Those constants were tuned for the 8s default
+# (DEFAULT_AGENT_CONFIG_INTERVAL_SECONDS) and were never revisited when the interval
+# became configurable. On this appliance, running the interval at 120s, a perfectly
+# healthy agent checking in every 122-139s (measured over 8 consecutive polls) cleared
+# the 45s Online window seconds after each check-in and spent roughly two-thirds of its
+# life reading "Idle": the fleet looked half-dead, the "Endpoints Online" tile flickered
+# between 0 and 1 on refresh, and anything keyed off Idle-vs-Online fired constantly on
+# healthy hosts.
+#
+#   Online  = hasn't missed a scheduled check-in. One interval plus slack for the agent's
+#             own work time -- the measured overshoot is ~15-20s on a 120s interval, and
+#             it scales with the interval, hence the multiplier rather than a flat grace.
+#   Idle    = has missed a few in a row; may be asleep, busy, or briefly off-network.
+#   Offline = long enough that something is actually wrong.
+#
+# The max() floors reproduce the original 45s/300s behaviour exactly at the 8s default,
+# so a deployment that never changed the interval sees no behaviour change at all.
+def _agent_status_cutoffs(db):
+    try:
+        row = db.execute("SELECT value FROM settings WHERE key = 'agent_config_interval_seconds'").fetchone()
+        interval = int(row['value']) if row and row['value'] else DEFAULT_AGENT_CONFIG_INTERVAL_SECONDS
+    except Exception:
+        interval = DEFAULT_AGENT_CONFIG_INTERVAL_SECONDS
+    if interval <= 0:
+        interval = DEFAULT_AGENT_CONFIG_INTERVAL_SECONDS
+    return (max(45, interval * 1.5 + 15), max(300, interval * 5))
+
+def _agent_status_from_age(age_seconds, cutoffs):
+    online_max, idle_max = cutoffs
+    if age_seconds <= online_max:
         return 'Online'
-    if age_seconds <= 300:
+    if age_seconds <= idle_max:
         return 'Idle'
     return 'Offline'
 
@@ -11190,13 +11217,14 @@ def api_dashboard_agent_status():
     db = get_db()
     rows = db.execute('SELECT * FROM agent_polls WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY user_agent)').fetchall()
     now = datetime.datetime.now()
+    cutoffs = _agent_status_cutoffs(db)  # one settings read per request, not per row
     counts = {'Online': 0, 'Idle': 0, 'Offline': 0, 'Unknown': 0}
     for r in rows:
         ts = r['timestamp'] if 'timestamp' in r.keys() else ''
         status = 'Unknown'
         try:
             age = (now - datetime.datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')).total_seconds()
-            status = _agent_status_from_age(age)
+            status = _agent_status_from_age(age, cutoffs)
         except (ValueError, TypeError):
             pass
         counts[status] += 1
@@ -19286,6 +19314,7 @@ def agent_checkins():
         # disagreed with no indication which was right.
         rows = db.execute('SELECT * FROM agent_polls WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY user_agent) ORDER BY id DESC').fetchall()
         now = datetime.datetime.now()
+        cutoffs = _agent_status_cutoffs(db)  # one settings read per request, not per row
         mapped = []
         hostnames = []
         for r in rows:
@@ -19293,16 +19322,14 @@ def agent_checkins():
             # Every row used to be hardcoded "Online" regardless of how long ago it actually
             # checked in — an agent that stopped polling (uninstalled, powered off, network
             # drop) would sit at the top of this list looking perpetually alive forever.
-            # The agent checks in roughly every 15s under normal operation, so a healthy
-            # margin above that (45s) still counts as Online; anything not heard from in
-            # over 5 minutes is genuinely gone, not just a missed beat.
+            # The cutoffs now scale with the configured check-in interval -- see
+            # _agent_status_cutoffs() for why the old fixed 45s/300s made a healthy
+            # 120s-interval fleet read as permanently Idle.
             status = "Unknown"
             try:
                 last_seen = datetime.datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
                 age = (now - last_seen).total_seconds()
-                if age <= 45: status = "Online"
-                elif age <= 300: status = "Idle"
-                else: status = "Offline"
+                status = _agent_status_from_age(age, cutoffs)
             except (ValueError, TypeError):
                 pass
             hostname = r["user_agent"] if "user_agent" in r.keys() else "Windows-Endpoint"

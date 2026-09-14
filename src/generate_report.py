@@ -367,10 +367,30 @@ def _case_lifecycle_metrics(conn, days):
 # from every report until now. Agent status is a real-time-only snapshot as of report
 # generation (same as the dashboard widget it mirrors, labeled "Live" there) -- it does
 # not reflect the report's days window, which only applies to FIM/DNS activity below.
-def _agent_status_from_age(age_seconds):
-    if age_seconds <= 45:
+#
+# The cutoffs scale with the configured check-in interval rather than the fixed 45s/300s
+# they used to be -- ported from app.py's _agent_status_cutoffs(), which has the full
+# reasoning. In short: the constants were tuned for the 8s default, so at a 120s interval
+# a healthy agent spent most of its life reading "Idle". Keeping this in step with app.py
+# matters more than usual here, since a report that disagrees with the dashboard about how
+# many endpoints are online is worse than either number on its own.
+DEFAULT_AGENT_CONFIG_INTERVAL_SECONDS = 8
+
+def _agent_status_cutoffs(conn):
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key = 'agent_config_interval_seconds'").fetchone()
+        interval = int(row['value']) if row and row['value'] else DEFAULT_AGENT_CONFIG_INTERVAL_SECONDS
+    except Exception:
+        interval = DEFAULT_AGENT_CONFIG_INTERVAL_SECONDS
+    if interval <= 0:
+        interval = DEFAULT_AGENT_CONFIG_INTERVAL_SECONDS
+    return (max(45, interval * 1.5 + 15), max(300, interval * 5))
+
+def _agent_status_from_age(age_seconds, cutoffs):
+    online_max, idle_max = cutoffs
+    if age_seconds <= online_max:
         return 'Online'
-    if age_seconds <= 300:
+    if age_seconds <= idle_max:
         return 'Idle'
     return 'Offline'
 
@@ -381,11 +401,12 @@ def _endpoint_health_context(conn, days):
         "SELECT timestamp FROM agent_polls WHERE id IN (SELECT MAX(id) FROM agent_polls GROUP BY user_agent)"
     ).fetchall()
     now = datetime.now()
+    cutoffs = _agent_status_cutoffs(conn)
     status_counts = {'Online': 0, 'Idle': 0, 'Offline': 0, 'Unknown': 0}
     for r in poll_rows:
         try:
             age = (now - datetime.strptime(r['timestamp'], '%Y-%m-%d %H:%M:%S')).total_seconds()
-            status_counts[_agent_status_from_age(age)] += 1
+            status_counts[_agent_status_from_age(age, cutoffs)] += 1
         except (ValueError, TypeError):
             status_counts['Unknown'] += 1
 
