@@ -43,7 +43,12 @@ identity shows its real Privileged badge and a Watch button keyed to its real id
 already-watched one shows Remove instead, a non-admin sees badges but no buttons,
 creating a new watched identity in one step succeeds and toasts, a create failure
 (e.g. a race where the identity already exists) surfaces the real server error, and a
-toggle failure shows an error toast rather than a false success.
+toggle failure shows an error toast rather than a false success. Live-verified on
+production against the real `noslo` user (9.4/10 Critical): opened their risk detail,
+clicked "Watch This User", and confirmed `/api/dashboards/watchlist` immediately
+returned them with the real priority score and `watched_by: "admin"` — then clicked
+"Remove from Watchlist" and deleted the test identity row, restoring the table to its
+original empty state.
 
 ### Cross-screen triage friction, round 3 (1/3): EDR quick actions for UEBA anomalies too
 
