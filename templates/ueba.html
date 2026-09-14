@@ -651,6 +651,18 @@ function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// For building a single-quoted JS-string argument inside an onclick="..." attribute --
+// NOT the same job as escHtml. escHtml alone is unsafe here: it turns a literal ' into
+// the HTML entity &#39;, which the browser decodes back into a literal ' when it parses
+// the attribute, before the onclick body is ever compiled as JS -- so a value containing
+// an apostrophe would still close the JS string early. This only needs to survive JS
+// string parsing, not double-quoted-attribute parsing, since every render*Histogram
+// caller below only ever places it inside a single-quoted arg of a double-quoted
+// onclick attribute whose other content is static.
+function escJs(s) {
+    return String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
 // A loader's initial "Loading..." table state has no failure counterpart today -- a
 // non-2xx response (still a resolved fetch()) leaves it stuck showing "Loading..."
 // forever with no visible sign anything went wrong. This renders an explicit, retriable
@@ -1406,13 +1418,26 @@ function renderTableHistogram(title, hist, opts) {
     opts = opts || {};
     const rows = hist.rows || [];
     const maxCount = Math.max(0, ...rows.map(r => r.count || 0));
-    const body = rows.length ? rows.map(r => `
+    // opts.linkFn(row), when given, returns a JS onclick expression (already
+    // quote-escaped the same way selectInsightsEntity's suggestion list above does) that
+    // pivots to somewhere useful for that row -- e.g. Log Search for an IP/alert name,
+    // or straight into that related entity's own risk detail modal. Rows this doesn't
+    // make sense for (risk_contributions -- it's the currently-selected entity's own
+    // indicator breakdown, nothing external to pivot to) simply omit linkFn.
+    const body = rows.length ? rows.map(r => {
+        const link = opts.linkFn ? opts.linkFn(r) : null;
+        const valueText = escHtml(r.value ?? '(none)');
+        const valueHtml = link
+            ? `<a href="#" class="text-info text-decoration-none" onclick="${link}; return false;" title="Click to pivot">${valueText}</a>`
+            : valueText;
+        return `
         <div class="d-flex justify-content-between align-items-center py-1 small">
-            <span class="text-truncate" style="max-width:60%;" title="${escHtml(r.value)}">${escHtml(r.value ?? '(none)')}${r.severity ? ` <span class="text-muted">(${escHtml(r.severity)})</span>` : ''}</span>
+            <span class="text-truncate" style="max-width:60%;" title="${escHtml(r.value)}">${valueHtml}${r.severity ? ` <span class="text-muted">(${escHtml(r.severity)})</span>` : ''}</span>
             <span class="text-muted ms-2 text-nowrap">${opts.pointsMode ? `${r.points ?? 0} pts` : r.count}</span>
         </div>
         <div class="insight-hist-bar mb-2" style="width:${histBarWidth(opts.pointsMode ? (r.points || 0) : r.count, opts.pointsMode ? Math.max(0, ...rows.map(x => x.points || 0)) : maxCount)}%;"></div>
-    `).join('') : '<p class="text-muted small mb-0">No data.</p>';
+    `;
+    }).join('') : '<p class="text-muted small mb-0">No data.</p>';
     return `
         <div class="card bg-dark border-secondary mb-3">
             <div class="card-header py-2 small d-flex justify-content-between">
@@ -1465,12 +1490,26 @@ function loadEntityInsights(entityType, entityId) {
         .then(data => {
             const windowLabel = `(last ${data.window_days || 90}d)`;
             let html = renderTimeOfWeek({...data.activity_pattern, window_days: data.window_days});
+            // Risk Contributions is the currently-selected entity's own indicator
+            // breakdown -- nothing external to pivot to, so it gets no linkFn. Every
+            // other histogram here names something outside this entity (a related
+            // entity, an alert, an IP, an admin action) worth jumping to.
             html += renderTableHistogram(`Risk Contributions ${windowLabel}`, data.risk_contributions, {pointsMode: true});
-            html += renderTableHistogram(`Top Alerts ${windowLabel}`, data.top_alerts);
-            html += renderTableHistogram(`Related ${data.related_entity_type === 'user' ? 'Users' : 'Hosts'} ${windowLabel}`, data.related_entities);
-            html += renderTableHistogram(`Top Source IPs ${windowLabel}`, data.top_source_ips);
-            html += renderTableHistogram(`Top Destination IPs ${windowLabel}`, data.top_destination_ips);
-            if (data.admin_activity) html += renderTableHistogram(`Admin Activity ${windowLabel}`, data.admin_activity);
+            html += renderTableHistogram(`Top Alerts ${windowLabel}`, data.top_alerts, {
+                linkFn: r => `pivotToLogSearch(null, '${escJs(r.value)}')`
+            });
+            html += renderTableHistogram(`Related ${data.related_entity_type === 'user' ? 'Users' : 'Hosts'} ${windowLabel}`, data.related_entities, {
+                linkFn: r => `viewRiskScoreDetail('${data.related_entity_type}', '${escJs(r.value)}')`
+            });
+            html += renderTableHistogram(`Top Source IPs ${windowLabel}`, data.top_source_ips, {
+                linkFn: r => `pivotToLogSearch('source_ip', '${escJs(r.value)}')`
+            });
+            html += renderTableHistogram(`Top Destination IPs ${windowLabel}`, data.top_destination_ips, {
+                linkFn: r => `pivotToLogSearch('destination_ip', '${escJs(r.value)}')`
+            });
+            if (data.admin_activity) html += renderTableHistogram(`Admin Activity ${windowLabel}`, data.admin_activity, {
+                linkFn: r => `pivotToLogSearch(null, '${escJs(r.value)}')`
+            });
             results.innerHTML = html;
         })
         .catch(err => {
@@ -1485,8 +1524,11 @@ function loadModelInsights(indicator) {
     fetch(`/api/ueba/insights/model/${encodeURIComponent(indicator)}`)
         .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
         .then(data => {
-            const rows = (data.rows || []).map(r => ({...r, value: `${r.entity_type === 'host' ? '\u{1F5A5} ' : '\u{1F464} '}${r.value}`}));
-            results.innerHTML = renderTableHistogram(`Top Entities — ${INSIGHTS_MODEL_LABELS[indicator] || indicator}`, {...data, rows}, {pointsMode: true});
+            const rows = (data.rows || []).map(r => ({...r, rawValue: r.value, value: `${r.entity_type === 'host' ? '\u{1F5A5} ' : '\u{1F464} '}${r.value}`}));
+            results.innerHTML = renderTableHistogram(`Top Entities — ${INSIGHTS_MODEL_LABELS[indicator] || indicator}`, {...data, rows}, {
+                pointsMode: true,
+                linkFn: r => `viewRiskScoreDetail('${r.entity_type}', '${escJs(r.rawValue)}')`
+            });
         })
         .catch(err => {
             console.error('Error loading model insights:', err);
