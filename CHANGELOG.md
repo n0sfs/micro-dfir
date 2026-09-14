@@ -86,7 +86,12 @@ individually (XSS safety unchanged), and a regression-baseline test confirms the
 join-then-escape expression really did double-escape. Source-inspection checks confirm
 the `?entity_type=&entity_id=` deep link correctly switches to the risk tab, awaits the
 right load promise without double-fetching, and the plain `?tab=` path is unaffected
-when no entity is specified.
+when no entity is specified. Live-verified on production: clicking the real `noslo` row
+in Top Risky Entities navigated straight to `/ueba?tab=risk&entity_type=user&entity_id=
+noslo` and auto-opened the detail modal with the `&middot;` fix visible as a real
+bullet between grouped rule-match details; separately watched `noslo` to verify the
+Watchlist widget's own row pivots identically and lands on the modal already showing
+"Watched" — test identity deleted afterward both times.
 
 ### Cross-screen triage friction, round 3 (1/3): EDR quick actions for UEBA anomalies too
 
