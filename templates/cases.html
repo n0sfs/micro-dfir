@@ -6,6 +6,7 @@
     #casesTable .th-icon-btn{background:none; border:none; color:var(--text-muted); padding:0 2px; font-size:.72rem; cursor:pointer; line-height:1;}
     #casesTable .th-icon-btn:hover{color:var(--text-secondary);}
     #casesTable .th-icon-btn.active-filter{color:var(--accent);}
+    #caseStatSlaBreachesTile.sla-filter-active{outline:2px solid var(--bs-danger, #dc3545); outline-offset:-2px; border-radius:6px;}
 </style>
 <div id="casesListView">
     <div class="page-header d-flex justify-content-between align-items-start flex-wrap gap-2">
@@ -35,7 +36,7 @@
                 </div>
             </div>
             <div class="col-6 col-lg-3">
-                <div class="stat-tile">
+                <div class="stat-tile" id="caseStatSlaBreachesTile" style="cursor:pointer;" onclick="toggleSlaBreachedFilter()" title="Click to show only breached cases in the list below">
                     <div class="stat-label">SLA Breaches</div>
                     <div class="stat-value" id="caseStatSlaBreaches" style="color:var(--bs-danger, #dc3545);">&hellip;</div>
                 </div>
@@ -376,6 +377,7 @@ const CURRENT_USERNAME = {{ current_user.username|tojson }};
 let allCases = [];
 let allQueues = [];
 let caseFilter = 'all';
+let slaBreachedOnlyFilter = false;
 let activeCaseId = null;
 let activeCaseClosed = false;
 let newCaseModal;
@@ -1054,6 +1056,16 @@ function setCaseFilter(f) {
     renderCases();
 }
 
+// The SLA Breaches stat tile used to be read-only -- an analyst had to open every case
+// to find out WHICH ones were breached. Clicking it now toggles the list down to just
+// those (api_cases() computes sla_breached per row via the same _case_sla_hours_for
+// threshold the aggregate count itself already used). Click again to clear it.
+function toggleSlaBreachedFilter() {
+    slaBreachedOnlyFilter = !slaBreachedOnlyFilter;
+    document.getElementById('caseStatSlaBreachesTile').classList.toggle('sla-filter-active', slaBreachedOnlyFilter);
+    renderCases();
+}
+
 function loadCases() {
     fetch('/api/cases').then(r => {
         if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -1135,6 +1147,7 @@ function getFilteredCases() {
     if (colFilters.severity.length) rows = rows.filter(c => colFilters.severity.includes(c.severity || 'medium'));
     if (colFilters.tlp.length) rows = rows.filter(c => colFilters.tlp.includes(c.tlp || ''));
     if (colFilters.assignee.length) rows = rows.filter(c => colFilters.assignee.includes(c.assignee || '__unassigned__'));
+    if (slaBreachedOnlyFilter) rows = rows.filter(c => c.sla_breached);
     return rows;
 }
 
@@ -1185,7 +1198,7 @@ function renderCases() {
         <tr style="cursor:pointer;" onclick="openCaseDetail(${c.id})">
             <td class="ps-3 fw-bold"><span class="text-muted small fw-normal me-1">${caseNumberLabel(c)}</span>${escHtml(c.title)}</td>
             <td>${caseSeverityBadge(c.severity)}</td>
-            <td>${caseStatusBadge(c.status)} ${workflowStateBadge(c.workflow_state)}</td>
+            <td>${caseStatusBadge(c.status)} ${workflowStateBadge(c.workflow_state)}${c.sla_breached ? ' <span class="badge bg-danger" title="Past its SLA target for this queue/severity"><i class="fa-solid fa-hourglass-end me-1"></i>SLA Breached</span>' : ''}</td>
             <td class="small">${c.queue_name ? `<span class="badge bg-secondary">${escHtml(c.queue_name)}</span>` : '<span class="text-muted">—</span>'}</td>
             <td>${tlpBadge(c.tlp)}</td>
             <td class="text-muted small">${escHtml(c.assignee || '-')}</td>
@@ -1780,6 +1793,36 @@ function prettifyItemDetail(detail, itemLookup) {
     return `${escHtml(kind)} #${escHtml(m[2])}`;
 }
 
+// "quarantine_file" -> "Quarantine File" -- a plain fallback for the playbook action
+// badges below rather than duplicating soar.html's full CASE_ACTION_LABELS catalog into
+// a third file for one label lookup (per this codebase's per-file-catalog convention).
+function humanizeActionType(t) {
+    return String(t || '').split('_').map(w => w ? w[0].toUpperCase() + w.slice(1) : w).join(' ');
+}
+
+// A real playbook run used to log one flat semicolon-joined string ("action1: result1;
+// action2: result2") -- unreadable next to the dry-run Test modal's clean per-step
+// cards for the exact same actions. _playbook_run_event_detail (app.py) now writes a
+// JSON blob {label, flat, actions} for the 3 real-run call sites instead. The
+// rate-limit-tripped 'playbook_run' event (app.py, _check_playbook_rate_limit) and any
+// row written before this change are still plain text -- JSON.parse throwing on those
+// is the expected, handled path, not an error worth logging.
+function playbookRunLabel(e) {
+    let parsed = null;
+    try { parsed = JSON.parse(e.detail); } catch (err) { /* not a structured event -- fall through to plain text below */ }
+    if (!parsed || !Array.isArray(parsed.actions)) {
+        return `<i class="fa-solid fa-robot me-1"></i>${escHtml(e.detail)}`;
+    }
+    const statusBadge = { ok: 'bg-success', queued: 'bg-info text-dark', failed: 'bg-danger' };
+    const actionsHtml = parsed.actions.map(a => `
+        <div class="d-flex gap-2 border border-secondary rounded p-2 mt-1">
+            <span class="badge ${statusBadge[a.status] || 'bg-secondary'} text-nowrap">${escHtml(humanizeActionType(a.action_type))}</span>
+            <span class="small">${escHtml(a.result)}</span>
+        </div>
+    `).join('');
+    return `<i class="fa-solid fa-robot me-1"></i>${escHtml(parsed.label)}${actionsHtml}`;
+}
+
 function caseEventLabel(e, itemLookup) {
     const map = {
         created: 'Case created',
@@ -1800,7 +1843,7 @@ function caseEventLabel(e, itemLookup) {
         task_removed: `Task removed: "${escHtml(e.detail)}"`,
         template_applied: `Template applied: ${escHtml(e.detail)}`,
         note: escHtml(e.detail),
-        playbook_run: `<i class="fa-solid fa-robot me-1"></i>${escHtml(e.detail)}`,
+        playbook_run: playbookRunLabel(e),
         playbook_action_approved: `<i class="fa-solid fa-check text-success me-1"></i>Approved: ${escHtml(e.detail)}`,
         playbook_action_rejected: `<i class="fa-solid fa-xmark text-danger me-1"></i>Rejected: ${escHtml(e.detail)}`,
         analysis: (e.detail || '').split('\n')[0] || 'Analysis',

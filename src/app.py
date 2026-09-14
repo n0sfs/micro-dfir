@@ -6921,6 +6921,7 @@ def api_cases():
         rows = db.execute(
             "SELECT c.id, c.case_number, c.title, c.status, c.severity, c.workflow_state, c.assignee, c.description, c.created_by, c.created_at, c.closed_at, c.acknowledged_at, c.tlp, c.pap, "
             "c.queue_id, q.name as queue_name, "
+            "(julianday('now') - julianday(c.created_at)) * 24 as age_hours, "
             "COUNT(DISTINCT ci.id) as item_count, "
             "COUNT(DISTINCT ct.id) as task_count, "
             "COUNT(DISTINCT CASE WHEN ct.status = 'done' THEN ct.id END) as task_done_count "
@@ -6928,7 +6929,18 @@ def api_cases():
             "LEFT JOIN case_queues q ON q.id = c.queue_id "
             "GROUP BY c.id ORDER BY CASE WHEN c.status = 'open' THEN 0 ELSE 1 END, c.created_at DESC"
         ).fetchall()
-        return jsonify([dict(r) for r in rows])
+        # Same per-case SLA-breach test api_dashboard_case_stats' aggregate count already
+        # runs (_case_sla_hours_for resolves each case's own queue/severity threshold) --
+        # that endpoint only ever returned the COUNT, so the case list had to be opened
+        # one at a time to find out WHICH cases were breached. Only meaningful for an
+        # open case; a closed one's age no longer matters.
+        out = []
+        for r in rows:
+            d = dict(r)
+            d.pop('age_hours', None)
+            d['sla_breached'] = bool(r['status'] == 'open' and r['age_hours'] > _case_sla_hours_for(db, r['queue_id'], r['severity']))
+            out.append(d)
+        return jsonify(out)
 
     data = request.get_json() or {}
     title = (data.get('title') or '').strip()
@@ -8654,6 +8666,15 @@ def _dry_run_playbook(db, playbook_id, cid):
 # isolation _run_playbook_action's own try/except already gives ordinary failures).
 def _execute_playbook_actions(db, cid, playbook_id, actions):
     results = []
+    # Same per-action data the Test/dry-run modal already renders as clean bordered
+    # cards (soar.html's runPlaybookTest) -- a real run used to only ever produce the
+    # flat semicolon-joined `results` string below, so the "real" audit trail in the
+    # case Timeline was harder to read than the "fake" dry-run preview of the exact same
+    # actions. Kept alongside (not instead of) the flat string: playbook_runs.detail and
+    # the Recent Runs modal (soar.html's showPlaybookRuns) still want plain text, so this
+    # only changes what gets attached to the Timeline event -- see the 3 call sites
+    # below, which now log a JSON blob carrying both.
+    structured = []
     overall_status = 'success'
     pending_approval = False
     for a in actions:
@@ -8665,12 +8686,15 @@ def _execute_playbook_actions(db, cid, playbook_id, actions):
                     (playbook_id, cid, a['action_type'], json.dumps(action_params))
                 )
                 results.append(f"{a['action_type']}: queued for approval")
+                structured.append({'action_type': a['action_type'], 'result': 'queued for approval', 'status': 'queued'})
                 pending_approval = True
                 continue
             result = _run_playbook_action(db, cid, a['action_type'], action_params)
             results.append(f"{a['action_type']}: {result}")
+            structured.append({'action_type': a['action_type'], 'result': result, 'status': 'ok'})
         except Exception as e:
             results.append(f"{a['action_type']}: FAILED ({e})")
+            structured.append({'action_type': a['action_type'], 'result': f"FAILED ({e})", 'status': 'failed'})
             overall_status = 'partial'
     # A gated action queued in this run must always surface as pending_approval, even if
     # another action in the same playbook also failed -- 'pending_approval' takes priority
@@ -8680,7 +8704,15 @@ def _execute_playbook_actions(db, cid, playbook_id, actions):
     if pending_approval:
         overall_status = 'pending_approval'
     detail = '; '.join(results) if results else 'no actions configured'
-    return detail, overall_status
+    return detail, overall_status, structured
+
+# Builds the JSON case_events.detail for a 'playbook_run' event -- carries both the
+# existing flat text (label, and `flat` as a fallback for anything reading this event
+# type as plain text) and the structured per-action list caseEventLabel() renders as
+# cards. `flat` deliberately excludes the label prefix (label is rendered separately),
+# unlike the plain-text detail= this replaces which had it baked in.
+def _playbook_run_event_detail(label, detail, structured):
+    return json.dumps({'label': label, 'flat': detail, 'actions': structured})
 
 # The one call site every trigger point (case create, status/queue/assignee change)
 # routes through. queue_id/tlp/status are the case's state AFTER whatever change just
@@ -8734,12 +8766,12 @@ def _run_playbooks_for_case(db, cid, trigger_event, queue_id, tlp, status, sever
         if not _check_playbook_rate_limit(db, pb, cid):
             continue
         actions = db.execute("SELECT action_type, params, requires_approval FROM playbook_actions WHERE playbook_id = ? ORDER BY position", (pb['id'],)).fetchall()
-        detail, overall_status = _execute_playbook_actions(db, cid, pb['id'], actions)
+        detail, overall_status, structured = _execute_playbook_actions(db, cid, pb['id'], actions)
         db.execute(
             "INSERT INTO playbook_runs (playbook_id, case_id, status, detail) VALUES (?, ?, ?, ?)",
             (pb['id'], cid, overall_status, detail)
         )
-        _log_case_event(db, cid, 'playbook_run', f"{pb['name']}: {detail}")
+        _log_case_event(db, cid, 'playbook_run', _playbook_run_event_detail(pb['name'], detail, structured))
 
 # All 6 EDR response actions (isolate_host, restore_network, collect_triage,
 # quarantine_file, kill_scheduled_task, kill_process_by_name) only ever target
@@ -8797,12 +8829,12 @@ def _run_scheduled_playbooks(db):
             cid = case_row['id']
             if not _check_playbook_rate_limit(db, pb, cid):
                 break  # this playbook just auto-disabled itself -- stop sweeping the rest
-            detail, overall_status = _execute_playbook_actions(db, cid, pb['id'], actions)
+            detail, overall_status, structured = _execute_playbook_actions(db, cid, pb['id'], actions)
             db.execute(
                 "INSERT INTO playbook_runs (playbook_id, case_id, status, detail) VALUES (?, ?, ?, ?)",
                 (pb['id'], cid, overall_status, detail)
             )
-            _log_case_event(db, cid, 'playbook_run', f"{pb['name']} (scheduled): {detail}")
+            _log_case_event(db, cid, 'playbook_run', _playbook_run_event_detail(f"{pb['name']} (scheduled)", detail, structured))
         db.execute("UPDATE playbooks SET last_scheduled_run = datetime('now') WHERE id = ?", (pb['id'],))
         db.commit()
 
@@ -9588,12 +9620,12 @@ def api_playbook_run(pid):
         return jsonify({'error': f"Rate limit reached ({pb['max_runs_per_hour']} runs/hour) -- the playbook has been auto-disabled."}), 429
 
     actions = db.execute("SELECT action_type, params, requires_approval FROM playbook_actions WHERE playbook_id = ? ORDER BY position", (pid,)).fetchall()
-    detail, overall_status = _execute_playbook_actions(db, case_id, pid, actions)
+    detail, overall_status, structured = _execute_playbook_actions(db, case_id, pid, actions)
     db.execute(
         "INSERT INTO playbook_runs (playbook_id, case_id, status, detail) VALUES (?, ?, ?, ?)",
         (pid, case_id, overall_status, detail)
     )
-    _log_case_event(db, case_id, 'playbook_run', f"{pb['name']} (run manually): {detail}")
+    _log_case_event(db, case_id, 'playbook_run', _playbook_run_event_detail(f"{pb['name']} (run manually)", detail, structured))
     db.commit()
     return jsonify({'status': 'success', 'run_status': overall_status, 'detail': detail})
 
@@ -9624,6 +9656,19 @@ def api_playbook_approvals():
     for r in rows:
         d = dict(r)
         d['params'] = json.loads(d['params']) if d['params'] else {}
+        # Same human-readable preview text the Test/dry-run modal already shows for
+        # these exact action_type/params -- an approver deciding whether to approve a
+        # potentially destructive action (quarantine_file, kill_process_by_name) used to
+        # see a raw JSON params dump instead. dry_run=True is read-only for every action
+        # type (each branch returns its preview string before any db.execute write), so
+        # this is safe to compute for every row, not just ones actually being approved.
+        # Wrapped defensively -- a preview failure (e.g. a since-deleted template_id)
+        # shouldn't break the whole approvals list; the frontend falls back to the raw
+        # params dump when preview is null.
+        try:
+            d['preview'] = _run_playbook_action(db, d['case_id'], d['action_type'], d['params'], dry_run=True)
+        except Exception:
+            d['preview'] = None
         out.append(d)
     return jsonify(out)
 
