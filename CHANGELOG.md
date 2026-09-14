@@ -78,6 +78,49 @@ real risk breakdown now carries the ⓘ info icon with that text — left in pla
 afterward as genuinely useful documentation, not reverted like the session's usual
 disposable test data.
 
+### UEBA usability pass 2 (item 2 of 3, pass complete): Timeline severity filter, pivots, and DSL discoverability
+
+Three related gaps in the same tab, fixed together:
+
+- No severity filter existed in the sidebar despite `/api/logs/search` already
+  supporting a `severity` param server-side (`_build_log_other_filters`) — added
+  Critical/High/Medium/Low/Info checkboxes (none checked = no filter, preserving
+  today's default) and wired `getTimelineSeverities()` into `loadTimeline()`'s query
+  params.
+- Host and username in the Entity column were plain text — generalized the existing
+  process-only pivot helper into `fieldPivotLink()` and used it for host/username too,
+  matching `dashboard.html`'s `pivotLinkHtml` convention (host/username are both
+  already `PIVOT_COLUMNS` there).
+- Each row had no way to reach its own full detail/triage/add-to-case/link-to-entity
+  view — that already exists in Log Search (`dashboard.html`'s `showLogDetail` modal),
+  so rather than duplicating it in a second template, added a deep link using the same
+  `?item_id=&item_type=` mechanism MITRE Coverage's Validated popup already uses to
+  jump straight to one exact row. No entry for EDR command rows — those already have
+  their own view in `cases.html`, not Log Search, matching that deep link's existing
+  carve-out.
+- The Search box's query DSL (field:value, quoted phrases, -exclude, wildcards) had no
+  discoverability — added the same click-to-insert "Try:" hint row Log Search's own
+  Advanced Query box already uses, as `insertTimelineQueryHint()` scoped to this tab's
+  own search box.
+
+Verified with a JS vm-context test (10 cases): severity checkbox selection state maps
+correctly to the query param (including the "none checked = no filter" default); the
+DSL hint buttons insert into an empty vs. non-empty search box correctly; host/username
+render as pivot links while a missing host falls back to plain "UNKNOWN" text with no
+link and a placeholder "-" username is suppressed entirely; the item_type mapping is
+correct per row type (alert/anomaly/log → alert/ueba_event/fim_event) and a command row
+or a row with no id correctly gets no deep link at all. Live-verified on production
+against real `WORKSTATION-A` data: checking Medium severity correctly narrowed 5244
+matching events down to 3923; clicking a "host:WIN-A" DSL hint button correctly
+inserted it and re-searched; clicking the real host link navigated to
+`/siem?tab=search&q=host:WORKSTATION-A` with results loading; and following a real
+row's deep link (`item_id=98212&item_type=ueba_event`) landed on Log Search with
+exactly 1 matching result, which opened the actual existing Log Detail modal (Add to
+Case, full process/message detail) for that exact rare-process anomaly.
+
+**Pass 2 complete (3/3 — 1 pivots item, this Timeline item covering the originally
+separate 6/7).**
+
 ### UEBA usability pass 2 (item 1 of 3): Data Insights histograms are now click-through
 
 Started Pass 2, the second of two approved UEBA usability passes. Every histogram row
