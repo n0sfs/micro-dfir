@@ -75,6 +75,29 @@
                     </div>
                 </div>
                 <div class="mb-3">
+                    <label class="form-label small text-muted mb-1">Severity <span class="fw-normal">(none = all)</span></label>
+                    <div class="form-check">
+                        <input class="form-check-input tl-sev-chk" type="checkbox" value="CRITICAL" id="tlSevCritical" onchange="timelineLimit=300; loadTimeline();">
+                        <label class="form-check-label small" for="tlSevCritical"><span class="badge bg-danger" style="font-size:.6rem;">Critical</span></label>
+                    </div>
+                    <div class="form-check">
+                        <input class="form-check-input tl-sev-chk" type="checkbox" value="HIGH" id="tlSevHigh" onchange="timelineLimit=300; loadTimeline();">
+                        <label class="form-check-label small" for="tlSevHigh"><span class="badge bg-danger" style="font-size:.6rem;">High</span></label>
+                    </div>
+                    <div class="form-check">
+                        <input class="form-check-input tl-sev-chk" type="checkbox" value="MEDIUM" id="tlSevMedium" onchange="timelineLimit=300; loadTimeline();">
+                        <label class="form-check-label small" for="tlSevMedium"><span class="badge bg-warning text-dark" style="font-size:.6rem;">Medium</span></label>
+                    </div>
+                    <div class="form-check">
+                        <input class="form-check-input tl-sev-chk" type="checkbox" value="LOW" id="tlSevLow" onchange="timelineLimit=300; loadTimeline();">
+                        <label class="form-check-label small" for="tlSevLow"><span class="badge bg-secondary" style="font-size:.6rem;">Low</span></label>
+                    </div>
+                    <div class="form-check">
+                        <input class="form-check-input tl-sev-chk" type="checkbox" value="INFO" id="tlSevInfo" onchange="timelineLimit=300; loadTimeline();">
+                        <label class="form-check-label small" for="tlSevInfo"><span class="badge bg-info text-dark" style="font-size:.6rem;">Info</span></label>
+                    </div>
+                </div>
+                <div class="mb-3">
                     <label class="form-label small text-muted mb-1" for="tlRange">Time Range</label>
                     <select id="tlRange" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="onTimelineRangeChange(); timelineLimit=300; loadTimeline();">
                         <option value="1h">Last 1 hour</option>
@@ -94,7 +117,14 @@
                 </div>
                 <div class="mb-3">
                     <label class="form-label small text-muted mb-1" for="tlSearch">Search</label>
-                    <input type="text" id="tlSearch" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Host, user, message…" onkeydown="if(event.key==='Enter'){timelineLimit=300; loadTimeline();}">
+                    <input type="text" id="tlSearch" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder='host:WIN-A "exact phrase"' title="Searches across hosts, apps, IDs, users, and messages by default; field:value scopes to one column -- same query language as Log Search." onkeydown="if(event.key==='Enter'){timelineLimit=300; loadTimeline();}">
+                    <div class="d-flex flex-wrap align-items-center gap-1 mt-1">
+                        <span class="text-muted" style="font-size:.7rem;">Try:</span>
+                        <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1 query-hint-btn" style="font-size:.65rem;" onclick="insertTimelineQueryHint('host:WIN-A')" title="Scope a term to one column">host:WIN-A</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1 query-hint-btn" style="font-size:.65rem;" onclick="insertTimelineQueryHint(String.fromCharCode(34) + 'exact phrase' + String.fromCharCode(34))" title="Quote to match literal text with spaces">"exact"</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1 query-hint-btn" style="font-size:.65rem;" onclick="insertTimelineQueryHint('-exclude')" title="Negate a term (NOT exclude also works)">-exclude</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1 query-hint-btn" style="font-size:.65rem;" onclick="insertTimelineQueryHint('win*')" title="* = any characters, ? = one character">win*</button>
+                    </div>
                 </div>
                 <button class="btn btn-outline-secondary btn-sm w-100" onclick="timelineLimit=300; loadTimeline();"><i class="fa-solid fa-rotate me-1"></i> Apply / Refresh</button>
                 </div>
@@ -805,6 +835,26 @@ function getTimelineTypes() {
     return types;
 }
 
+// Unlike Event Types above (which must always have at least one checked -- they select
+// which SQL branches get unioned at all), severity is a plain WHERE-clause value list on
+// /api/logs/search (already supported server-side via _build_log_other_filters, just never
+// wired up from this tab before) -- none checked means no filter, matching how a fresh
+// page load shows everything today.
+function getTimelineSeverities() {
+    return Array.from(document.querySelectorAll('.tl-sev-chk:checked')).map(el => el.value);
+}
+
+// Same click-to-insert cheat sheet as Log Search's Advanced Query box
+// (dashboard.html's insertQueryHint) -- a separate copy per this codebase's per-file
+// convention, scoped to this tab's own #tlSearch input.
+function insertTimelineQueryHint(snippet) {
+    const input = document.getElementById('tlSearch');
+    input.value = input.value ? `${input.value} ${snippet}` : snippet;
+    input.focus();
+    const pos = input.value.length;
+    input.setSelectionRange(pos, pos);
+}
+
 function timelineTypeBadge(t) {
     if (t === 'alert') return '<span class="badge bg-danger" style="font-size:.65rem;"><i class="fa-solid fa-triangle-exclamation me-1"></i>Alert</span>';
     if (t === 'anomaly') return '<span class="badge bg-info text-dark" style="font-size:.65rem;"><i class="fa-solid fa-user-secret me-1"></i>UEBA</span>';
@@ -819,16 +869,18 @@ function timelineTypeBadge(t) {
 // the tail -- ...\Git\bin\git.exe vs ...\Git\mingw64\bin\git.exe -- is what actually
 // distinguishes otherwise-identical-looking entries) so path context isn't lost for a
 // masquerading check, with the untruncated value always available via the title tooltip.
-// Same idea as dashboard.html's own pivotLinkHtml (process_image is already an
-// established Log Search pivot field there via PIVOT_COLUMNS) -- ueba.html doesn't
+// Same idea as dashboard.html's own pivotLinkHtml (process_image/host/username are all
+// established Log Search pivot fields there via PIVOT_COLUMNS) -- ueba.html doesn't
 // share that file's helper (per this codebase's per-file convention), so a small
 // equivalent lives here instead, calling the genuinely-global pivotToLogSearch
-// (base.html). data-* attribute (not an inline JS string literal) so a path
+// (base.html). data-* attribute (not an inline JS string literal) so a value
 // containing a quote/backslash can't break the onclick -- dataset auto-decodes the
-// escHtml()'d attribute value back to the raw string.
-function processPivotLink(rawValue, renderedHtml) {
+// escHtml()'d attribute value back to the raw string. `field` itself is always a fixed
+// literal from a call site below, never event data, so interpolating it directly into
+// the onclick is safe.
+function fieldPivotLink(field, rawValue, renderedHtml, label) {
     if (!rawValue) return renderedHtml;
-    return `<a href="#" class="text-info text-decoration-none" title="Search all logs for this process" data-pivot-value="${escHtml(rawValue)}" onclick="pivotToLogSearch('process_image', this.dataset.pivotValue); return false;">${renderedHtml}</a>`;
+    return `<a href="#" class="text-info text-decoration-none" title="Search all logs for this ${escHtml(label || field)}" data-pivot-value="${escHtml(rawValue)}" onclick="pivotToLogSearch('${field}', this.dataset.pivotValue); return false;">${renderedHtml}</a>`;
 }
 
 function renderTimelineProcess(ev) {
@@ -847,14 +899,30 @@ function renderTimelineProcess(ev) {
     // interactivity. Pivots on the full path (not just the displayed basename), since
     // that's what Log Search's own process_image column actually stores.
     const nameHtml = name ? `<code class="text-info">${escHtml(name)}</code>` : '<span class="text-muted">—</span>';
-    return `${name ? processPivotLink(path, nameHtml) : nameHtml}${pathLine}${cmdLine}`;
+    return `${name ? fieldPivotLink('process_image', path, nameHtml, 'process') : nameHtml}${pathLine}${cmdLine}`;
 }
 
 function timelineEntityCell(ev) {
     const badge = ev.type === 'anomaly' && ev.entity_type ? entityBadge(ev.entity_type) : '';
+    const hostHtml = fieldPivotLink('host', ev.host, `<strong>${escHtml(ev.host || 'UNKNOWN')}</strong>`, 'host');
     const userLine = (ev.username && ev.username !== '-')
-        ? `<br><span class="text-muted small">${escHtml(ev.username)}</span>` : '';
-    return `${badge}<strong>${escHtml(ev.host || 'UNKNOWN')}</strong>${userLine}`;
+        ? `<br>${fieldPivotLink('username', ev.username, `<span class="text-muted small">${escHtml(ev.username)}</span>`, 'user')}` : '';
+    return `${badge}${hostHtml}${userLine}`;
+}
+
+// Maps this tab's own event-type checkboxes (anomaly/alert/log/command) onto Log
+// Search's item_type deep-link values (dashboard.html, DEEP_LINK_ITEM_TYPE_CHK) -- the
+// same ?item_id=&item_type= mechanism MITRE Coverage's Validated popup already uses to
+// jump straight to one exact row there, reused here instead of duplicating dashboard.html's
+// entire triage/add-to-case/link-to-entity modal in a second template. 'command' has no
+// entry: an EDR action's full result already has its own view in cases.html, not Log
+// Search, matching the same carve-out dashboard.html's own deep link documents.
+const TIMELINE_ITEM_TYPE_MAP = { alert: 'alert', anomaly: 'ueba_event', log: 'fim_event' };
+
+function timelineDetailLink(ev) {
+    const itemType = TIMELINE_ITEM_TYPE_MAP[ev.type];
+    if (!itemType || !ev.id) return '';
+    return ` <a href="/siem?tab=search&item_id=${encodeURIComponent(ev.id)}&item_type=${itemType}" target="_blank" class="text-info text-decoration-none" title="Open full detail (triage, add to case, link to entity) in Log Search"><i class="fa-solid fa-arrow-up-right-from-square"></i></a>`;
 }
 
 function timelineDetailCell(ev) {
@@ -867,7 +935,7 @@ function timelineDetailCell(ev) {
         : `<strong>${escHtml(ev.app || '')}</strong>${ev.event_id && ev.event_id !== '-' ? ' <span class="text-muted">(Event ID ' + escHtml(ev.event_id) + ')</span>' : ''}${msg ? ' — ' + escHtml(msgShort) : ''}`;
     const recur = ev.occurrence_count > 1
         ? ` <span class="badge bg-secondary" title="Recurred ${ev.occurrence_count} times, last at ${escHtml(ev.last_seen || '')}">&times;${ev.occurrence_count}</span>` : '';
-    return headline + recur;
+    return headline + recur + timelineDetailLink(ev);
 }
 
 // Same collapse/expand idea as base.html's sidebar toggle, scoped to just this one
@@ -903,6 +971,8 @@ function loadTimeline() {
     params.set('types', types.join(','));
     params.set('range', range);
     params.set('limit', timelineLimit);
+    const severities = getTimelineSeverities();
+    if (severities.length) params.set('severity', severities.join(','));
     const q = document.getElementById('tlSearch').value.trim();
     if (q) params.set('q', q);
     if (range === 'custom') {
