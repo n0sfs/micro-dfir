@@ -187,7 +187,7 @@
                         <option value="new_destination_ip">New Destination IP</option>
                         <option value="process_lineage">Suspicious Process Lineage</option>
                         <option value="off_hours_activity">Off-Hours Activity</option>
-                        <option value="rare_process_population">Rare Process (Fleet-Wide)</option>
+                        <option value="rare_process_population">Rare Process (Peer-Tier or Fleet-Wide)</option>
                         <option value="beaconing_detected">Beaconing Detection</option>
                         <option value="multi_signal_convergence">Multi-Signal Convergence</option>
                         <option value="sequence_chain_progression">Sequence Chain Progression</option>
@@ -249,8 +249,17 @@
                     </div>
                     <div class="form-check form-switch mt-2 d-flex align-items-center flex-wrap gap-2">
                         <div>
+                            <!-- Was "across the whole fleet" -- factually wrong. The model
+                                 (_run_rare_process_population_model, ueba_engine.py) compares
+                                 within the host's own criticality tier first, only falling
+                                 back to fleet-wide when that tier doesn't have enough hosts to
+                                 compare against -- matching the accurate description the
+                                 Dynamic Scoring config field for this same model already uses
+                                 ('Rare Process (Peer-Tier or Fleet-Wide)') elsewhere in this
+                                 file. An admin tuning this threshold deserves the same accurate
+                                 picture, not a simplified-to-the-point-of-wrong one. -->
                             <input class="form-check-input" type="checkbox" id="cfgRareProcessEnabled" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
-                            <label class="form-check-label small" for="cfgRareProcessEnabled">Flag processes rare across the whole fleet, seen on</label>
+                            <label class="form-check-label small" for="cfgRareProcessEnabled">Flag processes rare among a host's criticality-tier peers (or fleet-wide if that tier is too small to compare against), seen on</label>
                         </div>
                         <input type="number" id="cfgRareProcessMaxHosts" class="form-control form-control-sm bg-dark text-light border-secondary" style="width:70px;" min="1" max="50" step="1" {{ '' if has_permission('ueba.config.manage') else 'disabled' }}>
                         <span class="text-muted small">host(s) or fewer <span class="text-muted">(independent of any single host's own baseline)</span></span>
@@ -509,9 +518,14 @@
             <h6 class="text-info mb-3">Identities</h6>
             <p class="text-muted small mb-3">Mark a user as privileged so their UEBA risk score is weighted up (&times;1.5) -- an admin account is a higher-value target than a standard one. Mark someone as <strong>departing</strong> (also &times;1.5, stacking with privileged) for the classic insider-threat window -- data exfiltration risk is well known to spike on the way out. Mark someone as <strong>watched</strong> to keep them on the standing list below and on the Insider Threat dashboard, independent of whatever their score happens to be this week -- a real investigation often runs for weeks past any one spike.</p>
             {% if has_permission('assets.manage') %}
+            <!-- 2+2+2+2+2+2=12 -- adding the Departing checkbox pushed this to 14/12 without
+                 rebalancing (Username/Department were col-md-3 each), wrapping the Add
+                 button onto its own line below the fields on every md+ screen. Caught live
+                 while walking the tab, not by any fixture/vm-context test (this is a pure
+                 CSS grid-math bug, no JS logic to unit-test). -->
             <div class="row g-2 mb-3" style="max-width:900px;">
-                <div class="col-md-3"><input type="text" id="newIdentityUsername" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Username"></div>
-                <div class="col-md-3"><input type="text" id="newIdentityDepartment" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Department (optional)"></div>
+                <div class="col-md-2"><input type="text" id="newIdentityUsername" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Username"></div>
+                <div class="col-md-2"><input type="text" id="newIdentityDepartment" class="form-control form-control-sm bg-dark text-light border-secondary" placeholder="Department (optional)"></div>
                 <div class="col-md-2 d-flex align-items-center">
                     <div class="form-check">
                         <input class="form-check-input" type="checkbox" id="newIdentityPrivileged">
@@ -1335,7 +1349,7 @@ const INSIGHTS_MODEL_LABELS = {
     failed_login: 'Failed Login', first_time_action: 'First-Time Action', volume_anomaly: 'Volume Anomaly', new_source_ip: 'New Source IP',
     new_process: 'New Process', new_destination_ip: 'New Destination IP',
     process_lineage: 'Suspicious Process Lineage', off_hours_activity: 'Off-Hours Activity',
-    rare_process_population: 'Rare Process (Fleet-Wide)',
+    rare_process_population: 'Rare Process (Peer-Tier or Fleet-Wide)',
     beaconing_detected: 'Beaconing Detection',
     multi_signal_convergence: 'Multi-Signal Convergence',
     sequence_chain_progression: 'Sequence Chain Progression',
