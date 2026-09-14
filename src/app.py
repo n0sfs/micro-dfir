@@ -8540,7 +8540,7 @@ def _run_playbook_action(db, cid, action_type, params, dry_run=False):
         # ingest address would strand the host exactly the same way -- and a playbook can
         # isolate several hosts at once, so getting it wrong here strands all of them.
         settings_map = {r[0]: r[1] for r in db.execute("SELECT key, value FROM settings").fetchall()}
-        soc_ips = _soc_allowlist_ips(settings_map, request.host)
+        soc_ips = _soc_allowlist_endpoints(settings_map, request.host)
         if not soc_ips:
             return "isolate_host skipped: cannot determine this server's address for the isolation allowlist -- set the UI Bind IP under Settings > Network."
         soc_ip = ','.join(soc_ips)
@@ -19669,7 +19669,7 @@ def api_fim_path_detail(fid):
 # heavier hunt-flavored sweeps/collections) stays gated to Tier 3+ below.
 AGENT_COMMAND_TIER1_LABELS = {'isolate_host', 'restore_network', 'block_ip', 'unblock_ip', 'collect_triage', 'kill_process', 'quarantine_file', 'kill_scheduled_task'}
 
-def _soc_allowlist_ips(settings_map, request_host=None):
+def _soc_allowlist_endpoints(settings_map, request_host=None):
     """Every address an isolated endpoint must still be able to reach us on.
 
     This used to be a single value read from ingest_bind_ip, and on a dual-homed
@@ -19690,21 +19690,29 @@ def _soc_allowlist_ips(settings_map, request_host=None):
     Both bind addresses are included, plus the address this request arrived on (which is
     how an operator reaches the UI, and the only clue available when a bind is the
     0.0.0.0 wildcard). Duplicates collapse, so a single-homed appliance still emits
-    exactly one address and behaves exactly as before."""
-    ips = []
-    for key in ('ui_bind_ip', 'ingest_bind_ip'):
+    exactly one address and behaves exactly as before.
+
+    Returned as "ip:port" entries. The port matters: the isolation script connects back to
+    each of these after applying the rules and rolls the whole isolation back if none
+    answers, which is the endpoint-side guard against exactly the failure above -- only the
+    endpoint can detect it, because by definition the server stops hearing from it."""
+    ui_port = (settings_map.get('ui_port') or '5001').strip() or '5001'
+    ingest_port = (settings_map.get('ingest_port') or '5000').strip() or '5000'
+    entries = []
+    for key, port in (('ui_bind_ip', ui_port), ('ingest_bind_ip', ingest_port)):
         val = (settings_map.get(key) or '').strip()
         # 0.0.0.0 means "every interface" -- it is not an address an endpoint can send to.
         if val and val != '0.0.0.0':
-            ips.append(val)
+            entries.append(f'{val}:{port}')
     if request_host:
-        host_only = request_host.split(':')[0].strip()
+        host_only, _, host_port = request_host.partition(':')
+        host_only = host_only.strip()
         if host_only and host_only != '0.0.0.0':
-            ips.append(host_only)
+            entries.append(f"{host_only}:{(host_port or ui_port).strip()}")
     deduped = []
-    for ip in ips:
-        if ip not in deduped:
-            deduped.append(ip)
+    for e in entries:
+        if e not in deduped:
+            deduped.append(e)
     return deduped
 
 def _queue_agent_command(db, hostname, label, params, script_in, queued_by):
@@ -19740,8 +19748,8 @@ def _queue_agent_command(db, hostname, label, params, script_in, queued_by):
         if label == 'isolate_host' and not params.get('soc_ip'):
             s = {r[0]: r[1] for r in db.execute("SELECT key, value FROM settings").fetchall()}
             # Every address the agent may need, not just the ingest one -- see
-            # _soc_allowlist_ips() for the production incident that forced this.
-            ips = _soc_allowlist_ips(s, request.host)
+            # _soc_allowlist_endpoints() for the production incident that forced this.
+            ips = _soc_allowlist_endpoints(s, request.host)
             if not ips:
                 return None, "Cannot determine this server's address for the isolation allowlist -- set the UI Bind IP under Settings > Network."
             params['soc_ip'] = ','.join(ips)

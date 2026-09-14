@@ -36,6 +36,43 @@ def _normalize_soc_ips(soc_ips):
     if not out:
         raise ValueError("At least one SOC IP address is required for isolation")
     return out
+
+def _normalize_soc_endpoints(value):
+    """'ip:port' entries (or bare 'ip') -> ([ips], [(ip, port), ...]).
+
+    The firewall rules only need addresses, but *verifying* the isolation didn't sever
+    our own command channel needs a port to connect to -- so callers pass ip:port and
+    both come out of here. A bare ip is accepted (it still produces a firewall rule) but
+    contributes no probe target, which is the honest degradation: no port, no proof.
+
+    Same per-element validation as _normalize_soc_ips: every address and every port is
+    checked on its own, because these are interpolated into a PowerShell array, an
+    iptables rule and a /dev/tcp path."""
+    if isinstance(value, str):
+        candidates = value.split(',')
+    else:
+        candidates = list(value or [])
+    ips, probes = [], []
+    for raw in candidates:
+        entry = str(raw).strip()
+        if not entry:
+            continue
+        ip, _, port = entry.partition(':')
+        ip = ip.strip()
+        if not _IPV4_RE.match(ip):
+            raise ValueError(f"Invalid SOC IP address: {ip!r}")
+        if ip not in ips:
+            ips.append(ip)
+        if port:
+            if not port.strip().isdigit() or not (0 < int(port) < 65536):
+                raise ValueError(f"Invalid SOC port: {port!r}")
+            pair = (ip, str(int(port)))
+            if pair not in probes:
+                probes.append(pair)
+    if not ips:
+        raise ValueError("At least one SOC address is required for isolation")
+    return ips, probes
+
 _SHA256_RE = re.compile(r'^[0-9a-fA-F]{64}$')
 _MD5_RE = re.compile(r'^[0-9a-fA-F]{32}$')
 _SHA1_RE = re.compile(r'^[0-9a-fA-F]{40}$')
@@ -78,6 +115,53 @@ foreach ($p in $targets) {{
 @{{killed=$killed; failed=$failed}} | ConvertTo-Json -Compress
 """
 
+# Proof, from the endpoint's own side of the firewall, that isolation did not sever the
+# channel that un-isolation has to arrive on.
+#
+# This exists because that is precisely what happened in production: the allowlist held
+# the ingest address but not the check-in address, so the host was contained AND
+# unreachable by any remote means -- restore_network had no path to it, and the isolate's
+# own result had no path back. The endpoint is the only party that can detect this, since
+# by definition the server stops hearing from it.
+#
+# So: after the rules are applied, try an actual TCP connect to each SOC endpoint. If none
+# answers, the isolation has cut our own command channel -- tear it back down and report
+# failure. A host that is briefly isolated and then released is a far better outcome than
+# one that is contained and unrecoverable; the analyst sees a red "Failed" saying exactly
+# what went wrong, instead of a host that quietly stops answering.
+#
+# Three rounds with a pause: the profile change can race a connection that is mid-setup,
+# and rolling back a *working* isolation over one transient failure would be its own bug.
+_WIN_VERIFY_SOC_REACHABLE = """    $socProbes = @(__PROBES__)
+    $socOk = $false
+    foreach ($round in 1..3) {
+        foreach ($probe in $socProbes) {
+            try {
+                $client = New-Object System.Net.Sockets.TcpClient
+                $async = $client.BeginConnect($probe[0], $probe[1], $null, $null)
+                if ($async.AsyncWaitHandle.WaitOne(4000, $false)) {
+                    try { $client.EndConnect($async); $socOk = $true } catch {}
+                }
+                $client.Close()
+            } catch {}
+            if ($socOk) { break }
+        }
+        if ($socOk) { break }
+        Start-Sleep -Seconds 3
+    }
+    if (-not $socOk) {
+        Set-NetFirewallProfile -Profile Domain,Public,Private -DefaultInboundAction NotConfigured -DefaultOutboundAction NotConfigured -ErrorAction SilentlyContinue
+        Remove-NetFirewallRule -DisplayName "MicroDFIR-Isolation-*" -ErrorAction SilentlyContinue
+        Write-Error "isolate_host ROLLED BACK -- the isolation cut this host off from the SOC itself, which would have left it contained with no way to receive restore_network. The firewall has been returned to its previous state and the host is NOT isolated. Check that every SOC address/port the agent uses is in the isolation allowlist."
+        exit 1
+    }
+"""
+
+# No port was supplied for any address, so there is nothing to connect to. Say so in the
+# output rather than letting a silent absence of verification read as verification.
+_WIN_VERIFY_SKIPPED = """    Write-Warning "isolate_host: no SOC port supplied, so reachability after isolation was NOT verified. If this host stops checking in, the isolation allowlist is the first thing to check."
+"""
+
 # The allow-SOC rules and the default-policy flip are wrapped together so a partial
 # apply can't be reported as a clean isolation. Without -ErrorAction Stop these cmdlets
 # only warn on failure (e.g. no admin rights) and the script would still fall through to
@@ -100,15 +184,19 @@ foreach ($p in $targets) {{
 # back either. Containment was real and irreversible by any remote means: the one channel
 # recovery depends on is the one isolation severed. Every address the agent might need is
 # now allowed, and _soc_allowlist_ips() in app.py is what assembles them.
-def isolate_host(soc_ips):
-    ips = _normalize_soc_ips(soc_ips)
+def isolate_host(soc_endpoints):
+    ips, probes = _normalize_soc_endpoints(soc_endpoints)
     joined = ','.join(ips)          # PowerShell -RemoteAddress takes a comma-separated array
     human = ' / '.join(ips)
+    verify = _WIN_VERIFY_SOC_REACHABLE.replace(
+        '__PROBES__', ', '.join(f"@('{ip}', {port})" for ip, port in probes)
+    ) if probes else _WIN_VERIFY_SKIPPED
     return f"""try {{
     Remove-NetFirewallRule -DisplayName "MicroDFIR-Isolation-*" -ErrorAction SilentlyContinue
     New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Allow-SOC-Out" -Direction Outbound -RemoteAddress {joined} -Action Allow -Profile Any -ErrorAction Stop | Out-Null
     New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Allow-SOC-In" -Direction Inbound -RemoteAddress {joined} -Action Allow -Profile Any -ErrorAction Stop | Out-Null
     Set-NetFirewallProfile -Profile Domain,Public,Private -DefaultInboundAction Block -DefaultOutboundAction Block -ErrorAction Stop
+{verify}
     "Host isolated. Only traffic to/from {human} is permitted."
 }} catch {{
     $errMsg = $_.Exception.Message -replace '"', "'"
@@ -1625,14 +1713,42 @@ _ISOLATION_CHAIN = "MICRODFIR_ISOLATION"
 # soc_ips is every address the agent may need (see isolate_host() for why a single one
 # silently made isolation irreversible on a dual-homed appliance) -- one ACCEPT pair per
 # address, emitted before the chain's default DROP.
-def isolate_host_linux(soc_ips):
-    ips = _normalize_soc_ips(soc_ips)
+def isolate_host_linux(soc_endpoints):
+    ips, probes = _normalize_soc_endpoints(soc_endpoints)
     accepts = '\n'.join(
         f'iptables -A {_ISOLATION_CHAIN} -d {ip} -j ACCEPT || fail "could not allow outbound to SOC {ip}"\n'
         f'iptables -A {_ISOLATION_CHAIN} -s {ip} -j ACCEPT || fail "could not allow inbound from SOC {ip}"'
         for ip in ips
     )
     human = ' / '.join(ips)
+    # Same self-check and rollback as the Windows build -- see _WIN_VERIFY_SOC_REACHABLE
+    # for why the endpoint has to be the one that notices. bash's /dev/tcp is a builtin,
+    # so this needs no nc/curl to be installed.
+    if probes:
+        # Probes are unrolled rather than iterated over positional parameters: every test
+        # has to sit inside an `if` condition, which is the one place `set -e` is exempt.
+        # A bare `[ "$soc_ok" = "1" ] && break` would abort the whole script the moment the
+        # first round found nothing -- before the rollback below could ever run.
+        checks = '\n'.join(
+            f'    if [ "$soc_ok" != "1" ] && timeout 4 bash -c "exec 3<>/dev/tcp/{ip}/{port}" 2>/dev/null; then soc_ok=1; fi'
+            for ip, port in probes
+        )
+        verify = f'''soc_ok=0
+for round in 1 2 3; do
+{checks}
+    if [ "$soc_ok" = "1" ]; then break; fi
+    sleep 3
+done
+if [ "$soc_ok" != "1" ]; then
+    iptables -D INPUT -j {_ISOLATION_CHAIN} 2>/dev/null || true
+    iptables -D OUTPUT -j {_ISOLATION_CHAIN} 2>/dev/null || true
+    iptables -F {_ISOLATION_CHAIN} 2>/dev/null || true
+    iptables -X {_ISOLATION_CHAIN} 2>/dev/null || true
+    echo "isolate_host ROLLED BACK -- the isolation cut this host off from the SOC itself, which would have left it contained with no way to receive restore_network. iptables has been returned to its previous state and the host is NOT isolated. Check that every SOC address/port the agent uses is in the isolation allowlist." >&2
+    exit 1
+fi'''
+    else:
+        verify = 'echo "isolate_host: no SOC port supplied, so reachability after isolation was NOT verified. If this host stops checking in, the isolation allowlist is the first thing to check." >&2'
     return f"""set -e
 fail() {{ echo "isolate_host FAILED -- host is NOT contained: $1" >&2; exit 1; }}
 command -v iptables >/dev/null 2>&1 || fail "iptables not found"
@@ -1647,6 +1763,7 @@ iptables -I INPUT 1 -j {_ISOLATION_CHAIN} || fail "could not attach chain to INP
 iptables -I OUTPUT 1 -j {_ISOLATION_CHAIN} || fail "could not attach chain to OUTPUT"
 iptables -C INPUT -j {_ISOLATION_CHAIN} 2>/dev/null || fail "chain not referenced from INPUT after apply"
 iptables -C OUTPUT -j {_ISOLATION_CHAIN} 2>/dev/null || fail "chain not referenced from OUTPUT after apply"
+{verify}
 echo "Host isolated. Only traffic to/from {human} is permitted."
 """
 
@@ -2557,18 +2674,38 @@ PYEOF
 _PF_ANCHOR = "microdfir/isolation"
 
 # soc_ips, plural, for the same reason as isolate_host() -- one pass pair per address.
-def isolate_host_macos(soc_ips):
-    ips = _normalize_soc_ips(soc_ips)
+def isolate_host_macos(soc_endpoints):
+    ips, probes = _normalize_soc_endpoints(soc_endpoints)
     passes = '\n'.join(
         f'pass out quick proto tcp from any to {ip}\npass in quick proto tcp from {ip} to any'
         for ip in ips
     )
     human = ' / '.join(ips)
+    # Same self-check and rollback as the other two platforms; nc ships with macOS.
+    if probes:
+        checks = '\n'.join(
+            f'    if [ "$soc_ok" != "1" ] && nc -z -w 4 {ip} {port} 2>/dev/null; then soc_ok=1; fi'
+            for ip, port in probes
+        )
+        verify = f'''soc_ok=0
+for round in 1 2 3; do
+{checks}
+    if [ "$soc_ok" = "1" ]; then break; fi
+    sleep 3
+done
+if [ "$soc_ok" != "1" ]; then
+    pfctl -a {_PF_ANCHOR} -F all 2>&1
+    echo "isolate_host ROLLED BACK -- the isolation cut this host off from the SOC itself, which would have left it contained with no way to receive restore_network. The pf anchor has been flushed and the host is NOT isolated. Check that every SOC address/port the agent uses is in the isolation allowlist." >&2
+    exit 1
+fi'''
+    else:
+        verify = 'echo "isolate_host: no SOC port supplied, so reachability after isolation was NOT verified. If this host stops checking in, the isolation allowlist is the first thing to check." >&2'
     return f"""cat <<'PFRULES' | pfctl -a {_PF_ANCHOR} -f - 2>&1
 block all
 {passes}
 PFRULES
 pfctl -e 2>&1 | grep -v 'already enabled'
+{verify}
 echo "Host isolated (pfctl anchor {_PF_ANCHOR}). Only traffic to/from {human} is permitted."
 """
 
