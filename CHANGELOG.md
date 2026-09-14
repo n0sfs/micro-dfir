@@ -78,6 +78,33 @@ real risk breakdown now carries the ⓘ info icon with that text — left in pla
 afterward as genuinely useful documentation, not reverted like the session's usual
 disposable test data.
 
+### UEBA usability pass 1 (item 4 of 4): description info-icon + Never Matched badge on Scoring & Rules
+
+The Scoring & Rules list table had no indicator for a rule's `description` field
+(invisible until the Edit modal was opened, even though the risk detail modal already
+shows it as an info-icon tooltip via a JOIN on the same field) and no in-table "Never
+Matched" signal, despite `matches_total` already being computed server-side
+(`_ANOMALY_RULES_TUNING_SQL`) and a "Never Matched" quick-filter chip already sitting
+above the table — an analyst had to apply that filter to discover which rules never
+fire, rather than seeing it at a glance per row.
+
+Added the same info-icon convention next to the rule name in `arRenderTable()`, and a
+"Never Matched" badge in the Last Matched column when `matches_total` is 0 (falls back
+to a plain dash if a rule somehow has matches but no resolved `last_matched` — avoids a
+false claim). Pure frontend change; the backend already selected everything needed.
+
+Verified with a JS vm-context test (5 cases): a rule with a description shows the info
+icon with that exact text as its tooltip, one without shows no icon, a rule with zero
+total matches shows the Never Matched badge, a matched rule shows its timestamp
+instead, and a matches_total>0-but-no-last_matched edge case still avoids the false
+badge. Live-verified on production against real data: 6 of the real 15 rules
+("Critical/High-Severity Alert with Internal Lateral Movement," host and user variants,
+etc.) correctly show the Never Matched badge, and the real "Named-User Alert Sourced
+from Internal Network" rule's info icon carries its actual rationale text (added last
+pass) — confirmed by reading the `title` attribute directly.
+
+**Pass 1 complete (4/4).**
+
 ### UEBA usability pass 1 (item 3 of 4): Departing status on the Insider Threat Watchlist widget
 
 `/api/dashboards/watchlist` selected everything about a watched identity except
