@@ -78,6 +78,25 @@ real risk breakdown now carries the ⓘ info icon with that text — left in pla
 afterward as genuinely useful documentation, not reverted like the session's usual
 disposable test data.
 
+### UEBA usability pass 1 (item 3 of 4): Departing status on the Insider Threat Watchlist widget
+
+`/api/dashboards/watchlist` selected everything about a watched identity except
+`departing`/`departing_note` — exactly the signal this widget exists to surface (the
+whole reason `departing` was added last pass was the classic "risk spikes on the way
+out" insider-threat window). Added both to the SELECT and a "Departing" badge (note as
+its tooltip) next to the username in `renderWatchlistWidget()`, matching the same badge
+convention already used in the risk detail modal and the Asset & Identity table.
+
+Verified with a real SQLite fixture test (3 cases): a departing watched user carries
+the flag and note through the watchlist query, a non-departing one shows a falsy flag,
+and an unwatched departing user is still excluded regardless. Plus a JS vm-context test
+(3 cases) for the badge rendering, including the pre-existing empty-state row staying
+unaffected. Live-verified on production: added a real test identity
+(`qa_test_departing_user`) flagged both departing and watched with a note, confirmed
+the Insider Threat dashboard's Watchlist widget rendered the red "Departing" badge with
+the note as its tooltip (`title` attribute read directly via devtools), then deleted
+the test identity, restoring the table to its original empty state.
+
 ### UEBA usability pass 1 (items 1-2 of 4): Add Identity grid overflow, inaccurate Rare Process label
 
 Asked to run two more usability passes over UEBA. A live walkthrough plus a background
