@@ -62,11 +62,39 @@ Full commit-level detail is always available via `git log`.
   filter, since the existing `pending` option would have shown fewer rows than the
   Pending tile's own number.
 
-Verified with 39 tests: 15 SQLite fixture tests (the DHCP-duplicate and NAT-collapse
+Verified with 42 tests: 15 SQLite fixture tests (the DHCP-duplicate and NAT-collapse
 bugs are **reproduced** against `GROUP BY ip_address` before being fixed; likewise the
 old tile derivation summing to 50 and reading 0-completed under a queue burst), 6 tests
-exercising the extracted spool helper from both agent sources, and 18 vm-context tests
-that run the real `renderEndpoints()` against a stubbed DOM and assert on rendered HTML.
+exercising the extracted spool helper from both agent sources, 18 vm-context tests that
+run the real `renderEndpoints()` against a stubbed DOM and assert on rendered HTML, and
+3 for the race below.
+
+**Live verification found a fourth bug and a stale-command backlog.** Clicking the
+Pending tile applied the filter to the select but left 50 unfiltered rows in the table:
+the history table auto-refreshes every 8s, so a periodic *unfiltered* request is often
+already in flight when the user changes a filter, both write the tbody unconditionally,
+and the stale one lands last. Pre-existing — it affects the filter dropdowns too, the
+tiles just made it easy to hit. `loadCommandHistory()` now stamps each request with a
+monotonic sequence number and discards any superseded response. Re-verified on
+production with the refresh running: all three tiles now match their filtered row counts
+exactly (3/3 pending, 19/19 completed, 0/0 failed).
+
+Production numbers made the tile bug concrete: on real data the *old* derivation would
+have read **Pending 0**, Completed 49, Failed 1 — summing to exactly 50 — while three
+commands were genuinely outstanding (two `list_processes` from decommissioned QA hosts,
+a `persistence_sweep` queued against `soc-appliance` on 2026-08-31). The new tiles report
+Pending 3 and Completed 19 (7d), against 125 total history rows. Those three stale
+commands had been invisible the entire time.
+
+The `isolated` flag came back present and `false` for both live hosts (correct — neither
+is contained). The badge and the Isolate→Restore menu swap were verified by re-rendering
+the real table with the flag flipped client-side — nothing queued, no host touched — and
+the badge confirmed genuinely visible (non-zero box, computed `display` not `none`),
+which is the check the recurring `d-flex`/`!important` class demands. The Isolate confirm
+was opened for real on `WORKSTATION-B` and **cancelled**: title "Confirm action on
+WORKSTATION-B", body naming the host and spelling out the user-facing impact, and zero
+`isolate_host` commands queued afterwards. Per standing instruction `WORKSTATION-A` was
+never a target of any action.
 
 ### EDR workflow/agent review, Pass A — response-action correctness (5 of 14 findings)
 
