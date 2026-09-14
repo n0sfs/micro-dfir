@@ -110,6 +110,25 @@ deployments collapse to one URL and make no extra requests.
 server-side and applies to the next isolate on any agent version; the agent change reaches
 endpoints only via Upgrade Agent.
 
+**And then the upgrade looked like it did nothing.** Running Upgrade Agent left the
+reported version unchanged. The upgrade had in fact worked — the command completed and the
+agent restarted on schedule — but `AGENT_VERSION` was still `2026.09.05.2` despite *two*
+commits changing those files (the ingest spool, then the check-in fallback). The header
+comment on that constant says to bump it on every change; it wasn't.
+
+That is not cosmetic. The version string is the only observable evidence an upgrade
+reached an endpoint, so hosts running old code and hosts running new code reported
+identically, the fleet's version column couldn't tell them apart, and "did it apply?" had
+no answer. All three agents are now on `2026.09.14.1`, and macOS picked up the same
+check-in fallback rather than being left with the single-path weakness.
+
+The guard is an invariant checkable straight from git, so it needs no fingerprint file to
+maintain: **if an agent file differs from HEAD, its `AGENT_VERSION` must differ too.** It
+compares working tree against HEAD, so it fails *before* the commit that would ship the
+mistake, and a companion test proves the guard isn't vacuous by constructing exactly the
+change-without-bump case. Verified end-to-end afterwards: `2026.09.05.2` → `2026.09.14.1`
+on a real endpoint, with check-ins and log shipping continuing across the restart.
+
 ### EDR workflow/agent review, Pass C — polish (4 of 14, review complete: 14/14)
 
 - **Failed actions were greyed out in the host-detail popup.** That table carried its own
