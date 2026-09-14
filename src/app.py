@@ -19722,6 +19722,58 @@ def _queue_agent_command(db, hostname, label, params, script_in, queued_by):
     )
     return cur.lastrowid, None
 
+@app.route('/api/agent/commands/<int:cmd_id>/cancel', methods=['POST'])
+@login_required
+def api_agent_command_cancel(cmd_id):
+    """Withdraw a command that hasn't produced a result yet.
+
+    There was no way to do this at all: once queued, a command sat 'pending' forever if
+    its host never came back, and a 'sent' one was flipped back to 'pending' by the
+    5-minute stale requeue and re-dispatched the moment the host reappeared. So a command
+    aimed at the wrong host, or one whose intent has been overtaken by events, could not
+    be called off -- it just waited. Three commands from August were still queued against
+    decommissioned hosts when this was written.
+
+    The case that forced it: an isolate_host that reached the endpoint and cut it off
+    before reporting a result stays 'sent'. Fixing the endpoint by hand then brings it
+    back, the stale requeue flips that same isolate back to 'pending', and the host is
+    re-isolated on its next check-in -- the recovery undone by the queue.
+
+    Only an unfinished command can be cancelled. A 'done'/'failed' row is history and
+    stays exactly as it is; cancelling would rewrite what actually happened on an
+    endpoint. 'cancelled' is terminal and no longer matches the requeue's status = 'sent'
+    filter, so it can never be re-dispatched."""
+    err = require_permission('edr.command.basic')
+    if err: return err
+    db = get_db()
+    row = db.execute("SELECT id, hostname, label, status FROM agent_commands WHERE id = ?", (cmd_id,)).fetchone()
+    if not row:
+        return jsonify({'error': 'Command not found'}), 404
+    if row['status'] not in ('pending', 'sent'):
+        return jsonify({'error': f"Command #{cmd_id} is already {row['status']} -- only a pending or sent command can be cancelled."}), 400
+    # Conditional UPDATE, not a bare write: the agent may be polling for this exact
+    # command right now. If it was dispatched between the SELECT above and here,
+    # rowcount is still 1 (status was 'sent'), but a result landing first moves it to
+    # done/failed and this correctly refuses to overwrite that.
+    cur = db.execute(
+        "UPDATE agent_commands SET status = 'cancelled', completed_at = ? WHERE id = ? AND status IN ('pending', 'sent')",
+        (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), cmd_id)
+    )
+    db.commit()
+    if cur.rowcount == 0:
+        current = db.execute("SELECT status FROM agent_commands WHERE id = ?", (cmd_id,)).fetchone()
+        return jsonify({'error': f"Command #{cmd_id} finished as '{current['status'] if current else 'unknown'}' before it could be cancelled."}), 409
+    log_audit('agent_command_cancel', 'agent_command', cmd_id)
+    # A command already delivered to the endpoint may still be running there -- cancelling
+    # only stops the *server* from dispatching it again. Say so rather than implying the
+    # endpoint was called off.
+    return jsonify({
+        'status': 'success',
+        'was': row['status'],
+        'note': ('Cancelled before dispatch -- the endpoint never received it.' if row['status'] == 'pending'
+                 else 'This command had already been sent to the endpoint and may still run or have run there. Cancelling stops the server re-dispatching it; it does not recall it.')
+    })
+
 @app.route('/api/agent/commands/summary', methods=['GET'])
 @login_required
 def api_agent_commands_summary():

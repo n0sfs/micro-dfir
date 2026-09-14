@@ -2330,6 +2330,9 @@ function statusBadgeCmd(status) {
     if (status === 'done') return '<span class="badge bg-success">Done</span>';
     if (status === 'failed') return '<span class="badge bg-danger">Failed</span>';
     if (status === 'sent') return '<span class="badge bg-info text-dark">Sent</span>';
+    // Terminal, and deliberately distinct from Failed: the command never reported a
+    // result because it was withdrawn, not because it ran and went wrong.
+    if (status === 'cancelled') return '<span class="badge bg-dark border border-secondary text-muted" title="Withdrawn before a result came back. The server will not dispatch it again.">Cancelled</span>';
     return '<span class="badge bg-secondary">Pending</span>';
 }
 
