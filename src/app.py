@@ -13056,6 +13056,40 @@ def migrate_identities_departing():
     except Exception:
         pass
 
+def migrate_insider_runbook_collection_reality():
+    """Retrofits the corrected Insider Threat Response steps onto an already-seeded runbook.
+
+    IR_RUNBOOKS_SEED inserts with INSERT OR IGNORE on a unique name, so editing a seed
+    entry only ever reaches a *fresh* install -- every existing deployment keeps the
+    original text forever. That is the same "only applies on first seed" trap the Windows
+    channel filters hit, and it matters more here: the text being corrected told analysts
+    to go and review DLP and file-access logs, and a cloud/USB audit trail, none of which
+    this product collects. Finding that out mid-investigation is a credibility problem,
+    not just a coverage gap.
+
+    Matched on the old wording rather than applied blindly, so a runbook someone has since
+    edited themselves is left exactly as they wrote it."""
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT id, steps FROM ir_runbooks WHERE name = 'Insider Threat Response'").fetchone()
+        if not row:
+            conn.close()
+            return
+        steps_text = row['steps'] or ''
+        # Only the untouched original carries both of these phrases.
+        if 'DLP/file-access logs' not in steps_text and 'personal storage/cloud/USB activity in the audit trail' not in steps_text:
+            conn.close()
+            return
+        fresh = next((rb for rb in IR_RUNBOOKS_SEED if rb['name'] == 'Insider Threat Response'), None)
+        if fresh:
+            conn.execute("UPDATE ir_runbooks SET steps = ?, updated_at = ? WHERE id = ?",
+                         (json.dumps(fresh['steps']), datetime.now().strftime('%Y-%m-%d %H:%M:%S'), row['id']))
+            conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def migrate_case_visibility():
     """Opt-in case confidentiality. Ships inert: every existing case defaults to 'normal'
     and behaves exactly as it did, so nothing changes until a case is deliberately
@@ -20856,6 +20890,7 @@ migrate_log_imports()
 migrate_alerts_import_id()
 migrate_logsearch_import_permission()
 migrate_ir_runbooks()
+migrate_insider_runbook_collection_reality()
 migrate_runbooks_permission()
 
 try:
