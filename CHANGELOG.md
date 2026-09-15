@@ -124,6 +124,42 @@ usual pre-deploy check could not catch it. Fixed by moving the block above its f
 and the suite now walks the AST asserting no decorator is used above its own `def`, so the
 class cannot recur silently.
 
+**Evidence integrity, insider templates and an honest runbook** (third pass):
+
+- **Deleting a case destroyed its evidentiary record with no trace.** The delete removed
+  `case_events` — the append-only timeline, the one table with no UPDATE path anywhere
+  precisely so it can be trusted — and wrote **no audit entry at all**. A case, its notes,
+  its analyst actions and the record that any of it existed could be erased leaving nothing
+  behind. For an insider case ending in an employment or legal proceeding that is the
+  difference between a defensible file and an unexplained gap. It now snapshots the case
+  identity and per-table counts *before* destroying anything and audits what went.
+- **It also orphaned evidence.** `case_attachments` rows and the files under
+  `CASE_ATTACHMENTS_DIR` were never touched, so uploaded evidence outlived the case that
+  explained it — files nobody can account for, with no chain back to why they were
+  collected. Now removed along with `case_acl` rows and `case_links` pointing at the case
+  from either direction; a file that cannot be unlinked is named in the audit detail rather
+  than aborting the delete half-way and leaving the case in pieces.
+- **Four insider case templates.** All four shipped templates are intrusion-shaped, and the
+  nearest neighbour — "Compromised Account" — opens with *"Force password reset and revoke
+  active sessions"*, correct for a compromised account and exactly what you must not do
+  first against an insider. Added Departing Employee Review, Data Exfiltration (Insider),
+  Privilege Misuse and Acceptable Use Violation, with the HR/Legal gate ahead of any
+  investigative step. Acceptable Use deliberately scopes *first* and engages HR second: it
+  is the lowest-severity and most common outcome, and escalating before anyone has
+  established which policy is in scope is its own harm to the person. A test pins that
+  asymmetry so it reads as a decision rather than an oversight.
+- **The Insider Threat runbook stopped promising telemetry that doesn't exist.** It told
+  analysts to review "DLP/file-access logs" and a "cloud/USB audit trail" — the product
+  collects none of it. It now names the limits plainly and points at what *is* collected
+  and what has to be switched on first. A coverage gap is survivable; discovering
+  mid-investigation that the runbook described a product you don't have is not.
+
+One process note: the runbook fix initially shipped **inert**. `IR_RUNBOOKS_SEED` uses
+`INSERT OR IGNORE` on a unique name, so editing a seed entry only ever reaches a fresh
+install — the same "only applies on first seed" trap the Windows channel filters hit.
+Caught in live verification, then retrofitted by a migration that matches on the old
+wording so a runbook someone has edited themselves is left alone.
+
 **Found and not yet addressed** — the seeded "Insider Threat" queue still restricts
 nothing on its own (`queue_members` is never consulted by any read path), though a case in
 it can now be restricted individually; and TLP remains a badge, not a control. Also open: no person as a first-class case entity
