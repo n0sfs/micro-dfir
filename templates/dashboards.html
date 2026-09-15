@@ -596,10 +596,18 @@ function renderWatchlistWidget(container, widgetId, config) {
             <tbody><tr><td colspan="4" class="text-center text-muted py-3">Loading…</td></tr></tbody>
         </table>`;
     fetch('/api/dashboards/watchlist').then(r => {
+        // Restricted for the same reason the underlying table is -- these rows name who is
+        // under investigation and why. An expected outcome for some roles, not a failure.
+        if (r.status === 403) return null;
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
     }).then(d => {
         const body = container.querySelector('tbody');
+        if (d === null) {
+            body.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">'
+                + '<i class="fa-solid fa-lock me-1"></i>Restricted — viewing the watchlist needs the same permission as changing it.</td></tr>';
+            return;
+        }
         if (!d.watchlist.length) {
             body.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">No one is currently watched -- add someone on UEBA &gt; Asset &amp; Identity.</td></tr>';
             return;

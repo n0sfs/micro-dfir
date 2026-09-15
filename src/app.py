@@ -6780,6 +6780,15 @@ def classify_account(username):
 def api_identities():
     db = get_db()
     if request.method == 'GET':
+        # Gated on read, not just write. This table is the insider-threat watchlist: it
+        # names who is being watched, who put them there, and the free-text reason why --
+        # "suspected IP theft, HR engaged" sitting in watch_reason. It was readable by any
+        # logged-in account, which on a SOC appliance plausibly includes the person the
+        # entry is about. The write branch below already required assets.manage; the read
+        # simply never checked, which is the recurring "read route shipped with only
+        # @login_required" class CLAUDE.md documents.
+        err = require_permission('assets.manage')
+        if err: return err
         rows = db.execute(
             "SELECT id, username, department, privileged, watched, watch_reason, watched_at, watched_by, "
             "departing, departing_note, departing_at, departing_by, created_by, created_at FROM identities ORDER BY username"
@@ -11322,6 +11331,11 @@ def api_dashboard_top_risk_entities():
 @app.route('/api/dashboards/watchlist', methods=['GET'])
 @login_required
 def api_dashboard_watchlist():
+    # Same gate as GET /api/identities -- this widget serves the same rows, including
+    # watch_reason and departing_note. Gating one and not the other would just move the
+    # leak to the Insider Threat dashboard, where it is arguably more visible.
+    err = require_permission('assets.manage')
+    if err: return err
     db = get_db()
     rows = db.execute(
         "SELECT i.username, i.department, i.watch_reason, i.watched_at, i.watched_by, "

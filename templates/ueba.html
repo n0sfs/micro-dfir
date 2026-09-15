@@ -2339,9 +2339,22 @@ function importIdentities() {
 
 function loadIdentities() {
     return fetch('/api/identities').then(r => {
+        // The identity list is the insider-threat watchlist -- who is watched, by whom,
+        // and the free-text reason. Not everyone who can open this tab may read it, so a
+        // refusal is an expected outcome here, not a failure: say so plainly instead of
+        // rendering the red "failed to load" that implies something is broken.
+        if (r.status === 403) {
+            identitiesCount = 0;
+            document.getElementById('identitiesTableBody').innerHTML =
+                '<tr><td colspan="8" class="text-muted small"><i class="fa-solid fa-lock me-1"></i>' +
+                'Identity and watchlist entries are restricted. They name who is under investigation and why, ' +
+                'so viewing them needs the same permission as changing them.</td></tr>';
+            return [];
+        }
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
     }).then(rows => {
+        if (!Array.isArray(rows)) return;   // 403 handled above
         identitiesCount = rows.length;
         updateAssetIdentityEmptyBanner();
         const tbody = document.getElementById('identitiesTableBody');
