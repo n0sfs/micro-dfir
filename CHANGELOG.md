@@ -61,7 +61,7 @@ shape: the console said a host was contained and it was not.
   one alert that matters.
 
 Found while testing ISO-01: the IPv4 validation in `agent_scripts` was shape-only
-(`\d{1,3}` per octet), so `192.168.86.999` passed and became a malformed firewall rule.
+(`\d{1,3}` per octet), so `192.0.2.999` passed and became a malformed firewall rule.
 On the isolate path, a rule the firewall rejects or silently skips means a host reported
 as contained that isn't. All five call sites now range-check through `ipaddress`.
 
