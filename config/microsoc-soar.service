@@ -10,5 +10,23 @@ Environment="PYTHONPATH=/opt/micro-dfir/src"
 ExecStart=/opt/micro-dfir/venv/bin/python3 src/soar_engine.py
 Restart=always
 RestartSec=10
+
+# Confinement -- the same set the Sigma engine carries, applied here after that canary
+# ran clean (see config/microsoc-sigma.service for the full reasoning and for the two
+# directives deliberately left off across all of these units).
+#
+# This one is the lowest-risk of the three by a wide margin: soar_engine.py is a single
+# FastAPI endpoint that authenticates a webhook and returns {"status": "Logged"}. It
+# touches nothing but the settings table, so there is very little here for a directive
+# to break -- and equally little reason for the process to reach anything it now can't.
+NoNewPrivileges=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictNamespaces=true
 [Install]
 WantedBy=multi-user.target

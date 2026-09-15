@@ -10,5 +10,25 @@ Environment="PYTHONPATH=/opt/micro-dfir/src"
 ExecStart=/opt/micro-dfir/venv/bin/python3 src/dns_server.py
 Restart=always
 RestartSec=10
+
+# Confinement -- the same set the Sigma engine carries, applied here after that canary
+# ran clean (see config/microsoc-sigma.service for the full reasoning and for the two
+# directives deliberately left off across all of these units).
+#
+# Applied last of the three, because this is the one with users outside the appliance:
+# real devices point their resolver here, and a directive that stops this unit starting
+# takes their name resolution with it. Nothing below touches that path -- the process
+# stays root and keeps every capability it has today, so binding port 53 is unaffected;
+# these directives only close off privilege escalation, /home, kernel tunables/modules,
+# cgroups and namespace creation, none of which a DNS forwarder has any business in.
+NoNewPrivileges=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictNamespaces=true
 [Install]
 WantedBy=multi-user.target
