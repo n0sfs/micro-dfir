@@ -166,6 +166,11 @@
                     <button type="button" class="btn btn-outline-secondary active" id="riskSortScore" onclick="setRiskSort('score')">Sort: Score</button>
                     <button type="button" class="btn btn-outline-secondary" id="riskSortPriority" onclick="setRiskSort('priority')" title="Blends peak severity, how many distinct signal types fired, and how recent the activity is -- so a diffuse, fresh actor can outrank a single loud-but-stale alert">Sort: Priority</button>
                 </div>
+                <div class="form-check form-switch d-inline-block me-3" style="vertical-align:middle;">
+                    <input class="form-check-input" type="checkbox" id="riskPeopleOnlyToggle" onchange="setRiskPeopleOnly(this.checked)">
+                    <label class="form-check-label small text-muted" for="riskPeopleOnlyToggle"
+                           title="Machine accounts (HOST$) and service principals (SYSTEM, LOCAL SERVICE) appear in logs exactly like a person's account, and are usually the loudest. Insider threat is a question about a person -- untick to include them for intrusion work.">People only</label>
+                </div>
                 <button class="btn btn-outline-secondary btn-sm" onclick="loadRiskScores()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
             </div>
         </div>
@@ -577,6 +582,28 @@
                 <div class="col-md-2"><button class="btn btn-outline-primary btn-sm w-100" onclick="addIdentity()"><i class="fa-solid fa-plus me-1"></i>Add</button></div>
             </div>
             <div id="identityError" class="text-danger small mb-2" style="display:none;"></div>
+            <!-- One-at-a-time is fine for flagging a person mid-investigation, but it is
+                 not how you populate a fleet -- and these flags are the only insider-specific
+                 scoring the product has, so an empty table means none of it ever fires. -->
+            <div class="mb-3">
+                <a class="small" href="#" onclick="document.getElementById('identityImportWrap').style.display = document.getElementById('identityImportWrap').style.display === 'none' ? '' : 'none'; return false;">
+                    <i class="fa-solid fa-file-csv me-1"></i>Import from CSV
+                </a>
+                <div id="identityImportWrap" style="display:none;" class="mt-2">
+                    <p class="text-muted small mb-1">
+                        Paste an HR export or <code>Get-ADUser | Export-Csv</code>. A <code>username</code> column is required;
+                        <code>department</code>, <code>privileged</code>, <code>departing</code>, <code>watched</code>,
+                        <code>watch_reason</code> and <code>departing_note</code> are optional. Existing users are updated, so
+                        re-importing the same export daily is the intended way to keep joiners, movers and leavers current.
+                    </p>
+                    <textarea id="identityImportCsv" class="form-control bg-dark text-light border-secondary font-monospace" rows="5"
+                              placeholder="username,department,privileged,departing,departing_note&#10;jdoe,Finance,false,true,2 weeks notice given&#10;asmith,Engineering,true,false,"></textarea>
+                    <div class="d-flex align-items-center gap-2 mt-2">
+                        <button class="btn btn-outline-primary btn-sm" onclick="importIdentities()"><i class="fa-solid fa-upload me-1"></i>Import</button>
+                        <span id="identityImportResult" class="small"></span>
+                    </div>
+                </div>
+            </div>
             {% endif %}
             <div class="table-responsive">
                 <table class="table table-dark table-sm align-middle mb-0">
@@ -1044,6 +1071,37 @@ function setRiskSort(mode) {
 // ?entity_type=&entity_id= deep link below await whichever load is already in flight
 // (e.g. the one switchUebaTab('risk') itself just triggered) instead of firing a
 // second redundant fetch just to know when it's safe to open the detail modal.
+// Defaults ON: this table's job on the Risk Scoring tab is "who should I look at", and
+// for that question a machine account is noise. Persisted so the choice survives a reload.
+let riskPeopleOnly = (() => { try { return localStorage.getItem('uebaRiskPeopleOnly') !== '0'; } catch (e) { return true; } })();
+
+function setRiskPeopleOnly(on) {
+    riskPeopleOnly = !!on;
+    try { localStorage.setItem('uebaRiskPeopleOnly', on ? '1' : '0'); } catch (e) {}
+    renderRiskScores();
+}
+
+// A machine account (DOMAIN\HOST$) and a service principal (SYSTEM, LOCAL SERVICE) both
+// arrive in live_logs.username looking exactly like a person. Labelling them is what lets
+// an analyst tell at a glance that the top row isn't somebody.
+function accountTypeBadge(r) {
+    if (r.entity_type !== 'user' || !r.account_type || r.account_type === 'human') return '';
+    const label = r.account_type === 'machine' ? 'Machine' : 'Service';
+    return ` <span class="badge bg-secondary" title="Not a person -- ${r.account_type === 'machine' ? 'an AD computer account' : 'a built-in service principal'}. Scored because it appears in logs like any other account.">${label}</span>`;
+}
+
+// The identity flags are what drive the risk multiplier; showing them next to the score
+// means an analyst can see WHY a user is weighted up, not just that they are.
+function identityFlagBadges(r) {
+    if (r.entity_type !== 'user') return '';
+    let out = '';
+    if (r.privileged) out += ' <span class="badge bg-warning text-dark" title="Marked privileged -- risk weighted x1.5">Privileged</span>';
+    if (r.departing) out += ' <span class="badge bg-danger" title="Marked departing -- risk weighted x1.5, stacking with privileged">Departing</span>';
+    if (r.watched) out += ' <span class="badge bg-info text-dark" title="On the standing watchlist. Deliberately does NOT change the score -- see the Identities panel.">Watched</span>';
+    if (r.department) out += ` <span class="badge bg-dark border border-secondary text-muted">${escHtml(r.department)}</span>`;
+    return out;
+}
+
 let _riskScoresLoadPromise = null;
 function loadRiskScores() {
     _riskScoresLoadPromise = fetch('/api/ueba/risk-scores')
@@ -1051,6 +1109,8 @@ function loadRiskScores() {
         .then(data => {
             riskScoresData = data.entities || [];
             riskScoresLoadedOnce = true;
+            const toggle = document.getElementById('riskPeopleOnlyToggle');
+            if (toggle) toggle.checked = riskPeopleOnly;   // reflect the persisted choice
             updateSharedStats();
             document.getElementById('riskScoresWindowNote').innerText = `Scored over the trailing ${data.window_days} day(s). Recomputed hourly alongside the anomaly models.`;
             renderRiskScores();
@@ -1071,7 +1131,19 @@ function renderRiskScores() {
     // Priority-sorted entities with no priority score yet (e.g. priority scoring just
     // enabled, hasn't run its first hourly cycle) sink to the bottom rather than being
     // treated as 0 -- a real 0 and "not computed yet" shouldn't look the same.
-    const rows = [...riskScoresData].sort((a, b) => {
+    // Insider threat is a question about a person, and on a real fleet the loudest
+    // "users" are not people -- measured here, SYSTEM outscored the only human by 12x and
+    // machine accounts (HOST$) scored as users, so this table's top rows said nothing
+    // about anybody. Filtering client-side keeps the machine/service entities one click
+    // away, since for intrusion work they matter.
+    const filtered = riskPeopleOnly
+        ? riskScoresData.filter(r => r.entity_type !== 'user' || r.account_type === 'human')
+        : riskScoresData;
+    if (!filtered.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">No human user accounts have scored in this window. Untick &ldquo;People only&rdquo; to include machine and service accounts.</td></tr>';
+        return;
+    }
+    const rows = [...filtered].sort((a, b) => {
         if (riskSortMode === 'priority') {
             const ap = a.priority_score, bp = b.priority_score;
             if (ap == null && bp == null) return b.score - a.score;
@@ -1083,7 +1155,7 @@ function renderRiskScores() {
     });
     tbody.innerHTML = rows.map(r => `
         <tr style="cursor:pointer;" onclick="viewRiskScoreDetail('${r.entity_type}', '${escHtml(r.entity_id).replace(/'/g, "\\'")}')">
-            <td class="ps-3">${entityBadge(r.entity_type)}<strong>${escHtml(r.entity_id)}</strong></td>
+            <td class="ps-3">${entityBadge(r.entity_type)}<strong>${escHtml(r.entity_id)}</strong>${accountTypeBadge(r)}${identityFlagBadges(r)}</td>
             <td class="fw-bold">${r.score}${r.multiplier && r.multiplier !== 1.0 ? ` <span class="badge bg-secondary" title="Raw score ${r.raw_score} &times; ${r.multiplier} criticality/privileged/departing multiplier">&times;${r.multiplier}</span>` : ''}</td>
             <td>${r.priority_score != null ? `<span class="badge bg-info text-dark">${r.priority_score}</span>` : '<span class="text-muted small">—</span>'}</td>
             <td>${riskTierBadge(r.tier)}</td>
@@ -2232,6 +2304,39 @@ async function deleteAsset(aid) {
         .catch(err => toast('Error deleting asset: ' + err, 'danger'));
 }
 
+// The departure window is the whole point of the flag, so show how far into it this
+// person is. Before departing_at existed, that date lived only in the free-text note --
+// where nothing could query it and "what changed in the 30 days after notice" had no
+// answer. Elapsed days, not the raw stamp: "day 9" is the number an analyst reasons with.
+function departingSince(i) {
+    if (!i.departing || !i.departing_at) return '';
+    const t = new Date(String(i.departing_at).replace(' ', 'T'));
+    if (isNaN(t.getTime())) return '';
+    const days = Math.max(0, Math.floor((Date.now() - t.getTime()) / 86400000));
+    const label = days === 0 ? 'today' : days === 1 ? 'day 1' : `day ${days}`;
+    return ` <span class="badge bg-dark border border-danger text-danger" title="Marked departing ${escHtml(i.departing_at)}${i.departing_by ? ' by ' + escHtml(i.departing_by) : ''}">${label}</span>`;
+}
+
+function importIdentities() {
+    const box = document.getElementById('identityImportCsv');
+    const out = document.getElementById('identityImportResult');
+    const csv = (box.value || '').trim();
+    if (!csv) { out.className = 'small text-warning'; out.innerText = 'Paste some CSV first.'; return; }
+    out.className = 'small text-muted'; out.innerText = 'Importing…';
+    fetch('/api/identities/import', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({csv})
+    }).then(r => r.json().then(d => ({ok: r.ok, d}))).then(({ok, d}) => {
+        if (!ok) { out.className = 'small text-danger'; out.innerText = d.error || 'Import failed.'; return; }
+        out.className = 'small text-success';
+        out.innerText = `${d.created} added, ${d.updated} updated${d.skipped ? `, ${d.skipped} skipped` : ''}.`
+            + (d.errors && d.errors.length ? ` (${d.errors.join('; ')})` : '');
+        box.value = '';
+        loadIdentities();
+        // The flags feed the risk multiplier, so the scores on the other tab are now stale.
+        if (typeof loadRiskScores === 'function') loadRiskScores();
+    }).catch(err => { out.className = 'small text-danger'; out.innerText = 'Import error: ' + err; });
+}
+
 function loadIdentities() {
     return fetch('/api/identities').then(r => {
         if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -2251,8 +2356,8 @@ function loadIdentities() {
                 ? `<input type="checkbox" class="form-check-input" ${i.privileged ? 'checked' : ''} onchange="updateIdentityPrivileged(${i.id}, this.checked)">`
                 : (i.privileged ? '<span class="badge bg-warning text-dark">Privileged</span>' : '<span class="badge bg-secondary">Standard</span>')}</td>
             <td>${ASSET_IS_ADMIN
-                ? `<input type="checkbox" class="form-check-input" ${i.departing ? 'checked' : ''} onchange="updateIdentityDeparting(${i.id}, this.checked)" title="Weights this user's risk score up (&times;1.5, stacks with Privileged) -- data exfiltration risk is well known to spike on the way out">`
-                : (i.departing ? '<span class="badge bg-danger">Departing</span>' : '')}</td>
+                ? `<input type="checkbox" class="form-check-input" ${i.departing ? 'checked' : ''} onchange="updateIdentityDeparting(${i.id}, this.checked)" title="Weights this user's risk score up (&times;1.5, stacks with Privileged) -- data exfiltration risk is well known to spike on the way out">${departingSince(i)}`
+                : (i.departing ? `<span class="badge bg-danger">Departing</span>${departingSince(i)}` : '')}</td>
             <td>${ASSET_IS_ADMIN
                 ? `<input type="text" class="form-control form-control-sm bg-dark text-light border-secondary" style="min-width:180px;" value="${escHtml(i.departing_note || '')}" placeholder="e.g. 2 weeks' notice given" onblur="updateIdentityDepartingNote(${i.id}, this.value)" onkeydown="if(event.key==='Enter') this.blur()">`
                 : `<span class="small text-muted">${escHtml(i.departing_note || '')}</span>`}</td>

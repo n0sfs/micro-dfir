@@ -6736,6 +6736,45 @@ def api_asset_detail(aid):
     db.commit()
     return jsonify({"status": "success"})
 
+# Windows machine accounts end in '$' (the AD computer-account convention); the rest are
+# the well-known local service principals. All of them land in live_logs.username exactly
+# the way a person's account does, so UEBA scores them as "users".
+#
+# For intrusion detection that is correct and worth keeping -- SYSTEM behaving oddly is a
+# real signal. For insider threat it is actively wrong, because the question is always
+# about a *person*. Measured on the live fleet: of five 'user' entities, one was a human,
+# and SYSTEM outranked them by 12x -- so "Top Risky Entities", the headline widget of the
+# Insider Threat dashboard, was led by a machine account.
+#
+# Hence a classification rather than an exclusion: nothing is dropped, the insider-facing
+# surfaces just get to ask for people.
+_NON_HUMAN_ACCOUNTS = {
+    'SYSTEM', 'LOCAL SERVICE', 'NETWORK SERVICE', 'LOCAL', 'ANONYMOUS LOGON',
+    'IUSR', 'IWAM', 'DWM', 'UMFD', 'NT AUTHORITY', 'NT SERVICE',
+    '-', 'N/A', 'UNKNOWN', 'NULL SID',
+}
+_NON_HUMAN_PREFIXES = ('DWM-', 'UMFD-', 'NT SERVICE\\', 'NT AUTHORITY\\', 'IIS APPPOOL\\', 'FONT DRIVER HOST')
+
+def classify_account(username):
+    """'machine' | 'service' | 'human' for a username as it appears in live_logs.
+
+    Deliberately conservative: anything not recognised as a machine or a service is called
+    human, so a real person is never hidden from an insider view by a classifier mistake.
+    The cost of that bias is an occasional service account showing up as a person, which an
+    analyst can see and ignore; the reverse would silently drop the subject of a case."""
+    name = (username or '').strip()
+    if not name:
+        return 'service'
+    # DOMAIN\user and user@domain both appear in Windows logs for the same principal.
+    bare = name.split('\\')[-1].split('@')[0].strip()
+    if bare.endswith('$'):
+        return 'machine'
+    if bare.upper() in _NON_HUMAN_ACCOUNTS:
+        return 'service'
+    if any(name.upper().startswith(p) for p in _NON_HUMAN_PREFIXES):
+        return 'service'
+    return 'human'
+
 @app.route('/api/identities', methods=['GET', 'POST'])
 @login_required
 def api_identities():
@@ -6743,7 +6782,7 @@ def api_identities():
     if request.method == 'GET':
         rows = db.execute(
             "SELECT id, username, department, privileged, watched, watch_reason, watched_at, watched_by, "
-            "departing, departing_note, created_by, created_at FROM identities ORDER BY username"
+            "departing, departing_note, departing_at, departing_by, created_by, created_at FROM identities ORDER BY username"
         ).fetchall()
         return jsonify([dict(r) for r in rows])
 
@@ -6755,9 +6794,10 @@ def api_identities():
     privileged = bool(data.get('privileged'))
     watched = bool(data.get('watched'))
     watch_reason = (data.get('watch_reason') or '').strip()
-    # departing is a standing risk-elevation flag, same kind of thing privileged
-    # already is (not a timestamped event) -- no watched_at/watched_by-style stamping
-    # needed, just a boolean + a free-text note (e.g. "2 weeks' notice given 2026-09-01").
+    # departing IS a timestamped transition, not a standing attribute like privileged.
+    # The whole point of the flag is that exfiltration risk spikes in a window that starts
+    # when notice is given -- so the start of that window has to be recorded somewhere
+    # queryable, not left to a convention inside the free-text note.
     departing = bool(data.get('departing'))
     departing_note = (data.get('departing_note') or '').strip()
     if not username:
@@ -6765,14 +6805,114 @@ def api_identities():
     if db.execute("SELECT 1 FROM identities WHERE username = ?", (username,)).fetchone():
         return jsonify({"error": f"'{username}' already has an identity entry -- edit it instead of adding a duplicate"}), 400
     db.execute(
-        "INSERT INTO identities (username, department, privileged, watched, watch_reason, watched_at, watched_by, departing, departing_note, created_by) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO identities (username, department, privileged, watched, watch_reason, watched_at, watched_by, departing, departing_note, departing_at, departing_by, created_by) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (username, department, privileged, watched, watch_reason,
          datetime.now().strftime('%Y-%m-%d %H:%M:%S') if watched else None,
-         current_user.username if watched else None, departing, departing_note, current_user.username)
+         current_user.username if watched else None, departing, departing_note,
+         datetime.now().strftime('%Y-%m-%d %H:%M:%S') if departing else None,
+         current_user.username if departing else None, current_user.username)
     )
     db.commit()
     return jsonify({"status": "success"})
+
+@app.route('/api/identities/import', methods=['POST'])
+@login_required
+def api_identities_import():
+    """Bulk upsert identities from pasted CSV.
+
+    The identity table is the only place the product learns that a username belongs to a
+    person, what department they are in, and whether they are privileged, departing or
+    watched -- and those flags are the ONLY insider-specific scoring mechanism in the
+    product. Until now the sole way to populate it was a form, one user at a time, which
+    on any real fleet means it stays empty and the whole mechanism never fires. It was
+    empty on this deployment.
+
+    A paste-CSV box is not a directory integration, and deliberately so: an HR export or
+    an `Get-ADUser | Export-Csv` both land here with no connector to build, no credentials
+    to store, and no scheduled sync to go stale. Re-importing is the update path, which is
+    also how a joiner/mover/leaver feed would be applied.
+
+    Upsert, not insert: re-importing an unchanged row is a no-op, so the same export can be
+    re-run daily. departing/watched transitions are stamped by the same rules the
+    single-record routes use, so a bulk import cannot launder away the start of a
+    departure window."""
+    err = require_permission('assets.manage')
+    if err: return err
+    import csv as _csv
+    import io as _io
+    text = (request.get_json() or {}).get('csv', '')
+    if not text.strip():
+        return jsonify({'error': 'Paste some CSV first.'}), 400
+
+    try:
+        reader = _csv.DictReader(_io.StringIO(text.strip()))
+        rows = list(reader)
+    except Exception as e:
+        return jsonify({'error': f'Could not parse that as CSV: {e}'}), 400
+    if not rows:
+        return jsonify({'error': 'No data rows found -- the first line must be a header.'}), 400
+
+    fields = {(f or '').strip().lower() for f in (reader.fieldnames or [])}
+    if 'username' not in fields:
+        return jsonify({'error': f"A 'username' column is required. Found: {', '.join(sorted(fields)) or 'nothing'}"}), 400
+
+    def truthy(v):
+        return str(v or '').strip().lower() in ('1', 'true', 'yes', 'y', 't')
+
+    db = get_db()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    created = updated = skipped = 0
+    errors = []
+    for i, raw in enumerate(rows, start=2):  # row 1 is the header
+        row = {(k or '').strip().lower(): v for k, v in raw.items()}
+        username = (row.get('username') or '').strip()
+        if not username:
+            skipped += 1
+            continue
+        if len(username) > 256:
+            errors.append(f'row {i}: username is implausibly long, skipped')
+            skipped += 1
+            continue
+        department = (row.get('department') or '').strip()
+        privileged = truthy(row.get('privileged'))
+        departing = truthy(row.get('departing'))
+        watched = truthy(row.get('watched'))
+        watch_reason = (row.get('watch_reason') or row.get('reason') or '').strip()
+        departing_note = (row.get('departing_note') or row.get('note') or '').strip()
+
+        existing = db.execute(
+            "SELECT id, watched, departing FROM identities WHERE username = ?", (username,)
+        ).fetchone()
+        if existing:
+            sets = ["department = ?", "privileged = ?", "watched = ?", "watch_reason = ?",
+                    "departing = ?", "departing_note = ?"]
+            vals = [department, privileged, watched, watch_reason, departing, departing_note]
+            if watched and not existing['watched']:
+                sets += ["watched_at = ?", "watched_by = ?"]; vals += [now, current_user.username]
+            elif not watched:
+                sets += ["watched_at = ?", "watched_by = ?"]; vals += [None, None]
+            if departing and not existing['departing']:
+                sets += ["departing_at = ?", "departing_by = ?"]; vals += [now, current_user.username]
+            elif not departing:
+                sets += ["departing_at = ?", "departing_by = ?"]; vals += [None, None]
+            db.execute(f"UPDATE identities SET {', '.join(sets)} WHERE id = ?", vals + [existing['id']])
+            updated += 1
+        else:
+            db.execute(
+                "INSERT INTO identities (username, department, privileged, watched, watch_reason, watched_at, watched_by, "
+                "departing, departing_note, departing_at, departing_by, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (username, department, privileged, watched, watch_reason,
+                 now if watched else None, current_user.username if watched else None,
+                 departing, departing_note,
+                 now if departing else None, current_user.username if departing else None,
+                 current_user.username)
+            )
+            created += 1
+    db.commit()
+    log_audit('identities_import', 'identity', None, f"created={created} updated={updated} skipped={skipped}")
+    return jsonify({'status': 'success', 'created': created, 'updated': updated,
+                    'skipped': skipped, 'errors': errors[:20]})
 
 @app.route('/api/identities/<int:iid>', methods=['PUT', 'DELETE'])
 @login_required
@@ -6794,8 +6934,6 @@ def api_identity_detail(iid):
     privileged = bool(data['privileged']) if 'privileged' in data else bool(existing['privileged'])
     watch_reason = data['watch_reason'].strip() if 'watch_reason' in data else (existing['watch_reason'] or '')
     watched = bool(data['watched']) if 'watched' in data else bool(existing['watched'])
-    # No watched_at/watched_by-style stamping needed here -- departing is a plain
-    # boolean + note, same as privileged, not a timestamped transition like watched.
     departing = bool(data['departing']) if 'departing' in data else bool(existing['departing'])
     departing_note = data['departing_note'].strip() if 'departing_note' in data else (existing['departing_note'] or '')
     # watched_at/watched_by are stamped only on the 0->1 transition (when this person is
@@ -6810,15 +6948,29 @@ def api_identity_detail(iid):
         watched_by = None
     else:
         watched_at, watched_by = None, None  # left unchanged below when already watched and staying watched
+    # Same transition rule watched uses: stamp on 0->1, clear on 1->0, and leave the
+    # original stamp alone while the flag simply stays set -- so an unrelated edit (fixing
+    # a department typo) can't silently reset the start of someone's departure window and
+    # move the goalposts on an investigation already measuring against it.
+    departing_cols, departing_vals = "", []
+    if departing and not existing['departing']:
+        departing_cols = ", departing_at = ?, departing_by = ?"
+        departing_vals = [datetime.now().strftime('%Y-%m-%d %H:%M:%S'), current_user.username]
+    elif not departing:
+        departing_cols = ", departing_at = ?, departing_by = ?"
+        departing_vals = [None, None]
+
     if watched and existing['watched']:
         db.execute(
-            "UPDATE identities SET department = ?, privileged = ?, watched = ?, watch_reason = ?, departing = ?, departing_note = ? WHERE id = ?",
-            (department, privileged, watched, watch_reason, departing, departing_note, iid)
+            "UPDATE identities SET department = ?, privileged = ?, watched = ?, watch_reason = ?, departing = ?, departing_note = ?"
+            + departing_cols + " WHERE id = ?",
+            [department, privileged, watched, watch_reason, departing, departing_note] + departing_vals + [iid]
         )
     else:
         db.execute(
-            "UPDATE identities SET department = ?, privileged = ?, watched = ?, watch_reason = ?, watched_at = ?, watched_by = ?, departing = ?, departing_note = ? WHERE id = ?",
-            (department, privileged, watched, watch_reason, watched_at, watched_by, departing, departing_note, iid)
+            "UPDATE identities SET department = ?, privileged = ?, watched = ?, watch_reason = ?, watched_at = ?, watched_by = ?, departing = ?, departing_note = ?"
+            + departing_cols + " WHERE id = ?",
+            [department, privileged, watched, watch_reason, watched_at, watched_by, departing, departing_note] + departing_vals + [iid]
         )
     db.commit()
     return jsonify({"status": "success"})
@@ -10676,7 +10828,11 @@ def api_ueba_risk_scores():
         "WHEN rse.entity_type = 'user' THEN "
         "    CASE WHEN i.privileged = 1 THEN 1.5 ELSE 1.0 END * CASE WHEN i.departing = 1 THEN 1.5 ELSE 1.0 END END, 1.0) as multiplier, "
         "COUNT(*) as event_count, MAX(rse.computed_at) as last_event, "
-        "ps.priority_score as priority_score "
+        "ps.priority_score as priority_score, "
+        # Surfaced so the insider views can badge them and so an analyst can see WHY a
+        # multiplier applied, rather than only that one did.
+        "i.privileged as privileged, i.departing as departing, i.watched as watched, "
+        "i.department as department "
         "FROM risk_score_events rse "
         "LEFT JOIN assets a ON rse.entity_type = 'host' AND rse.entity_id = a.host "
         "LEFT JOIN identities i ON rse.entity_type = 'user' AND rse.entity_id = i.username "
@@ -10690,10 +10846,19 @@ def api_ueba_risk_scores():
     # proved out: rank/tier by the decay-aware priority_score when available (a stale old
     # alert flood doesn't pin an entity at Critical with zero current activity), falling
     # back to the flat windowed sum's tier only when no priority row exists yet.
+    # account_type lets an insider-threat view ask for people without losing the
+    # machine/service entities that intrusion detection wants -- see classify_account().
+    # ?account_types=human (comma-separated) filters; omitted means everything, so every
+    # existing caller is unchanged.
+    wanted = {t.strip() for t in (request.args.get('account_types') or '').split(',') if t.strip()}
     out = []
     for r in rows:
         d = dict(r)
         d['tier'] = _priority_tier(r['priority_score']) if r['priority_score'] is not None else _risk_tier(r['score'], cfg['tiers'])
+        # Hosts are hosts; only a 'user' entity has an account type worth classifying.
+        d['account_type'] = classify_account(r['entity_id']) if r['entity_type'] == 'user' else None
+        if wanted and r['entity_type'] == 'user' and d['account_type'] not in wanted:
+            continue
         out.append(d)
     return jsonify({'entities': out, 'window_days': cfg['window_days']})
 
@@ -12662,6 +12827,16 @@ def migrate_identities_departing():
             conn.execute("ALTER TABLE identities ADD COLUMN departing INTEGER DEFAULT 0")
         if 'departing_note' not in cols:
             conn.execute("ALTER TABLE identities ADD COLUMN departing_note TEXT")
+        # Stamped on the 0->1 transition, the same way watched_at/watched_by are. Without
+        # a date, "departing" is a state with no beginning -- and the entire reason the
+        # flag exists is that exfiltration risk spikes *in a window*, which cannot be
+        # measured, charted, or asked about ("what changed in the 30 days after notice?")
+        # if nothing records when notice was given. The free-text note was carrying that
+        # date by convention, where nothing can query it.
+        if 'departing_at' not in cols:
+            conn.execute("ALTER TABLE identities ADD COLUMN departing_at DATETIME")
+        if 'departing_by' not in cols:
+            conn.execute("ALTER TABLE identities ADD COLUMN departing_by TEXT")
         conn.commit()
         conn.close()
     except Exception:
