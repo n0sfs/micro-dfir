@@ -11,7 +11,7 @@ try:
 except Exception as e:
     print(f"WAL setup error: {e}")
 
-import os, json, re, sqlite3, tempfile, yaml, secrets, subprocess
+import os, json, re, sqlite3, tempfile, yaml, secrets, subprocess, functools
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from werkzeug.utils import secure_filename
@@ -6215,8 +6215,16 @@ def reports_page():
 @login_required
 def download_report(history_id):
     from flask import send_from_directory
-    row = get_db().execute("SELECT filename FROM report_history WHERE id = ?", (history_id,)).fetchone()
+    db = get_db()
+    row = db.execute("SELECT filename, case_id FROM report_history WHERE id = ?", (history_id,)).fetchone()
     if not row or not os.path.exists(os.path.join('/opt/micro-dfir/reports', row['filename'])):
+        flash("Report file not found.", "warning")
+        return redirect(url_for('reports_page'))
+    # A case report is the whole case in one file -- description, notes, timeline, assets.
+    # This route is keyed on history_id, so without this check it reaches straight past
+    # every guard on the case routes themselves: the most complete version of a restricted
+    # case, addressable by guessing a small integer.
+    if row['case_id'] and _case_access_error(db, row['case_id']) is not None:
         flash("Report file not found.", "warning")
         return redirect(url_for('reports_page'))
     return send_from_directory('/opt/micro-dfir/reports', row['filename'], as_attachment=True)
@@ -6349,6 +6357,7 @@ def api_email_report(history_id):
 
 @app.route('/api/cases/<int:cid>/reports', methods=['GET', 'POST'])
 @login_required
+@requires_case_access
 def api_case_reports(cid):
     db = get_db()
     case = db.execute("SELECT title FROM cases WHERE id = ?", (cid,)).fetchone()
@@ -7046,6 +7055,127 @@ def _seed_case_template_fields(db, cid, template_id):
 # Closed = the formal administrative closing (read-only, still reopenable if new
 # evidence surfaces) -- see the case-detail PUT handler below for the one path that's
 # still allowed to write to a closed case (leaving 'closed' in that same request).
+# ---- Case confidentiality ----------------------------------------------------------
+# Every case was readable by every logged-in account: no visibility flag, no ACL, and the
+# seeded "Insider Threat" queue restricts nothing because queue_members is never consulted
+# by any read path. For ordinary incident work that is fine and deliberate on a
+# single-team appliance. For an insider case it is not: the subject of the investigation
+# plausibly holds a login here, and could read the case about themselves -- the notes, the
+# linked evidence, the generated PDF.
+#
+# Design notes, because the safety of this depends on them:
+#   * visibility defaults to 'normal', and a 'normal' case behaves EXACTLY as before. This
+#     ships inert -- nothing changes for any existing case until someone deliberately
+#     restricts one. There is no flag day and no lockout risk.
+#   * Admins always retain access. A confidentiality control that can lock the appliance's
+#     owner out of their own case data is a worse bug than the one it fixes.
+#   * The case creator and the current assignee always retain access, so the ordinary act
+#     of restricting a case cannot orphan it from the people already working it.
+#   * A restricted case a user cannot see returns 404, not 403. 403 confirms the case
+#     exists, which for "is there an investigation into me?" is most of the answer.
+CASE_VISIBILITY_VALUES = ('normal', 'restricted')
+
+def _case_access_error(db, cid):
+    """None if the current user may see this case, else a response to return.
+
+    Deliberately reads the case row itself rather than trusting a caller-supplied
+    visibility, so there is no path that checks a stale value."""
+    row = db.execute(
+        "SELECT id, visibility, created_by, assignee FROM cases WHERE id = ?", (cid,)
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "Case not found"}), 404
+    if (row['visibility'] or 'normal') != 'restricted':
+        return None
+    me = getattr(current_user, 'username', None)
+    if is_admin() or me and me in ((row['created_by'] or ''), (row['assignee'] or '')):
+        return None
+    if db.execute("SELECT 1 FROM case_acl WHERE case_id = ? AND username = ?", (cid, me)).fetchone():
+        return None
+    # Same shape as "not found" on purpose -- see the note above.
+    return jsonify({"error": "Case not found"}), 404
+
+def requires_case_access(fn):
+    """Applied to every route carrying a <int:cid>, so access is enforced in one place.
+
+    There are two dozen case routes and they share no other chokepoint (unlike
+    _require_open_case, which every mutation already calls). Hand-editing each one is
+    exactly how a surface gets missed, and a confidentiality control with a hole in it is
+    worse than none because it invites trust it hasn't earned."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        cid = kwargs.get('cid')
+        if cid is not None:
+            err = _case_access_error(get_db(), cid)
+            if err:
+                return err
+        return fn(*args, **kwargs)
+    return wrapper
+
+def _visible_case_filter():
+    """(sql_fragment, params) restricting a cases query to what the current user may see.
+
+    Written as a WHERE fragment rather than a post-filter so counts, pagination and
+    ORDER BY all operate on the visible set."""
+    if is_admin():
+        return "1=1", []
+    me = getattr(current_user, 'username', None) or ''
+    return ("(COALESCE(c.visibility, 'normal') != 'restricted' "
+            " OR c.created_by = ? OR c.assignee = ? "
+            " OR EXISTS (SELECT 1 FROM case_acl acl WHERE acl.case_id = c.id AND acl.username = ?))",
+            [me, me, me])
+
+@app.route('/api/cases/<int:cid>/visibility', methods=['GET', 'PUT'])
+@login_required
+@requires_case_access
+def api_case_visibility(cid):
+    """Read or change a case's confidentiality, and who is on its access list.
+
+    Gated on the same permission that edits the case itself rather than a new one: anyone
+    trusted to run a case is trusted to decide it is sensitive. Restricting is deliberately
+    NOT admin-only -- the analyst who realises mid-triage that this is an insider matter is
+    exactly who needs to act, and making them find an admin first is how it doesn't happen."""
+    db = get_db()
+    if request.method == 'GET':
+        row = db.execute("SELECT visibility, created_by, assignee FROM cases WHERE id = ?", (cid,)).fetchone()
+        acl = [r['username'] for r in db.execute(
+            "SELECT username FROM case_acl WHERE case_id = ? ORDER BY username", (cid,)).fetchall()]
+        return jsonify({'visibility': row['visibility'] or 'normal', 'acl': acl,
+                        'created_by': row['created_by'], 'assignee': row['assignee']})
+
+    err = _require_open_case(db, cid)
+    if err: return err
+    data = request.get_json() or {}
+    visibility = (data.get('visibility') or '').strip()
+    if visibility not in CASE_VISIBILITY_VALUES:
+        return jsonify({'error': f"visibility must be one of: {', '.join(CASE_VISIBILITY_VALUES)}"}), 400
+    before = db.execute("SELECT visibility FROM cases WHERE id = ?", (cid,)).fetchone()['visibility'] or 'normal'
+    db.execute("UPDATE cases SET visibility = ? WHERE id = ?", (visibility, cid))
+
+    if 'acl' in data:
+        # Whole-list replace rather than add/remove deltas: "who can see this" is a thing
+        # an analyst should be able to read off one screen and set in one action.
+        names = [str(n).strip() for n in (data.get('acl') or []) if str(n).strip()]
+        known = {r['username'] for r in db.execute("SELECT username FROM users").fetchall()}
+        unknown = [n for n in names if n not in known]
+        if unknown:
+            return jsonify({'error': f"Not users on this appliance: {', '.join(unknown[:5])}"}), 400
+        db.execute("DELETE FROM case_acl WHERE case_id = ?", (cid,))
+        for n in names:
+            db.execute("INSERT OR IGNORE INTO case_acl (case_id, username, added_by) VALUES (?, ?, ?)",
+                       (cid, n, current_user.username))
+
+    db.commit()
+    if before != visibility:
+        # On the case's own append-only timeline as well as the audit log: a change in who
+        # can see an investigation is part of the investigation's record, and the first
+        # thing anyone reviewing it afterwards will want dated.
+        _log_case_event(db, cid, 'visibility_changed',
+                        f"Case visibility changed from {before} to {visibility} by {current_user.username}")
+        db.commit()
+    log_audit('case_visibility_change', 'case', cid, f"{before} -> {visibility}")
+    return jsonify({'status': 'success', 'visibility': visibility})
+
 def _require_open_case(db, cid):
     case = db.execute("SELECT status FROM cases WHERE id = ?", (cid,)).fetchone()
     if not case:
@@ -7156,6 +7286,7 @@ def api_case_queue_members(qid):
 def api_cases():
     db = get_db()
     if request.method == 'GET':
+        _vis_sql, _vis_params = _visible_case_filter()
         rows = db.execute(
             "SELECT c.id, c.case_number, c.title, c.status, c.severity, c.workflow_state, c.assignee, c.description, c.created_by, c.created_at, c.closed_at, c.acknowledged_at, c.tlp, c.pap, "
             "c.queue_id, q.name as queue_name, "
@@ -7165,7 +7296,12 @@ def api_cases():
             "COUNT(DISTINCT CASE WHEN ct.status = 'done' THEN ct.id END) as task_done_count "
             "FROM cases c LEFT JOIN case_items ci ON ci.case_id = c.id LEFT JOIN case_tasks ct ON ct.case_id = c.id "
             "LEFT JOIN case_queues q ON q.id = c.queue_id "
-            "GROUP BY c.id ORDER BY CASE WHEN c.status = 'open' THEN 0 ELSE 1 END, c.created_at DESC"
+            # Restricted cases the current user may not see are filtered in SQL rather than
+            # after the fetch, so the counts and ordering are computed over the visible set.
+            # A 'normal' case (every existing one) passes this unconditionally.
+            f"WHERE {_vis_sql} "
+            "GROUP BY c.id ORDER BY CASE WHEN c.status = 'open' THEN 0 ELSE 1 END, c.created_at DESC",
+            _vis_params
         ).fetchall()
         # Same per-case SLA-breach test api_dashboard_case_stats' aggregate count already
         # runs (_case_sla_hours_for resolves each case's own queue/severity threshold) --
@@ -7310,6 +7446,7 @@ def _case_item_summary(db, item_type, item_id):
 
 @app.route('/api/cases/<int:cid>', methods=['GET', 'PUT', 'DELETE'])
 @login_required
+@requires_case_access
 def api_case_detail(cid):
     db = get_db()
     case = db.execute("SELECT * FROM cases WHERE id = ?", (cid,)).fetchone()
@@ -7485,6 +7622,7 @@ def api_case_detail(cid):
 
 @app.route('/api/cases/<int:cid>/items', methods=['POST'])
 @login_required
+@requires_case_access
 def api_case_add_item(cid):
     db = get_db()
     err = _require_open_case(db, cid)
@@ -7524,6 +7662,7 @@ def api_case_add_item(cid):
 
 @app.route('/api/cases/<int:cid>/items/<int:item_row_id>', methods=['DELETE'])
 @login_required
+@requires_case_access
 def api_case_remove_item(cid, item_row_id):
     db = get_db()
     err = _require_open_case(db, cid)
@@ -7547,6 +7686,7 @@ def api_case_remove_item(cid, item_row_id):
 # reads as "nothing more happened."
 @app.route('/api/cases/<int:cid>/coverage-gaps', methods=['GET'])
 @login_required
+@requires_case_access
 def api_case_coverage_gaps(cid):
     db = get_db()
     if not db.execute("SELECT 1 FROM cases WHERE id = ?", (cid,)).fetchone():
@@ -7598,6 +7738,7 @@ def _watchlist_case_implicated_users(db, cid):
 
 @app.route('/api/cases/<int:cid>/related-items', methods=['GET'])
 @login_required
+@requires_case_access
 def api_case_related_items(cid):
     db = get_db()
     case = db.execute("SELECT id FROM cases WHERE id = ?", (cid,)).fetchone()
@@ -7693,6 +7834,7 @@ def api_case_related_items(cid):
 # same evidence, different lens.
 @app.route('/api/cases/<int:cid>/forensic-timeline', methods=['GET'])
 @login_required
+@requires_case_access
 def api_case_forensic_timeline(cid):
     db = get_db()
     case = db.execute("SELECT id, created_at FROM cases WHERE id = ?", (cid,)).fetchone()
@@ -7787,6 +7929,7 @@ def api_case_forensic_timeline(cid):
 # to the same threat entity) -- no new schema, no new detection logic.
 @app.route('/api/cases/<int:cid>/related-cases', methods=['GET'])
 @login_required
+@requires_case_access
 def api_case_related_cases(cid):
     db = get_db()
     case = db.execute("SELECT id FROM cases WHERE id = ?", (cid,)).fetchone()
@@ -7856,6 +7999,7 @@ def api_case_related_cases(cid):
 # is the parent of case 142" reads correctly on both cases' own Related Cases tab.
 @app.route('/api/cases/<int:cid>/links', methods=['GET'])
 @login_required
+@requires_case_access
 def api_case_links(cid):
     db = get_db()
     if not db.execute("SELECT 1 FROM cases WHERE id = ?", (cid,)).fetchone():
@@ -7890,6 +8034,7 @@ def api_case_links(cid):
 
 @app.route('/api/cases/<int:cid>/links', methods=['POST'])
 @login_required
+@requires_case_access
 def api_case_add_link(cid):
     db = get_db()
     err = _require_open_case(db, cid)
@@ -7927,6 +8072,7 @@ def api_case_add_link(cid):
 
 @app.route('/api/cases/<int:cid>/links/<int:link_id>', methods=['DELETE'])
 @login_required
+@requires_case_access
 def api_case_remove_link(cid, link_id):
     db = get_db()
     err = _require_open_case(db, cid)
@@ -7958,6 +8104,7 @@ def _confirmed_at_value(new_status, existing_confirmed_at=None):
 
 @app.route('/api/cases/<int:cid>/assets', methods=['POST'])
 @login_required
+@requires_case_access
 def api_case_add_asset(cid):
     db = get_db()
     err = _require_open_case(db, cid)
@@ -7991,6 +8138,7 @@ def api_case_add_asset(cid):
 
 @app.route('/api/cases/<int:cid>/assets/<int:asset_id>', methods=['PUT', 'DELETE'])
 @login_required
+@requires_case_access
 def api_case_asset_detail(cid, asset_id):
     db = get_db()
     err = _require_open_case(db, cid)
@@ -8035,6 +8183,7 @@ CASE_IOC_TYPES = ('ip', 'domain', 'hash', 'url')
 
 @app.route('/api/cases/<int:cid>/iocs', methods=['POST'])
 @login_required
+@requires_case_access
 def api_case_add_ioc(cid):
     db = get_db()
     err = _require_open_case(db, cid)
@@ -8059,6 +8208,7 @@ def api_case_add_ioc(cid):
 
 @app.route('/api/cases/<int:cid>/iocs/<int:ioc_id>', methods=['DELETE'])
 @login_required
+@requires_case_access
 def api_case_ioc_detail(cid, ioc_id):
     db = get_db()
     err = _require_open_case(db, cid)
@@ -8082,6 +8232,7 @@ CASE_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
 
 @app.route('/api/cases/<int:cid>/attachments', methods=['GET', 'POST'])
 @login_required
+@requires_case_access
 def api_case_attachments(cid):
     db = get_db()
     if request.method == 'GET':
@@ -8142,6 +8293,7 @@ def api_case_attachments(cid):
 # browser instead, regardless of what it actually is.
 @app.route('/api/cases/<int:cid>/attachments/<int:aid>/download', methods=['GET'])
 @login_required
+@requires_case_access
 def api_case_attachment_download(cid, aid):
     from flask import send_from_directory
     db = get_db()
@@ -8179,6 +8331,7 @@ def api_case_attachment_download(cid, aid):
 
 @app.route('/api/cases/<int:cid>/attachments/<int:aid>', methods=['DELETE'])
 @login_required
+@requires_case_access
 def api_case_attachment_detail(cid, aid):
     db = get_db()
     err = _require_open_case(db, cid)
@@ -8197,6 +8350,7 @@ def api_case_attachment_detail(cid, aid):
 
 @app.route('/api/cases/<int:cid>/tasks', methods=['POST'])
 @login_required
+@requires_case_access
 def api_case_add_task(cid):
     db = get_db()
     err = _require_open_case(db, cid)
@@ -8215,6 +8369,7 @@ def api_case_add_task(cid):
 
 @app.route('/api/cases/<int:cid>/tasks/<int:tid>', methods=['PUT', 'DELETE'])
 @login_required
+@requires_case_access
 def api_case_task_detail(cid, tid):
     db = get_db()
     err = _require_open_case(db, cid)
@@ -8249,6 +8404,7 @@ def api_case_task_detail(cid, tid):
 
 @app.route('/api/cases/<int:cid>/fields', methods=['PUT'])
 @login_required
+@requires_case_access
 def api_case_fields_update(cid):
     db = get_db()
     err = _require_open_case(db, cid)
@@ -8264,6 +8420,7 @@ def api_case_fields_update(cid):
 
 @app.route('/api/cases/<int:cid>/notes', methods=['POST'])
 @login_required
+@requires_case_access
 def api_case_add_note(cid):
     db = get_db()
     err = _require_open_case(db, cid)
@@ -8406,6 +8563,7 @@ def _run_case_analysis(db, cid, entity_type, entity_id):
 
 @app.route('/api/cases/<int:cid>/analyze', methods=['POST'])
 @login_required
+@requires_case_access
 def api_case_analyze(cid):
     db = get_db()
     err = _require_open_case(db, cid)
@@ -12851,6 +13009,30 @@ def migrate_identities_departing():
             conn.execute("ALTER TABLE identities ADD COLUMN departing_at DATETIME")
         if 'departing_by' not in cols:
             conn.execute("ALTER TABLE identities ADD COLUMN departing_by TEXT")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def migrate_case_visibility():
+    """Opt-in case confidentiality. Ships inert: every existing case defaults to 'normal'
+    and behaves exactly as it did, so nothing changes until a case is deliberately
+    restricted. See _case_access_error() for the access rule."""
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(cases)").fetchall()}
+        if 'visibility' not in cols:
+            conn.execute("ALTER TABLE cases ADD COLUMN visibility TEXT DEFAULT 'normal'")
+            # Existing rows get NULL from ALTER TABLE regardless of DEFAULT, and every
+            # read path COALESCEs -- but set them explicitly so the column is never
+            # ambiguous to someone reading the table directly.
+            conn.execute("UPDATE cases SET visibility = 'normal' WHERE visibility IS NULL")
+        conn.execute("""CREATE TABLE IF NOT EXISTS case_acl (
+            case_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            added_by TEXT,
+            added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (case_id, username))""")
         conn.commit()
         conn.close()
     except Exception:
@@ -20498,6 +20680,7 @@ migrate_assets_identities()
 migrate_identities_watchlist()
 migrate_identities_departing()
 migrate_cases()
+migrate_case_visibility()
 migrate_case_upgrade()
 migrate_case_template_fields()
 migrate_case_numbering()
