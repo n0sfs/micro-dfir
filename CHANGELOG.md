@@ -71,11 +71,45 @@ both hold the key and keep it. Both surfaces degrade to a lock and an explanatio
 than a red "failed to load", because for some roles a refusal here is an expected outcome
 rather than a failure. 6 tests; verified live that a privileged account is unaffected.
 
-**Found and not yet addressed** — the rest of the confidentiality model, which is the
-larger half: `GET /api/cases` still has no visibility filter, so **the subject of an
-insider investigation, if they hold a login, can read the case about themselves**. The seeded
-"Insider Threat" queue restricts nothing (`queue_members` is never consulted by any read
-path) and TLP is a badge, not a control. Also open: no person as a first-class case entity
+**Case-level confidentiality** (the finding that mattered most, now closed). Every case
+was readable by every logged-in account — no visibility flag, no ACL, and the seeded
+"Insider Threat" queue restricted nothing because `queue_members` is never consulted by
+any read path. Added `cases.visibility` (`normal` | `restricted`) plus a `case_acl` table:
+a restricted case is visible to admins, its creator, its current assignee and anyone on
+its ACL, and returns **404 to everyone else — not 403**, because a 403 confirms the case
+exists, which for *"is there an investigation into me?"* is most of the answer.
+
+Enforced through a single decorator across all 24 case routes rather than 24 hand-edits.
+They all carry `<int:cid>` and share no other chokepoint (unlike `_require_open_case`,
+which every mutation already calls), and hand-editing each is exactly how a surface gets
+missed — a confidentiality control with a hole in it is worse than none, because it
+invites trust it hasn't earned. The list route filters in SQL, so counts and ordering are
+computed over the visible set. `/reports/download/<history_id>` is checked too: a case PDF
+is the whole case in one file and that route is keyed on the report id, so it reached
+straight past every guard on the case routes, addressable by guessing a small integer.
+
+Ships inert — `visibility` defaults to `normal` and a normal case behaves exactly as
+before, so nothing changes until a case is deliberately restricted. Admins, the creator
+and the assignee always retain access, so restricting cannot orphan a case from the people
+already working it. Restricting is deliberately *not* admin-only: the analyst who realises
+mid-triage that this is an insider matter is exactly who needs to act. A visibility change
+is written to the case's own append-only timeline as well as the audit log.
+
+15 tests. Live-verified end to end on a real case: restricted, confirmed the timeline
+entry, confirmed an unknown ACL name is refused, then set back to normal — both transitions
+remain on the timeline, which is the point.
+
+**Deployment note worth keeping.** The first deploy of this took the web service down:
+the `/api/cases/<int:cid>/reports` route sits ~700 lines above where the helpers were
+added, so `@requires_case_access` was evaluated at import before the name existed.
+`py_compile` passes on that — it is a name-resolution failure, not a syntax one — so the
+usual pre-deploy check could not catch it. Fixed by moving the block above its first use,
+and the suite now walks the AST asserting no decorator is used above its own `def`, so the
+class cannot recur silently.
+
+**Found and not yet addressed** — the seeded "Insider Threat" queue still restricts
+nothing on its own (`queue_members` is never consulted by any read path), though a case in
+it can now be restricted individually; and TLP remains a badge, not a control. Also open: no person as a first-class case entity
 (the subject is inferred from `alerts.username`); deleting a case wipes its append-only
 timeline with no audit entry and orphans the attachment files; no chain of custody, no
 legal hold; the four shipped case templates are all intrusion-shaped and the nearest one
