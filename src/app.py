@@ -20538,8 +20538,10 @@ AGENT_COMMAND_TIER1_LABELS = {'isolate_host', 'restore_network', 'block_ip', 'un
 
 def _is_ipv4(value):
     """True only for a real dotted-quad. Uses ipaddress rather than a regex so octets are
-    range-checked -- agent_scripts._IPV4_RE accepts '999.1.1.1', which would reach the
-    endpoint and fail there as a confusing script error instead of a clean refusal here."""
+    range-checked. agent_scripts now applies the same check at its own boundary (its
+    shape-only regex used to accept '999.1.1.1' and build a malformed firewall rule out of
+    it) -- this one stays so a bad value is refused cleanly here rather than becoming a
+    confusing script error on the endpoint."""
     import ipaddress
     try:
         return isinstance(ipaddress.ip_address(str(value).strip()), ipaddress.IPv4Address)

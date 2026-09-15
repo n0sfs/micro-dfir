@@ -7,7 +7,22 @@
 # shell-quoting entirely since the whole script travels as one argument).
 import re
 
-_IPV4_RE = re.compile(r'^(\d{1,3}\.){3}\d{1,3}$')
+def _is_ipv4(value):
+    """A real IPv4 address, octets range-checked.
+
+    Replaces a `^(\\d{1,3}\\.){3}\\d{1,3}$` regex that checked shape and not range, so it
+    matched 192.168.86.999 and 999.999.999.999. These values are interpolated straight
+    into a PowerShell -RemoteAddress list, an iptables rule and a pf rule, where an
+    out-of-range octet is not a harmless typo but a malformed rule the firewall may
+    reject, silently skip, or interpret as something else -- on the isolate path, any of
+    those means a host reported as contained that isn't. Mirrors the ipaddress-based
+    check app.py already uses for these same values on the server side."""
+    import ipaddress
+    try:
+        ipaddress.IPv4Address(str(value).strip())
+        return True
+    except ValueError:
+        return False
 
 def _py_literal(value):
     """A caller-supplied string as a safe single-line Python literal, for embedding in a
@@ -41,7 +56,7 @@ def _py_literal(value):
 def _normalize_soc_ips(soc_ips):
     """One IP, a comma-separated string, or any iterable of them -> a deduped ordered list.
 
-    Every value still goes through _IPV4_RE individually: these are interpolated straight
+    Every value still goes through _is_ipv4 individually: these are interpolated straight
     into a PowerShell -RemoteAddress list / an iptables rule / a pf anchor, so the
     validation that made the single-IP form injection-safe has to apply per element, not
     to the joined string. A bare '10.0.0.1,8.8.8.8; rm -rf /' must fail, not sneak through
@@ -58,7 +73,7 @@ def _normalize_soc_ips(soc_ips):
         ip = str(raw).strip()
         if not ip:
             continue
-        if not _IPV4_RE.match(ip):
+        if not _is_ipv4(ip):
             raise ValueError(f"Invalid SOC IP address: {ip!r}")
         if ip not in out:
             out.append(ip)
@@ -88,7 +103,7 @@ def _normalize_soc_endpoints(value):
             continue
         ip, _, port = entry.partition(':')
         ip = ip.strip()
-        if not _IPV4_RE.match(ip):
+        if not _is_ipv4(ip):
             raise ValueError(f"Invalid SOC IP address: {ip!r}")
         if ip not in ips:
             ips.append(ip)
@@ -101,6 +116,29 @@ def _normalize_soc_endpoints(value):
     if not ips:
         raise ValueError("At least one SOC address is required for isolation")
     return ips, probes
+
+def _ipv4_complement(ips):
+    """Every IPv4 address EXCEPT the given ones, as inclusive `first-last` ranges.
+
+    Needed because Windows Firewall has no "not this address" rule syntax, and the
+    complement is the only way to express "block everything else" as an explicit Block
+    rule -- which is what actually outranks the host's pre-existing Allow rules.
+
+    Ranges rather than CIDR blocks on purpose. -RemoteAddress accepts both, but excluding
+    two addresses from 0.0.0.0/0 needs 31 CIDR blocks and only 3 ranges, and a range says
+    plainly what it covers instead of relying on every one of 31 prefix lengths being read
+    back correctly. Adjacent SOC addresses (the normal case -- .100 and .101) collapse
+    into a single gap rather than producing an empty one."""
+    import ipaddress
+    marked = sorted({int(ipaddress.IPv4Address(ip)) for ip in ips})
+    ranges, cursor = [], 0
+    for n in marked:
+        if n > cursor:
+            ranges.append((cursor, n - 1))
+        cursor = n + 1
+    if cursor <= 0xFFFFFFFF:
+        ranges.append((cursor, 0xFFFFFFFF))
+    return [f'{ipaddress.IPv4Address(lo)}-{ipaddress.IPv4Address(hi)}' for lo, hi in ranges]
 
 _SHA256_RE = re.compile(r'^[0-9a-fA-F]{64}$')
 _MD5_RE = re.compile(r'^[0-9a-fA-F]{32}$')
@@ -225,9 +263,30 @@ _WIN_VERIFY_SKIPPED = """    Write-Warning "isolate_host: no SOC port supplied, 
 # back either. Containment was real and irreversible by any remote means: the one channel
 # recovery depends on is the one isolation severed. Every address the agent might need is
 # now allowed, and _soc_allowlist_ips() in app.py is what assembles them.
+#
+# ISO-01: the default-action flip alone does NOT isolate a Windows host.
+#
+# Set-NetFirewallProfile -DefaultOutboundAction Block changes what happens to traffic
+# that matches *no rule*. Windows Firewall evaluates Block rules, then Allow rules, then
+# the default -- so every one of the host's pre-existing enabled Allow rules still matches
+# first and still permits its traffic. A stock Windows install ships with dozens of them
+# (Core Networking, mDNS, network discovery, Remote Desktop...) and every application ever
+# installed adds more; malware that registered its own Allow rule keeps its channel open
+# through an "isolation" that reports success. The host looked contained and was not.
+#
+# The fix is an explicit Block rule, because Block outranks Allow. Windows has no
+# "everywhere except X" address syntax, so the exception is expressed as the arithmetic
+# complement of the SOC addresses (see _ipv4_complement) -- the SOC is the only thing no
+# Block rule matches, which lets the Allow-SOC pair below still take effect, while
+# everything else is blocked ahead of whatever the host had configured.
+#
+# IPv6 is blocked wholesale. The SOC is reached over IPv4, so there is nothing to carve
+# out, and leaving v6 open would hand any attacker on a v6-capable network an untouched
+# path straight out of a "contained" host.
 def isolate_host(soc_endpoints):
     ips, probes = _normalize_soc_endpoints(soc_endpoints)
     joined = ','.join(ips)          # PowerShell -RemoteAddress takes a comma-separated array
+    everything_else = ','.join(_ipv4_complement(ips))
     human = ' / '.join(ips)
     verify = _WIN_VERIFY_SOC_REACHABLE.replace(
         '__PROBES__', ', '.join(f"@('{ip}', {port})" for ip, port in probes)
@@ -236,7 +295,15 @@ def isolate_host(soc_endpoints):
     Remove-NetFirewallRule -DisplayName "MicroDFIR-Isolation-*" -ErrorAction SilentlyContinue
     New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Allow-SOC-Out" -Direction Outbound -RemoteAddress {joined} -Action Allow -Profile Any -ErrorAction Stop | Out-Null
     New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Allow-SOC-In" -Direction Inbound -RemoteAddress {joined} -Action Allow -Profile Any -ErrorAction Stop | Out-Null
+    New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Block-Other-Out" -Direction Outbound -RemoteAddress {everything_else} -Action Block -Profile Any -ErrorAction Stop | Out-Null
+    New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Block-Other-In" -Direction Inbound -RemoteAddress {everything_else} -Action Block -Profile Any -ErrorAction Stop | Out-Null
+    New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Block-IPv6-Out" -Direction Outbound -RemoteAddress ::/0 -Action Block -Profile Any -ErrorAction Stop | Out-Null
+    New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Block-IPv6-In" -Direction Inbound -RemoteAddress ::/0 -Action Block -Profile Any -ErrorAction Stop | Out-Null
     Set-NetFirewallProfile -Profile Domain,Public,Private -DefaultInboundAction Block -DefaultOutboundAction Block -ErrorAction Stop
+    # All six rules have to be present and enabled, or this is a partial isolation being
+    # reported as a complete one -- the exact failure ISO-01 was.
+    $applied = @(Get-NetFirewallRule -DisplayName "MicroDFIR-Isolation-*" -ErrorAction SilentlyContinue | Where-Object {{ $_.Enabled -eq 'True' }}).Count
+    if ($applied -lt 6) {{ throw "only $applied of 6 isolation rules are present and enabled" }}
 {verify}
     "Host isolated. Only traffic to/from {human} is permitted."
 }} catch {{
@@ -288,7 +355,7 @@ def restore_network():
 # api_agent_result reads as success -- so the row went green "Done" with an error buried
 # in its stdout. `exit 1` is what actually makes it land as Failed.
 def block_ip(target_ip):
-    if not _IPV4_RE.match(target_ip):
+    if not _is_ipv4(target_ip):
         raise ValueError(f"Invalid target IP address: {target_ip!r}")
     return f"""$ip = "{target_ip}"
 try {{
@@ -304,7 +371,7 @@ try {{
 """
 
 def unblock_ip(target_ip):
-    if not _IPV4_RE.match(target_ip):
+    if not _is_ipv4(target_ip):
         raise ValueError(f"Invalid target IP address: {target_ip!r}")
     return f"""$ip = "{target_ip}"
 try {{
@@ -605,7 +672,7 @@ Start-Process -FilePath "powershell.exe" -ArgumentList @('-NoProfile','-NonInter
 # independent OS process, not a Start-Job pipe tied to this script's own lifetime) and
 # returns immediately -- it does not itself wait for the beacon run to finish.
 def beacon_simulator(target_ip, target_port, interval_seconds, jitter_seconds, count):
-    if not _IPV4_RE.match(target_ip):
+    if not _is_ipv4(target_ip):
         raise ValueError(f"Invalid target IP address: {target_ip!r}")
     try:
         target_port = int(target_port)
@@ -2715,16 +2782,45 @@ PYEOF
 
 # pfctl anchor-based isolation -- same "dedicated ruleset, flush-and-remove on restore"
 # shape as the Linux agent's iptables chain, so restore can't leave stray rules behind
-# or clobber whatever pf rules already existed on the host. Uses `pfctl -a <anchor> -f -`
-# to load an ad-hoc anchor from stdin (works without needing an `anchor` line already
-# present in /etc/pf.conf) and `pfctl -e` to make sure pf itself is enabled -- NOT
-# live-verified against a real Mac; if this doesn't take effect as expected, `pfctl -s
-# rules -a microdfir/isolation` on the host is the first thing to check.
-_PF_ANCHOR = "microdfir/isolation"
+# or clobber whatever pf rules already existed on the host.
+#
+# ISO-02: the previous version of this was a NO-OP that reported success.
+#
+# It did `pfctl -a microdfir/isolation -f -` to load rules into an anchor, and stopped
+# there. Loading an anchor does not make pf evaluate it: an anchor is only ever reached
+# through an `anchor` rule in the main ruleset, and macOS's stock /etc/pf.conf references
+# `com.apple/*` and nothing else. So the rules loaded cleanly, pfctl exited 0, the script
+# printed "Host isolated" -- and every packet flowed exactly as before. Worse than no
+# containment, because the console said the host was contained.
+#
+# Three things were wrong and all three are fixed here:
+#   1. The anchor is now referenced from /etc/pf.conf (plus a `load anchor` line so it
+#      survives a `pfctl -f`), written between markers so restore can remove exactly what
+#      was added and nothing else.
+#   2. The script had no `set -e` and no failure path at all -- every command's failure
+#      fell through to the hardcoded success echo, the same false-positive class already
+#      fixed on Windows and Linux.
+#   3. Nothing checked the end state. It now asserts all three conditions that have to
+#      hold for this host to actually be isolated: pf enabled, the anchor referenced in
+#      the loaded ruleset, and our rules present inside it. Any of them failing is a loud
+#      failure, not a success message.
+#
+# Still NOT live-verified against a real Mac -- there isn't one to test on. That is
+# exactly why the self-checks above matter: on an untested platform the honest failure
+# mode is "says it failed", never "says it worked".
+_PF_ANCHOR = "microdfir"
+_PF_ANCHOR_FILE = "/etc/pf.anchors/microdfir"
+_PF_CONF = "/etc/pf.conf"
+_PF_MARK_BEGIN = "# BEGIN MicroDFIR isolation -- managed by the Micro DFIR agent"
+_PF_MARK_END = "# END MicroDFIR isolation"
 
 # soc_ips, plural, for the same reason as isolate_host() -- one pass pair per address.
 def isolate_host_macos(soc_endpoints):
     ips, probes = _normalize_soc_endpoints(soc_endpoints)
+    # `quick` on every rule, passes first: pf is last-match-wins by default, so without
+    # quick a later rule in the main ruleset could silently re-permit what this anchor
+    # just blocked. With it, SOC traffic terminates on a pass and everything else
+    # terminates on the block, regardless of what surrounds the anchor.
     passes = '\n'.join(
         f'pass out quick proto tcp from any to {ip}\npass in quick proto tcp from {ip} to any'
         for ip in ips
@@ -2743,24 +2839,59 @@ for round in 1 2 3; do
     sleep 3
 done
 if [ "$soc_ok" != "1" ]; then
-    pfctl -a {_PF_ANCHOR} -F all 2>&1
-    echo "isolate_host ROLLED BACK -- the isolation cut this host off from the SOC itself, which would have left it contained with no way to receive restore_network. The pf anchor has been flushed and the host is NOT isolated. Check that every SOC address/port the agent uses is in the isolation allowlist." >&2
+    pfctl -a {_PF_ANCHOR} -F all 2>/dev/null || true
+    sed -i '' "/{_PF_MARK_BEGIN}/,/{_PF_MARK_END}/d" {_PF_CONF} 2>/dev/null || true
+    pfctl -f {_PF_CONF} 2>/dev/null || true
+    # Confirm the rollback instead of asserting it -- every line above is failure-tolerant.
+    if pfctl -sr 2>/dev/null | grep -q '{_PF_ANCHOR}'; then
+        echo "isolate_host FAILED AND THE ROLLBACK ALSO FAILED -- the {_PF_ANCHOR} anchor is still referenced, so this host is STILL ISOLATED and cannot reach the SOC. It will NOT receive restore_network and needs hands-on recovery at the console." >&2
+    else
+        echo "isolate_host ROLLED BACK -- the isolation cut this host off from the SOC itself, which would have left it contained with no way to receive restore_network. The rollback was verified: the {_PF_ANCHOR} anchor is no longer referenced, so the host is NOT isolated. Check that every SOC address/port the agent uses is in the isolation allowlist." >&2
+    fi
     exit 1
 fi'''
     else:
         verify = 'echo "isolate_host: no SOC port supplied, so reachability after isolation was NOT verified. If this host stops checking in, the isolation allowlist is the first thing to check." >&2'
-    return f"""cat <<'PFRULES' | pfctl -a {_PF_ANCHOR} -f - 2>&1
-block all
+    return f"""set -e
+fail() {{ echo "isolate_host FAILED -- host is NOT contained: $1" >&2; exit 1; }}
+command -v pfctl >/dev/null 2>&1 || fail "pfctl not found"
+mkdir -p /etc/pf.anchors || fail "could not create /etc/pf.anchors (need root?)"
+cat > {_PF_ANCHOR_FILE} <<'PFRULES' || fail "could not write {_PF_ANCHOR_FILE} (need root?)"
 {passes}
+block quick all
 PFRULES
-pfctl -e 2>&1 | grep -v 'already enabled'
+# Idempotent: a second isolate re-writes the anchor file but must not append the same
+# reference to pf.conf twice.
+if ! grep -q "{_PF_MARK_BEGIN}" {_PF_CONF} 2>/dev/null; then
+    printf '%s\\nanchor "{_PF_ANCHOR}"\\nload anchor "{_PF_ANCHOR}" from "{_PF_ANCHOR_FILE}"\\n%s\\n' "{_PF_MARK_BEGIN}" "{_PF_MARK_END}" >> {_PF_CONF} || fail "could not reference the anchor from {_PF_CONF} (need root?)"
+fi
+pfctl -f {_PF_CONF} || fail "pfctl could not load {_PF_CONF}"
+# `pfctl -e` exits non-zero when pf is ALREADY enabled, which is a success for us -- so it
+# is tolerated here and the actual state is asserted below instead. The old code piped
+# this through grep, which made the pipeline's exit status grep's and hid both outcomes.
+pfctl -e 2>/dev/null || true
+pfctl -si 2>/dev/null | grep -q "Status: Enabled" || fail "pf is not enabled, so no rule in it is being evaluated"
+pfctl -sr 2>/dev/null | grep -q '{_PF_ANCHOR}' || fail "the {_PF_ANCHOR} anchor is not referenced in the loaded ruleset, so its rules would never be evaluated"
+pfctl -a {_PF_ANCHOR} -sr 2>/dev/null | grep -q "block" || fail "the {_PF_ANCHOR} anchor is referenced but contains no block rule"
 {verify}
-echo "Host isolated (pfctl anchor {_PF_ANCHOR}). Only traffic to/from {human} is permitted."
+echo "Host isolated (pf anchor {_PF_ANCHOR}, referenced from {_PF_CONF}). Only traffic to/from {human} is permitted."
 """
 
+# A silently-failed restore is worse than a silently-failed isolate -- it leaves a host
+# cut off while the console says it was restored. Removes both halves of what isolate
+# added (the anchor's rules and the pf.conf reference), then proves the end state.
+# Not-isolated-to-begin-with and successfully-restored both end as "anchor not
+# referenced", which is exactly the condition worth reporting success on.
 def restore_network_macos():
-    return f"""pfctl -a {_PF_ANCHOR} -F all 2>&1
-echo "Network isolation removed (pfctl anchor {_PF_ANCHOR} flushed)."
+    return f"""fail() {{ echo "restore_network FAILED -- host may STILL be isolated: $1" >&2; exit 1; }}
+command -v pfctl >/dev/null 2>&1 || fail "pfctl not found"
+pfctl -a {_PF_ANCHOR} -F all 2>/dev/null || true
+sed -i '' "/{_PF_MARK_BEGIN}/,/{_PF_MARK_END}/d" {_PF_CONF} 2>/dev/null || true
+rm -f {_PF_ANCHOR_FILE} 2>/dev/null || true
+pfctl -f {_PF_CONF} 2>/dev/null || fail "could not reload {_PF_CONF} after removing the isolation anchor"
+if pfctl -sr 2>/dev/null | grep -q '{_PF_ANCHOR}'; then fail "the {_PF_ANCHOR} anchor is still referenced after removal"; fi
+if grep -q "{_PF_MARK_BEGIN}" {_PF_CONF} 2>/dev/null; then fail "the isolation block is still present in {_PF_CONF}"; fi
+echo "Network isolation removed (pf anchor {_PF_ANCHOR} flushed and dereferenced)."
 """
 
 def collect_triage_macos():
