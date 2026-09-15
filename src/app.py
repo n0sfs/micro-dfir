@@ -8248,6 +8248,22 @@ PLAYBOOK_APPROVAL_STATUSES = ('pending', 'approved', 'rejected')
 # there's no way to configure any of them to run unattended.
 PLAYBOOK_ACTION_TYPES_ALWAYS_GATED = {'isolate_host', 'restore_network', 'collect_triage', 'quarantine_file', 'kill_scheduled_task', 'kill_process_by_name', 'revoke_user_credentials'}
 
+def _edr_permission_for_action(action_type):
+    """The EDR permission a playbook action needs, or None if it isn't an EDR action.
+
+    Approving a queued action executes it for real, so approval must demand the same
+    permission the direct route does. Rather than restate the tiering, this reads the same
+    AGENT_COMMAND_TIER1_LABELS set api_agent_commands() uses, so adding a label in one
+    place can't leave the approval queue behind -- which is exactly how the queue ended up
+    re-checking isolate_host and nothing else.
+
+    revoke_user_credentials never reaches an endpoint (it disables the account
+    server-side), so it isn't an agent command and maps to no EDR key; approving it stays
+    on soar.playbooks.manage alone."""
+    if action_type not in PLAYBOOK_ACTION_TYPES_ALWAYS_GATED or action_type == 'revoke_user_credentials':
+        return None
+    return 'edr.command.basic' if action_type in AGENT_COMMAND_TIER1_LABELS else 'edr.command.advanced'
+
 def _valid_action_types_for_trigger(trigger_event):
     return ALERT_ACTION_TYPES if trigger_event == 'alert_created' else PLAYBOOK_ACTION_TYPES
 
@@ -9825,16 +9841,23 @@ def api_playbook_approval_decide(approval_id):
     decision = (request.json or {}).get('decision')
     if decision not in ('approve', 'reject'):
         return jsonify({'error': "decision must be 'approve' or 'reject'"}), 400
-    # Approving an isolate_host action is what actually fires it -- require the same EDR
-    # permission the direct one-click isolate button requires (AGENT_COMMAND_TIER1_LABELS
-    # -> 'edr.command.basic'), not just soar.playbooks.manage. Without this, a custom role
-    # granted soar.playbooks.manage but not edr.command.basic could approve a host
-    # isolation through the SOAR queue, sidestepping the permission boundary that blocks
-    # that same user from the direct EDR action. Rejecting never executes anything, so it
-    # doesn't need this extra check.
-    if decision == 'approve' and approval['action_type'] == 'isolate_host':
-        err = require_permission('edr.command.basic')
-        if err: return err
+    # Approving one of these is what actually fires it -- so it requires the same EDR
+    # permission the direct one-click button requires, not just soar.playbooks.manage.
+    # Without it, a custom role granted soar.playbooks.manage but no EDR permission can
+    # execute EDR actions through the SOAR queue, sidestepping the boundary that blocks
+    # that same user from the direct route. Rejecting never executes anything, so it
+    # doesn't need the check.
+    #
+    # This previously covered isolate_host ONLY, while PLAYBOOK_ACTION_TYPES_ALWAYS_GATED
+    # holds six more -- so the queue was a bypass for un-isolating a contained host,
+    # quarantining files, killing processes fleet-wide and revoking credentials. Derived
+    # from the same tiering api_agent_commands() applies rather than restated, so the two
+    # cannot drift apart again as labels are added.
+    if decision == 'approve':
+        required_perm = _edr_permission_for_action(approval['action_type'])
+        if required_perm:
+            err = require_permission(required_perm)
+            if err: return err
 
     # Atomically claim this approval BEFORE doing anything else. A plain "check status in
     # Python, then execute, then UPDATE" (the original shape) is a classic TOCTOU race: a
@@ -17054,6 +17077,32 @@ LOG_TYPE_BRANCHES_WITH_ARCHIVE = [
     ('anomaly', _ANOMALY_BRANCH_SQL), ('command', _COMMAND_BRANCH_SQL), ('import', _IMPORT_BRANCH_SQL)
 ]
 
+def _log_branches_for_user(include_archive):
+    """The union branches the current user is allowed to read.
+
+    The `command` branch projects response-action stdout/stderr into its message column,
+    and that is forensic collection output for any host in the fleet -- triage bundles,
+    browser artifacts, registry and USB collection, live-forensics dumps.
+    api_agent_commands' GET refuses to serve exactly that data without
+    edr.command.basic, and its comment explains why.
+
+    Reaching it through the unified log search bypassed that decision completely: the
+    three consumers (search, CSV export, timeline) carry only @login_required, and
+    `types=command` narrows the union to this branch alone -- so any account, including a
+    custom role holding no permissions at all, could request a clean dump of every
+    response-action result across the fleet. Same recurring "read route shipped with only
+    @login_required" class CLAUDE.md documents, reached by a side door rather than by the
+    route that owns the data.
+
+    Filtering the branch out (rather than refusing the whole request) keeps log search
+    working normally for everyone; a user without the permission simply never sees command
+    rows. Every caller already handles an empty branch list, which is what happens when
+    such a user explicitly asks for types=command."""
+    branches = LOG_TYPE_BRANCHES_WITH_ARCHIVE if include_archive else LOG_TYPE_BRANCHES
+    if 'edr.command.basic' in _current_user_permissions():
+        return branches
+    return [(t, sql) for t, sql in branches if t != 'command']
+
 _RANGE_DELTAS = {
     '5m': ('minutes', 5), '15m': ('minutes', 15), '30m': ('minutes', 30),
     '1h': ('hours', 1), '4h': ('hours', 4), '12h': ('hours', 12), '24h': ('hours', 24),
@@ -17914,7 +17963,7 @@ def api_logs_search():
         db = get_db()
         other_where, other_params = _build_log_other_filters(request.args)
         active_types = _active_log_types(request.args)
-        branches = LOG_TYPE_BRANCHES_WITH_ARCHIVE if request.args.get('include_archive') == '1' else LOG_TYPE_BRANCHES
+        branches = _log_branches_for_user(request.args.get('include_archive') == '1')
         if active_types:
             branches = [(t, sql) for t, sql in branches if t in active_types]
         sort_clause = _build_log_sort(request.args)
@@ -17963,7 +18012,7 @@ def export_logs_csv():
         db = get_db()
         other_where, other_params = _build_log_other_filters(request.args)
         active_types = _active_log_types(request.args)
-        branches = LOG_TYPE_BRANCHES_WITH_ARCHIVE if request.args.get('include_archive') == '1' else LOG_TYPE_BRANCHES
+        branches = _log_branches_for_user(request.args.get('include_archive') == '1')
         if active_types:
             branches = [(t, sql) for t, sql in branches if t in active_types]
         sort_clause = _build_log_sort(request.args)
@@ -18020,7 +18069,7 @@ def api_logs_timeline():
         db = get_db()
         other_where, other_params = _build_log_other_filters(request.args)
         active_types = _active_log_types(request.args)
-        branches = LOG_TYPE_BRANCHES_WITH_ARCHIVE if request.args.get('include_archive') == '1' else LOG_TYPE_BRANCHES
+        branches = _log_branches_for_user(request.args.get('include_archive') == '1')
         if active_types:
             branches = [(t, sql) for t, sql in branches if t in active_types]
         time_range = request.args.get('range', '24h')
@@ -19785,6 +19834,21 @@ def _queue_agent_command(db, hostname, label, params, script_in, queued_by):
             if not ips:
                 return None, "Cannot determine this server's address for the isolation allowlist -- set the UI Bind IP under Settings > Network."
             params['soc_ip'] = ','.join(ips)
+        if label == 'block_ip':
+            # Refuse to block the appliance's own addresses. Nothing stopped this before,
+            # and it is the same unrecoverable outcome as the dual-homed isolation
+            # incident, reachable from a lower tier: a Block rule beats an Allow rule in
+            # the Windows filtering engine, so blocking a SOC address also overrides the
+            # isolation allowlist, the agent can never poll again, and unblock_ip can
+            # therefore never be delivered. One mistyped IOC from a feed is enough.
+            # Checked at queue time because the script builder has no idea what the
+            # appliance's addresses are.
+            s = {r[0]: r[1] for r in db.execute("SELECT key, value FROM settings").fetchall()}
+            soc_ips = {e.split(':')[0] for e in _soc_allowlist_endpoints(s, request.host)}
+            target = str(params.get('target_ip') or '').strip()
+            if target in soc_ips:
+                return None, (f"Refusing to block {target}: that is this appliance's own address. "
+                              f"Blocking it would cut the agent's link to the SOC, and the unblock could never be delivered.")
         missing = [p for p in required if not params.get(p)]
         if missing:
             return None, f"Missing required parameter(s): {', '.join(missing)}"
@@ -19990,12 +20054,24 @@ def api_agent_commands():
             cmd_id, error = _queue_agent_command(db, h, label, dict(d.get('params') or {}), d.get('script'), current_user.username)
             (failed if error else queued).append({'hostname': h, **({'error': error} if error else {'id': cmd_id})})
         db.commit()
+        # One audit row for the dispatch, naming the group and every host it reached --
+        # see the note on the single-host branch below for why this matters most here.
+        log_audit('agent_command_queue', 'agent_command', None,
+                  f"label={label} group={group_name} queued={len(queued)} failed={len(failed)} hosts={', '.join(h['hostname'] for h in queued)}")
         return jsonify({'status': 'success', 'queued': queued, 'failed': failed})
 
     cmd_id, error = _queue_agent_command(db, hostname, label, d.get('params', {}) or {}, d.get('script'), current_user.username)
     if error:
         return jsonify({'error': error}), 400
     db.commit()
+    # Queuing a command is the highest-impact action in the product -- a 'custom' label is
+    # arbitrary code as SYSTEM/root on the endpoint, and the group branch above runs it on
+    # every host in a group from one request. It was the only such action with no audit
+    # record: cancelling a command and changing a host's group both wrote one, while this
+    # did not, leaving agent_commands.queued_by (a column the same permission can read and
+    # nothing immutable) as the sole trace. The script body is deliberately not logged --
+    # it can be very large and is already stored on the row.
+    log_audit('agent_command_queue', 'agent_command', cmd_id, f"label={label} host={hostname}")
     return jsonify({'status': 'success', 'id': cmd_id})
 
 @app.route('/api/agent/result', methods=['POST'])
