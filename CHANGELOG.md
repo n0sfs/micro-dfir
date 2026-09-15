@@ -1136,7 +1136,7 @@ expression itself correctly computes 1.0x/1.5x/1.5x/2.25x for
 neither/departing-only/privileged-only/both — including the LEFT JOIN case where a
 user has no `identities` row at all. Plus a JS vm-context test (3 cases) for the badge
 rendering in the identity quick-actions panel. Live-verified on production against the
-real `noslo` user: flagged privileged+departing, confirmed `/api/ueba/risk-scores`
+real `analyst-a` user: flagged privileged+departing, confirmed `/api/ueba/risk-scores`
 returned `multiplier: 2.25` and `score: 15754.5` (exactly `7002 raw × 2.25`), confirmed
 the Risk Scoring table rendered "15754.5 ×2.25" with the updated tooltip wording, and
 confirmed the risk detail modal's identity panel showed both real badges — test
@@ -1171,7 +1171,7 @@ tooltip for a rule-derived event, no icon for a built-in one, first-non-null-win
 across grouped events, and the rule modal correctly prefills/clears the description
 field on open for an existing vs. brand-new rule. Live-verified on production: wrote a
 real rationale for the actual "Named-User Alert Sourced from Internal Network" rule
-(125 real historical matches), confirmed every `custom_alert_rule` row in `noslo`'s
+(125 real historical matches), confirmed every `custom_alert_rule` row in `analyst-a`'s
 real risk breakdown now carries the ⓘ info icon with that text — left in place
 afterward as genuinely useful documentation, not reverted like the session's usual
 disposable test data.
@@ -1248,7 +1248,7 @@ and backslashes; a Top Alerts row (including one with an apostrophe in its name)
 to an escaped raw-text pivot; a Related Entities row links to that entity's risk detail
 modal; IP rows link field-scoped; Risk Contributions rows get no link; a Top Entities
 (By Model) row pivots using the raw entity id, not the emoji-prefixed display text.
-Live-verified on production against the real `noslo` user: clicked the real
+Live-verified on production against the real `analyst-a` user: clicked the real
 `WORKSTATION-A` row under Related Hosts and confirmed its own risk detail modal
 opened with real data (Priority 10/10, `rare_process_population`/`process_lineage`/
 `new_destination_ip` events), then clicked the real "Suspicious PowerShell Execution"
@@ -1331,7 +1331,7 @@ Live-verified all three on production.
 Asked to run through the insider-threat process specifically. Live-verified current
 state: the `identities` table is completely empty on this deployment (the Insider
 Threat dashboard's Watchlist widget literally says so), but the same dashboard's Top
-Risky Entities widget shows real live data — including the real user `noslo` at a
+Risky Entities widget shows real live data — including the real user `analyst-a` at a
 genuine 9.4/10 Critical priority score. Investigating that gap surfaced the actual
 friction: UEBA's Risk Scoring detail modal (`viewRiskScoreDetail`) shows a full score
 breakdown for any entity, including users, but had zero identity/watchlist context or
@@ -1360,7 +1360,7 @@ already-watched one shows Remove instead, a non-admin sees badges but no buttons
 creating a new watched identity in one step succeeds and toasts, a create failure
 (e.g. a race where the identity already exists) surfaces the real server error, and a
 toggle failure shows an error toast rather than a false success. Live-verified on
-production against the real `noslo` user (9.4/10 Critical): opened their risk detail,
+production against the real `analyst-a` user (9.4/10 Critical): opened their risk detail,
 clicked "Watch This User", and confirmed `/api/dashboards/watchlist` immediately
 returned them with the real priority score and `watched_by: "admin"` — then clicked
 "Remove from Watchlist" and deleted the test identity row, restoring the table to its
@@ -1372,7 +1372,7 @@ Second finding from the same review: the Insider Threat dashboard's two flagship
 widgets — Watchlist and Top Risky Entities — were fully static, confirmed via source
 (neither `renderTopRiskWidget()` nor `renderWatchlistWidget()` in `dashboards.html` had
 an `onclick` anywhere). An analyst scanning the dashboard for who's risky (it showed
-the real user `noslo` at a genuine 9.4/10 Critical) had no way to click through — they
+the real user `analyst-a` at a genuine 9.4/10 Critical) had no way to click through — they
 had to separately open UEBA and search for that exact entity by hand.
 
 Added `pivotToRiskDetail(entityType, entityId)` and wired it to both widgets' rows,
@@ -1402,10 +1402,10 @@ individually (XSS safety unchanged), and a regression-baseline test confirms the
 join-then-escape expression really did double-escape. Source-inspection checks confirm
 the `?entity_type=&entity_id=` deep link correctly switches to the risk tab, awaits the
 right load promise without double-fetching, and the plain `?tab=` path is unaffected
-when no entity is specified. Live-verified on production: clicking the real `noslo` row
+when no entity is specified. Live-verified on production: clicking the real `analyst-a` row
 in Top Risky Entities navigated straight to `/ueba?tab=risk&entity_type=user&entity_id=
-noslo` and auto-opened the detail modal with the `&middot;` fix visible as a real
-bullet between grouped rule-match details; separately watched `noslo` to verify the
+analyst-a` and auto-opened the detail modal with the `&middot;` fix visible as a real
+bullet between grouped rule-match details; separately watched `analyst-a` to verify the
 Watchlist widget's own row pivots identically and lands on the modal already showing
 "Watched" — test identity deleted afterward both times.
 
