@@ -4,7 +4,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, random, ssl, tem
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.09.14.1"
+AGENT_VERSION = "2026.09.15.1"
 
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
@@ -93,7 +93,157 @@ SERVER_URL = f'https://{_HOST_URL}/api/agent/config' if _HOST_URL else 'https://
 RESULT_URL = f'https://{_HOST_URL}/api/agent/result' if _HOST_URL else 'https://__HOST_URL__/api/agent/result'
 INGEST_URL = f'https://{_INGEST_HOST_URL}/api/ingest' if _INGEST_HOST_URL else 'https://__HOST_URL__/api/ingest'
 SYSMON_CONFIG_URL = f'https://{_HOST_URL}/api/agent/sysmon-config' if _HOST_URL else 'https://__HOST_URL__/api/agent/sysmon-config'
-SOC_TOKEN = _EXTERNAL_CONFIG.get('soc_token') or '__SOC_TOKEN__'
+# ---- Enrollment token at rest -------------------------------------------------------
+#
+# The token authorises remote script execution on this endpoint, and it used to live in
+# plaintext in two places on disk: baked into this file's own source at download time,
+# and again in agent_config.json when the NSIS installer is used. Measured on a real
+# deployment, the installed source carries `BUILTIN\Users: ReadAndExecute` -- so ANY
+# local user could read a fleet credential out of it, no privilege required.
+#
+# It is now kept as a DPAPI blob instead. Deliberately USER scope (dwFlags without
+# CRYPTPROTECT_LOCAL_MACHINE): this agent runs under the installing account (a scheduled
+# task with RunLevel=Highest, verified live -- not SYSTEM), so user scope binds the blob
+# to that one account. Machine scope would be strictly worse here, since it lets every
+# local user decrypt it.
+#
+# What this does and does not buy, stated plainly: it stops any *other* local user
+# reading the token, and it makes a copied file useless on another machine (DPAPI keys
+# are per-user, per-machine). It does not stop the account the agent runs as, nor an
+# attacker who already executes code as that account -- nothing file-based can.
+_TOKEN_STORE_PATH = os.path.join(INSTALL_DIR, "agent_token.bin")
+
+# The literal placeholder, assembled rather than written out: src/app.py's download-time
+# substitution does a blind str.replace() for it across this whole file, so spelling it
+# directly here would make THIS string get replaced with the real token too -- which is
+# precisely the plaintext-on-disk problem this code exists to remove.
+_TOKEN_PLACEHOLDER = '__' + 'SOC_TOKEN' + '__'
+
+def _dpapi(data, protect):
+    """CryptProtectData / CryptUnprotectData through ctypes.
+
+    ctypes rather than pywin32 because this agent has no third-party dependencies and
+    must keep it that way -- it is deployed by copying one .py onto an endpoint."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _DATA_BLOB(ctypes.Structure):
+        _fields_ = [('cbData', wintypes.DWORD), ('pbData', ctypes.POINTER(ctypes.c_char))]
+
+    buf = ctypes.create_string_buffer(data, len(data))
+    src = _DATA_BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    out = _DATA_BLOB()
+    fn = ctypes.windll.crypt32.CryptProtectData if protect else ctypes.windll.crypt32.CryptUnprotectData
+    # CRYPTPROTECT_UI_FORBIDDEN (0x01): this runs headless, and a DPAPI prompt in a
+    # session with no desktop would hang the agent rather than fail it.
+    if not fn(ctypes.byref(src), None, None, None, None, 0x01, ctypes.byref(out)):
+        raise OSError(ctypes.get_last_error() or 'DPAPI call failed')
+    try:
+        return ctypes.string_at(out.pbData, out.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(out.pbData)
+
+def _token_log(msg):
+    """Breadcrumb for the one genuinely dangerous state this code can reach.
+
+    The agent's normal print()-to-agent.log redirection is installed in main(), long
+    after this module-level token resolution runs, so a print here would go nowhere.
+    Appends directly instead. Deliberately never raises: a logging failure must not stop
+    the agent from starting."""
+    try:
+        with open(os.path.join(INSTALL_DIR, "agent.log"), "a", encoding="utf-8") as f:
+            f.write(time.strftime("[%Y-%m-%d %H:%M:%S] ") + msg + "\n")
+    except Exception:
+        pass
+
+def _read_stored_token():
+    try:
+        with open(_TOKEN_STORE_PATH, 'rb') as f:
+            blob = f.read()
+        if not blob:
+            return None
+        return _dpapi(blob, False).decode('utf-8').strip() or None
+    except Exception:
+        # No store yet, a blob from another account/machine, or DPAPI unavailable --
+        # all of them mean "fall back to the bootstrap token", never "crash at startup".
+        return None
+
+def _store_token(tok):
+    """Protect the token on disk. Returns True only if it reads back correctly."""
+    try:
+        if not os.path.isdir(INSTALL_DIR):
+            os.makedirs(INSTALL_DIR)
+        with open(_TOKEN_STORE_PATH, 'wb') as f:
+            f.write(_dpapi(tok.encode('utf-8'), True))
+        # Drop inherited ACEs so the blob does not inherit the same BUILTIN\Users read
+        # the source file has. Belt and braces: DPAPI user scope already means another
+        # user cannot decrypt it, but there is no reason to let them hold the ciphertext.
+        subprocess.run(
+            ['icacls', _TOKEN_STORE_PATH, '/inheritance:r',
+             '/grant:r', f'{os.environ.get("USERNAME", "")}:(F)',
+             '/grant:r', 'SYSTEM:(F)', '/grant:r', 'Administrators:(F)'],
+            capture_output=True, timeout=20
+        )
+        # Never report success on a write we have not proved we can read back -- the
+        # scrub below is irreversible, and a store that cannot be read would take this
+        # endpoint off the fleet permanently.
+        return _read_stored_token() == tok
+    except Exception:
+        return False
+
+def _scrub_plaintext_token(tok):
+    """Remove the bootstrap copies of the token from disk, once it is safely stored."""
+    try:
+        installed = os.path.join(INSTALL_DIR, "micro_agent_windows.py")
+        for path in {installed, os.path.abspath(__file__)}:
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    text = f.read()
+                if tok in text:
+                    with open(path, 'w', encoding='utf-8') as f:
+                        f.write(text.replace(tok, _TOKEN_PLACEHOLDER))
+            except OSError:
+                pass
+    except Exception:
+        pass
+    try:
+        cfg_path = os.path.join(INSTALL_DIR, "agent_config.json")
+        if os.path.exists(cfg_path):
+            with open(cfg_path, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+            if cfg.pop('soc_token', None) is not None:
+                with open(cfg_path, 'w', encoding='utf-8') as f:
+                    json.dump(cfg, f)
+    except Exception:
+        pass
+
+def _resolve_soc_token():
+    # Store first: after the one-time migration below it is the only copy that exists.
+    stored = _read_stored_token()
+    if stored:
+        return stored
+    # Bootstrap; also the path every self-upgrade takes, since the server bakes the token
+    # back into the source it sends (it has to -- an older agent has nowhere else to get
+    # it). Re-migrating on each upgrade keeps that window down to one startup.
+    # The literal below is the ONE occurrence src/app.py's download-time substitution
+    # targets -- it must stay spelled out here, or the plain-.zip download ships an agent
+    # with no credential at all. Comparing against the assembled _TOKEN_PLACEHOLDER is
+    # how "never substituted" is detected without writing the literal a second time.
+    bootstrap = _EXTERNAL_CONFIG.get('soc_token') or '__SOC_TOKEN__'
+    if bootstrap and bootstrap != _TOKEN_PLACEHOLDER:
+        if _store_token(bootstrap):
+            _scrub_plaintext_token(bootstrap)
+    if not stored and bootstrap == _TOKEN_PLACEHOLDER:
+        # Store unreadable AND the source already scrubbed: this endpoint has no
+        # credential left and every request it makes will be rejected. It cannot tell the
+        # SOC, because telling the SOC needs the credential -- so the only place this can
+        # be said is the local log. Re-download the agent for this host to re-enroll it.
+        _token_log("FATAL: no usable SOC token -- the protected store could not be read "
+                   "and the bootstrap copy is already scrubbed. This agent cannot "
+                   "authenticate. Re-download the agent package to re-enroll this host.")
+    return bootstrap
+
+SOC_TOKEN = _resolve_soc_token()
 
 def _api_urls(path):
     """Every base this appliance might answer `path` on, primary first.

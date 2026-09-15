@@ -4,7 +4,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, ssl, threading, 
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.09.14.1"
+AGENT_VERSION = "2026.09.15.1"
 
 _OS_DETAIL_CACHE = None
 
@@ -34,7 +34,111 @@ SERVICE_PATH = f"/etc/systemd/system/{SERVICE_NAME}.service"
 SERVER_URL = 'https://__HOST_URL__/api/agent/config'
 INGEST_URL = 'https://__HOST_URL__/api/ingest'
 RESULT_URL = 'https://__HOST_URL__/api/agent/result'
-SOC_TOKEN = '__SOC_TOKEN__'
+# ---- Enrollment token at rest -------------------------------------------------------
+#
+# The token authorises remote script execution on this endpoint, and it used to sit in
+# plaintext in this file's own source, baked in at download time. Anything that could
+# read the script -- any local user, if the install directory's permissions allow it, or
+# anyone with a copy of the backup -- had a fleet credential.
+#
+# On Linux the honest answer is a root-owned 0600 file, not a keyring. This agent runs as
+# root (systemd User=root), and for a root process the kernel keyring offers no real
+# protection root does not already have; what actually matters is that NON-root users
+# cannot read it, which mode 0600 gives directly. `secret-tool`/libsecret is not an
+# option here either: it needs a D-Bus session and a desktop login, neither of which
+# exists on a headless endpoint. Choosing the simple mechanism that genuinely holds,
+# rather than the impressive-sounding one that would not.
+_TOKEN_STORE_PATH = os.path.join(INSTALL_DIR, "agent_token")
+
+# Assembled, not written out: src/app.py's download-time substitution blind-replaces this
+# literal across the whole file, so spelling it directly would turn this constant into
+# the real token -- exactly the plaintext-on-disk problem being removed here.
+_TOKEN_PLACEHOLDER = '__' + 'SOC_TOKEN' + '__'
+
+def _token_log(msg):
+    """Breadcrumb for the one genuinely dangerous state this code can reach.
+
+    The agent's normal print()-to-agent.log redirection is installed in main(), long
+    after this module-level token resolution runs, so a print here would go nowhere.
+    Appends directly instead. Deliberately never raises: a logging failure must not stop
+    the agent from starting."""
+    try:
+        with open(os.path.join(INSTALL_DIR, "agent.log"), "a", encoding="utf-8") as f:
+            f.write(time.strftime("[%Y-%m-%d %H:%M:%S] ") + msg + "\n")
+    except Exception:
+        pass
+
+def _read_stored_token():
+    try:
+        st = os.stat(_TOKEN_STORE_PATH)
+        # Refuse a store anyone else can read. If the mode is wrong the token must be
+        # treated as compromised-in-place rather than quietly used: re-storing it below
+        # rewrites the file with the correct mode.
+        if st.st_mode & 0o077:
+            return None
+        with open(_TOKEN_STORE_PATH, 'r', encoding='utf-8') as f:
+            return f.read().strip() or None
+    except Exception:
+        return None
+
+def _store_token(tok):
+    """Write the token root-only. Returns True only if it reads back correctly."""
+    try:
+        if not os.path.isdir(INSTALL_DIR):
+            os.makedirs(INSTALL_DIR, mode=0o700)
+        # Created 0600 from the outset via os.open -- opening with the default mode and
+        # chmod-ing afterwards leaves a window where the file exists world-readable.
+        fd = os.open(_TOKEN_STORE_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, tok.encode('utf-8'))
+        finally:
+            os.close(fd)
+        os.chmod(_TOKEN_STORE_PATH, 0o600)
+        # Never report success on a write not proved readable -- the scrub below is
+        # irreversible, and an unreadable store would take this endpoint off the fleet.
+        return _read_stored_token() == tok
+    except Exception:
+        return False
+
+def _scrub_plaintext_token(tok):
+    """Remove the bootstrap copy of the token from the script source on disk."""
+    installed = os.path.join(INSTALL_DIR, "micro_agent_linux.py")
+    for path in {installed, os.path.abspath(__file__)}:
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                text = f.read()
+            if tok in text:
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(text.replace(tok, _TOKEN_PLACEHOLDER))
+        except Exception:
+            pass
+
+def _resolve_soc_token():
+    # Store first: after the one-time migration it is the only copy that exists.
+    stored = _read_stored_token()
+    if stored:
+        return stored
+    # Bootstrap, and also the path every self-upgrade takes -- the server bakes the token
+    # back into the source it sends, because an older agent has nowhere else to get it.
+    # Re-migrating on each upgrade keeps that window to a single startup.
+    #
+    # The literal below is the ONE occurrence src/app.py's substitution targets; it must
+    # stay spelled out or a downloaded agent has no credential at all.
+    bootstrap = '__SOC_TOKEN__'
+    if bootstrap and bootstrap != _TOKEN_PLACEHOLDER:
+        if _store_token(bootstrap):
+            _scrub_plaintext_token(bootstrap)
+    if not stored and bootstrap == _TOKEN_PLACEHOLDER:
+        # Store unreadable AND the source already scrubbed: this endpoint has no
+        # credential left and every request it makes will be rejected. It cannot tell the
+        # SOC, because telling the SOC needs the credential -- so the only place this can
+        # be said is the local log. Re-download the agent for this host to re-enroll it.
+        _token_log("FATAL: no usable SOC token -- the protected store could not be read "
+                   "and the bootstrap copy is already scrubbed. This agent cannot "
+                   "authenticate. Re-download the agent package to re-enroll this host.")
+    return bootstrap
+
+SOC_TOKEN = _resolve_soc_token()
 
 def _api_urls(path):
     """Every base this appliance might answer `path` on, primary first.

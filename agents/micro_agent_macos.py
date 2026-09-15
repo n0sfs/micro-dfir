@@ -21,7 +21,7 @@ import urllib.request, json, time, sys, os, subprocess, socket, ssl, threading, 
 # Bump this on every change to this file — it's reported on every check-in
 # (X-Agent-Version header) so the Agents page can show what each deployed endpoint is
 # actually running and when it last picked up an upgrade.
-AGENT_VERSION = "2026.09.14.1"
+AGENT_VERSION = "2026.09.15.1"
 
 _OS_DETAIL_CACHE = None
 
@@ -45,7 +45,138 @@ LAUNCHD_PLIST_PATH = f"/Library/LaunchDaemons/{SERVICE_LABEL}.plist"
 SERVER_URL = 'https://__HOST_URL__/api/agent/config'
 INGEST_URL = 'https://__HOST_URL__/api/ingest'
 RESULT_URL = 'https://__HOST_URL__/api/agent/result'
-SOC_TOKEN = '__SOC_TOKEN__'
+# ---- Enrollment token at rest -------------------------------------------------------
+#
+# The token authorises remote script execution on this endpoint, and it used to sit in
+# plaintext in this file's own source, baked in at download time -- readable by anyone
+# who could read the script or a backup of it.
+#
+# macOS has a real answer for this, so it gets used: the System keychain, via /usr/bin/
+# security. This agent runs as root (a LaunchDaemon), which is what makes the System
+# keychain reachable at all -- a login keychain would need a logged-in user and would be
+# locked on a headless boot. A 0600 file is kept as the fallback for the case where
+# `security` is unavailable or refuses, because losing the credential entirely is a worse
+# outcome than storing it the way Linux does.
+_TOKEN_STORE_PATH = os.path.join(INSTALL_DIR, "agent_token")
+_KEYCHAIN = "/Library/Keychains/System.keychain"
+_KEYCHAIN_SERVICE = "micro-dfir-agent"
+_KEYCHAIN_ACCOUNT = "soc-token"
+
+# Assembled, not written out: src/app.py's download-time substitution blind-replaces this
+# literal across the whole file, so spelling it directly would turn this constant into
+# the real token -- exactly the problem being removed here.
+_TOKEN_PLACEHOLDER = '__' + 'SOC_TOKEN' + '__'
+
+def _keychain_read():
+    try:
+        r = subprocess.run(
+            ['/usr/bin/security', 'find-generic-password', '-s', _KEYCHAIN_SERVICE,
+             '-a', _KEYCHAIN_ACCOUNT, '-w', _KEYCHAIN],
+            capture_output=True, text=True, timeout=20
+        )
+        if r.returncode == 0:
+            return (r.stdout or '').strip() or None
+    except Exception:
+        pass
+    return None
+
+def _keychain_write(tok):
+    try:
+        # -U updates an existing item instead of failing on a duplicate, so a re-enrolled
+        # endpoint replaces its entry rather than accumulating one per upgrade.
+        r = subprocess.run(
+            ['/usr/bin/security', 'add-generic-password', '-s', _KEYCHAIN_SERVICE,
+             '-a', _KEYCHAIN_ACCOUNT, '-w', tok, '-U', _KEYCHAIN],
+            capture_output=True, text=True, timeout=20
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+def _token_log(msg):
+    """Breadcrumb for the one genuinely dangerous state this code can reach.
+
+    The agent's normal print()-to-agent.log redirection is installed in main(), long
+    after this module-level token resolution runs, so a print here would go nowhere.
+    Appends directly instead. Deliberately never raises: a logging failure must not stop
+    the agent from starting."""
+    try:
+        with open(os.path.join(INSTALL_DIR, "agent.log"), "a", encoding="utf-8") as f:
+            f.write(time.strftime("[%Y-%m-%d %H:%M:%S] ") + msg + "\n")
+    except Exception:
+        pass
+
+def _read_stored_token():
+    tok = _keychain_read()
+    if tok:
+        return tok
+    try:
+        st = os.stat(_TOKEN_STORE_PATH)
+        # Refuse a fallback store anyone else can read -- re-storing rewrites it 0600.
+        if st.st_mode & 0o077:
+            return None
+        with open(_TOKEN_STORE_PATH, 'r', encoding='utf-8') as f:
+            return f.read().strip() or None
+    except Exception:
+        return None
+
+def _store_token(tok):
+    """Keychain first, 0600 file as fallback. True only if it reads back correctly."""
+    if _keychain_write(tok) and _keychain_read() == tok:
+        return True
+    try:
+        if not os.path.isdir(INSTALL_DIR):
+            os.makedirs(INSTALL_DIR, mode=0o700)
+        # 0600 from the outset -- creating with the default mode and chmod-ing after
+        # leaves a window where the file exists world-readable.
+        fd = os.open(_TOKEN_STORE_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, tok.encode('utf-8'))
+        finally:
+            os.close(fd)
+        os.chmod(_TOKEN_STORE_PATH, 0o600)
+        return _read_stored_token() == tok
+    except Exception:
+        return False
+
+def _scrub_plaintext_token(tok):
+    """Remove the bootstrap copy of the token from the script source on disk."""
+    installed = os.path.join(INSTALL_DIR, "micro_agent_macos.py")
+    for path in {installed, os.path.abspath(__file__)}:
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                text = f.read()
+            if tok in text:
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(text.replace(tok, _TOKEN_PLACEHOLDER))
+        except Exception:
+            pass
+
+def _resolve_soc_token():
+    # Store first: after the one-time migration it is the only copy that exists.
+    stored = _read_stored_token()
+    if stored:
+        return stored
+    # Bootstrap, and also the path every self-upgrade takes -- the server bakes the token
+    # back into the source it sends, because an older agent has nowhere else to get it.
+    #
+    # The literal below is the ONE occurrence src/app.py's substitution targets; it must
+    # stay spelled out or a downloaded agent has no credential at all.
+    bootstrap = '__SOC_TOKEN__'
+    if bootstrap and bootstrap != _TOKEN_PLACEHOLDER:
+        if _store_token(bootstrap):
+            _scrub_plaintext_token(bootstrap)
+    if not stored and bootstrap == _TOKEN_PLACEHOLDER:
+        # Store unreadable AND the source already scrubbed: this endpoint has no
+        # credential left and every request it makes will be rejected. It cannot tell the
+        # SOC, because telling the SOC needs the credential -- so the only place this can
+        # be said is the local log. Re-download the agent for this host to re-enroll it.
+        _token_log("FATAL: no usable SOC token -- the protected store could not be read "
+                   "and the bootstrap copy is already scrubbed. This agent cannot "
+                   "authenticate. Re-download the agent package to re-enroll this host.")
+    return bootstrap
+
+SOC_TOKEN = _resolve_soc_token()
 
 def _api_urls(path):
     """Every base this appliance might answer `path` on, primary first.
