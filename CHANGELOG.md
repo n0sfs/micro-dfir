@@ -60,6 +60,32 @@ shape: the console said a host was contained and it was not.
   broken probe crying containment failure every cycle would train analysts to ignore the
   one alert that matters.
 
+**Live-verified end to end on a real Windows endpoint**, with a before/after egress probe:
+
+| | baseline | isolated | restored |
+|---|---|---|---|
+| TCP to an external host | reachable | **blocked** | reachable |
+| External DNS over UDP/53 | works | **blocked** | works |
+| TCP to the SOC | reachable | reachable | reachable |
+| Isolation rules enabled | 0 | 6 | 0 |
+| Profiles defaulting to Block | 0 | 3 | 0 (back to `NotConfigured`) |
+
+The DNS row is the ISO-01 proof specifically: outbound DNS is covered by the stock
+"Core Networking - DNS (UDP-Out)" **Allow** rule, so under the old code it kept working
+straight through an "isolation" that reported success. ISO-04 proved itself unprompted in
+the same window — the server's own 15-minute check queued a `verify_isolation` nobody
+asked for and the endpoint answered `isolated: true, rules_enabled: 6`.
+
+**The first attempt failed, and that is worth recording**, because it is the behaviour all
+of this was for. `-RemoteAddress ::/0` is rejected by `New-NetFirewallRule` (`::` is the
+unspecified address and cannot be the base of a prefix), and since every rule uses
+`-ErrorAction Stop`, one bad entry failed the whole isolate: the command went red, the
+error named the cause, and the host was left **not contained** rather than half-contained
+and reported green. The pre-ISO-01 code would have reported success. Settled by probing
+the host with every candidate address form rather than guessing — all of `0.0.0.0-x`,
+`x-255.255.255.255`, `0.0.0.0/1`, `::/1`, `8000::/1` and the explicit full IPv6 range are
+accepted and stored verbatim; `::/0` and `::1/128` are not.
+
 Found while testing ISO-01: the IPv4 validation in `agent_scripts` was shape-only
 (`\d{1,3}` per octet), so `192.0.2.999` passed and became a malformed firewall rule.
 On the isolate path, a rule the firewall rejects or silently skips means a host reported
