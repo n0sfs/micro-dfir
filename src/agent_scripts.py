@@ -283,6 +283,18 @@ _WIN_VERIFY_SKIPPED = """    Write-Warning "isolate_host: no SOC port supplied, 
 # IPv6 is blocked wholesale. The SOC is reached over IPv4, so there is nothing to carve
 # out, and leaving v6 open would hand any attacker on a v6-capable network an untouched
 # path straight out of a "contained" host.
+#
+# It is spelled as an explicit full range and not as ::/0, which Windows REJECTS -- the
+# whole isolate then fails with "One or more of the address prefixes is invalid", because
+# :: is the unspecified address and New-NetFirewallRule refuses it as the base of a
+# prefix (the sibling error, on ::1/128, says so in as many words: "An unspecified,
+# multicast, broadcast, or loopback IPv6 address was specified"). Confirmed by probing a
+# real Windows host with every candidate form: ::/1, 8000::/1 and this range are all
+# accepted and stored verbatim; ::/0 is not. Found by live-testing this very code, which
+# failed exactly as designed -- loudly, with the host left uncontained rather than
+# half-contained and reported green.
+_WIN_ALL_IPV6 = '::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff'
+
 def isolate_host(soc_endpoints):
     ips, probes = _normalize_soc_endpoints(soc_endpoints)
     joined = ','.join(ips)          # PowerShell -RemoteAddress takes a comma-separated array
@@ -297,8 +309,8 @@ def isolate_host(soc_endpoints):
     New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Allow-SOC-In" -Direction Inbound -RemoteAddress {joined} -Action Allow -Profile Any -ErrorAction Stop | Out-Null
     New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Block-Other-Out" -Direction Outbound -RemoteAddress {everything_else} -Action Block -Profile Any -ErrorAction Stop | Out-Null
     New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Block-Other-In" -Direction Inbound -RemoteAddress {everything_else} -Action Block -Profile Any -ErrorAction Stop | Out-Null
-    New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Block-IPv6-Out" -Direction Outbound -RemoteAddress ::/0 -Action Block -Profile Any -ErrorAction Stop | Out-Null
-    New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Block-IPv6-In" -Direction Inbound -RemoteAddress ::/0 -Action Block -Profile Any -ErrorAction Stop | Out-Null
+    New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Block-IPv6-Out" -Direction Outbound -RemoteAddress {_WIN_ALL_IPV6} -Action Block -Profile Any -ErrorAction Stop | Out-Null
+    New-NetFirewallRule -DisplayName "MicroDFIR-Isolation-Block-IPv6-In" -Direction Inbound -RemoteAddress {_WIN_ALL_IPV6} -Action Block -Profile Any -ErrorAction Stop | Out-Null
     Set-NetFirewallProfile -Profile Domain,Public,Private -DefaultInboundAction Block -DefaultOutboundAction Block -ErrorAction Stop
     # All six rules have to be present and enabled, or this is a partial isolation being
     # reported as a complete one -- the exact failure ISO-01 was.
