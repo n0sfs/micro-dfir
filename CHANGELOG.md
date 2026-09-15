@@ -95,9 +95,26 @@ already working it. Restricting is deliberately *not* admin-only: the analyst wh
 mid-triage that this is an insider matter is exactly who needs to act. A visibility change
 is written to the case's own append-only timeline as well as the audit log.
 
-15 tests. Live-verified end to end on a real case: restricted, confirmed the timeline
-entry, confirmed an unknown ACL name is refused, then set back to normal — both transitions
-remain on the timeline, which is the point.
+**The UI** puts it on the case rather than leaving it API-only: a visibility row at the
+top of the case detail, above the fields, because "who can see this" is something you want
+to know before you start reading. A restricted case gets a red border, a shield badge and
+the access list inline — including the creator, assignee and admins, who retain access
+whatever the list says; leaving those implicit would give "who can see this?" a second,
+invisible answer. The case list carries the same shield.
+
+The editor is a dedicated modal rather than `confirmDialog()`: that helper renders its
+body with `innerText` and binds Enter to confirm — both correct for a confirmation and
+wrong for a form, since every newline typed into the access list would have submitted it.
+Retrofitting it would have weakened a correct behaviour for every other caller. The access
+list disables itself when the case isn't restricted; a rejected username reports inside the
+dialog with the offending value still on screen rather than as a toast over a closed form;
+and on a closed case the button becomes "Reopen the case to change this" rather than
+vanishing, since the API rejects the write anyway.
+
+24 tests (15 backend, 9 UI). Live-verified end to end on a real case: restricted it
+through the dialog, saw the red panel and the list shield, confirmed an unknown ACL name is
+refused inline without closing the form, then set it back to normal — all four transitions
+remain on the case timeline, which is the point.
 
 **Deployment note worth keeping.** The first deploy of this took the web service down:
 the `/api/cases/<int:cid>/reports` route sits ~700 lines above where the helpers were
