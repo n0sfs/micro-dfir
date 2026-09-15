@@ -10,6 +10,85 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-14
 
+### Security assessment of the EDR agent, isolation and appliance posture
+
+Asked whether the EDR agent deployment, its security and firewall features, and the
+overall posture could be bypassed. Four parallel code reviews — agent authentication and
+identity, endpoint tamper resistance, the server-side API surface, isolation internals —
+produced 36 findings. Every one relayed was re-checked by hand against the cited lines;
+two reviewer claims were wrong on the facts and were dropped rather than passed on (a
+"unpinned HTTP" Sysmon download that actually uses full system-CA verification, and an
+installer-path bug framed as remote code execution when the resulting agent cannot
+resolve its server at all and simply never connects). Full report published separately.
+
+Three structural themes account for most of it:
+
+1. **"Isolated" means "a command exited 0", not "this host is contained."** Every success
+   criterion in the containment feature is an exit code. Nothing compares intended state
+   against endpoint state — not at apply time, not periodically. Containment that
+   evaporated on reboot, was never applied, or was removed locally all present
+   identically: a green badge.
+2. **The lowest EDR tier could reach root on an endpoint**, collapsing the
+   Tier-1/Tier-3 boundary the permission model exists to enforce.
+3. **Agent identity is asserted by the client** and rarely checked against the credential.
+   One route does this correctly; the other three trust a header.
+
+Worth recording as a genuine strength: the per-agent token model is sound — 256-bit,
+minted per download, hostname-bound with replay rejection — and `/api/agent/result`
+derives identity from the command row rather than a header, which is the pattern the
+other routes need. A live probe of the auth boundary returned 401 for both an absent and
+an incorrect token with no state written.
+
+**Fixed in this pass** (the highest-severity finding, plus three regressions introduced
+hours earlier by the isolation-incident fix — all four reproduced before and after):
+
+- **A Tier-1 analyst could execute arbitrary code as root on any Linux/macOS endpoint.**
+  Six builders embedded a caller-supplied path or pattern in a `python3 - <<'PYEOF'`
+  heredoc, escaped with Python string-literal rules that do not cover newlines. A path
+  containing a line reading `PYEOF` closed the heredoc early and bash ran the rest as
+  root. `quarantine_file` is a Tier-1 label, so this required only `edr.command.basic` —
+  while that same account cannot queue a `custom` script, which needs
+  `edr.command.advanced`. The quoting flaw inverted the permission model it sat behind.
+  Now `_py_literal()`: `repr()` (the pattern `string_sweep_linux` already used) plus
+  outright rejection of control characters, so the next builder added here fails loudly
+  rather than depending on `repr()` being remembered.
+- **Isolation had become impossible on any appliance reached by hostname.** This
+  morning's fix folded `request.host` into the allowlist unconditionally, and the
+  validator rejects the whole set on one non-IPv4 entry. A DNS-name or reverse-proxied
+  console could not contain a host at all; in the playbook path the exception was
+  swallowed, so automated containment silently did not happen. This box is reached by IP,
+  which is exactly why the testing missed it.
+- **An attacker-controlled `Host` header punched a hole in the allowlist.** A caller with
+  `edr.command.basic` sending `Host: <their-address>` got it written into the isolated
+  endpoint's firewall as an Allow rule — and the endpoint-side probe then *passes*,
+  because their address answers. `request.host` is now a last resort used only when the
+  bind settings yield nothing, validated through `ipaddress` so octets are range-checked
+  too. The allowlist is also computed server-side unconditionally: a client-supplied
+  `soc_ip` no longer overrides it.
+- **`unblock_ip` reported success on failure** — the `exit 1` fix its sibling `block_ip`
+  received in Pass A was never carried across.
+- **The rollback asserted the opposite of what may have happened.** Every teardown
+  command is failure-tolerant, and the script then claimed *"the firewall has been
+  returned to its previous state and the host is NOT isolated"* regardless. A failed
+  rollback therefore told the analyst the host was fine while leaving it isolated and
+  unable to reach the SOC — the same false-success class the self-check exists to remove,
+  surviving in the branch that handles the worst case. Both platforms now verify their
+  own teardown and pick the message from the result.
+
+17 tests, including a reproduction of the heredoc escape under the old quoting,
+round-trip checks for awkward-but-legitimate paths (apostrophes, quotes, backslashes,
+unicode), and an assertion that `repr()` alone would hold if the control-character guard
+were ever removed. Full regression green across all nine suites.
+
+**Known and not yet addressed** — Windows isolation leaves pre-existing Allow rules
+intact so an "isolated" host keeps DNS egress; the macOS pf anchor is never evaluated;
+Linux and macOS containment does not survive a reboot while the console keeps claiming
+it does; `/api/ingest` authenticates only the first entry of a batch, so any endpoint can
+forge logs for any host and overwrite a real alert's message inside the dedup window; the
+SOAR approval queue re-checks the EDR permission for one of seven gated actions; log
+search exposes command stdout/stderr to any logged-in account; agent tokens have no
+revocation path; and every appliance service runs as root with no systemd confinement.
+
 ### Incident: host isolation was irreversible on a dual-homed appliance
 
 Running the first real end-to-end containment test (a genuine `isolate_host` on the one
