@@ -37,4 +37,13 @@ async def receive_alert(alert: SIEMAlert, api_key: str = Depends(get_api_key)):
     return {"status": "Logged"}
 
 if __name__ == "__main__":
-    import uvicorn; uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Loopback only. This bound 0.0.0.0:8000 -- an authenticated-but-inert webhook
+    # receiver listening on every interface. Nothing calls it: a repo-wide search for
+    # port 8000 or /webhook/alert finds exactly one hit, the route definition itself.
+    # Every playbook and notification path in this product runs inside the web app
+    # (soar_alerts.py, _run_playbook_action) and has never gone near this service.
+    # An open port with no client is pure surface area.
+    #
+    # If a genuine off-box integration ever needs this, that is a deliberate decision that
+    # comes with a bind setting and a reason, not a default nobody chose.
+    import uvicorn; uvicorn.run(app, host="127.0.0.1", port=8000)

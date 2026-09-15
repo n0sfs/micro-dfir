@@ -250,6 +250,25 @@ def _is_own_host_request(db, remote_addr):
     own.discard('0.0.0.0')
     return remote_addr in own
 
+# Per-agent tokens are stored as a hash, never in the clear. `agent_tokens` used to hold
+# the token itself as its primary key, so anything able to read siem.db -- a stolen
+# backup, the world-readable file this appliance shipped with until the hardening pass, a
+# SQL-injection read, anyone with shell access -- walked away with a working credential
+# for every enrolled endpoint, and those credentials authorise remote script execution
+# across the whole fleet.
+#
+# A plain SHA-256 is the right primitive here, not bcrypt/PBKDF2/scrypt: these are
+# 256-bit values from secrets.token_hex(32), not human-chosen passwords, so there is no
+# dictionary to stretch against and nothing a work factor can buy. The agent presents the
+# token exactly as it always did -- this changes storage only, so nothing has to be
+# re-downloaded and AGENT_VERSION is deliberately not bumped.
+#
+# Defined up here with the other cross-cutting helpers because migrate_agent_token_hashing
+# (far below, but invoked at module level after this point) needs it too.
+def _agent_token_hash(token):
+    import hashlib
+    return hashlib.sha256((token or '').encode('utf-8', 'surrogatepass')).hexdigest()
+
 def _record_vector_config_status(db, ok, error=None):
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('vector_config_status', ?)", ('ok' if ok else 'error',))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('vector_config_status_at', datetime('now'))")
@@ -15240,12 +15259,16 @@ def migrate_agent_tokens():
     # so already-deployed agents keep functioning until they're re-downloaded/upgraded.
     try:
         conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        # Fresh installs get the hashed shape directly. An existing host still has the
+        # original plaintext-keyed table at this point (IF NOT EXISTS no-ops on it) --
+        # migrate_agent_token_hashing rebuilds that one, and no-ops here.
         conn.execute('''CREATE TABLE IF NOT EXISTS agent_tokens (
-            token TEXT PRIMARY KEY,
+            token_hash TEXT PRIMARY KEY,
             hostname TEXT,
             created_at TEXT NOT NULL,
             bound_at TEXT,
-            last_seen TEXT
+            last_seen TEXT,
+            group_name TEXT NOT NULL DEFAULT ''
         )''')
         conn.commit()
         conn.close()
@@ -15268,6 +15291,57 @@ def migrate_agent_groups():
         conn.close()
     except Exception:
         pass
+
+def migrate_agent_token_hashing():
+    # Rehomes agent_tokens from a plaintext `token` primary key onto a `token_hash` one.
+    # See _agent_token_hash for why this matters and why SHA-256 is the right primitive.
+    #
+    # A table rebuild rather than an ALTER, because the plaintext column has to actually
+    # go: leaving it in place and merely adding a hash alongside would fix nothing, and
+    # it cannot be blanked in place either -- it is the primary key, so every row would
+    # collide on ''.
+    #
+    # Existing enrolled agents keep working across this. Their tokens are hashed in
+    # flight here, so the binding, group assignment and last-seen history all survive and
+    # the next check-in authenticates exactly as before. Nothing has to be re-downloaded.
+    try:
+        conn = sqlite3.connect('/opt/micro-dfir/siem.db', timeout=30)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(agent_tokens)").fetchall()}
+        if not cols or 'token_hash' in cols:
+            conn.close()
+            return  # table not created yet, or already migrated -- both no-ops
+        has_group = 'group_name' in cols
+        select_cols = "token, hostname, created_at, bound_at, last_seen" + (", group_name" if has_group else "")
+        rows = conn.execute(f"SELECT {select_cols} FROM agent_tokens").fetchall()
+        # A half-finished previous attempt (this whole function is best-effort, like every
+        # migration here) would otherwise leave the scratch table behind and make every
+        # retry fail on CREATE.
+        conn.execute("DROP TABLE IF EXISTS agent_tokens_hashed")
+        conn.execute('''CREATE TABLE agent_tokens_hashed (
+            token_hash TEXT PRIMARY KEY,
+            hostname TEXT,
+            created_at TEXT NOT NULL,
+            bound_at TEXT,
+            last_seen TEXT,
+            group_name TEXT NOT NULL DEFAULT ''
+        )''')
+        for r in rows:
+            # created_at is NOT NULL on the new table; an older row that somehow lacks one
+            # must not abort the migration and strand the whole fleet's credentials.
+            conn.execute(
+                "INSERT OR REPLACE INTO agent_tokens_hashed "
+                "(token_hash, hostname, created_at, bound_at, last_seen, group_name) VALUES (?, ?, ?, ?, ?, ?)",
+                (_agent_token_hash(r[0]), r[1],
+                 r[2] or datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                 r[3], r[4], (r[5] if has_group else '') or '')
+            )
+        conn.execute("DROP TABLE agent_tokens")
+        conn.execute("ALTER TABLE agent_tokens_hashed RENAME TO agent_tokens")
+        conn.commit()
+        conn.close()
+        print(f"[+] agent_tokens migrated to hashed storage ({len(rows)} token(s)).", flush=True)
+    except Exception as e:
+        print(f"[-] agent_tokens hash migration failed: {e}", flush=True)
 
 def migrate_cve_records():
     # A dedicated table, not a new stix_indicators/ti_feeds row shape -- a CVE record
@@ -17324,7 +17398,7 @@ def _agent_token_bound_host(db, token):
     except TypeError:
         # compare_digest raises on non-ASCII str -- a malformed header, not a match.
         return None
-    row = db.execute("SELECT hostname FROM agent_tokens WHERE token = ?", (token,)).fetchone()
+    row = db.execute("SELECT hostname FROM agent_tokens WHERE token_hash = ?", (_agent_token_hash(token),)).fetchone()
     return row['hostname'] if row and row['hostname'] else None
 
 def _validate_agent_auth(db, token, hostname):
@@ -17361,17 +17435,18 @@ def _validate_agent_auth(db, token, hostname):
         return True
     if not token:
         return False
-    row = db.execute("SELECT hostname FROM agent_tokens WHERE token = ?", (token,)).fetchone()
+    token_hash = _agent_token_hash(token)
+    row = db.execute("SELECT hostname FROM agent_tokens WHERE token_hash = ?", (token_hash,)).fetchone()
     if not row:
         return False
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     if row['hostname'] is None:
-        db.execute("UPDATE agent_tokens SET hostname = ?, bound_at = ?, last_seen = ? WHERE token = ?", (hostname, now, now, token))
+        db.execute("UPDATE agent_tokens SET hostname = ?, bound_at = ?, last_seen = ? WHERE token_hash = ?", (hostname, now, now, token_hash))
         db.commit()
         return True
     if row['hostname'] != hostname:
         return False
-    db.execute("UPDATE agent_tokens SET last_seen = ? WHERE token = ?", (now, token))
+    db.execute("UPDATE agent_tokens SET last_seen = ? WHERE token_hash = ?", (now, token_hash))
     db.commit()
     return True
 
@@ -19936,9 +20011,14 @@ AGENT_TLS_CERT_PATH = '/opt/micro-dfir/config/cert.pem'
 def _mint_agent_token(db):
     import datetime as _dt
     soc_token = secrets.token_hex(32)
+    # Only the hash is stored (see _agent_token_hash). This return value is the one and
+    # only time the plaintext exists server-side -- it goes straight into the script being
+    # built for this download and is never recoverable from the database afterwards. That
+    # is the point, and it costs nothing: the self-upgrade path reuses the token the agent
+    # itself presents in X-Agent-Token, so nothing ever needs to read one back out.
     db.execute(
-        "INSERT INTO agent_tokens (token, hostname, created_at) VALUES (?, NULL, ?)",
-        (soc_token, _dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        "INSERT INTO agent_tokens (token_hash, hostname, created_at) VALUES (?, NULL, ?)",
+        (_agent_token_hash(soc_token), _dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
     )
     db.commit()
     return soc_token
@@ -21002,6 +21082,9 @@ migrate_live_logs_hash_dns_columns()
 migrate_agent_versions()
 migrate_agent_tokens()
 migrate_agent_groups()
+# Strictly after the two above: it rebuilds the table they create and extend, and it
+# carries group_name across, so it has to see the finished shape.
+migrate_agent_token_hashing()
 migrate_cve_records()
 migrate_cve_kev_epss()
 migrate_cve_affected_products()
