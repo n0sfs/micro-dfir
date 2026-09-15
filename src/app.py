@@ -6355,6 +6355,127 @@ def api_email_report(history_id):
         return jsonify({'error': f'Failed to send: {send_err}'}), 500
     return jsonify({'status': 'success'})
 
+# ---- Case confidentiality ----------------------------------------------------------
+# Every case was readable by every logged-in account: no visibility flag, no ACL, and the
+# seeded "Insider Threat" queue restricts nothing because queue_members is never consulted
+# by any read path. For ordinary incident work that is fine and deliberate on a
+# single-team appliance. For an insider case it is not: the subject of the investigation
+# plausibly holds a login here, and could read the case about themselves -- the notes, the
+# linked evidence, the generated PDF.
+#
+# Design notes, because the safety of this depends on them:
+#   * visibility defaults to 'normal', and a 'normal' case behaves EXACTLY as before. This
+#     ships inert -- nothing changes for any existing case until someone deliberately
+#     restricts one. There is no flag day and no lockout risk.
+#   * Admins always retain access. A confidentiality control that can lock the appliance's
+#     owner out of their own case data is a worse bug than the one it fixes.
+#   * The case creator and the current assignee always retain access, so the ordinary act
+#     of restricting a case cannot orphan it from the people already working it.
+#   * A restricted case a user cannot see returns 404, not 403. 403 confirms the case
+#     exists, which for "is there an investigation into me?" is most of the answer.
+CASE_VISIBILITY_VALUES = ('normal', 'restricted')
+
+def _case_access_error(db, cid):
+    """None if the current user may see this case, else a response to return.
+
+    Deliberately reads the case row itself rather than trusting a caller-supplied
+    visibility, so there is no path that checks a stale value."""
+    row = db.execute(
+        "SELECT id, visibility, created_by, assignee FROM cases WHERE id = ?", (cid,)
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "Case not found"}), 404
+    if (row['visibility'] or 'normal') != 'restricted':
+        return None
+    me = getattr(current_user, 'username', None)
+    if is_admin() or me and me in ((row['created_by'] or ''), (row['assignee'] or '')):
+        return None
+    if db.execute("SELECT 1 FROM case_acl WHERE case_id = ? AND username = ?", (cid, me)).fetchone():
+        return None
+    # Same shape as "not found" on purpose -- see the note above.
+    return jsonify({"error": "Case not found"}), 404
+
+def requires_case_access(fn):
+    """Applied to every route carrying a <int:cid>, so access is enforced in one place.
+
+    There are two dozen case routes and they share no other chokepoint (unlike
+    _require_open_case, which every mutation already calls). Hand-editing each one is
+    exactly how a surface gets missed, and a confidentiality control with a hole in it is
+    worse than none because it invites trust it hasn't earned."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        cid = kwargs.get('cid')
+        if cid is not None:
+            err = _case_access_error(get_db(), cid)
+            if err:
+                return err
+        return fn(*args, **kwargs)
+    return wrapper
+
+def _visible_case_filter():
+    """(sql_fragment, params) restricting a cases query to what the current user may see.
+
+    Written as a WHERE fragment rather than a post-filter so counts, pagination and
+    ORDER BY all operate on the visible set."""
+    if is_admin():
+        return "1=1", []
+    me = getattr(current_user, 'username', None) or ''
+    return ("(COALESCE(c.visibility, 'normal') != 'restricted' "
+            " OR c.created_by = ? OR c.assignee = ? "
+            " OR EXISTS (SELECT 1 FROM case_acl acl WHERE acl.case_id = c.id AND acl.username = ?))",
+            [me, me, me])
+
+@app.route('/api/cases/<int:cid>/visibility', methods=['GET', 'PUT'])
+@login_required
+@requires_case_access
+def api_case_visibility(cid):
+    """Read or change a case's confidentiality, and who is on its access list.
+
+    Gated on the same permission that edits the case itself rather than a new one: anyone
+    trusted to run a case is trusted to decide it is sensitive. Restricting is deliberately
+    NOT admin-only -- the analyst who realises mid-triage that this is an insider matter is
+    exactly who needs to act, and making them find an admin first is how it doesn't happen."""
+    db = get_db()
+    if request.method == 'GET':
+        row = db.execute("SELECT visibility, created_by, assignee FROM cases WHERE id = ?", (cid,)).fetchone()
+        acl = [r['username'] for r in db.execute(
+            "SELECT username FROM case_acl WHERE case_id = ? ORDER BY username", (cid,)).fetchall()]
+        return jsonify({'visibility': row['visibility'] or 'normal', 'acl': acl,
+                        'created_by': row['created_by'], 'assignee': row['assignee']})
+
+    err = _require_open_case(db, cid)
+    if err: return err
+    data = request.get_json() or {}
+    visibility = (data.get('visibility') or '').strip()
+    if visibility not in CASE_VISIBILITY_VALUES:
+        return jsonify({'error': f"visibility must be one of: {', '.join(CASE_VISIBILITY_VALUES)}"}), 400
+    before = db.execute("SELECT visibility FROM cases WHERE id = ?", (cid,)).fetchone()['visibility'] or 'normal'
+    db.execute("UPDATE cases SET visibility = ? WHERE id = ?", (visibility, cid))
+
+    if 'acl' in data:
+        # Whole-list replace rather than add/remove deltas: "who can see this" is a thing
+        # an analyst should be able to read off one screen and set in one action.
+        names = [str(n).strip() for n in (data.get('acl') or []) if str(n).strip()]
+        known = {r['username'] for r in db.execute("SELECT username FROM users").fetchall()}
+        unknown = [n for n in names if n not in known]
+        if unknown:
+            return jsonify({'error': f"Not users on this appliance: {', '.join(unknown[:5])}"}), 400
+        db.execute("DELETE FROM case_acl WHERE case_id = ?", (cid,))
+        for n in names:
+            db.execute("INSERT OR IGNORE INTO case_acl (case_id, username, added_by) VALUES (?, ?, ?)",
+                       (cid, n, current_user.username))
+
+    db.commit()
+    if before != visibility:
+        # On the case's own append-only timeline as well as the audit log: a change in who
+        # can see an investigation is part of the investigation's record, and the first
+        # thing anyone reviewing it afterwards will want dated.
+        _log_case_event(db, cid, 'visibility_changed',
+                        f"Case visibility changed from {before} to {visibility} by {current_user.username}")
+        db.commit()
+    log_audit('case_visibility_change', 'case', cid, f"{before} -> {visibility}")
+    return jsonify({'status': 'success', 'visibility': visibility})
+
 @app.route('/api/cases/<int:cid>/reports', methods=['GET', 'POST'])
 @login_required
 @requires_case_access
@@ -7055,127 +7176,6 @@ def _seed_case_template_fields(db, cid, template_id):
 # Closed = the formal administrative closing (read-only, still reopenable if new
 # evidence surfaces) -- see the case-detail PUT handler below for the one path that's
 # still allowed to write to a closed case (leaving 'closed' in that same request).
-# ---- Case confidentiality ----------------------------------------------------------
-# Every case was readable by every logged-in account: no visibility flag, no ACL, and the
-# seeded "Insider Threat" queue restricts nothing because queue_members is never consulted
-# by any read path. For ordinary incident work that is fine and deliberate on a
-# single-team appliance. For an insider case it is not: the subject of the investigation
-# plausibly holds a login here, and could read the case about themselves -- the notes, the
-# linked evidence, the generated PDF.
-#
-# Design notes, because the safety of this depends on them:
-#   * visibility defaults to 'normal', and a 'normal' case behaves EXACTLY as before. This
-#     ships inert -- nothing changes for any existing case until someone deliberately
-#     restricts one. There is no flag day and no lockout risk.
-#   * Admins always retain access. A confidentiality control that can lock the appliance's
-#     owner out of their own case data is a worse bug than the one it fixes.
-#   * The case creator and the current assignee always retain access, so the ordinary act
-#     of restricting a case cannot orphan it from the people already working it.
-#   * A restricted case a user cannot see returns 404, not 403. 403 confirms the case
-#     exists, which for "is there an investigation into me?" is most of the answer.
-CASE_VISIBILITY_VALUES = ('normal', 'restricted')
-
-def _case_access_error(db, cid):
-    """None if the current user may see this case, else a response to return.
-
-    Deliberately reads the case row itself rather than trusting a caller-supplied
-    visibility, so there is no path that checks a stale value."""
-    row = db.execute(
-        "SELECT id, visibility, created_by, assignee FROM cases WHERE id = ?", (cid,)
-    ).fetchone()
-    if not row:
-        return jsonify({"error": "Case not found"}), 404
-    if (row['visibility'] or 'normal') != 'restricted':
-        return None
-    me = getattr(current_user, 'username', None)
-    if is_admin() or me and me in ((row['created_by'] or ''), (row['assignee'] or '')):
-        return None
-    if db.execute("SELECT 1 FROM case_acl WHERE case_id = ? AND username = ?", (cid, me)).fetchone():
-        return None
-    # Same shape as "not found" on purpose -- see the note above.
-    return jsonify({"error": "Case not found"}), 404
-
-def requires_case_access(fn):
-    """Applied to every route carrying a <int:cid>, so access is enforced in one place.
-
-    There are two dozen case routes and they share no other chokepoint (unlike
-    _require_open_case, which every mutation already calls). Hand-editing each one is
-    exactly how a surface gets missed, and a confidentiality control with a hole in it is
-    worse than none because it invites trust it hasn't earned."""
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        cid = kwargs.get('cid')
-        if cid is not None:
-            err = _case_access_error(get_db(), cid)
-            if err:
-                return err
-        return fn(*args, **kwargs)
-    return wrapper
-
-def _visible_case_filter():
-    """(sql_fragment, params) restricting a cases query to what the current user may see.
-
-    Written as a WHERE fragment rather than a post-filter so counts, pagination and
-    ORDER BY all operate on the visible set."""
-    if is_admin():
-        return "1=1", []
-    me = getattr(current_user, 'username', None) or ''
-    return ("(COALESCE(c.visibility, 'normal') != 'restricted' "
-            " OR c.created_by = ? OR c.assignee = ? "
-            " OR EXISTS (SELECT 1 FROM case_acl acl WHERE acl.case_id = c.id AND acl.username = ?))",
-            [me, me, me])
-
-@app.route('/api/cases/<int:cid>/visibility', methods=['GET', 'PUT'])
-@login_required
-@requires_case_access
-def api_case_visibility(cid):
-    """Read or change a case's confidentiality, and who is on its access list.
-
-    Gated on the same permission that edits the case itself rather than a new one: anyone
-    trusted to run a case is trusted to decide it is sensitive. Restricting is deliberately
-    NOT admin-only -- the analyst who realises mid-triage that this is an insider matter is
-    exactly who needs to act, and making them find an admin first is how it doesn't happen."""
-    db = get_db()
-    if request.method == 'GET':
-        row = db.execute("SELECT visibility, created_by, assignee FROM cases WHERE id = ?", (cid,)).fetchone()
-        acl = [r['username'] for r in db.execute(
-            "SELECT username FROM case_acl WHERE case_id = ? ORDER BY username", (cid,)).fetchall()]
-        return jsonify({'visibility': row['visibility'] or 'normal', 'acl': acl,
-                        'created_by': row['created_by'], 'assignee': row['assignee']})
-
-    err = _require_open_case(db, cid)
-    if err: return err
-    data = request.get_json() or {}
-    visibility = (data.get('visibility') or '').strip()
-    if visibility not in CASE_VISIBILITY_VALUES:
-        return jsonify({'error': f"visibility must be one of: {', '.join(CASE_VISIBILITY_VALUES)}"}), 400
-    before = db.execute("SELECT visibility FROM cases WHERE id = ?", (cid,)).fetchone()['visibility'] or 'normal'
-    db.execute("UPDATE cases SET visibility = ? WHERE id = ?", (visibility, cid))
-
-    if 'acl' in data:
-        # Whole-list replace rather than add/remove deltas: "who can see this" is a thing
-        # an analyst should be able to read off one screen and set in one action.
-        names = [str(n).strip() for n in (data.get('acl') or []) if str(n).strip()]
-        known = {r['username'] for r in db.execute("SELECT username FROM users").fetchall()}
-        unknown = [n for n in names if n not in known]
-        if unknown:
-            return jsonify({'error': f"Not users on this appliance: {', '.join(unknown[:5])}"}), 400
-        db.execute("DELETE FROM case_acl WHERE case_id = ?", (cid,))
-        for n in names:
-            db.execute("INSERT OR IGNORE INTO case_acl (case_id, username, added_by) VALUES (?, ?, ?)",
-                       (cid, n, current_user.username))
-
-    db.commit()
-    if before != visibility:
-        # On the case's own append-only timeline as well as the audit log: a change in who
-        # can see an investigation is part of the investigation's record, and the first
-        # thing anyone reviewing it afterwards will want dated.
-        _log_case_event(db, cid, 'visibility_changed',
-                        f"Case visibility changed from {before} to {visibility} by {current_user.username}")
-        db.commit()
-    log_audit('case_visibility_change', 'case', cid, f"{before} -> {visibility}")
-    return jsonify({'status': 'success', 'visibility': visibility})
-
 def _require_open_case(db, cid):
     case = db.execute("SELECT status FROM cases WHERE id = ?", (cid,)).fetchone()
     if not case:
