@@ -224,6 +224,32 @@ def init_db():
 # the preview's whole job is to faithfully predict what the real Vector config would drop.
 DROP_RULE_FIELDS = ('app', 'host', 'event_id', 'message')
 
+# "Did this request come from the appliance itself?" -- loopback OR either of the
+# addresses gunicorn is actually bound to.
+#
+# The bind addresses have to count. Settings > Network binds gunicorn to specific
+# interface IPs, and a socket bound that way does not listen on 127.0.0.1 at all, so
+# this machine's own components (sigma_engine's scheduled-playbook poll, Vector's ingest
+# sink) must dial an interface address -- and those connections arrive with that
+# interface IP as remote_addr, not loopback. Two separate self-recognition checks were
+# testing loopback alone and both silently misfired on a dual-bound appliance.
+#
+# Not a widening of trust: a request from anywhere else on the network carries ITS own
+# source address, never the server's, so only this machine can present a bind IP here.
+def _is_own_host_request(db, remote_addr):
+    if remote_addr in ('127.0.0.1', '::1'):
+        return True
+    if not remote_addr:
+        return False
+    own = {(r['value'] or '').strip() for r in db.execute(
+        "SELECT value FROM settings WHERE key IN ('ui_bind_ip', 'ingest_bind_ip')"
+    ).fetchall()}
+    # 0.0.0.0 is a wildcard, never an address a packet can arrive FROM -- excluded so a
+    # default-bound appliance can't match it by accident.
+    own.discard('')
+    own.discard('0.0.0.0')
+    return remote_addr in own
+
 def _record_vector_config_status(db, ok, error=None):
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('vector_config_status', ?)", ('ok' if ok else 'error',))
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('vector_config_status_at', datetime('now'))")
@@ -823,6 +849,9 @@ def api_ingest():
                                 'message': f"Token is bound to {bound_host}; this batch also claimed: {', '.join(foreign[:5])}"}), 403
 
         count = 0
+        # Resolved ONCE per batch, not per entry -- it reads the settings table, and this
+        # loop runs for every log row on the appliance's hottest path.
+        from_self = _is_own_host_request(db, request.remote_addr)
         for log in logs:
             ts = log.get('time', datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
             hst = log.get('host', 'UNKNOWN')
@@ -835,13 +864,20 @@ def api_ingest():
             # network-address text in its message (most Sysmon/System events) still comes
             # from a real endpoint, and request.remote_addr is that endpoint's address for
             # a genuine direct connection (agents). It's NOT trustworthy for anything
-            # forwarded through Vector's local sink, though -- that always reads as
-            # 127.0.0.1 (Vector posts to 127.0.0.1:{ingest_port}), so falling back to it
-            # there would silently record Vector's own address instead of leaving the
-            # field unset. log.get('source_ip') is checked first and already covers the
-            # real syslog case (Vector's syslog source populates it natively).
+            # forwarded through Vector's local sink, though -- that is this same machine
+            # posting to itself, so falling back to it there would silently record the
+            # appliance's own address instead of leaving the field unset.
+            # log.get('source_ip') is checked first and already covers the real syslog
+            # case (Vector's syslog source populates it natively).
+            #
+            # Testing that against loopback alone is not enough: generate_vector_config
+            # deliberately points the sink at ingest_bind_ip when the appliance has a
+            # specific binding (it must -- a socket bound to 192.168.x.y never accepts a
+            # 127.0.0.1 connection), so on any dual-bound appliance Vector's posts arrive
+            # from an interface address and this fallback stamped the SOC's own IP onto
+            # every relayed syslog event that carried no address of its own.
             sip = log.get('source_ip') or _extract_source_ip(msg)
-            if not sip and request.remote_addr not in ('127.0.0.1', '::1'):
+            if not sip and not from_self:
                 sip = request.remote_addr
             raw_xml = log.get('xml') or None
             # XML (when a channel has "Capture XML" enabled) has every field explicitly
@@ -4154,6 +4190,62 @@ def api_log_pipeline_vector_status():
         'status': rows.get('vector_config_status'),
         'checked_at': rows.get('vector_config_status_at'),
         'error': rows.get('vector_config_status_error') or None,
+    })
+
+# Nothing in this app ever showed whether its own background services were running.
+# Three separate incidents trace back to that blind spot: the Sigma engine's scheduled-
+# task poll being rejected with a 403 on every cycle for as long as the appliance had a
+# real bind address, four systemd unit files that were never installed and so were dead
+# config, and systemd confinement work whose failure mode (a hardened unit that refuses
+# to start) is indistinguishable from "no rules matched today" without this.
+#
+# Two independent signals, because they fail differently:
+#   * `systemctl is-active` says whether systemd currently has the unit running. Cheap,
+#     and the only thing that catches a unit that died or never started.
+#   * the engine's own heartbeat says whether its loop is actually completing work. A
+#     process can be "active" and wedged, or active and having every call it makes
+#     rejected -- which is precisely what happened here.
+_SERVICE_HEALTH_UNITS = ('microsoc-web', 'microsoc-sigma', 'microsoc-soar', 'microsoc-dns', 'vector')
+
+@app.route('/api/system/service-health', methods=['GET'])
+@login_required
+def api_system_service_health():
+    import subprocess
+    db = get_db()
+    units = []
+    for unit in _SERVICE_HEALTH_UNITS:
+        try:
+            r = subprocess.run(['systemctl', 'is-active', unit], capture_output=True, text=True, timeout=5)
+            state = (r.stdout or '').strip() or 'unknown'
+        except Exception:
+            # A timeout or a missing systemctl is a reporting failure, not a service
+            # failure -- say so rather than claiming the unit is down.
+            state = 'unknown'
+        units.append({'unit': unit, 'state': state})
+
+    rows = {r['key']: r['value'] for r in db.execute(
+        "SELECT key, value FROM settings WHERE key IN "
+        "('engine_sigma_heartbeat_at', 'engine_sigma_poll_status', 'engine_sigma_poll_error')"
+    ).fetchall()}
+    beat = rows.get('engine_sigma_heartbeat_at')
+    age_seconds = None
+    if beat:
+        try:
+            # The heartbeat is written with SQLite's datetime('now'), which is UTC.
+            age_seconds = int((datetime.utcnow() - datetime.strptime(beat[:19], '%Y-%m-%d %H:%M:%S')).total_seconds())
+        except (ValueError, TypeError):
+            age_seconds = None
+    return jsonify({
+        'units': units,
+        'sigma_engine': {
+            'heartbeat_at': beat,
+            # The loop sleeps 30s; 180s is six missed cycles, comfortably past a slow
+            # detection pass on a large batch without being so loose it hides a dead loop.
+            'age_seconds': age_seconds,
+            'stale': (age_seconds is None or age_seconds > 180),
+            'poll_status': rows.get('engine_sigma_poll_status'),
+            'poll_error': rows.get('engine_sigma_poll_error') or None,
+        },
     })
 
 # Log Pipeline's own stat tiles used to show config counts (active/total drop rules,
@@ -9434,13 +9526,30 @@ def api_settings_agent_sweeps():
 # auto-sync check) -- not a user-facing route, so no @login_required/current_user. The
 # due-check inside _run_scheduled_playbooks() makes this cheap to call that often (a
 # no-op unless something's actually due), same shape as taxii_client.sync_due_feeds().
-# Restricted to localhost since this process and the Flask app always run on the same
-# host and there's no legitimate reason for this to be reachable from outside it.
+# Restricted to this host since this process and the Flask app always run on the same
+# machine and there's no legitimate reason for this to be reachable from outside it.
+#
+# "This host" can't be just loopback. Settings > Network's dual-bind flow binds gunicorn
+# to specific interface IPs (--bind 192.168.x.y:5001 ...), and a process bound that way
+# is NOT listening on 127.0.0.1 at all -- so sigma_engine.py resolves ui_bind_ip and
+# calls the appliance's own interface address instead. That connection's remote_addr is
+# that same interface IP, not loopback, so a loopback-only check rejected every single
+# poll with a 403 -- and `requests.post` does not raise on a 403, so the engine logged
+# nothing and every feature driven by this endpoint (scheduled playbooks, agent sweeps,
+# isolation auto-reverts, SLA-breach/offline-agent/case-stale notifications, stale-import
+# cleanup) silently stopped running the moment the appliance was given a real binding.
+#
+# Accepting the appliance's own configured bind addresses is not a widening of trust: a
+# LAN client connecting here arrives with ITS own source address, never the server's, so
+# the only way to present a bind IP as remote_addr is to be this machine. Nothing else
+# on the network can reach this endpoint any more than it could before.
+# (_is_own_host_request is defined near the top of this file, beside the other network
+# helpers -- api_ingest needs it too, for the same dual-bind reason.)
 @app.route('/api/internal/run-scheduled-playbooks', methods=['POST'])
 def api_run_scheduled_playbooks():
-    if request.remote_addr not in ('127.0.0.1', '::1'):
-        return jsonify({'error': 'Forbidden'}), 403
     db = get_db()
+    if not _is_own_host_request(db, request.remote_addr):
+        return jsonify({'error': 'Forbidden'}), 403
     _run_scheduled_playbooks(db)
     _run_scheduled_agent_sweeps(db)
     _run_due_auto_reverts(db)

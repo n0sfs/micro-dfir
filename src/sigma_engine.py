@@ -1096,6 +1096,25 @@ def run_due_ioc_purge():
     if deleted:
         print(f"[+] Automatic IOC purge: deleted {deleted} stale indicator(s) older than {retention_days} day(s) (cutoff {cutoff}).", flush=True)
 
+# Liveness + last-outcome stamp for this service, written once per loop iteration.
+#
+# There was no way to tell from the UI whether this engine was running at all. That
+# matters twice over: it is the process that does the detection matching, and it is the
+# canary for the systemd confinement work -- a hardening directive that stops the unit
+# from starting would otherwise look exactly like a quiet day with no rule matches.
+# Stored in settings (same pattern as vector_config_status) rather than a new table.
+def _record_engine_status(poll_status, poll_error):
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('engine_sigma_heartbeat_at', datetime('now'))")
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('engine_sigma_poll_status', ?)", (poll_status,))
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('engine_sigma_poll_error', ?)", (poll_error or '',))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        # A health stamp must never be able to take down the engine it reports on.
+        print(f"[-] Could not record engine heartbeat: {e}")
+
 if __name__ == "__main__":
     # Threat intel feed auto-sync, automatic log purge, and automatic IOC purge all
     # piggyback on this loop rather than running as their own scheduler service — this
@@ -1138,7 +1157,17 @@ if __name__ == "__main__":
             ui_port = (row[0] if row else None) or '5001'
             conn.close()
             ui_ip = '127.0.0.1' if ui_ip == '0.0.0.0' else ui_ip
-            requests.post(f"https://{ui_ip}:{ui_port}/api/internal/run-scheduled-playbooks", timeout=15, verify=False)
+            resp = requests.post(f"https://{ui_ip}:{ui_port}/api/internal/run-scheduled-playbooks", timeout=15, verify=False)
+            # requests does NOT raise on a 4xx/5xx. This call was answered with 403 on
+            # every cycle for as long as the appliance had a specific bind address, and
+            # because nothing checked the status code it failed in total silence -- every
+            # scheduled playbook, agent sweep, auto-revert and SLA notification stopped
+            # firing with no error anywhere. Record the outcome either way.
+            if resp.status_code == 200:
+                _record_engine_status('ok', '')
+            else:
+                _record_engine_status('error', f'HTTP {resp.status_code} from the scheduled-task endpoint')
         except Exception as e:
             print(f"[-] Scheduled playbook check failed: {e}")
+            _record_engine_status('error', str(e)[:300])
         time.sleep(30)
