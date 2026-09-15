@@ -78,11 +78,21 @@ venv/bin/python src/sync_report_schedule.py
 # wrote once at first install and nothing ever updated. That silently made four of the
 # five unit files dead config: changes to them looked deployed and were not.
 #
-# microsoc-dnsmasq is deliberately excluded, matching its own unit comment and the
-# restart list below: it serves DNS for whatever devices have opted in, and a routine
-# app deploy must never interrupt that.
+# Two units are deliberately NOT managed here:
+#
+#   microsoc-dnsmasq -- matching its own unit comment and the restart list below: it
+#     serves DNS for whatever devices have opted in, and a routine app deploy must never
+#     interrupt that.
+#
+#   microsoc-web -- because its installed unit is LIVE STATE, not deployable config.
+#     Settings > Network rewrites /etc/systemd/system/microsoc-web.service in place to
+#     set the UI and ingestion bind addresses (see the sys_re.sub on the --bind arguments
+#     in app.py). The copy in this repo carries the generic `--bind 0.0.0.0:5001` default,
+#     so copying it over the installed one silently discards an admin's deliberate
+#     per-interface binding and re-exposes the UI on every interface. Learned the hard
+#     way: the first version of this loop included it and did exactly that.
 UNITS_CHANGED=0
-for unit in microsoc-web microsoc-soar microsoc-sigma microsoc-dns; do
+for unit in microsoc-soar microsoc-sigma microsoc-dns; do
     src="$SOC_DIR/config/$unit.service"
     dst="/etc/systemd/system/$unit.service"
     [ -f "$src" ] || continue

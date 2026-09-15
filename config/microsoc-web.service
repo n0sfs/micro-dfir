@@ -1,6 +1,15 @@
 [Unit]
 Description=Micro DFIR Web Dashboard & Ingestion (Gunicorn Production)
 After=network.target vector.service
+# NOTE: this file is the INSTALL-TIME template only. Once installed, the live copy at
+# /etc/systemd/system/microsoc-web.service is rewritten in place by Settings > Network
+# (app.py substitutes the --bind arguments), so the installed unit carries the admin's
+# real bind addresses and this one does not. update.sh deliberately excludes this unit
+# from its unit-deployment loop for that reason -- copying this file over the live one
+# discards the configured binding and re-exposes the UI on every interface.
+#
+# Consequence worth knowing: confinement directives added here reach an existing host
+# only via a Settings > Network save, or by hand. They are not added here yet.
 [Service]
 Type=simple
 User=root
