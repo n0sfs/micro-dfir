@@ -71,12 +71,42 @@ venv/bin/python src/sync_report_schedule.py
 # sudo step. Idempotent (matches this script's own cron-job-registration precedent
 # above): a re-run when it's already installed just re-copies the identical file and
 # no-ops on enable.
-if [ ! -f /etc/systemd/system/microsoc-dns.service ] || ! cmp -s "$SOC_DIR/config/microsoc-dns.service" /etc/systemd/system/microsoc-dns.service; then
-    echo "[*] Installing/updating the Micro DFIR DNS Server systemd unit..."
-    cp "$SOC_DIR/config/microsoc-dns.service" /etc/systemd/system/microsoc-dns.service
+#
+# Extended to every unit this repo ships, not just the DNS one. Until now only
+# microsoc-dns.service was installed here, so editing any of the others in the repo had
+# NO effect on a running host -- systemd reads /etc/systemd/system/, which install.sh
+# wrote once at first install and nothing ever updated. That silently made four of the
+# five unit files dead config: changes to them looked deployed and were not.
+#
+# microsoc-dnsmasq is deliberately excluded, matching its own unit comment and the
+# restart list below: it serves DNS for whatever devices have opted in, and a routine
+# app deploy must never interrupt that.
+UNITS_CHANGED=0
+for unit in microsoc-web microsoc-soar microsoc-sigma microsoc-dns; do
+    src="$SOC_DIR/config/$unit.service"
+    dst="/etc/systemd/system/$unit.service"
+    [ -f "$src" ] || continue
+    if [ ! -f "$dst" ] || ! cmp -s "$src" "$dst"; then
+        echo "[*] Installing/updating the $unit systemd unit..."
+        cp "$src" "$dst"
+        UNITS_CHANGED=1
+    fi
+done
+if [ "$UNITS_CHANGED" = "1" ]; then
     systemctl daemon-reload
 fi
 systemctl enable microsoc-dns >/dev/null 2>&1 || true
+
+# The TLS private key every agent pins, and the database holding agent tokens, the shared
+# secret, password hashes and all forensic data. install.sh creates both with the default
+# umask and never restricts them. Applied on every deploy rather than at install only, so
+# an existing host picks it up without anyone having to know to go and do it.
+echo "[*] Restricting permissions on secrets and the database..."
+chmod 600 "$SOC_DIR/config/key.pem" 2>/dev/null || true
+chmod 600 "$SOC_DIR/siem.db" 2>/dev/null || true
+# SQLite's sidecar files carry the same data mid-transaction.
+chmod 600 "$SOC_DIR/siem.db-wal" "$SOC_DIR/siem.db-shm" 2>/dev/null || true
+chmod 700 "$SOC_DIR/case_attachments" 2>/dev/null || true
 
 echo "[*] Restarting Micro-SOC services to apply changes..."
 systemctl restart microsoc-web

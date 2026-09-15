@@ -10,5 +10,32 @@ Environment="PYTHONPATH=/opt/micro-dfir/src"
 ExecStart=/opt/micro-dfir/venv/bin/python3 src/sigma_engine.py
 Restart=always
 RestartSec=10
+
+# Confinement. Every service here runs as root, and the web app in particular parses
+# untrusted log data AND can push scripts to every endpoint -- so one RCE is root on the
+# appliance and control of the fleet. Dropping off root is a larger change (the web app
+# writes /etc/vector/vector.toml, rewrites its own unit, and edits root's crontab, so a
+# non-root user breaks three features outright); these directives cost nothing and
+# meaningfully shrink what a compromise of this process can reach.
+#
+# Applied to the Sigma engine first, on purpose: it is the least disruptive to lose. If
+# something here is wrong, detection matching stops but the web UI stays up and the
+# deploy path keeps working, which is what makes the failure diagnosable.
+#
+# Deliberately NOT set here, both needing work first rather than being oversights:
+#   ProtectSystem=strict|full -- makes /etc read-only. The web app writes
+#     /etc/vector/vector.toml and /etc/systemd/system/, so it needs ReadWritePaths first.
+#   PrivateTmp=true -- app.py writes /tmp/microdfir_update.lock and update.sh's trap
+#     removes it from OUTSIDE the unit. A private /tmp would hide one from the other and
+#     silently break the "Update Now" double-trigger guard.
+NoNewPrivileges=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictNamespaces=true
 [Install]
 WantedBy=multi-user.target

@@ -36,6 +36,11 @@ echo "[*] Generating self-signed TLS certificate for the web dashboard and inges
 if [ ! -f "config/cert.pem" ] || [ ! -f "config/key.pem" ]; then
   openssl req -x509 -newkey rsa:2048 -nodes -keyout config/key.pem -out config/cert.pem -days 3650 -subj "/CN=micro-dfir"
 fi
+# -nodes means the key is unencrypted on disk, which is fine for an appliance that has to
+# start unattended -- but it inherits the default umask, so it lands world-readable. This
+# is the key every deployed agent pins; anyone who can read it can impersonate the SOC to
+# the whole fleet. update.sh re-applies this on every deploy so existing hosts get it too.
+chmod 600 config/key.pem 2>/dev/null || true
 
 echo "[*] Configuring Vector..."
 cp config/vector.toml /etc/vector/vector.toml
