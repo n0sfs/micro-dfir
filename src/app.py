@@ -19669,6 +19669,16 @@ def api_fim_path_detail(fid):
 # heavier hunt-flavored sweeps/collections) stays gated to Tier 3+ below.
 AGENT_COMMAND_TIER1_LABELS = {'isolate_host', 'restore_network', 'block_ip', 'unblock_ip', 'collect_triage', 'kill_process', 'quarantine_file', 'kill_scheduled_task'}
 
+def _is_ipv4(value):
+    """True only for a real dotted-quad. Uses ipaddress rather than a regex so octets are
+    range-checked -- agent_scripts._IPV4_RE accepts '999.1.1.1', which would reach the
+    endpoint and fail there as a confusing script error instead of a clean refusal here."""
+    import ipaddress
+    try:
+        return isinstance(ipaddress.ip_address(str(value).strip()), ipaddress.IPv4Address)
+    except ValueError:
+        return False
+
 def _soc_allowlist_endpoints(settings_map, request_host=None):
     """Every address an isolated endpoint must still be able to reach us on.
 
@@ -19702,12 +19712,27 @@ def _soc_allowlist_endpoints(settings_map, request_host=None):
     for key, port in (('ui_bind_ip', ui_port), ('ingest_bind_ip', ingest_port)):
         val = (settings_map.get(key) or '').strip()
         # 0.0.0.0 means "every interface" -- it is not an address an endpoint can send to.
-        if val and val != '0.0.0.0':
+        if val and val != '0.0.0.0' and _is_ipv4(val):
             entries.append(f'{val}:{port}')
-    if request_host:
+    # request.host is a LAST RESORT, not a routine contributor. Two reasons, both found
+    # in review after the first version of this function folded it in unconditionally:
+    #
+    #   1. It is client-supplied. A caller with edr.command.basic who sends
+    #      `Host: <their-own-address>` got that address written into the isolated
+    #      endpoint's firewall as an Allow rule, and the endpoint-side reachability probe
+    #      then passed because their address answered. Confirmed by reproduction.
+    #   2. It is frequently not an IP. An appliance reached by DNS name or through a
+    #      reverse proxy yields something _normalize_soc_endpoints rejects outright, and
+    #      because it rejects the whole set on one bad entry, isolation could not be
+    #      queued at all on such a deployment. Also confirmed by reproduction.
+    #
+    # The bind settings are admin-configured and are the trustworthy source. Only when
+    # they yield nothing at all -- both wildcard or unset -- is the request's own address
+    # worth guessing from, and then only if it is genuinely an IPv4 literal.
+    if not entries and request_host:
         host_only, _, host_port = request_host.partition(':')
         host_only = host_only.strip()
-        if host_only and host_only != '0.0.0.0':
+        if host_only and host_only != '0.0.0.0' and _is_ipv4(host_only):
             entries.append(f"{host_only}:{(host_port or ui_port).strip()}")
     deduped = []
     for e in entries:
@@ -19745,7 +19770,14 @@ def _queue_agent_command(db, hostname, label, params, script_in, queued_by):
             params['patterns'] = _get_live_yara_strings()
         if label == 'yara_condition_sweep':
             params['rule_conditions'] = _get_live_yara_rule_conditions()
-        if label == 'isolate_host' and not params.get('soc_ip'):
+        if label == 'isolate_host':
+            # Computed server-side unconditionally, overwriting anything the caller sent.
+            # This used to be `and not params.get('soc_ip')`, which let a caller with only
+            # edr.command.basic supply the allowlist themselves -- isolate a host while
+            # allowlisting an address they control instead of the appliance. The
+            # endpoint-side probe cannot catch that: it connects to exactly the addresses
+            # it was handed, so it succeeds and the isolation holds, reproducing the
+            # contained-and-unreachable incident this allowlist exists to prevent.
             s = {r[0]: r[1] for r in db.execute("SELECT key, value FROM settings").fetchall()}
             # Every address the agent may need, not just the ingest one -- see
             # _soc_allowlist_endpoints() for the production incident that forced this.

@@ -9,6 +9,35 @@ import re
 
 _IPV4_RE = re.compile(r'^(\d{1,3}\.){3}\d{1,3}$')
 
+def _py_literal(value):
+    """A caller-supplied string as a safe single-line Python literal, for embedding in a
+    heredoc'd script.
+
+    Replaces a hand-rolled escape that appeared in six builders, which escaped a
+    backslash to two backslashes and a single quote to backslash-quote, and nothing else.
+
+    That is Python string-literal escaping, and it does not escape newlines. The value is
+    interpolated into a `python3 - <<'PYEOF' ... PYEOF` heredoc, so a path containing a
+    line reading PYEOF closed the heredoc early and bash executed everything after it --
+    as root, from a caller holding only edr.command.basic. That is strictly *lower* than
+    the edr.command.advanced tier which gates arbitrary scripts, so the quoting flaw
+    inverted the permission model it sits behind. Confirmed by reproduction before the fix.
+
+    repr() escapes newlines, carriage returns, backslashes and both quote styles, and
+    emits its own delimiters -- so interpolation sites take {x}, not '{x}'.
+    string_sweep_linux and yara_condition_sweep_linux already did it this way; these six
+    were hand-rolled instead.
+
+    Control characters are rejected outright on top of that. Nothing legitimate in a file
+    path or a process-match pattern contains one, and this heredoc form is fragile enough
+    that the next builder added here should fail loudly rather than depend on repr() alone
+    being remembered."""
+    text = str(value)
+    bad = next((ch for ch in text if ord(ch) < 32 or ord(ch) == 127), None)
+    if bad is not None:
+        raise ValueError(f"Control character {bad!r} is not allowed in a path or pattern")
+    return repr(text)
+
 def _normalize_soc_ips(soc_ips):
     """One IP, a comma-separated string, or any iterable of them -> a deduped ordered list.
 
@@ -152,7 +181,19 @@ _WIN_VERIFY_SOC_REACHABLE = """    $socProbes = @(__PROBES__)
     if (-not $socOk) {
         Set-NetFirewallProfile -Profile Domain,Public,Private -DefaultInboundAction NotConfigured -DefaultOutboundAction NotConfigured -ErrorAction SilentlyContinue
         Remove-NetFirewallRule -DisplayName "MicroDFIR-Isolation-*" -ErrorAction SilentlyContinue
-        Write-Error "isolate_host ROLLED BACK -- the isolation cut this host off from the SOC itself, which would have left it contained with no way to receive restore_network. The firewall has been returned to its previous state and the host is NOT isolated. Check that every SOC address/port the agent uses is in the isolation allowlist."
+        # Every teardown command above is deliberately failure-tolerant, so "it ran" is not
+        # "it worked". Confirm the end state before saying which of the two very different
+        # outcomes this is -- an earlier version asserted the good one unconditionally,
+        # which meant a failed rollback told the analyst the host was fine while leaving it
+        # isolated and unable to reach the SOC. That is the exact false-success class this
+        # whole self-check exists to remove, surviving in the branch for the worst case.
+        $leftRules = @(Get-NetFirewallRule -DisplayName "MicroDFIR-Isolation-*" -ErrorAction SilentlyContinue).Count
+        $stillBlocking = @(Get-NetFirewallProfile -Profile Domain,Public,Private -ErrorAction SilentlyContinue | Where-Object { $_.DefaultOutboundAction -eq 'Block' }).Count
+        if ($leftRules -eq 0 -and $stillBlocking -eq 0) {
+            Write-Error "isolate_host ROLLED BACK -- the isolation cut this host off from the SOC itself, which would have left it contained with no way to receive restore_network. The rollback was verified: no isolation rules remain and no profile still defaults to Block, so the host is NOT isolated. Check that every SOC address/port the agent uses is in the isolation allowlist."
+        } else {
+            Write-Error "isolate_host FAILED AND THE ROLLBACK ALSO FAILED -- this host is STILL ISOLATED and cannot reach the SOC, so it will NOT receive restore_network and needs hands-on recovery at the console. Remaining isolation rules: $leftRules. Profiles still defaulting to Block: $stillBlocking."
+        }
         exit 1
     }
 """
@@ -272,7 +313,8 @@ try {{
     if ($existing.Count -gt 0) {{ "Removed $($existing.Count) MicroDFIR block rule(s) for $ip." }} else {{ "No MicroDFIR block rule found for $ip -- nothing to remove." }}
 }} catch {{
     $errMsg = $_.Exception.Message -replace '"', "'"
-    "{{`"error`":`"failed to remove firewall block rule for $ip -- $errMsg`"}}"
+    Write-Error "unblock_ip FAILED -- $ip may STILL be blocked on this host: $errMsg"
+    exit 1
 }}
 """
 
@@ -1664,11 +1706,11 @@ def kill_process_linux(pid):
 # shared verbatim by both POSIX agents instead of a Linux-only procfs version plus a
 # separate macOS one.
 def kill_process_by_name_linux(pattern):
-    esc = pattern.replace('\\', '\\\\').replace("'", "\\'")
+    esc = _py_literal(pattern)
     return f"""python3 - <<'PYEOF'
 import json, os, re, signal, subprocess
 
-pattern = re.compile(re.escape('{esc}'), re.IGNORECASE)
+pattern = re.compile(re.escape({esc}), re.IGNORECASE)
 out = subprocess.run(['ps', '-Ao', 'pid=,comm=,args='], capture_output=True, text=True, timeout=15).stdout
 killed, failed = [], []
 my_pid = os.getpid()
@@ -1744,7 +1786,14 @@ if [ "$soc_ok" != "1" ]; then
     iptables -D OUTPUT -j {_ISOLATION_CHAIN} 2>/dev/null || true
     iptables -F {_ISOLATION_CHAIN} 2>/dev/null || true
     iptables -X {_ISOLATION_CHAIN} 2>/dev/null || true
-    echo "isolate_host ROLLED BACK -- the isolation cut this host off from the SOC itself, which would have left it contained with no way to receive restore_network. iptables has been returned to its previous state and the host is NOT isolated. Check that every SOC address/port the agent uses is in the isolation allowlist." >&2
+    # Every teardown line above tolerates failure, so confirm the end state rather than
+    # asserting it. An earlier version claimed the host was not isolated unconditionally,
+    # which on a failed rollback told the analyst the opposite of the truth.
+    if iptables -C INPUT -j {_ISOLATION_CHAIN} 2>/dev/null || iptables -C OUTPUT -j {_ISOLATION_CHAIN} 2>/dev/null; then
+        echo "isolate_host FAILED AND THE ROLLBACK ALSO FAILED -- the {_ISOLATION_CHAIN} chain is still referenced, so this host is STILL ISOLATED and cannot reach the SOC. It will NOT receive restore_network and needs hands-on recovery at the console." >&2
+    else
+        echo "isolate_host ROLLED BACK -- the isolation cut this host off from the SOC itself, which would have left it contained with no way to receive restore_network. The rollback was verified: the {_ISOLATION_CHAIN} chain is no longer referenced from INPUT or OUTPUT, so the host is NOT isolated. Check that every SOC address/port the agent uses is in the isolation allowlist." >&2
+    fi
     exit 1
 fi'''
     else:
@@ -1809,10 +1858,10 @@ def collect_file_linux(path):
     # 40KB raw, not 4MB -- see collect_file()'s comment: base64 inflation blows through
     # the server's 60,000-char stdout truncation (api_agent_result, app.py) well before
     # 4MB, corrupting the JSON mid-string. Same fix applied identically here.
-    esc = path.replace('\\', '\\\\').replace("'", "\\'")
+    esc = _py_literal(path)
     return f"""python3 - <<'PYEOF'
 import base64, hashlib, json, os
-p = '{esc}'
+p = {esc}
 if not os.path.isfile(p):
     print(json.dumps({{'error': 'file not found'}}))
 else:
@@ -1833,11 +1882,11 @@ PYEOF
 # not all filesystems support it (tmpfs, some network mounts don't), so its real success
 # is reported back rather than assumed.
 def quarantine_file_linux(path):
-    esc = path.replace('\\', '\\\\').replace("'", "\\'")
+    esc = _py_literal(path)
     return f"""python3 - <<'PYEOF'
 import hashlib, json, os, shutil, subprocess, datetime
 
-p = '{esc}'
+p = {esc}
 if not os.path.isfile(p):
     print(json.dumps({{'error': 'file not found'}}))
 else:
@@ -2631,11 +2680,11 @@ def kill_process_macos(pid):
 # Identical shape to kill_process_by_name_linux() -- `ps -Ao pid=,comm=,args=` output is
 # the same on both POSIX agents, no /proc dependency either way.
 def kill_process_by_name_macos(pattern):
-    esc = pattern.replace('\\', '\\\\').replace("'", "\\'")
+    esc = _py_literal(pattern)
     return f"""python3 - <<'PYEOF'
 import json, os, re, signal, subprocess
 
-pattern = re.compile(re.escape('{esc}'), re.IGNORECASE)
+pattern = re.compile(re.escape({esc}), re.IGNORECASE)
 out = subprocess.run(['ps', '-Ao', 'pid=,comm=,args='], capture_output=True, text=True, timeout=15).stdout
 killed, failed = [], []
 my_pid = os.getpid()
@@ -2739,10 +2788,10 @@ def collect_file_macos(path):
     # escaping, not bash escaping. 40KB raw, not 4MB -- see collect_file()'s comment:
     # base64 inflation blows through the server's 60,000-char stdout truncation
     # (api_agent_result, app.py) well before 4MB, corrupting the JSON mid-string.
-    esc = path.replace('\\', '\\\\').replace("'", "\\'")
+    esc = _py_literal(path)
     return f"""python3 - <<'PYEOF'
 import base64, hashlib, json, os
-p = '{esc}'
+p = {esc}
 if not os.path.isfile(p):
     print(json.dumps({{'error': 'file not found'}}))
 else:
@@ -2763,11 +2812,11 @@ def quarantine_file_macos(path):
     # Linux's chattr +i) is attempted best-effort on top; not guaranteed to be honored
     # depending on SIP/filesystem, so its real success is reported back rather than
     # assumed, same honesty as the Linux chattr attempt.
-    esc = path.replace('\\', '\\\\').replace("'", "\\'")
+    esc = _py_literal(path)
     return f"""python3 - <<'PYEOF'
 import hashlib, json, os, shutil, subprocess, datetime
 
-p = '{esc}'
+p = {esc}
 if not os.path.isfile(p):
     print(json.dumps({{'error': 'file not found'}}))
 else:
