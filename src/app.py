@@ -9745,6 +9745,46 @@ LOG_SOURCE_SILENT_BASELINE_DAYS = 7  # not exposed as a setting -- changing the
 LOG_SOURCE_SILENT_MIN_BASELINE_EVENTS = 20  # too few historical events in the baseline
 # window to establish a meaningful cadence at all -- skip rather than guess
 
+# Every OTHER check on the 30-second scheduled-task poll is a "cheap no-op unless due"
+# lookup against a small table. This one is not: it runs three GROUP BY scans over
+# live_logs across a 7-day window -- the same shape of query this file measured at 93
+# seconds on this appliance's own multi-million-row table (see _parser_health_summary).
+#
+# It got away with that only because the poll was being rejected with a 403 and never
+# actually ran. The moment that was fixed, a multi-second full scan started firing every
+# 30 seconds against the hottest table in the database. So this check carries its own
+# cadence: nothing here is time-critical at 30-second resolution -- the thresholds are
+# measured in HOURS and the alert cooldown defaults to a day.
+LOG_SOURCE_SILENT_CHECK_INTERVAL_MINUTES = 15
+
+def _claim_due_check(db, key, interval_minutes):
+    """Claim the right to run a periodic check, or return False if it isn't due.
+
+    The claim is written BEFORE the work runs, with a conditional UPDATE bound to the
+    value this caller read (the optimistic-concurrency pattern used elsewhere in this
+    file). Both properties matter: gunicorn runs three workers, and a check that takes
+    longer than the 30s poll interval can otherwise be entered again while the first run
+    is still going -- two concurrent passes racing the same read-then-insert cooldown
+    check and double-firing the same alert."""
+    now = datetime.now()
+    row = db.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    prev = row['value'] if row else None
+    if prev:
+        try:
+            last = datetime.strptime(prev[:19], '%Y-%m-%d %H:%M:%S')
+            if (now - last).total_seconds() < interval_minutes * 60:
+                return False
+        except (ValueError, TypeError):
+            pass  # unparseable stamp -- treat as due, same as never having run
+    now_str = now.strftime('%Y-%m-%d %H:%M:%S')
+    if prev is None:
+        cur = db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, now_str))
+    else:
+        cur = db.execute("UPDATE settings SET value = ? WHERE key = ? AND value = ?", (now_str, key, prev))
+    db.commit()
+    # rowcount 0 means another worker claimed this slot between our read and our write.
+    return cur.rowcount > 0
+
 def _log_source_silent_config(db):
     mult_row = db.execute("SELECT value FROM settings WHERE key = 'log_source_silent_multiplier'").fetchone()
     min_row = db.execute("SELECT value FROM settings WHERE key = 'log_source_silent_min_hours'").fetchone()
@@ -9796,6 +9836,8 @@ def _run_due_log_source_silent_alerts(db):
     # log volume across every source it sends, so a chatty host and a quiet one each get
     # a cadence-appropriate threshold without hand-tuning.
     from datetime import timedelta
+    if not _claim_due_check(db, 'log_source_silent_last_check', LOG_SOURCE_SILENT_CHECK_INTERVAL_MINUTES):
+        return
     cfg = _log_source_silent_config(db)
     # live_logs.timestamp is written from Python's local datetime.now() at ingest (see
     # api_ingest()), NOT UTC -- SQLite's own 'now' literal is always UTC regardless of

@@ -1157,7 +1157,14 @@ if __name__ == "__main__":
             ui_port = (row[0] if row else None) or '5001'
             conn.close()
             ui_ip = '127.0.0.1' if ui_ip == '0.0.0.0' else ui_ip
-            resp = requests.post(f"https://{ui_ip}:{ui_port}/api/internal/run-scheduled-playbooks", timeout=15, verify=False)
+            # Most cycles return in milliseconds -- every check behind this endpoint is a
+            # cheap "unless due" lookup. One cycle in thirty is not: the silent-log-source
+            # check runs a real scan over live_logs on its own 15-minute cadence, and a 15
+            # second timeout abandoned it every single time (the server kept working, the
+            # engine just stopped listening and logged a failure). Waiting is the right
+            # behaviour: the detection pass at the top of this loop resumes from its own
+            # stored last_id, so a long cycle delays matching, it never skips logs.
+            resp = requests.post(f"https://{ui_ip}:{ui_port}/api/internal/run-scheduled-playbooks", timeout=120, verify=False)
             # requests does NOT raise on a 4xx/5xx. This call was answered with 403 on
             # every cycle for as long as the appliance had a specific bind address, and
             # because nothing checked the status code it failed in total silence -- every
