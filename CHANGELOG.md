@@ -10,6 +10,85 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-15
 
+### Containment that reported success without containing (ISO-01 → ISO-04)
+
+All four isolation findings from the security assessment. Three of the four share one
+shape: the console said a host was contained and it was not.
+
+- **ISO-01, Windows — pre-existing Allow rules survived "isolation".**
+  `Set-NetFirewallProfile -DefaultOutboundAction Block` only changes what happens to
+  traffic matching *no rule*. Windows Firewall evaluates Block rules, then Allow rules,
+  then the default — so every one of the host's enabled Allow rules still matched first
+  and still permitted its traffic. A stock install ships with dozens (Core Networking,
+  mDNS, network discovery, RDP) and every application adds more; malware that registered
+  its own Allow rule kept its channel open through an isolation that came back green.
+  Fixed with explicit **Block** rules, because Block outranks Allow. Windows has no
+  "everywhere except X" address syntax, so the exception is the arithmetic complement of
+  the SOC addresses — as inclusive ranges, which needs 3 entries where CIDR needs 31 and
+  says plainly what it covers. IPv6 is blocked wholesale: the SOC is reached over IPv4,
+  and leaving v6 open hands anyone on a v6-capable network an untouched path out.
+- **ISO-02, macOS — the whole thing was a no-op.** It loaded rules into a pf anchor and
+  stopped. Loading an anchor does not make pf evaluate it; an anchor is only reached
+  through an `anchor` rule in the main ruleset, and macOS's stock `/etc/pf.conf`
+  references `com.apple/*` and nothing else. The rules loaded, `pfctl` exited 0, the
+  script printed "Host isolated", and every packet flowed as before. The anchor is now
+  referenced from `pf.conf` (between markers, so restore removes exactly what was added),
+  the script has `set -e` and a fail path like the other two platforms, and it asserts all
+  three conditions that must hold: pf enabled, anchor referenced, rules present inside it.
+  Also fixed `pfctl -e 2>&1 | grep -v 'already enabled'`, which made the pipeline's exit
+  status grep's and hid both outcomes. **Still untested on real hardware** — there is no
+  Mac here. That is precisely why the self-checks matter: on an untested platform the
+  honest failure mode is "says it failed", never "says it worked".
+- **ISO-03 — a reboot silently un-isolated Linux and macOS hosts.** iptables rules live in
+  kernel memory and nothing on a stock host writes them back at boot; macOS ships pf
+  disabled and its boot job loads `pf.conf` without ever running `pfctl -e`. Rebooting is
+  not an exotic evasion — it is the first thing a person does when their machine "stops
+  working", which is exactly how an isolated machine looks to whoever is sitting at it.
+  Linux gets a systemd oneshot, macOS a LaunchDaemon; both removed by restore, which now
+  fails loudly if the boot job is still installed (otherwise a host restores now and
+  re-isolates itself at the next reboot with nothing in its history to explain why).
+  Windows needed nothing — its rules and profile defaults are already persistent.
+- **ISO-04 — containment was asserted once and never re-checked.** The Isolated badge is
+  derived from the newest completed `isolate_host` with no later `restore_network`: a
+  record of what was *asked for*, not of what is true now. Between those two commands
+  containment quietly dies (firewall cleared, GPO refresh, image rollback, malware with
+  local admin). A new read-only `verify_isolation` action returns a JSON verdict from the
+  endpoint, and the server asks every believed-isolated host every 15 minutes. A "no"
+  raises a HIGH **Isolation Not Holding** alert through the normal alert path, SOAR
+  included — "the host you believe is contained is not" is an incident and belongs in the
+  queue. An unparseable or failed probe is deliberately *not* read as "not isolated": a
+  broken probe crying containment failure every cycle would train analysts to ignore the
+  one alert that matters.
+
+Found while testing ISO-01: the IPv4 validation in `agent_scripts` was shape-only
+(`\d{1,3}` per octet), so `192.168.86.999` passed and became a malformed firewall rule.
+On the isolate path, a rule the firewall rejects or silently skips means a host reported
+as contained that isn't. All five call sites now range-check through `ipaddress`.
+
+### Agent tokens are no longer stored in the clear (AUTH-04)
+
+`agent_tokens` kept the token itself as its primary key. Anything able to read `siem.db` —
+a stolen backup, the world-readable file this appliance shipped with until the hardening
+pass, a SQL-injection read, anyone with shell access — walked away with a working
+credential for every enrolled endpoint, and those credentials authorise remote script
+execution across the fleet. Now SHA-256: the right primitive here rather than
+bcrypt/PBKDF2, because these are 256-bit `secrets.token_hex(32)` values, not human-chosen
+passwords, so there is no dictionary to stretch against.
+
+A table rebuild rather than an ALTER — the plaintext column had to actually go, and it
+couldn't be blanked in place because it was the primary key and every row would collide on
+`''`. Existing agents kept working across it: tokens are hashed in flight, so binding,
+group assignment and last-seen history all survive. Verified live — both agents stayed
+Online through the migration and their group assignment came out the other side intact,
+which is the real proof rows were carried rather than recreated. `_mint_agent_token`'s
+return value is now the only moment the plaintext exists server-side; nothing ever needs
+to read one back, because the self-upgrade path reuses the token the agent presents.
+
+Alongside it: **`soar_engine.py` bound `0.0.0.0:8000`** — an authenticated-but-inert
+webhook receiver listening on every interface. A repo-wide search for port 8000 or
+`/webhook/alert` finds exactly one hit, the route definition. Nothing has ever called it;
+every playbook and notification path runs inside the web app. Bound to loopback.
+
 ### The appliance couldn't recognise its own requests — and nothing could have told us
 
 Host hardening (HOST-01 phase 1) went looking for proof that the Sigma engine was running
