@@ -10,6 +10,69 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-14
 
+### Insider threat workflow review — making the identity scoring actually work
+
+Asked to walk the investigative workflow as an insider threat analyst. Three parallel
+code reviews plus a live walkthrough. The scaffolding turned out to be better than
+expected — an Identities model with Privileged/Departing/Watch multipliers, asset
+criticality, a seeded Insider Threat queue, a genuinely well-written Insider Threat
+runbook and a dedicated dashboard. Two things were wrong with it: it was completely
+inert, and the user-centric views were led by accounts that aren't people.
+
+- **Machine and service accounts were scored as people.** Measured on the live fleet: of
+  five `user` entities, exactly **one was a human**, and `SYSTEM` outranked them **12×** —
+  so "Top Risky Entities", the headline widget of the Insider Threat dashboard, led with a
+  machine account. `classify_account()` now labels AD computer accounts (`HOST$`) and the
+  built-in service principals across the bare / `DOMAIN\name` / `name@domain` forms, and
+  the Risk Scoring table defaults to **People only**. Deliberately a classification rather
+  than an exclusion — `SYSTEM` behaving oddly is a real intrusion signal, so nothing is
+  dropped, it is one click away. The classifier is biased toward *human* on purpose:
+  hiding the subject of a case is a far worse failure than showing a service account, so
+  `svc_backup` and `system_admin` both classify as people.
+- **`departing` is now a timestamped transition**, like `watched` already was. It was a
+  bare boolean, so the date lived by convention inside the free-text note where nothing
+  could query it — and the entire premise of the flag is that exfiltration risk spikes in
+  a *window*, which cannot be measured or charted if nothing records when it opened.
+  Stamped on the 0→1 transition, cleared on 1→0, shown as an elapsed day count
+  ("day 9") since that is the number an analyst reasons with. An unrelated edit cannot
+  reset it and move the goalposts on an investigation already measuring against it.
+- **CSV import for identities.** These flags are the only insider-specific scoring in the
+  product, and the sole way to populate them was a form, one user at a time — so on any
+  real fleet the table stays empty and none of it ever fires. It was empty here. Paste an
+  HR export or `Get-ADUser | Export-Csv`; upsert, so re-running the same export daily is
+  the joiner/mover/leaver path. Deliberately a paste box, not a directory connector: no
+  credentials to store and no scheduled sync to go stale.
+- The identity flags are surfaced on the risk table, so an analyst can see **why** a user
+  is weighted up rather than only that they are.
+
+**`watched` deliberately still does not multiply the score**, despite the obvious symmetry
+with privileged and departing, and despite that being the shape of the original request.
+Inflating someone's risk score *because* an investigation was opened into them is circular,
+and in the HR or legal proceeding these cases end in it is prejudicial — "we watchlisted
+them, which raised their score, which justified the case" does not survive contact with a
+defence. It surfaces them instead, via the badge and the standing watchlist widget. There
+is a test pinning this so it is not "fixed" by accident later.
+
+19 tests, including a reproduction from the real fleet entity list and the re-import trap
+where a nightly feed silently resets a departure window. Live-verified end to end:
+`SYSTEM` and `HOST$` now label correctly and People-only leaves the one human while
+preserving every host; a two-row import created 2, a re-import updated 2 with no
+duplicates and the original `departing_at` intact. Test identities removed afterwards.
+
+**Found and not yet addressed** — the confidentiality model, which matters more than any
+of the above: `GET /api/cases` and `GET /api/identities` are `@login_required` only with
+no visibility filter, so **the subject of an insider investigation, if they hold a login,
+can read the case about themselves and see that they are watchlisted and why**. The seeded
+"Insider Threat" queue restricts nothing (`queue_members` is never consulted by any read
+path) and TLP is a badge, not a control. Also open: no person as a first-class case entity
+(the subject is inferred from `alerts.username`); deleting a case wipes its append-only
+timeline with no audit entry and orphans the attachment files; no chain of custody, no
+legal hold; the four shipped case templates are all intrusion-shaped and the nearest one
+starts by resetting the subject's password, which tips them off; and the shipped Insider
+Threat runbook tells analysts to review "DLP/file-access logs" and a "cloud/USB audit
+trail" that the product does not collect — no file-read auditing, no USB copy visibility,
+no printing, no byte counts, with Sysmon and all 11 Linux auditd channels off by default.
+
 ### Security assessment of the EDR agent, isolation and appliance posture
 
 Asked whether the EDR agent deployment, its security and firewall features, and the
