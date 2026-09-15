@@ -80,14 +80,49 @@ round-trip checks for awkward-but-legitimate paths (apostrophes, quotes, backsla
 unicode), and an assertion that `repr()` alone would hold if the control-character guard
 were ever removed. Full regression green across all nine suites.
 
+**Fixed in a second pass** — the permission side doors and one destructive action:
+
+- **Log Search handed EDR command output to any logged-in account.** The unified search
+  union projects response-action stdout/stderr into its message column, and its three
+  consumers (search, CSV export, timeline) carry only `@login_required`. `types=command`
+  narrows the union to that branch alone, so any account — including a custom role holding
+  no permissions at all — could request a clean dump of every response-action result
+  across the fleet. `api_agent_commands`' GET refuses exactly that data without
+  `edr.command.basic` and its comment explains why; this was a side door around that
+  decision. `_log_branches_for_user()` now drops the branch for users without the
+  permission. Filtering rather than refusing keeps log search working normally for
+  everyone, and every consumer already short-circuits on an empty branch list.
+- **The SOAR approval queue gated one of seven actions.** It re-checked the EDR permission
+  only for `isolate_host`, while the always-gated set holds six more — so
+  `soar.playbooks.manage` alone could **un-isolate a contained host**, quarantine files,
+  kill processes fleet-wide and revoke credentials. Approving executes the action for
+  real, so it now demands the same permission the direct route does, *derived* from
+  `AGENT_COMMAND_TIER1_LABELS` rather than restated, so the two cannot drift apart again —
+  which is exactly how the queue ended up covering one label and not the rest.
+- **`block_ip` could sever the appliance's own control channel.** Nothing compared the
+  target against the SOC addresses, and a Block rule beats an Allow rule in the Windows
+  filtering engine — so blocking a SOC address also overrides the isolation allowlist, the
+  agent can never poll again, and the unblock can never be delivered. One mistyped IOC
+  from a feed was enough. Refused at queue time now, reusing the same allowlist isolation
+  computes.
+- **Queuing a command had no audit record** — the highest-impact action in the product,
+  where a `custom` label is arbitrary code as SYSTEM/root and the group branch runs it on
+  every host in a group from one request, while cancelling a command and changing a host's
+  group both wrote audit rows. Both paths now do; the script body is deliberately not
+  logged, since it can be large and already lives on the row.
+
+18 further tests. Live-verified: an account holding the permission still sees command rows
+(the gate filters, it does not break search), blocking the appliance's own address is
+refused with an explanation, and blocking an ordinary indicator still works.
+
 **Known and not yet addressed** — Windows isolation leaves pre-existing Allow rules
 intact so an "isolated" host keeps DNS egress; the macOS pf anchor is never evaluated;
 Linux and macOS containment does not survive a reboot while the console keeps claiming
 it does; `/api/ingest` authenticates only the first entry of a batch, so any endpoint can
-forge logs for any host and overwrite a real alert's message inside the dedup window; the
-SOAR approval queue re-checks the EDR permission for one of seven gated actions; log
-search exposes command stdout/stderr to any logged-in account; agent tokens have no
-revocation path; and every appliance service runs as root with no systemd confinement.
+forge logs for any host and overwrite a real alert's message inside the dedup window;
+agent tokens have no revocation path and are stored in plaintext; the agent has no tamper
+resistance and a killed agent is indistinguishable from a sleeping laptop; and every
+appliance service runs as root with no systemd confinement.
 
 ### Incident: host isolation was irreversible on a dual-homed appliance
 
