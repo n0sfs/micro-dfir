@@ -115,14 +115,54 @@ were ever removed. Full regression green across all nine suites.
 (the gate filters, it does not break search), blocking the appliance's own address is
 refused with an explanation, and blocking an ordinary indicator still works.
 
+**Fixed in a third pass** — binding identity to the credential:
+
+- **Any endpoint could forge logs for any host.** `/api/ingest` authenticated
+  `logs[0]['host']` while the write loop read `log.get('host')` per entry, so an endpoint
+  holding its own valid token could name itself first and any other host in the rest,
+  with arbitrary timestamps and severities. Every deployed endpoint holds a valid token,
+  so this was the fleet's normal state rather than a stolen-credential scenario. It
+  reached the alert dedup branch too, which `UPDATE`s an existing alert's message and
+  severity — letting an attacker who had just tripped a heuristic overwrite the stored
+  message of the real alert inside the window.
+- **The fix is deliberately scoped, and it corrected the assessment.** Vector
+  authenticates with the shared secret and relays syslog for *every* device on the
+  network, each entry carrying its own self-reported hostname
+  (`generate_vector_config` sets `.host = .hostname`). Requiring one identity per batch
+  would have silently broken all syslog and dnsmasq ingestion. So the shared secret is
+  **load-bearing for the appliance's own log relay**, not merely legacy-agent
+  compatibility — retiring it, as the assessment suggested, needs Vector moved to its own
+  credential first. `_agent_token_bound_host()` makes the distinction: a per-agent token
+  bound to a hostname may only write that hostname, and a mismatched batch is refused with
+  a 403 and an audit record rather than having foreign entries silently dropped.
+- **Authentication now fails closed.** `if not expected_secret: return True` meant a
+  missing secret row left every agent route accepting anyone with no token at all. It now
+  rejects, and seeds a fresh secret so the closed state heals itself.
+- **The fleet-wide secret was generated with `Math.random()`** — V8's xorshift128+, state
+  recoverable from a modest run of outputs, for the credential that authenticates to every
+  agent route with no hostname binding. Now `crypto.getRandomValues`, 128 bits. The save
+  endpoint also accepted any non-empty string, so `test` was a valid fleet key; added a
+  length and repetition floor that every generated value clears.
+- **Tokens are revoked when an uninstall is delivered.** There was no revocation path
+  anywhere, so removing an endpoint left its token valid forever and a decommissioned
+  machine could re-enroll by polling. Revoked at hand-over, deliberately *not* in
+  `delete_agent()` — the agent must authenticate once more to collect that very command,
+  so revoking earlier would leave it running forever and invisible. Only `uninstall`
+  revokes; an `upgrade` leaves the credential intact because that agent keeps running.
+
+15 further tests, including a reproduction of the forgery and an explicit regression test
+that a shared-secret caller can still relay many hosts. Live-verified after deploy: both
+agents kept polling and shipping logs across the change. The Vector path could **not** be
+live-verified — this appliance currently has no active syslog sources, so there is no
+traffic on it to observe; that direction rests on the test and the code path.
+
 **Known and not yet addressed** — Windows isolation leaves pre-existing Allow rules
 intact so an "isolated" host keeps DNS egress; the macOS pf anchor is never evaluated;
 Linux and macOS containment does not survive a reboot while the console keeps claiming
-it does; `/api/ingest` authenticates only the first entry of a batch, so any endpoint can
-forge logs for any host and overwrite a real alert's message inside the dedup window;
-agent tokens have no revocation path and are stored in plaintext; the agent has no tamper
-resistance and a killed agent is indistinguishable from a sleeping laptop; and every
-appliance service runs as root with no systemd confinement.
+it does; tokens are still stored in plaintext and there is no revocation for a host that
+never returns; the agent has no tamper resistance and a killed agent is indistinguishable
+from a sleeping laptop; the self-upgrade executes unsigned server-supplied source; and
+every appliance service runs as root with no systemd confinement.
 
 ### Incident: host isolation was irreversible on a dual-homed appliance
 
