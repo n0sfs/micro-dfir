@@ -59,10 +59,21 @@ where a nightly feed silently resets a departure window. Live-verified end to en
 preserving every host; a two-row import created 2, a re-import updated 2 with no
 duplicates and the original `departing_at` intact. Test identities removed afterwards.
 
-**Found and not yet addressed** — the confidentiality model, which matters more than any
-of the above: `GET /api/cases` and `GET /api/identities` are `@login_required` only with
-no visibility filter, so **the subject of an insider investigation, if they hold a login,
-can read the case about themselves and see that they are watchlisted and why**. The seeded
+**The watchlist is now restricted** (follow-up pass). `GET /api/identities` and
+`GET /api/dashboards/watchlist` both served the rows that name who is under investigation,
+who put them there and the free-text reason why — and both were `@login_required` only, so
+any account could read them. They now require `assets.manage`, exactly the key the write
+side of `/api/identities` already used: the GET/POST parity rule this project documents as
+a recurring gap, not a new permission model. Closing only one would have moved the leak to
+the Insider Threat dashboard, which is more visible. The role split lands correctly — the
+built-in Tier 1 `analyst` loses it, `senior_analyst` and the custom `insider_threat` role
+both hold the key and keep it. Both surfaces degrade to a lock and an explanation rather
+than a red "failed to load", because for some roles a refusal here is an expected outcome
+rather than a failure. 6 tests; verified live that a privileged account is unaffected.
+
+**Found and not yet addressed** — the rest of the confidentiality model, which is the
+larger half: `GET /api/cases` still has no visibility filter, so **the subject of an
+insider investigation, if they hold a login, can read the case about themselves**. The seeded
 "Insider Threat" queue restricts nothing (`queue_members` is never consulted by any read
 path) and TLP is a badge, not a control. Also open: no person as a first-class case entity
 (the subject is inferred from `alerts.username`); deleting a case wipes its append-only
