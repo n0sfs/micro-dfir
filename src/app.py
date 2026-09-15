@@ -7289,7 +7289,7 @@ def api_cases():
         _vis_sql, _vis_params = _visible_case_filter()
         rows = db.execute(
             "SELECT c.id, c.case_number, c.title, c.status, c.severity, c.workflow_state, c.assignee, c.description, c.created_by, c.created_at, c.closed_at, c.acknowledged_at, c.tlp, c.pap, "
-            "c.queue_id, q.name as queue_name, "
+            "c.queue_id, q.name as queue_name, COALESCE(c.visibility, 'normal') as visibility, "
             "(julianday('now') - julianday(c.created_at)) * 24 as age_hours, "
             "COUNT(DISTINCT ci.id) as item_count, "
             "COUNT(DISTINCT ct.id) as task_count, "

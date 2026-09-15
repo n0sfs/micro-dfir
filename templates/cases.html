@@ -235,6 +235,42 @@
     </div>
 </div>
 
+<!-- Case visibility / access list.
+     A dedicated modal rather than confirmDialog(): that helper renders its body as text
+     and binds Enter to confirm, both correct for a confirmation but wrong for a form --
+     every newline in the access list would submit the dialog. -->
+<div class="modal fade" id="caseVisibilityModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content bg-dark text-light border-secondary">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title"><i class="fa-solid fa-user-shield me-2"></i>Case visibility</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="small text-muted">
+                    A restricted case is hidden from everyone except the people listed below. They get the
+                    same response as a case that doesn't exist, so its existence isn't confirmed &mdash; which
+                    is what matters when the subject of an investigation has a login on this appliance.
+                </p>
+                <div class="form-check mb-3">
+                    <input class="form-check-input" type="checkbox" id="visRestrictChk">
+                    <label class="form-check-label" for="visRestrictChk">Restrict this case</label>
+                </div>
+                <div id="visAclWrap">
+                    <label class="form-label small text-muted mb-1" for="visAclBox">Who can see it &mdash; one username per line</label>
+                    <textarea id="visAclBox" class="form-control form-control-sm bg-dark text-light border-secondary font-monospace" rows="4"></textarea>
+                    <div class="small text-muted mt-2" id="visAlwaysNote"></div>
+                </div>
+                <div id="visError" class="small text-danger mt-2" style="display:none;"></div>
+            </div>
+            <div class="modal-footer border-secondary">
+                <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary btn-sm" id="visSaveBtn">Save</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Runbook view modal -->
 <div class="modal fade" id="runbookViewModal" tabindex="-1">
     <div class="modal-dialog modal-lg modal-dialog-scrollable">
@@ -959,6 +995,98 @@ const TLP_PAP_COLORS = {clear: 'bg-secondary', green: 'bg-success', amber: 'bg-w
 // rather than silently displaying as CLEAR.
 function tlpBadge(v) { return v ? `<span class="badge ${TLP_PAP_COLORS[v] || 'bg-secondary'}" title="Traffic Light Protocol">TLP:${escHtml(v.toUpperCase())}</span>` : `<span class="badge bg-secondary bg-opacity-25 text-muted" title="Traffic Light Protocol -- not set">TLP: —</span>`; }
 
+// Unlike TLP, which is a handling *label* nothing enforces, this is the real control:
+// a restricted case is invisible to everyone outside its access list, and returns 404 --
+// not 403 -- so its existence isn't confirmed to someone who shouldn't know about it.
+// Rendered at the top of the case rather than buried in a settings tab, because "who can
+// see this" is something you want to know before you start reading, not after.
+function caseVisibilityBadge(v) {
+    return v === 'restricted'
+        ? '<span class="badge bg-danger" title="Only the people listed below can see this case. Everyone else gets the same response as a case that does not exist."><i class="fa-solid fa-user-shield me-1"></i>Restricted</span>'
+        : '<span class="badge bg-secondary bg-opacity-25 text-muted" title="Visible to every user of this appliance, like every other case.">Normal visibility</span>';
+}
+
+function renderCaseVisibility(c, isClosed) {
+    const restricted = (c.visibility || 'normal') === 'restricted';
+    const rowClass = restricted ? 'border-danger' : 'border-secondary';
+    return `
+        <div class="border ${rowClass} rounded p-2 mb-2 d-flex flex-wrap align-items-center gap-2" id="caseVisibilityWrap">
+            <span class="small text-muted"><i class="fa-solid fa-eye me-1"></i>Visibility</span>
+            ${caseVisibilityBadge(restricted ? 'restricted' : 'normal')}
+            ${restricted ? `<span class="small text-muted" id="caseVisibilityWho">Loading access list…</span>` : ''}
+            <div class="ms-auto d-flex align-items-center gap-2">
+                ${isClosed
+                    ? '<span class="small text-muted">Reopen the case to change this.</span>'
+                    : `<button class="btn btn-sm ${restricted ? 'btn-outline-secondary' : 'btn-outline-danger'}" onclick="openCaseVisibilityDialog(${c.id})">
+                         ${restricted ? 'Manage access' : 'Restrict this case'}
+                       </button>`}
+            </div>
+        </div>`;
+}
+
+// Loaded separately from the case body: the access list lives on its own endpoint, and a
+// case that isn't restricted doesn't need it fetched at all.
+function loadCaseVisibilityWho(cid) {
+    const el = document.getElementById('caseVisibilityWho');
+    if (!el) return;
+    fetch(`/api/cases/${cid}/visibility`).then(r => r.ok ? r.json() : null).then(d => {
+        if (!d || !el.isConnected) return;
+        // The creator and assignee always retain access -- showing them alongside the
+        // explicit list stops "who can see this?" having a second, invisible answer.
+        const implicit = [...new Set([d.created_by, d.assignee].filter(Boolean))];
+        const names = [...new Set([...implicit, ...(d.acl || [])])];
+        el.innerHTML = names.length
+            ? `Visible to ${names.map(n => `<span class="badge bg-dark border border-secondary">${escHtml(n)}</span>`).join(' ')} <span class="text-muted">and admins</span>`
+            : '<span class="text-muted">Visible to admins only</span>';
+    }).catch(() => {});
+}
+
+async function openCaseVisibilityDialog(cid) {
+    const d = await fetch(`/api/cases/${cid}/visibility`).then(r => r.ok ? r.json() : null).catch(() => null);
+    if (!d) { toast('Could not load the access list for this case.', 'danger'); return; }
+    const restricted = d.visibility === 'restricted';
+    const chk = document.getElementById('visRestrictChk');
+    const box = document.getElementById('visAclBox');
+    const err = document.getElementById('visError');
+    chk.checked = restricted;
+    box.value = (d.acl || []).join('\n');
+    err.style.display = 'none';
+
+    // The creator and assignee keep access whatever the list says, so name them -- otherwise
+    // "who can see this?" has a second, invisible answer.
+    const implicit = [...new Set([d.created_by, d.assignee].filter(Boolean))];
+    document.getElementById('visAlwaysNote').innerHTML = implicit.length
+        ? `Always retains access: ${implicit.map(n => escHtml(n)).join(', ')} <span class="text-muted">(creator / assignee)</span>, plus admins.`
+        : 'Admins always retain access.';
+
+    // The access list only means anything while the case is restricted.
+    const syncAclState = () => { document.getElementById('visAclWrap').style.opacity = chk.checked ? '1' : '.5'; box.disabled = !chk.checked; };
+    chk.onchange = syncAclState;
+    syncAclState();
+
+    const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('caseVisibilityModal'));
+    document.getElementById('visSaveBtn').onclick = async () => {
+        const acl = (box.value || '').split('\n').map(s => s.trim()).filter(Boolean);
+        const r = await fetch(`/api/cases/${cid}/visibility`, {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({visibility: chk.checked ? 'restricted' : 'normal', acl})
+        }).then(x => x.json().then(j => ({ok: x.ok, j}))).catch(e => ({ok: false, j: {error: String(e)}}));
+        if (!r.ok) {
+            // Shown in the dialog rather than as a toast: the name that was rejected is
+            // still on screen to be corrected.
+            err.innerText = r.j.error || 'Could not change visibility.';
+            err.style.display = '';
+            return;
+        }
+        modal.hide();
+        toast(chk.checked
+            ? 'Case restricted. It is now hidden from everyone outside the access list.'
+            : 'Case set back to normal visibility.', 'success');
+        openCaseDetail(cid);   // re-render so the badge, access list and button all agree
+    };
+    modal.show();
+}
+
 function populateTlpPapSelect(elId, values, current) {
     const el = document.getElementById(elId);
     el.innerHTML = '<option value="">Not set</option>' + values.map(v => `<option value="${v}" ${v === current ? 'selected' : ''}>${v.toUpperCase()}</option>`).join('');
@@ -1196,7 +1324,7 @@ function renderCases() {
     }
     tbody.innerHTML = rows.map(c => `
         <tr style="cursor:pointer;" onclick="openCaseDetail(${c.id})">
-            <td class="ps-3 fw-bold"><span class="text-muted small fw-normal me-1">${caseNumberLabel(c)}</span>${escHtml(c.title)}</td>
+            <td class="ps-3 fw-bold"><span class="text-muted small fw-normal me-1">${caseNumberLabel(c)}</span>${escHtml(c.title)}${c.visibility === 'restricted' ? ' <i class="fa-solid fa-user-shield text-danger" title="Restricted -- only the people on its access list can see it"></i>' : ''}</td>
             <td>${caseSeverityBadge(c.severity)}</td>
             <td>${caseStatusBadge(c.status)} ${workflowStateBadge(c.workflow_state)}${c.sla_breached ? ' <span class="badge bg-danger" title="Past its SLA target for this queue/severity"><i class="fa-solid fa-hourglass-end me-1"></i>SLA Breached</span>' : ''}</td>
             <td class="small">${c.queue_name ? `<span class="badge bg-secondary">${escHtml(c.queue_name)}</span>` : '<span class="text-muted">—</span>'}</td>
@@ -2220,6 +2348,7 @@ function loadAndRenderCaseDetail(cid) {
                 <div class="card-body">
                     <div id="caseSlaTimersWrap">${renderCaseSlaTimers(c)}</div>
                     ${isClosed ? '<div class="alert alert-secondary py-2 small mb-2"><i class="fa-solid fa-lock me-1"></i>This case is closed and read-only. Change Status below to reopen it.</div>' : ''}
+                    ${renderCaseVisibility(c, isClosed)}
                     <div class="row g-2 mb-2">
                         <div class="col-md-8">
                             <label class="form-label small text-muted mb-1">Title</label>
@@ -2573,6 +2702,9 @@ function loadAndRenderCaseDetail(cid) {
         `;
         populateTlpPapSelect('editCaseTlp', TLP_VALUES, c.tlp);
         populateQueueSelect('editCaseQueue', c.queue_id);
+        // Only fetches when the case is actually restricted -- the element the access list
+        // renders into only exists in that branch of renderCaseVisibility().
+        loadCaseVisibilityWho(c.id);
         renderLinkToEntityControl();
         loadCaseReports(c.id);
         loadRelatedItems(c.id);
