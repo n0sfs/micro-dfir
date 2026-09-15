@@ -10,6 +10,46 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-15
 
+### A PyInstaller bundle build for the Windows agent, and frozen-awareness
+
+`installer/build_agent_exe.ps1` produces a single-file `MicroDFIRAgent.exe` and
+Authenticode-signs it when `MICRODFIR_SIGN_THUMBPRINT` is set. It still builds unsigned,
+with a warning, because the signature is the part that carries the real value — tamper
+detection by the OS, and allowlisting. A onefile bundle extracts to temp at runtime and
+its PYZ is readable with ordinary tools; **this is not obfuscation** and the script says so
+rather than letting bundling feel more protective than it is.
+
+The larger half of the work was making the agent *correct* when frozen, because three
+paths fail silently otherwise and every one would have been an unpleasant surprise in
+production:
+
+- the watchdog matched `IMAGENAME eq python.exe`. A bundle runs under its own image name,
+  so the watchdog would never find the live agent, conclude it had died, and relaunch it
+  every five minutes — **one extra agent per tick, forever**.
+- self-upgrade writes Python source to `micro_agent_windows.py`. Nothing executes that
+  file in a bundled install, so every upgrade would report success and change nothing. It
+  refuses loudly now.
+- `_kill_other_agent_instances` matched the `.py` name in the command line, which a
+  bundle's command line never contains — so reinstall would quietly stop de-duplicating
+  at exactly the moment it matters.
+
+**Bundling costs remote source self-upgrade**, which is why the built exe is gitignored
+rather than checked in like the NSIS installer: switching a fleet to bundled agents should
+be a decision, not something stumbled into because a binary was sitting in the repo.
+
+So the trade-off is visible rather than mysterious, agents now report `X-Agent-Packaging`
+on check-in and the server stores it per poll (`agent_polls.packaging`, backfilling every
+pre-existing row to `source` — which they all are). Without it, a bundled fleet ignoring
+Upgrade Agent would look identical to a successful upgrade that changed nothing, a
+confusion this product has already produced once for a different reason.
+
+The build refuses to ship a bundle that fails its own self-check, and that check
+deliberately exercises the agent's two **lazy** imports — `winreg` and `ctypes`/`wintypes`.
+Every other import is module-level and therefore already proven by the interpreter
+reaching that line, but those two are imported on first use: a bundle missing `ctypes`
+would build fine, start fine, and then be unable to read its own stored credential on a
+real endpoint.
+
 ### The endpoint enrollment token is no longer plaintext on disk
 
 The token authorises remote script execution on the endpoint it belongs to, and it sat in
