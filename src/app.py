@@ -7460,19 +7460,61 @@ def api_case_detail(cid):
         # accident or a Tier 1 mis-click.
         err = require_permission('cases.delete')
         if err: return err
+        # Capture what is about to be destroyed BEFORE destroying it. This delete removes
+        # case_events -- the append-only timeline that is the case's evidentiary record,
+        # the one table with no UPDATE path anywhere precisely so it can be trusted -- and
+        # it wrote no audit entry at all. A case, its notes, its analyst actions and the
+        # record that any of it ever existed could be erased leaving nothing behind. For
+        # an insider case that ends in an employment or legal proceeding, that is the
+        # difference between a defensible file and an unexplained gap.
+        doomed = db.execute("SELECT case_number, title, status, created_by, visibility FROM cases WHERE id = ?", (cid,)).fetchone()
+        counts = {
+            t: db.execute(f"SELECT COUNT(*) c FROM {t} WHERE case_id = ?", (cid,)).fetchone()['c']
+            for t in ('case_events', 'case_items', 'case_tasks', 'case_assets', 'case_iocs', 'case_attachments')
+        }
+
+        # Attachments were missed entirely: the rows stayed in case_attachments and the
+        # files stayed on disk under CASE_ATTACHMENTS_DIR, pointing at a case that no
+        # longer exists. Uploaded evidence outliving the case that explains it is the
+        # worst possible direction for this bug to fail in -- files nobody can account
+        # for, with no chain back to why they were collected.
+        orphans = db.execute("SELECT filename FROM case_attachments WHERE case_id = ?", (cid,)).fetchall()
+        removed_files, failed_files = 0, []
+        for a in orphans:
+            path = os.path.join(CASE_ATTACHMENTS_DIR, a['filename'])
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                removed_files += 1
+            except OSError as e:
+                # Recorded, not raised: a file we cannot unlink must not abort the delete
+                # half-way and leave the case in pieces. The audit entry names it instead.
+                failed_files.append(f"{a['filename']}: {e}")
+
         db.execute("DELETE FROM case_items WHERE case_id = ?", (cid,))
         db.execute("DELETE FROM case_tasks WHERE case_id = ?", (cid,))
         db.execute("DELETE FROM case_events WHERE case_id = ?", (cid,))
-        # No FKs/cascades exist on any of cases' child tables -- these 4 used to be
+        # No FKs/cascades exist on any of cases' child tables -- these used to be
         # left behind as orphaned rows on every case delete (harmless today since
         # AUTOINCREMENT never reuses a case id, but still a real leak).
         db.execute("DELETE FROM case_assets WHERE case_id = ?", (cid,))
         db.execute("DELETE FROM case_iocs WHERE case_id = ?", (cid,))
         db.execute("DELETE FROM case_field_values WHERE case_id = ?", (cid,))
+        db.execute("DELETE FROM case_attachments WHERE case_id = ?", (cid,))
+        db.execute("DELETE FROM case_acl WHERE case_id = ?", (cid,))
+        db.execute("DELETE FROM case_links WHERE case_id = ? OR related_case_id = ?", (cid, cid))
         db.execute("DELETE FROM ti_relationships WHERE target_type = 'case' AND target_id = ?", (str(cid),))
         db.execute("DELETE FROM cases WHERE id = ?", (cid,))
         db.commit()
-        return jsonify({"ok": 1})
+        detail = (f"{doomed['case_number'] or ''} \"{doomed['title']}\" "
+                  f"(status={doomed['status']}, visibility={doomed['visibility'] or 'normal'}, created_by={doomed['created_by']}) "
+                  f"destroyed: " + ", ".join(f"{k.replace('case_', '')}={v}" for k, v in counts.items())
+                  + f", files_removed={removed_files}") if doomed else f"case {cid}"
+        if failed_files:
+            detail += f" | FILES LEFT ON DISK: {'; '.join(failed_files[:5])}"
+        log_audit('case_delete', 'case', cid, detail)
+        return jsonify({"ok": 1, "destroyed": counts, "files_removed": removed_files,
+                        "files_left_on_disk": failed_files})
 
     if request.method == 'PUT':
         data = request.get_json() or {}
@@ -13091,6 +13133,56 @@ CASE_TEMPLATES_SEED = [
     {'name': 'Generic Investigation', 'description': 'A minimal starting checklist for anything else.',
      'tasks': ['Scope what triggered this case', 'Determine affected hosts/users', 'Contain if needed',
                'Document findings', 'Close out or escalate']},
+    # Insider cases invert the order of a normal incident. Every template above opens by
+    # containing and notifying; "Compromised Account" literally starts with a password
+    # reset. Against an insider that is the one thing you must not do first -- it tips off
+    # the subject before the evidence is preserved, which the shipped Insider Threat
+    # runbook says in as many words. Hence a separate set, with the HR/Legal gate placed
+    # ahead of any investigative step, so the sequencing is structural rather than
+    # something an analyst has to remember under pressure.
+    #
+    # The exception is Acceptable Use Violation, which scopes first and engages HR second
+    # -- deliberately. It is the lowest-severity and by far the most common outcome, and
+    # escalating to HR before anyone has established which policy is even in scope is its
+    # own harm to the person. Proportionality is the whole point of that template.
+    {'name': 'Departing Employee Review',
+     'description': 'Offboarding review for a user who has given or been given notice. Exfiltration risk is well known to spike in this window -- this is a review, not an accusation.',
+     'tasks': ['Confirm with HR that a review is authorised, and record the departure date',
+               'Flag the user as Departing on UEBA > Asset & Identity (weights their risk score and starts the window)',
+               'Establish the baseline: what does this person normally access, and from where',
+               'Review activity since notice was given against that baseline',
+               'Check removable media, personal cloud and webmail activity for the window',
+               'Review access to sensitive repositories and any unusual bulk access',
+               'Record findings factually -- most reviews find nothing, and that outcome must be written down too',
+               'Hand the outcome to HR and confirm access removal on the departure date']},
+    {'name': 'Data Exfiltration (Insider)',
+     'description': 'Suspected unauthorised removal of data by an authorised user -- USB, personal cloud, webmail or bulk download.',
+     'tasks': ['Engage HR/Legal BEFORE any action -- confirm the evidentiary standard first',
+               'Preserve evidence covertly: avoid lockout or device seizure until preservation is agreed',
+               'Establish what data is in scope and who owns it',
+               'Reconstruct the timeline: what was accessed, when, and by what route',
+               'Identify the egress channel and whether the transfer completed',
+               'Assess whether active loss is ongoing and requires immediate containment despite the above',
+               'Attach evidence to this case and record the SHA-256 of each item',
+               'Coordinate the resolution with HR/Legal/management -- do not act unilaterally']},
+    {'name': 'Privilege Misuse',
+     'description': 'An authorised user using legitimate access outside its intended purpose -- snooping, unauthorised changes, or self-granted permissions.',
+     'tasks': ['Engage HR/Legal before contacting the subject or changing their access',
+               'Establish what access the user legitimately holds and why',
+               'Identify what was accessed or changed that falls outside that purpose',
+               'Check for self-granted or escalated permissions and who approved them',
+               'Determine whether the access was used, or only held',
+               'Assess blast radius: what else was reachable with the same access',
+               'Record findings factually for the case file',
+               'Coordinate access changes with HR/Legal rather than acting unilaterally']},
+    {'name': 'Acceptable Use Violation',
+     'description': 'Policy breach without evidence of malicious intent -- the most common insider outcome, and one that should not be run like an intrusion.',
+     'tasks': ['Confirm which policy is in scope and that a formal review is warranted',
+               'Engage HR -- this is usually an HR matter with SOC support, not the reverse',
+               'Establish the facts and the time window, proportionately',
+               'Avoid collecting more personal data than the specific question requires',
+               'Record findings factually and without characterisation',
+               'Hand to HR for resolution and close the case']},
 ]
 
 CASE_TEMPLATE_FIELD_TYPES = {'text', 'dropdown', 'date', 'checkbox'}
@@ -13128,10 +13220,10 @@ IR_RUNBOOKS_SEED = [
      'description': 'Procedure for investigating suspected malicious or negligent insider activity -- data exfiltration, sabotage, or policy violation by an authorized user.',
      'steps': [
         {'title': 'Engage HR/Legal before taking any action', 'instructions': 'Insider cases carry employment and legal risk that other incident types do not -- confirm the investigative approach and evidentiary standard with HR/Legal before touching the account or device.'},
-        {'title': 'Scope the activity under investigation', 'instructions': 'Review UEBA anomaly history, DLP/file-access logs, and case-linked alerts for the user. Establish the specific behavior and time window in question.'},
+        {'title': 'Scope the activity under investigation', 'instructions': 'Review UEBA anomaly history (off-hours and volume models are the user-centric ones), the raw Log Search timeline scoped with username:<name>, and case-linked alerts. Establish the specific behaviour and time window in question. Be aware of what this appliance does NOT collect: there is no file-read auditing, no record of a file copied to removable media, no print telemetry and no egress byte counts -- so absence of evidence here is not evidence of absence, and anything in those categories has to come from elsewhere.'},
         {'title': 'Preserve evidence covertly where required', 'instructions': 'If the investigation is still confidential, avoid actions (account lockout, device seizure) that would tip off the subject before evidence is preserved, unless active data loss requires immediate action.'},
         {'title': 'Assess whether immediate containment is needed', 'instructions': 'If active exfiltration or sabotage is in progress, weigh covert evidence preservation against the need to stop ongoing harm -- this determination should involve HR/Legal/management.'},
-        {'title': 'Review access scope and recent changes', 'instructions': 'Check what systems/data the user can reach, any recent permission changes, and any personal storage/cloud/USB activity in the audit trail.'},
+        {'title': 'Review access scope and recent changes', 'instructions': 'Check what systems/data the user can reach and any recent permission changes (Windows 4728/4732/4756 group changes are collected by default). For personal storage, cloud or USB activity: USB device *insertion* history can be pulled on demand via Collect Live Forensics, and DNS or network-connection visibility requires the Sysmon channel to be enabled -- none of it is collected continuously by default, so decide early whether you need to turn collection up before the window closes.'},
         {'title': 'Coordinate the resolution with HR/Legal/Management', 'instructions': 'Final actions (account suspension, device seizure, termination-related access removal) should be directed by HR/Legal, not initiated unilaterally by the SOC.'},
         {'title': 'Document findings for the case record', 'instructions': 'Record findings factually and objectively -- this file may support an HR or legal proceeding.'},
      ]},
