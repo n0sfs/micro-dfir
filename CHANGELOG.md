@@ -10,6 +10,55 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-15
 
+### The endpoint enrollment token is no longer plaintext on disk
+
+The token authorises remote script execution on the endpoint it belongs to, and it sat in
+plaintext in up to two places there: baked into the agent's own `.py` source at download
+time, and again in `agent_config.json` on installer-based deployments. Measured on a real
+endpoint rather than assumed — the installed source carries `BUILTIN\Users:
+ReadAndExecute`, so **any local user could read a fleet credential out of it with no
+privilege at all**.
+
+Each platform now uses what it actually has:
+
+- **Windows** — DPAPI through `ctypes` (no pywin32; this agent has no third-party
+  dependencies and must keep it that way). **User** scope deliberately, not
+  `LOCAL_MACHINE`: verified live that the agent runs under the installing account via a
+  `RunLevel=Highest` scheduled task, *not* SYSTEM, so user scope binds the blob to that
+  one account. Machine scope would be strictly worse here — it lets every local user
+  decrypt. The blob's inherited ACEs are stripped too.
+- **macOS** — the System keychain via `/usr/bin/security`, reachable because the agent
+  runs as root from a LaunchDaemon (a login keychain would be locked on a headless boot).
+  Falls back to a 0600 file if `security` refuses, because losing the credential is worse.
+- **Linux** — a root-owned 0600 file, and that is the honest answer rather than a keyring.
+  The agent runs as root, where the kernel keyring offers root nothing it does not already
+  have; what matters is that *non-root* users cannot read it, which the mode gives
+  directly. libsecret needs D-Bus and a desktop login, neither of which a headless
+  endpoint has.
+
+What this buys is stated plainly in the code as well: it stops any *other* local user
+reading the token and makes a copied file useless elsewhere. It does not stop the account
+the agent runs as — nothing file-based can.
+
+Three ordering details carry the safety. The bootstrap copy is scrubbed **only after** the
+store is written *and read back correctly*, because an unverified store plus an
+irreversible scrub would de-enroll the endpoint permanently. A POSIX store whose mode has
+drifted world-readable is refused and rewritten rather than trusted. And if the store ever
+becomes unreadable after the scrub, the agent cannot report it — reporting needs the
+credential — so it writes a FATAL line to the local `agent.log` naming the fix.
+
+The self-upgrade path still ships the token inline, because an older agent has nowhere
+else to get it; the new agent migrates and scrubs on its first startup, so that window is
+one startup rather than forever.
+
+**Verified on a real endpoint after upgrading it:** the DPAPI store exists (294 bytes,
+correct blob header — the same length the local DPAPI test produced for a 64-char token),
+its ACL is SYSTEM / Administrators / the agent's own account with **no `BUILTIN\Users`**,
+`soc_token` is gone from `agent_config.json` while its other keys survive, no 64-hex
+literal remains anywhere in the source, the placeholder is back in its place exactly once
+— and the host kept checking in and shipping logs throughout, which is the part that
+proves the stored credential actually works.
+
 ### Containment that reported success without containing (ISO-01 → ISO-04)
 
 All four isolation findings from the security assessment. Three of the four share one
