@@ -336,6 +336,32 @@ def restore_network():
 }
 """
 
+# ISO-04: nothing ever re-checked that isolation was still in force.
+#
+# The Agents view derives "Isolated" from the newest successfully-completed isolate_host
+# with no later restore_network -- a record of what was *asked for*, not of what is true
+# now. Between those two commands the rules can be gone: an admin clears the firewall, a
+# GPO refresh replaces the rule set, a restore point or image rollback, malware with
+# local admin simply deletes them, or (on Linux and macOS before the persistence work
+# below) the host reboots. In every one of those cases the console goes on showing the
+# host as contained, indefinitely, with nothing to contradict it.
+#
+# This is the counter-question, asked on a schedule by the server: prove it, from the
+# endpoint. Read-only -- it changes nothing, it reports. Output is JSON so the server can
+# act on a verdict rather than pattern-match prose.
+#
+# Windows checks both halves, because either alone is a false positive: the six rules
+# must be present AND enabled, and all three profiles must still default to Block. A
+# host with the rules deleted but the default still Block is not isolated (its own Allow
+# rules are back in charge -- see ISO-01); one with the rules but the default reverted is
+# not isolated either.
+def verify_isolation():
+    return """$rules = @(Get-NetFirewallRule -DisplayName "MicroDFIR-Isolation-*" -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq 'True' })
+$blocking = @(Get-NetFirewallProfile -Profile Domain,Public,Private -ErrorAction SilentlyContinue | Where-Object { $_.DefaultOutboundAction -eq 'Block' })
+$isolated = ($rules.Count -ge 6 -and $blocking.Count -ge 3)
+@{isolated=$isolated; rules_enabled=$rules.Count; rules_expected=6; profiles_blocking=$blocking.Count; profiles_expected=3; platform='windows'} | ConvertTo-Json -Compress
+"""
+
 # A lighter-touch containment than isolate_host: adds two DENY rules for one specific
 # IP instead of flipping the whole host's default policy to block-everything-except-SOC.
 # The host stays otherwise fully usable (an analyst/user can keep working) while the one
@@ -1716,6 +1742,7 @@ WINDOWS_TEMPLATES = {
     'kill_process_by_name': (lambda params: _PROGRESS_SILENT + kill_process_by_name(params['pattern']), ['pattern']),
     'isolate_host': (lambda params: _PROGRESS_SILENT + isolate_host(params['soc_ip']), ['soc_ip']),
     'restore_network': (lambda params: _PROGRESS_SILENT + restore_network(), []),
+    'verify_isolation': (lambda params: _PROGRESS_SILENT + verify_isolation(), []),
     'block_ip': (lambda params: _PROGRESS_SILENT + block_ip(params['target_ip']), ['target_ip']),
     'unblock_ip': (lambda params: _PROGRESS_SILENT + unblock_ip(params['target_ip']), ['target_ip']),
     'collect_triage': (lambda params: _PROGRESS_SILENT + collect_triage(), []),
@@ -1812,6 +1839,20 @@ PYEOF
 # other firewall rules that were already on the host before isolation.
 _ISOLATION_CHAIN = "MICRODFIR_ISOLATION"
 
+# ISO-03: iptables rules live in kernel memory and nothing on a stock host writes them
+# back at boot, so a reboot silently un-isolated a contained Linux machine while the
+# console went on showing it as Isolated. Rebooting is not an exotic evasion -- it is the
+# first thing a user does when their machine "stops working", which is exactly how an
+# isolated machine looks to the person sitting at it.
+#
+# Persistence is a systemd oneshot that re-applies the same rules before the network
+# comes up. Deliberately NOT the reachability probe: that check exists to catch a wrong
+# allowlist at isolate time, and at boot it would be racing DHCP and rolling back a
+# perfectly good isolation over a network that simply is not ready yet.
+_ISOLATION_APPLY_PATH = "/usr/local/sbin/microdfir-isolation-apply.sh"
+_ISOLATION_UNIT_PATH = "/etc/systemd/system/microdfir-isolation.service"
+_ISOLATION_UNIT_NAME = "microdfir-isolation.service"
+
 # Same false-success fix as the Windows isolate_host(): without `set -e` this script
 # ran straight past a failing `iptables -N` (no root, iptables missing, nf_tables-only
 # host) to its final echo and exited 0, which api_agent_result reads as a successful
@@ -1865,6 +1906,62 @@ if [ "$soc_ok" != "1" ]; then
 fi'''
     else:
         verify = 'echo "isolate_host: no SOC port supplied, so reachability after isolation was NOT verified. If this host stops checking in, the isolation allowlist is the first thing to check." >&2'
+    # The boot-time re-apply: the same chain build as below, minus the teardown of a
+    # chain that cannot exist yet and minus the probe (see _ISOLATION_APPLY_PATH).
+    boot_apply = '\n'.join([
+        '#!/bin/sh',
+        '# Re-applies Micro DFIR network isolation at boot. Installed by isolate_host,',
+        '# removed by restore_network. Editing this by hand does not un-isolate the host;',
+        '# use the Micro DFIR console, or run the restore_network action.',
+        f'iptables -F {_ISOLATION_CHAIN} 2>/dev/null || true',
+        f'iptables -N {_ISOLATION_CHAIN} 2>/dev/null || true',
+        # Built from `ips` directly rather than reusing `accepts` -- that one carries
+        # fail() calls that only make sense in the interactive apply.
+        '\n'.join(
+            f'iptables -A {_ISOLATION_CHAIN} -d {ip} -j ACCEPT\n'
+            f'iptables -A {_ISOLATION_CHAIN} -s {ip} -j ACCEPT'
+            for ip in ips
+        ),
+        f'iptables -A {_ISOLATION_CHAIN} -j DROP',
+        f'iptables -C INPUT -j {_ISOLATION_CHAIN} 2>/dev/null || iptables -I INPUT 1 -j {_ISOLATION_CHAIN}',
+        f'iptables -C OUTPUT -j {_ISOLATION_CHAIN} 2>/dev/null || iptables -I OUTPUT 1 -j {_ISOLATION_CHAIN}',
+    ])
+    unit = '\n'.join([
+        '[Unit]',
+        'Description=Micro DFIR network isolation (re-applied at boot)',
+        'DefaultDependencies=no',
+        'Before=network-pre.target',
+        'Wants=network-pre.target',
+        '[Service]',
+        'Type=oneshot',
+        'RemainAfterExit=yes',
+        f'ExecStart={_ISOLATION_APPLY_PATH}',
+        '[Install]',
+        'WantedBy=multi-user.target',
+    ])
+    # Persistence failing must not undo a working isolation, so this warns rather than
+    # calling fail(). It says so explicitly, because "isolated until the next reboot" and
+    # "isolated" are different states and the analyst is entitled to know which one they
+    # have. Note `set -e` is active here: every line is tolerant on purpose.
+    persist = f"""persist_ok=0
+if command -v systemctl >/dev/null 2>&1; then
+    if cat > {_ISOLATION_APPLY_PATH} <<'MDFIRBOOT' 2>/dev/null
+{boot_apply}
+MDFIRBOOT
+    then
+        chmod 700 {_ISOLATION_APPLY_PATH} 2>/dev/null || true
+        if cat > {_ISOLATION_UNIT_PATH} <<'MDFIRUNIT' 2>/dev/null
+{unit}
+MDFIRUNIT
+        then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            if systemctl enable {_ISOLATION_UNIT_NAME} >/dev/null 2>&1; then persist_ok=1; fi
+        fi
+    fi
+fi
+if [ "$persist_ok" != "1" ]; then
+    echo "WARNING: isolation is ACTIVE but could NOT be made to survive a reboot (could not install {_ISOLATION_UNIT_NAME}). iptables rules live in kernel memory only, so rebooting this host will silently un-isolate it while the console still shows it as contained." >&2
+fi"""
     return f"""set -e
 fail() {{ echo "isolate_host FAILED -- host is NOT contained: $1" >&2; exit 1; }}
 command -v iptables >/dev/null 2>&1 || fail "iptables not found"
@@ -1880,6 +1977,7 @@ iptables -I OUTPUT 1 -j {_ISOLATION_CHAIN} || fail "could not attach chain to OU
 iptables -C INPUT -j {_ISOLATION_CHAIN} 2>/dev/null || fail "chain not referenced from INPUT after apply"
 iptables -C OUTPUT -j {_ISOLATION_CHAIN} 2>/dev/null || fail "chain not referenced from OUTPUT after apply"
 {verify}
+{persist}
 echo "Host isolated. Only traffic to/from {human} is permitted."
 """
 
@@ -1896,8 +1994,30 @@ iptables -D INPUT -j {_ISOLATION_CHAIN} 2>/dev/null || true
 iptables -D OUTPUT -j {_ISOLATION_CHAIN} 2>/dev/null || true
 iptables -F {_ISOLATION_CHAIN} 2>/dev/null || true
 iptables -X {_ISOLATION_CHAIN} 2>/dev/null || true
+# The boot-time re-apply has to go too, or the host restores now and silently
+# re-isolates itself at the next reboot -- with no command in its history to explain why.
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable {_ISOLATION_UNIT_NAME} >/dev/null 2>&1 || true
+fi
+rm -f {_ISOLATION_UNIT_PATH} {_ISOLATION_APPLY_PATH} 2>/dev/null || true
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
 if iptables -L {_ISOLATION_CHAIN} -n >/dev/null 2>&1; then fail "chain {_ISOLATION_CHAIN} still present after removal"; fi
+if [ -f {_ISOLATION_UNIT_PATH} ]; then fail "the boot-time isolation unit {_ISOLATION_UNIT_NAME} is still installed, so this host would re-isolate itself on reboot"; fi
 echo "Network isolation removed. Host restored to normal connectivity."
+"""
+
+# See verify_isolation() for why this exists. Read-only; JSON verdict.
+def verify_isolation_linux():
+    return f"""in_ref=0; out_ref=0; has_drop=0; boot_unit=0
+if iptables -C INPUT -j {_ISOLATION_CHAIN} 2>/dev/null; then in_ref=1; fi
+if iptables -C OUTPUT -j {_ISOLATION_CHAIN} 2>/dev/null; then out_ref=1; fi
+if iptables -S {_ISOLATION_CHAIN} 2>/dev/null | grep -q -- "-j DROP"; then has_drop=1; fi
+if [ -f {_ISOLATION_UNIT_PATH} ]; then boot_unit=1; fi
+if [ "$in_ref" = "1" ] && [ "$out_ref" = "1" ] && [ "$has_drop" = "1" ]; then iso=true; else iso=false; fi
+printf '{{"isolated":%s,"input_chain_referenced":%s,"output_chain_referenced":%s,"default_drop_present":%s,"survives_reboot":%s,"platform":"linux"}}\\n' \\
+    "$iso" "$in_ref" "$out_ref" "$has_drop" "$boot_unit"
 """
 
 def collect_triage_linux():
@@ -2697,6 +2817,7 @@ LINUX_TEMPLATES = {
     'kill_process_by_name': (lambda params: kill_process_by_name_linux(params['pattern']), ['pattern']),
     'isolate_host': (lambda params: isolate_host_linux(params['soc_ip']), ['soc_ip']),
     'restore_network': (lambda params: restore_network_linux(), []),
+    'verify_isolation': (lambda params: verify_isolation_linux(), []),
     'collect_triage': (lambda params: collect_triage_linux(), []),
     'persistence_sweep': (lambda params: persistence_sweep_linux(), []),
     'collect_file': (lambda params: collect_file_linux(params['path']), ['path']),
@@ -2814,6 +2935,14 @@ _PF_CONF = "/etc/pf.conf"
 _PF_MARK_BEGIN = "# BEGIN MicroDFIR isolation -- managed by the Micro DFIR agent"
 _PF_MARK_END = "# END MicroDFIR isolation"
 
+# ISO-03, macOS half. The pf.conf edit above persists across a reboot, but pf itself does
+# not: macOS ships pf disabled, and the stock boot job loads /etc/pf.conf without ever
+# running `pfctl -e`. So after a reboot the isolation rules are sitting there, loaded and
+# inert, while the console still reports the host as contained. This LaunchDaemon is the
+# missing `-e`.
+_PF_PLIST_PATH = "/Library/LaunchDaemons/com.microdfir.isolation.plist"
+_PF_PLIST_LABEL = "com.microdfir.isolation"
+
 # soc_ips, plural, for the same reason as isolate_host() -- one pass pair per address.
 def isolate_host_macos(soc_endpoints):
     ips, probes = _normalize_soc_endpoints(soc_endpoints)
@@ -2852,6 +2981,40 @@ if [ "$soc_ok" != "1" ]; then
 fi'''
     else:
         verify = 'echo "isolate_host: no SOC port supplied, so reachability after isolation was NOT verified. If this host stops checking in, the isolation allowlist is the first thing to check." >&2'
+    plist = '\n'.join([
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+        '<plist version="1.0">',
+        '<dict>',
+        '    <key>Label</key>',
+        f'    <string>{_PF_PLIST_LABEL}</string>',
+        '    <key>ProgramArguments</key>',
+        '    <array>',
+        '        <string>/sbin/pfctl</string>',
+        '        <string>-e</string>',
+        '        <string>-f</string>',
+        f'        <string>{_PF_CONF}</string>',
+        '    </array>',
+        '    <key>RunAtLoad</key>',
+        '    <true/>',
+        '</dict>',
+        '</plist>',
+    ])
+    # Same reasoning as the Linux half: a failure to persist must not undo a working
+    # isolation, but it must be said out loud. "Isolated until the next reboot" and
+    # "isolated" are different states.
+    persist = f"""persist_ok=0
+if cat > {_PF_PLIST_PATH} <<'MDFIRPLIST' 2>/dev/null
+{plist}
+MDFIRPLIST
+then
+    chmod 644 {_PF_PLIST_PATH} 2>/dev/null || true
+    launchctl unload {_PF_PLIST_PATH} >/dev/null 2>&1 || true
+    if launchctl load -w {_PF_PLIST_PATH} >/dev/null 2>&1; then persist_ok=1; fi
+fi
+if [ "$persist_ok" != "1" ]; then
+    echo "WARNING: isolation is ACTIVE but could NOT be made to survive a reboot (could not install {_PF_PLIST_PATH}). macOS ships pf disabled and its stock boot job never runs 'pfctl -e', so after a reboot these rules would be loaded but inert while the console still shows this host as contained." >&2
+fi"""
     return f"""set -e
 fail() {{ echo "isolate_host FAILED -- host is NOT contained: $1" >&2; exit 1; }}
 command -v pfctl >/dev/null 2>&1 || fail "pfctl not found"
@@ -2874,6 +3037,7 @@ pfctl -si 2>/dev/null | grep -q "Status: Enabled" || fail "pf is not enabled, so
 pfctl -sr 2>/dev/null | grep -q '{_PF_ANCHOR}' || fail "the {_PF_ANCHOR} anchor is not referenced in the loaded ruleset, so its rules would never be evaluated"
 pfctl -a {_PF_ANCHOR} -sr 2>/dev/null | grep -q "block" || fail "the {_PF_ANCHOR} anchor is referenced but contains no block rule"
 {verify}
+{persist}
 echo "Host isolated (pf anchor {_PF_ANCHOR}, referenced from {_PF_CONF}). Only traffic to/from {human} is permitted."
 """
 
@@ -2888,10 +3052,27 @@ command -v pfctl >/dev/null 2>&1 || fail "pfctl not found"
 pfctl -a {_PF_ANCHOR} -F all 2>/dev/null || true
 sed -i '' "/{_PF_MARK_BEGIN}/,/{_PF_MARK_END}/d" {_PF_CONF} 2>/dev/null || true
 rm -f {_PF_ANCHOR_FILE} 2>/dev/null || true
+# The boot-time re-enable has to go too, or the host restores now and pf comes back up
+# at the next reboot with whatever is in pf.conf.
+launchctl unload {_PF_PLIST_PATH} >/dev/null 2>&1 || true
+rm -f {_PF_PLIST_PATH} 2>/dev/null || true
 pfctl -f {_PF_CONF} 2>/dev/null || fail "could not reload {_PF_CONF} after removing the isolation anchor"
 if pfctl -sr 2>/dev/null | grep -q '{_PF_ANCHOR}'; then fail "the {_PF_ANCHOR} anchor is still referenced after removal"; fi
 if grep -q "{_PF_MARK_BEGIN}" {_PF_CONF} 2>/dev/null; then fail "the isolation block is still present in {_PF_CONF}"; fi
+if [ -f {_PF_PLIST_PATH} ]; then fail "the boot-time isolation LaunchDaemon is still installed at {_PF_PLIST_PATH}"; fi
 echo "Network isolation removed (pf anchor {_PF_ANCHOR} flushed and dereferenced)."
+"""
+
+# See verify_isolation() for why this exists. Read-only; JSON verdict.
+def verify_isolation_macos():
+    return f"""pf_on=0; anchor_ref=0; has_block=0; boot_plist=0
+if pfctl -si 2>/dev/null | grep -q "Status: Enabled"; then pf_on=1; fi
+if pfctl -sr 2>/dev/null | grep -q '{_PF_ANCHOR}'; then anchor_ref=1; fi
+if pfctl -a {_PF_ANCHOR} -sr 2>/dev/null | grep -q "block"; then has_block=1; fi
+if [ -f {_PF_PLIST_PATH} ]; then boot_plist=1; fi
+if [ "$pf_on" = "1" ] && [ "$anchor_ref" = "1" ] && [ "$has_block" = "1" ]; then iso=true; else iso=false; fi
+printf '{{"isolated":%s,"pf_enabled":%s,"anchor_referenced":%s,"block_rule_present":%s,"survives_reboot":%s,"platform":"macos"}}\\n' \\
+    "$iso" "$pf_on" "$anchor_ref" "$has_block" "$boot_plist"
 """
 
 def collect_triage_macos():
@@ -2986,6 +3167,7 @@ MACOS_TEMPLATES = {
     'kill_process_by_name': (lambda params: kill_process_by_name_macos(params['pattern']), ['pattern']),
     'isolate_host': (lambda params: isolate_host_macos(params['soc_ip']), ['soc_ip']),
     'restore_network': (lambda params: restore_network_macos(), []),
+    'verify_isolation': (lambda params: verify_isolation_macos(), []),
     'collect_triage': (lambda params: collect_triage_macos(), []),
     'collect_file': (lambda params: collect_file_macos(params['path']), ['path']),
     'quarantine_file': (lambda params: quarantine_file_macos(params['path']), ['path']),

@@ -9581,6 +9581,7 @@ def api_run_scheduled_playbooks():
     _run_due_case_created_playbooks(db)
     _run_due_case_stale_playbooks(db)
     _run_due_log_source_silent_alerts(db)
+    _run_due_isolation_verification(db)
     _cleanup_stale_imports(db)
     return jsonify({'status': 'success'})
 
@@ -9849,6 +9850,113 @@ def api_settings_log_source_silent_alert():
     db.commit()
     log_audit('log_source_silent_alert_config_change', 'settings', None, f'multiplier={multiplier}, min_hours={min_hours}, cooldown={cooldown_hours}h')
     return jsonify({'status': 'success', 'multiplier': multiplier, 'min_hours': min_hours, 'cooldown_hours': cooldown_hours})
+
+# ISO-04: containment was asserted once and never checked again.
+#
+# The Agents view's "Isolated" badge is derived from the newest successfully-completed
+# isolate_host with no later restore_network. That is a record of what was asked for, not
+# of what is true now -- and the gap between them is where containment quietly dies: an
+# admin clears the firewall, a GPO refresh replaces the rule set, an image rollback, a
+# reboot on a platform where the rules did not persist, or malware with local admin simply
+# deleting them. In every one of those cases the console kept showing the host as
+# contained, forever, with nothing anywhere to contradict it. An analyst reading that
+# badge is making containment decisions on it.
+#
+# So the server now asks the endpoint, on a schedule, and raises a real alert when the
+# answer is no. Deliberately an alert and not a silent badge change: "the host you believe
+# is contained is not" is an incident, and it should reach whoever is on the queue through
+# the same path every other detection does -- including any SOAR playbook wired to it.
+ISOLATION_VERIFY_INTERVAL_MINUTES = 15
+# One alert per host per this window. Long enough not to bury the queue while a host
+# stays broken, short enough that a re-broken host is reported again the same shift.
+ISOLATION_VERIFY_ALERT_COOLDOWN_HOURS = 6
+
+def _believed_isolated_hosts(db):
+    """Hosts the server currently considers contained.
+
+    Same derivation the Agents list uses (app.py's api_agent_checkins) -- the newest
+    *successfully completed* isolate_host or restore_network decides it. status='done' is
+    load-bearing: a failed isolate stays non-'done' so it never claims containment, and a
+    failed restore stays non-'done' so the host correctly keeps counting as isolated."""
+    rows = db.execute(
+        "SELECT hostname, label FROM agent_commands WHERE id IN ("
+        "  SELECT MAX(id) FROM agent_commands "
+        "  WHERE status = 'done' AND label IN ('isolate_host', 'restore_network') "
+        "  GROUP BY hostname)"
+    ).fetchall()
+    return [r['hostname'] for r in rows if r['label'] == 'isolate_host']
+
+def _run_due_isolation_verification(db):
+    if not _claim_due_check(db, 'isolation_verify_last_check', ISOLATION_VERIFY_INTERVAL_MINUTES):
+        return
+    hosts = _believed_isolated_hosts(db)
+    if not hosts:
+        return
+    for host in hosts:
+        # Read the newest verdict before queueing the next probe, so a host that has
+        # already answered "no" is alerted on even if it later goes offline and the new
+        # command never runs.
+        # The newest COMPLETED probe, not the newest row. Reading the newest row means an
+        # in-flight probe hides the last thing the endpoint actually said -- so a host
+        # that answered "not isolated" and then went offline would have its next probe sit
+        # pending forever and never be reported again, which is exactly the host that most
+        # needs repeating. The last real answer stands until a newer real answer replaces
+        # it.
+        latest = db.execute(
+            "SELECT status, stdout FROM agent_commands "
+            "WHERE hostname = ? AND label = 'verify_isolation' AND status = 'done' "
+            "ORDER BY id DESC LIMIT 1",
+            (host,)
+        ).fetchone()
+        if latest:
+            verdict = None
+            try:
+                verdict = json.loads((latest['stdout'] or '').strip().splitlines()[-1])
+            except (ValueError, IndexError):
+                verdict = None
+            # An unparseable answer is NOT treated as "not isolated". It means the probe
+            # itself is broken, and crying containment failure on every cycle because of a
+            # parsing bug would train an analyst to ignore this alert -- which costs more
+            # than the missed case.
+            if isinstance(verdict, dict) and verdict.get('isolated') is False:
+                recent = db.execute(
+                    "SELECT 1 FROM alerts WHERE rule_name = 'Isolation Not Holding' AND host = ? "
+                    "AND timestamp >= datetime('now', ?)",
+                    (host, f'-{ISOLATION_VERIFY_ALERT_COOLDOWN_HOURS} hours')
+                ).fetchone()
+                if not recent:
+                    detail = ', '.join(f'{k}={v}' for k, v in sorted(verdict.items()) if k != 'isolated')
+                    msg = (f"Host '{host}' is recorded as network-isolated, but the endpoint reports it is NOT. "
+                           f"Containment is not in force and this host has unrestricted network access. "
+                           f"Endpoint check: {detail}.")
+                    ins = db.execute(
+                        "INSERT INTO alerts (timestamp, rule_name, severity, host, message, occurrence_count, last_seen) "
+                        "VALUES (datetime('now'), 'Isolation Not Holding', 'HIGH', ?, ?, 1, datetime('now'))",
+                        (host, msg)
+                    )
+                    soar_alerts.run_playbooks_for_alert(db, {
+                        'id': ins.lastrowid, 'rule_title': 'Isolation Not Holding', 'severity': 'HIGH',
+                        'host': host, 'username': None, 'source_ip': None, 'message': msg, 'timestamp': None,
+                    }, run_case_playbooks_fn=lambda cid, qid, tlp, st, sev: _run_playbooks_for_case(db, cid, 'case_created', qid, tlp, st, sev))
+
+        # Never stack probes. An offline isolated host would otherwise accumulate one
+        # queued command per cycle and run the whole backlog the moment it returns.
+        outstanding = db.execute(
+            "SELECT 1 FROM agent_commands WHERE hostname = ? AND label = 'verify_isolation' "
+            "AND status IN ('pending', 'sent')",
+            (host,)
+        ).fetchone()
+        if outstanding:
+            continue
+        try:
+            builder, _ = agent_scripts.TEMPLATES_BY_OS[_get_host_os(db, host)]['verify_isolation']
+            db.execute(
+                "INSERT INTO agent_commands (hostname, label, script, queued_by) VALUES (?, 'verify_isolation', ?, 'system')",
+                (host, builder({}))
+            )
+        except Exception as e:
+            app.logger.error(f"Could not queue verify_isolation for {host}: {e}")
+    db.commit()
 
 def _run_due_log_source_silent_alerts(db):
     # Grouped by HOST, not by individual log source/app -- a host that goes dark
@@ -20534,7 +20642,12 @@ def api_fim_path_detail(fid):
 # collateral risk beyond the action itself, and no backend data/detection-logic
 # access involved. Every other label (custom scripts, agent lifecycle, and the
 # heavier hunt-flavored sweeps/collections) stays gated to Tier 3+ below.
-AGENT_COMMAND_TIER1_LABELS = {'isolate_host', 'restore_network', 'block_ip', 'unblock_ip', 'collect_triage', 'kill_process', 'quarantine_file', 'kill_scheduled_task'}
+# 'verify_isolation' is read-only -- it inspects firewall state and reports, changing
+# nothing -- so it belongs with the low-risk actions rather than in the advanced bucket.
+# It is normally queued by the server itself (_run_due_isolation_verification, which
+# bypasses permission checks entirely by inserting directly); this classification only
+# governs a manual dispatch of it through api_agent_commands.
+AGENT_COMMAND_TIER1_LABELS = {'isolate_host', 'restore_network', 'verify_isolation', 'block_ip', 'unblock_ip', 'collect_triage', 'kill_process', 'quarantine_file', 'kill_scheduled_task'}
 
 def _is_ipv4(value):
     """True only for a real dotted-quad. Uses ipaddress rather than a regex so octets are
