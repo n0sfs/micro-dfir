@@ -857,10 +857,16 @@ function toggleSocTokenVisibility() {
     icon.className = showing ? 'fa-solid fa-eye' : 'fa-solid fa-eye-slash';
 }
 
+// crypto.getRandomValues, not Math.random. This value is the fleet-wide shared secret:
+// it authenticates to every agent route without any hostname binding, so whoever holds it
+// can poll as any host and receive that host's queued scripts. Math.random is V8's
+// xorshift128+ -- not a CSPRNG, and its internal state is recoverable from a modest run of
+// outputs, which for a credential of this reach is the whole ballgame. 32 hex characters
+// of real entropy is 128 bits, matching what the server generates for itself.
 function generateToken() {
-    const chars = 'abcdef0123456789';
-    let token = '';
-    for (let i = 0; i < 32; i++) token += chars[Math.floor(Math.random() * chars.length)];
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    const token = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
     document.getElementById('socToken').value = token;
 }
 

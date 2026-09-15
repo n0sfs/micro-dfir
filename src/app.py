@@ -793,6 +793,35 @@ def api_ingest():
         if not _validate_agent_auth(db, token, ingest_host):
             return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
 
+        # Auth above only ever checked logs[0]['host'], while the write loop below reads
+        # log.get('host') per entry -- so an endpoint holding its own valid token could
+        # name itself in the first entry and any other host in the rest. Every deployed
+        # endpoint holds a valid token, so that was not a stolen-credential scenario but
+        # the fleet's normal state: forge activity against a colleague's workstation, or
+        # bury a real incident under noise attributed elsewhere. Worse, the alert dedup
+        # branch further down UPDATEs an existing alert's message and severity, so an
+        # attacker who had just tripped a heuristic could overwrite the stored message of
+        # the real alert within the window.
+        #
+        # Scoped deliberately to per-agent tokens. The shared secret cannot be held to one
+        # identity: Vector authenticates with it and relays syslog for every device on the
+        # network, each entry carrying its own self-reported hostname. So this tightens the
+        # path every modern endpoint uses and leaves the appliance's own trusted local
+        # relay alone.
+        bound_host = _agent_token_bound_host(db, token)
+        if bound_host:
+            foreign = sorted({
+                str(l.get('host') or '').strip() for l in logs if isinstance(l, dict)
+            } - {bound_host, '', 'UNKNOWN', 'Unknown'})
+            if foreign:
+                # Refuse the batch rather than silently dropping the foreign entries -- a
+                # legitimate agent never sends another host's logs, so this is either an
+                # attack or a genuinely broken agent, and both deserve to be loud.
+                log_audit('ingest_host_mismatch', 'agent', bound_host,
+                          f"rejected a batch claiming {len(foreign)} other host(s): {', '.join(foreign[:5])}")
+                return jsonify({'status': 'error',
+                                'message': f"Token is bound to {bound_host}; this batch also claimed: {', '.join(foreign[:5])}"}), 403
+
         count = 0
         for log in logs:
             ts = log.get('time', datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
@@ -16070,6 +16099,15 @@ def api_settings_token():
     token = (request.json or {}).get('token', '').strip()
     if not token:
         return jsonify({'error': 'Token cannot be empty'}), 400
+    # An entropy floor, because this is the fleet-wide credential: it authenticates to
+    # every agent route with no hostname binding, and there is no rate limiting on those
+    # routes to slow a guess down. "Cannot be empty" was the only rule, so `test` was a
+    # valid fleet key. 24 characters is well short of the 32 the generator produces but
+    # rules out the values people actually type by hand.
+    if len(token) < 24:
+        return jsonify({'error': 'Token must be at least 24 characters. Use Generate to create one.'}), 400
+    if len(set(token)) < 8:
+        return jsonify({'error': 'Token is too repetitive to be a credential. Use Generate to create one.'}), 400
     db = get_db()
     db.execute("UPDATE settings SET value = ? WHERE key = 'soc_secret'", (token,))
     db.commit()
@@ -16617,6 +16655,26 @@ def get_soc_secret(db):
     row = db.execute("SELECT value FROM settings WHERE key = 'soc_secret'").fetchone()
     return row['value'] if row and row['value'] else None
 
+def _agent_token_bound_host(db, token):
+    """The hostname a per-agent token is bound to, or None.
+
+    None means the caller is not a single-identity agent: either it presented the
+    fleet-wide shared secret, or the token has not been bound yet. That distinction is
+    what lets /api/ingest tighten the agent path without breaking the appliance's own
+    log relay -- Vector authenticates with the shared secret and legitimately forwards
+    logs for *many* hosts (`.host = .hostname` per syslog message, see
+    generate_vector_config), so it cannot be held to one identity."""
+    if not token:
+        return None
+    try:
+        if secrets.compare_digest(token, get_soc_secret(db) or ''):
+            return None
+    except TypeError:
+        # compare_digest raises on non-ASCII str -- a malformed header, not a match.
+        return None
+    row = db.execute("SELECT hostname FROM agent_tokens WHERE token = ?", (token,)).fetchone()
+    return row['hostname'] if row and row['hostname'] else None
+
 def _validate_agent_auth(db, token, hostname):
     # Two tiers of credential. The legacy global soc_secret is shared across every
     # agent and carries no hostname binding — kept working only so already-deployed
@@ -16629,7 +16687,24 @@ def _validate_agent_auth(db, token, hostname):
     import datetime
     expected_secret = get_soc_secret(db)
     if not expected_secret:
-        return True  # no secret configured yet (fresh/unconfigured install) — unchanged from before this existed
+        # Fails CLOSED. This used to `return True`, meaning a missing secret row left every
+        # agent route -- including the one that hands out queued scripts -- accepting anyone
+        # who could reach the port, with no token at all. The only thing preventing that was
+        # migrate_settings() seeding a random value at startup, and every migration in this
+        # file is wrapped in `except Exception: pass`, so a database-locked startup (which
+        # this appliance has had) could have silently opened the whole agent API.
+        #
+        # Seeding here as well makes the closed state self-healing: the next call finds a
+        # real secret, and an admin can read it from Settings. No deployment that already
+        # has the row is affected in any way.
+        try:
+            db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('soc_secret', ?)", (secrets.token_hex(16),))
+            db.commit()
+            app.logger.error("SOC secret was missing -- generated a new one and rejected this agent request. "
+                             "Re-download agent packages if endpoints stop checking in.")
+        except Exception as e:
+            app.logger.error(f"SOC secret missing and could not be generated ({e}) -- rejecting agent request.")
+        return False
     if token and secrets.compare_digest(token, expected_secret):
         return True
     if not token:
@@ -16725,6 +16800,17 @@ def agent_config():
         # server's own part is complete once the agent has the instruction in hand.
         if cmd_row['label'] in ('uninstall', 'upgrade'):
             db.execute("UPDATE agent_commands SET status = 'done', completed_at = ? WHERE id = ?", (now, cmd_row['id']))
+            if cmd_row['label'] == 'uninstall':
+                # Last thing this credential is needed for -- revoke it now that the
+                # instruction is in the agent's hands. There was no revocation path at all
+                # before: removing an endpoint left its token fully valid forever, so a
+                # decommissioned machine could re-enroll itself by polling, and a token
+                # read off its disk stayed good indefinitely. Done here rather than in
+                # delete_agent() because the agent must authenticate once more to collect
+                # this very command.
+                revoked = db.execute("DELETE FROM agent_tokens WHERE hostname = ?", (ua,)).rowcount
+                if revoked:
+                    app.logger.info(f"Revoked {revoked} agent token(s) for {ua} on uninstall delivery.")
         else:
             # UTC, deliberately -- `now` above is local (datetime.now()), and sent_at is
             # only ever compared against the UTC stale_cutoff. Writing local here would
@@ -20177,7 +20263,13 @@ def delete_agent(hostname):
         "INSERT INTO agent_commands (hostname, label, script, queued_by) VALUES (?, 'uninstall', '', ?)",
         (hostname, current_user.username)
     )
+    # NOTE: the token is deliberately NOT revoked here. The agent has to authenticate once
+    # more to collect the uninstall queued above, so killing its credential now would leave
+    # it running forever -- still collecting, just invisible in the console. Revocation
+    # happens in api_agent_poll at the moment the uninstall is handed over, which is the
+    # last thing that token is needed for.
     db.commit()
+    log_audit('agent_delete', 'agent', hostname, 'uninstall queued; token revoked on delivery')
     return jsonify({"status": "success", "id": cur.lastrowid})
 
 # ==========================================
