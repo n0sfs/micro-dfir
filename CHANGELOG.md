@@ -8,6 +8,78 @@ a new feature, a real architectural decision, an incident and its fix. Routine p
 fixes don't need their own line; group them into the feature they support. Newest first.
 Full commit-level detail is always available via `git log`.
 
+## 2026-09-15
+
+### The appliance couldn't recognise its own requests — and nothing could have told us
+
+Host hardening (HOST-01 phase 1) went looking for proof that the Sigma engine was running
+under its new systemd confinement, and found there was no way to ask. That absence turned
+out to be hiding a live outage.
+
+- **`/api/internal/run-scheduled-playbooks` was answering the detection engine with 403 on
+  every 30-second cycle.** The endpoint is deliberately restricted to this host, and it
+  tested `remote_addr in ('127.0.0.1', '::1')`. That test does not hold on an appliance
+  with a real binding: Settings > Network binds gunicorn to specific interface addresses,
+  a socket bound that way never accepts a loopback connection, so the engine must dial an
+  interface address — and that request arrives carrying that interface IP, not loopback.
+  `requests.post` does not raise on a 403 and nothing checked the status code, so it failed
+  in total silence. **Scheduled playbooks, agent sweeps, isolation auto-reverts, SLA-breach
+  / offline-agent / case-created / case-stale notifications and stale-import cleanup had
+  all stopped running** from the moment the appliance was given a binding.
+- **The same wrong test, in a second place.** `api_ingest`'s `source_ip` fallback used it
+  to avoid stamping the SOC's own address onto relayed syslog — and, being loopback-only,
+  did exactly what its comment said it existed to prevent, because the Vector sink is
+  pointed at `ingest_bind_ip` for that same socket reason. Both now share
+  `_is_own_host_request()`: loopback or either configured bind address. Not a widening of
+  trust — a request from anywhere else carries *its* source address, never the server's.
+- **Fixing the 403 immediately exposed the next problem.** The silent-log-source check is
+  the one thing on that poll that isn't cheap — three `GROUP BY` scans over `live_logs`
+  across 7 days, the query shape already measured at 93 seconds on this box. It had been
+  harmless only because it never ran. Within a minute of deploying the fix the engine's
+  poll was timing out on every cycle. It now runs on a 15-minute cadence of its own,
+  claimed with a conditional `UPDATE` *before* the work starts — three gunicorn workers
+  plus a check that outlasts the poll interval is otherwise two concurrent passes racing
+  the same cooldown check and double-firing one alert.
+- **Service Health** (Log Pipeline > Parsers) is the missing instrument: `systemctl
+  is-active` for all five units, plus the detection engine's own per-cycle heartbeat and
+  the outcome of its scheduled-task call. Two signals because they fail differently — a
+  unit can be perfectly "active" while every request it makes is rejected, which is
+  precisely what was happening. It is also the canary the confinement work needed: until
+  now, a hardened unit that refused to start looked exactly like a quiet day with no rule
+  matches.
+
+### Host hardening, phase 1 — systemd units, file permissions, Sigma confinement
+
+- **Four of the five `config/*.service` files were dead config.** `update.sh` only ever
+  installed `microsoc-dns.service`; systemd reads `/etc/systemd/system/`, which
+  `install.sh` wrote once at first install and nothing updated since. Editing any of the
+  others *looked* deployed and was not. `update.sh` now syncs them (only when changed,
+  then one `daemon-reload`).
+- **Two units are deliberately excluded, for different reasons.** `microsoc-dnsmasq`
+  serves DNS to whatever has opted in, and a routine app deploy must never interrupt that.
+  `microsoc-web` is **live state, not deployable config** — Settings > Network rewrites
+  the installed unit in place to set the bind addresses, and the repo copy carries the
+  generic `--bind 0.0.0.0:5001`. Learned the hard way: the first version of the loop
+  included it and silently discarded the admin's deliberate per-interface binding,
+  re-exposing the UI on every interface. Nothing broke, which is exactly why it would have
+  gone unnoticed; restored by re-saving the Network form. The template now carries a
+  header saying so.
+- **`update.sh` self-update lag**, worth knowing before trusting any deploy that changes
+  the script itself: the running copy is the old one, so an edit to `update.sh` only takes
+  effect on the *next* run.
+- **Secrets were world-readable.** `config/key.pem` is the TLS key every agent pins;
+  `siem.db` holds agent tokens, the shared secret and every password hash. `install.sh`
+  created both with the default umask. Now `chmod 600` (plus the WAL/SHM sidecars, which
+  carry the same data mid-transaction) and `chmod 700` on `case_attachments`, applied on
+  every deploy so existing hosts pick it up without anyone knowing to go and do it.
+- **Confinement starts with the Sigma engine on purpose** — nine directives
+  (`NoNewPrivileges`, `ProtectHome`, the `ProtectKernel*`/`Restrict*` set). It is the least
+  disruptive service to lose: if a directive is wrong, detection matching stops while the
+  UI and the deploy path keep working, which is what makes the failure diagnosable.
+  `ProtectSystem` and `PrivateTmp` are deliberately absent with the reasons recorded in the
+  unit — the web app writes `/etc/vector/` and `/etc/systemd/system/`, and the update lock
+  file is created inside the app but removed from outside it.
+
 ## 2026-09-14
 
 ### Insider threat workflow review — making the identity scoring actually work

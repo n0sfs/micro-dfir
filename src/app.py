@@ -4239,10 +4239,14 @@ def api_system_service_health():
         'units': units,
         'sigma_engine': {
             'heartbeat_at': beat,
-            # The loop sleeps 30s; 180s is six missed cycles, comfortably past a slow
-            # detection pass on a large batch without being so loose it hides a dead loop.
+            # The loop sleeps 30s, so a healthy heartbeat lands roughly every 35-40s --
+            # but once every 15 minutes it also waits on the silent-log-source scan, and
+            # that cycle was measured live at 201 seconds end to end. A threshold tight
+            # enough to flag "dead" on a normal cycle would therefore cry wolf four times
+            # an hour, which is worse than no indicator at all. 360s is twelve ordinary
+            # cycles and still well inside the heavy one.
             'age_seconds': age_seconds,
-            'stale': (age_seconds is None or age_seconds > 180),
+            'stale': (age_seconds is None or age_seconds > 360),
             'poll_status': rows.get('engine_sigma_poll_status'),
             'poll_error': rows.get('engine_sigma_poll_error') or None,
         },
