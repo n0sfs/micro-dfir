@@ -9,6 +9,27 @@ AGENT_VERSION = "2026.09.15.1"
 INSTALL_DIR = r"C:\Program Files\MicroDFIR"
 TASK_NAME = "MicroDFIRAgent"
 
+# True when running as a PyInstaller bundle (installer/build_agent_exe.ps1) rather than
+# as a .py under the embeddable interpreter. Several paths below genuinely differ, and
+# every one of them fails SILENTLY if it is not handled -- which is the whole reason this
+# flag exists rather than being inferred ad hoc at each site:
+#
+#   * install/watchdog register and look for `python.exe <script>`; a frozen agent is its
+#     own process with its own image name, so the watchdog would never find the running
+#     agent, conclude it had died, and relaunch it every 5 minutes -- accumulating
+#     duplicate agents indefinitely.
+#   * self-upgrade writes new Python source to micro_agent_windows.py. Nothing executes
+#     that file in a frozen install, so the upgrade would report success and change
+#     nothing, forever.
+#   * the token scrub rewrites the .py it was bootstrapped from. In a onefile bundle
+#     __file__ points into a temp extraction directory that is deleted on exit, so the
+#     write would be pointless rather than wrong -- but agent_config.json still must be
+#     scrubbed, so the two halves have to be separated.
+_IS_FROZEN = bool(getattr(sys, 'frozen', False))
+# The image name the watchdog matches on: the bundle's own exe when frozen, the
+# interpreter otherwise.
+_AGENT_IMAGE_NAME = os.path.basename(sys.executable) if _IS_FROZEN else "python.exe"
+
 _OS_DETAIL_CACHE = None
 
 def _get_os_detail():
@@ -193,19 +214,24 @@ def _store_token(tok):
 
 def _scrub_plaintext_token(tok):
     """Remove the bootstrap copies of the token from disk, once it is safely stored."""
-    try:
-        installed = os.path.join(INSTALL_DIR, "micro_agent_windows.py")
-        for path in {installed, os.path.abspath(__file__)}:
-            try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    text = f.read()
-                if tok in text:
-                    with open(path, 'w', encoding='utf-8') as f:
-                        f.write(text.replace(tok, _TOKEN_PLACEHOLDER))
-            except OSError:
-                pass
-    except Exception:
-        pass
+    # Source scrub only makes sense for a .py install. In a onefile bundle __file__ points
+    # into a temp extraction directory that is deleted on exit, and the token was never
+    # baked into the exe anyway -- a frozen agent is configured through agent_config.json,
+    # which is still scrubbed below.
+    if not _IS_FROZEN:
+        try:
+            installed = os.path.join(INSTALL_DIR, "micro_agent_windows.py")
+            for path in {installed, os.path.abspath(__file__)}:
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        text = f.read()
+                    if tok in text:
+                        with open(path, 'w', encoding='utf-8') as f:
+                            f.write(text.replace(tok, _TOKEN_PLACEHOLDER))
+                except OSError:
+                    pass
+        except Exception:
+            pass
     try:
         cfg_path = os.path.join(INSTALL_DIR, "agent_config.json")
         if os.path.exists(cfg_path):
@@ -314,9 +340,13 @@ def _kill_other_agent_instances():
     # itself) before handing off to the new one.
     try:
         my_pid = os.getpid()
+        # A frozen bundle's command line is just its own exe path -- it never contains
+        # "micro_agent_windows.py", so matching on that alone would find nothing and this
+        # would silently stop de-duplicating exactly when a reinstall happens.
+        needle = os.path.basename(sys.executable) if _IS_FROZEN else 'micro_agent_windows.py'
         ps = (
             "Get-CimInstance Win32_Process | Where-Object { "
-            "$_.CommandLine -like '*micro_agent_windows.py*' "
+            f"$_.CommandLine -like '*{needle}*' "
             "-and $_.CommandLine -notlike '* install*' -and $_.CommandLine -notlike '* uninstall*' "
             f"-and $_.ProcessId -ne {my_pid} "
             "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
@@ -557,13 +587,23 @@ def install_agent():
     try:
         _kill_other_agent_instances()
         if not os.path.exists(INSTALL_DIR): os.makedirs(INSTALL_DIR)
-        target_path = os.path.join(INSTALL_DIR, "micro_agent_windows.py")
-        with open(os.path.abspath(__file__), 'r', encoding='utf-8') as src, open(target_path, 'w', encoding='utf-8') as dst:
-            dst.write(src.read())
+        if _IS_FROZEN:
+            # The bundle IS the agent -- copy the exe rather than a source file, and give
+            # the launcher no script argument. Skipped when the exe is already running
+            # from its install location (copying a file onto itself truncates it).
+            target_path = os.path.join(INSTALL_DIR, os.path.basename(sys.executable))
+            if os.path.abspath(sys.executable).lower() != os.path.abspath(target_path).lower():
+                shutil.copyfile(sys.executable, target_path)
+            launch = '""' + target_path + '""'
+        else:
+            target_path = os.path.join(INSTALL_DIR, "micro_agent_windows.py")
+            with open(os.path.abspath(__file__), 'r', encoding='utf-8') as src, open(target_path, 'w', encoding='utf-8') as dst:
+                dst.write(src.read())
+            launch = '""' + sys.executable + '"" ""' + target_path + '""'
         vbs_path = os.path.join(INSTALL_DIR, "run_hidden.vbs")
         with open(vbs_path, 'w') as f:
             f.write('Set objShell = WScript.CreateObject("WScript.Shell")\n')
-            f.write('objShell.Run """' + sys.executable + '"" ""' + target_path + '""", 0, False\n')
+            f.write('objShell.Run "' + launch + '", 0, False\n')
         cmd = f'schtasks /create /tn "{TASK_NAME}" /tr "wscript.exe \\"{vbs_path}\\"" /sc ONSTART /rl HIGHEST /f'
         subprocess.run(cmd, shell=True)
         subprocess.run(f'schtasks /run /tn "{TASK_NAME}"', shell=True)
@@ -589,8 +629,12 @@ def watchdog_check():
     try:
         with open(pid_path, 'r') as f:
             pid = int(f.read().strip())
+        # Image name, not a hardcoded python.exe: a frozen bundle runs under its own exe
+        # name, so matching on the interpreter would never find the live agent, conclude
+        # it had died, and relaunch it every 5 minutes -- one extra agent per watchdog
+        # tick, forever.
         result = subprocess.run(
-            ['tasklist', '/FI', f'PID eq {pid}', '/FI', 'IMAGENAME eq python.exe', '/FO', 'CSV', '/NH'],
+            ['tasklist', '/FI', f'PID eq {pid}', '/FI', f'IMAGENAME eq {_AGENT_IMAGE_NAME}', '/FO', 'CSV', '/NH'],
             capture_output=True, text=True, timeout=15
         )
         if str(pid) in result.stdout:
@@ -612,6 +656,16 @@ def upgrade_agent(new_source):
     # (telling the caller to let this process exit) once the new file is safely on
     # disk — if the write fails, the old process keeps running rather than vanishing
     # with nothing to replace it, unlike uninstall which always removes itself.
+    # A frozen agent cannot be upgraded by receiving Python source: nothing in a bundled
+    # install executes micro_agent_windows.py, so writing it would leave the running exe
+    # untouched while the command went green -- a silent no-op reported as success, the
+    # exact failure class the isolation work spent a day removing. Refuse loudly instead;
+    # a bundled fleet is upgraded by pushing a new installer.
+    if _IS_FROZEN:
+        print("[-] Upgrade refused: this agent is a compiled bundle, and source upgrades "
+              "do not apply to it. Deploy a new MicroDFIRAgentSetup.exe to upgrade this "
+              "host.", flush=True)
+        return False
     if not new_source.strip():
         print("[-] Upgrade command had no source; ignoring.", flush=True)
         return False
@@ -954,7 +1008,12 @@ def run_agent():
                 checkin_url = checkin_urls[attempt % len(checkin_urls)]
                 try:
                     print(f"[*] Checking in with {checkin_url} (Attempt {attempt + 1})...", flush=True)
-                    headers = {'X-Agent-Hostname': socket.gethostname(), 'X-Agent-Token': SOC_TOKEN, 'X-Agent-Version': AGENT_VERSION, 'X-Agent-OS': 'windows', 'X-Agent-OS-Detail': _get_os_detail()}
+                    # X-Agent-Packaging tells the server whether source self-upgrade even
+                    # applies to this endpoint. A bundled agent refuses one (see
+                    # upgrade_agent), and without this the console would show the same
+                    # thing it shows for a successful upgrade that changed nothing --
+                    # which has already confused a real operator once.
+                    headers = {'X-Agent-Hostname': socket.gethostname(), 'X-Agent-Token': SOC_TOKEN, 'X-Agent-Version': AGENT_VERSION, 'X-Agent-OS': 'windows', 'X-Agent-OS-Detail': _get_os_detail(), 'X-Agent-Packaging': 'frozen' if _IS_FROZEN else 'source'}
                     req = urllib.request.Request(checkin_url, headers=headers)
                     with urllib.request.urlopen(req, context=context, timeout=5) as response:
                         data = json.loads(response.read().decode())
@@ -1097,4 +1156,33 @@ if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == 'install': install_agent()
     elif len(sys.argv) > 1 and sys.argv[1] == 'uninstall': uninstall_agent()
     elif len(sys.argv) > 1 and sys.argv[1] == 'watchdog': watchdog_check()
+    # Side-effect-free identity probe. installer/build_agent_exe.ps1 runs this against the
+    # freshly built bundle and refuses to ship one whose reported version or packaging is
+    # wrong -- a build that silently produced a non-frozen-aware binary would break the
+    # watchdog and the upgrade path on every endpoint it reached. Must stay free of
+    # install/uninstall side effects: it runs on a developer workstation.
+    elif len(sys.argv) > 1 and sys.argv[1] in ('--version', '-v', 'version'):
+        # Also exercises the two LAZY imports, because they are the ones a bundle can
+        # silently omit: every other import in this file is module-level and therefore
+        # already proven by the interpreter reaching this line, but winreg (inside
+        # _get_os_detail) and ctypes/ctypes.wintypes (inside _dpapi) are imported on
+        # first use. A bundle missing either would build cleanly, start cleanly, and then
+        # fail on a real endpoint -- at OS detection, or at reading the stored credential.
+        # Both probes here are side-effect-free: a registry read, and a DPAPI round trip
+        # held entirely in memory.
+        lazy = []
+        try:
+            _get_os_detail()
+            lazy.append('winreg=ok')
+        except Exception as e:
+            lazy.append(f'winreg=FAILED({e})')
+        try:
+            probe = 'selftest'
+            lazy.append('dpapi=ok' if _dpapi(_dpapi(probe.encode(), True), False).decode() == probe
+                        else 'dpapi=FAILED(round trip mismatch)')
+        except Exception as e:
+            lazy.append(f'dpapi=FAILED({e})')
+        print(f"MicroDFIR agent {AGENT_VERSION} packaging={'frozen' if _IS_FROZEN else 'source'} "
+              + ' '.join(lazy))
+        sys.exit(1 if any('FAILED' in x for x in lazy) else 0)
     else: run_agent()

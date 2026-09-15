@@ -29,6 +29,20 @@ agent_config.json
 # Linux appliance itself has no way to (re)compile a Windows installer.
 installer/vendor/
 
+# PyInstaller bundle build (installer/build_agent_exe.ps1): a throwaway venv holding the
+# build tool, and PyInstaller's scratch/spec directory. Both are reproducible from the
+# script's documented one-time setup.
+#
+# installer/dist/MicroDFIRAgent.exe is ignored too, UNLIKE the NSIS setup .exe above --
+# deliberately, and the difference is the point. The setup .exe is checked in because the
+# appliance serves it and cannot build it. The agent bundle is not served by anything
+# yet: switching a fleet to bundled agents means giving up remote source self-upgrade
+# (see the script's header), which is a decision to make on purpose rather than to
+# stumble into because a binary happened to be sitting in the repo.
+installer/.buildvenv/
+installer/.build/
+installer/dist/MicroDFIRAgent.exe
+
 # OS Specific
 .DS_Store
 Thumbs.db

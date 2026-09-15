@@ -13031,7 +13031,12 @@ def migrate_agent_polls_os_detail():
         cols = [r[1] for r in conn.execute("PRAGMA table_info(agent_polls)").fetchall()]
         if 'os_detail' not in cols:
             conn.execute('ALTER TABLE agent_polls ADD COLUMN os_detail TEXT')
-            conn.commit()
+        # Same route, same reason -- see the packaging comment in agent_config(). Kept in
+        # this one migration rather than a second function because both columns are on
+        # agent_polls and both exist for the same hot-route reason.
+        if 'packaging' not in cols:
+            conn.execute("ALTER TABLE agent_polls ADD COLUMN packaging TEXT NOT NULL DEFAULT 'source'")
+        conn.commit()
         conn.close()
     except Exception:
         pass
@@ -17584,9 +17589,18 @@ def agent_config():
     # Agents that predate OS-detail reporting send no header -- 'unknown' rather than
     # blank so the UI can tell "hasn't upgraded yet" apart from "reported empty".
     os_detail = (request.headers.get('X-Agent-OS-Detail') or 'unknown')[:200]
+    # How this endpoint's agent is packaged, which decides whether the remote "Upgrade
+    # Agent" action means anything to it: a 'source' agent replaces its own .py and
+    # restarts, a 'frozen' one (a compiled bundle) cannot and refuses. Without this the
+    # console shows an identical green result either way, and a bundled fleet would look
+    # like it was upgrading while its reported version never moved -- a confusion this
+    # product has already produced once, for a different reason.
+    # Anything that predates the header is a source agent; that is what every deployed
+    # agent was when this was added.
+    packaging = 'frozen' if request.headers.get('X-Agent-Packaging') == 'frozen' else 'source'
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     db.execute('CREATE TABLE IF NOT EXISTS agent_polls (id INTEGER PRIMARY KEY, timestamp TEXT, ip_address TEXT, user_agent TEXT, version TEXT, os TEXT, os_detail TEXT)')
-    db.execute('INSERT INTO agent_polls (timestamp, ip_address, user_agent, version, os, os_detail) VALUES (?, ?, ?, ?, ?, ?)', (now, ip, ua, agent_version, agent_os, os_detail))
+    db.execute('INSERT INTO agent_polls (timestamp, ip_address, user_agent, version, os, os_detail, packaging) VALUES (?, ?, ?, ?, ?, ?, ?)', (now, ip, ua, agent_version, agent_os, os_detail, packaging))
     db.execute(
         "INSERT OR IGNORE INTO agent_version_history (hostname, version, first_seen) VALUES (?, ?, ?)",
         (ua, agent_version, now)
@@ -20325,6 +20339,9 @@ def agent_checkins():
                 "version_since": None,
                 "os": os_name,
                 "os_detail": os_detail,
+                # 'source' | 'frozen' -- whether the remote Upgrade Agent action applies
+                # to this endpoint at all (see agent_config's own comment).
+                "packaging": (r["packaging"] if "packaging" in r.keys() and r["packaging"] else "source"),
                 "group": "",
                 "recent_polls": [],
                 "alerts_24h": 0,
