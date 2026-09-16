@@ -29,6 +29,10 @@ DETECTION_BATCH_SIZE = 50000
 # the dominant cost of its cycle.
 SLOW_RULE_SECONDS = 10
 
+# How long a detection cycle waits for the database write lock before giving up. Sized
+# against the real lock holder (see run_detection_cycle), not against an idle appliance.
+DETECTION_LOCK_TIMEOUT_SECONDS = 120
+
 # pysigma's SQLite backend correctly translates a Sigma rule's |re field modifier into
 # SQLite's `value REGEXP 'pattern'` syntax -- but SQLite only recognizes REGEXP as sugar
 # for a registered function, it doesn't implement one itself, so every |re rule silently
@@ -982,7 +986,15 @@ def replay_import_chunk(conn, import_id, rule_offset, chunk_size, ioc_cache=None
 
 def run_detection_cycle():
     if not os.path.exists(DB_PATH): return
-    conn = sqlite3.connect(DB_PATH, timeout=30); conn.row_factory = sqlite3.Row
+    # 30s was not enough and the detection pass failed with "database is locked" on every
+    # cycle -- observed live, and until run_detection_cycle was wrapped in a try/except it
+    # took the whole engine down with it. The lock holder is the ingest path: api_ingest
+    # runs one transaction per posted batch, and inside that transaction it also does
+    # enrichment and SOAR webhook calls with their own 8-10s timeouts, so a busy batch can
+    # hold the write lock far longer than a naive "a few INSERTs" estimate suggests. The
+    # cycle loses nothing by waiting: sigma_state.json's last_id is only advanced after a
+    # successful pass, so a blocked cycle re-reads the same window rather than skipping it.
+    conn = sqlite3.connect(DB_PATH, timeout=DETECTION_LOCK_TIMEOUT_SECONDS); conn.row_factory = sqlite3.Row
     conn.create_function('REGEXP', 2, _sqlite_regexp)
     cursor = conn.cursor()
     last_id = json.load(open(STATE_FILE)).get("last_id", 0) if os.path.exists(STATE_FILE) else 0
