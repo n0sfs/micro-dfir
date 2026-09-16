@@ -51,12 +51,32 @@ already present in the message. At this appliance's ~330k events/day that is ~60
 duplication. By channel: Sysmon is 71.5% of volume at 1,727 XML bytes/event, PowerShell 23.5%
 at 2,039, Security 5% at 1,633 (the only channel whose XML is *smaller* than its message).
 
-Not removed automatically, because `raw_xml` still carries three things the message doesn't:
-fields outside the extract map (`Provider_Name` is an XML attribute, `param1`/`param2` are
-Data elements with no rendered label — both appear in real Sigma rules), the Raw XML view in
-Log Search, and the authoritative original artifact, which has evidentiary value in DFIR that
-a re-rendered summary does not. Capture XML is per-channel and defaults off, so this is a
-per-channel decision (Log Pipeline → Windows Log Channels), not a global one.
+`raw_xml` still carries three things the message doesn't: fields outside the extract map
+(`Provider_Name` is an XML attribute, `param1`/`param2` are Data elements with no rendered
+label — both appear in real Sigma rules), the Raw XML view in Log Search, and the
+authoritative original artifact, which has evidentiary value in DFIR that a re-rendered
+summary does not. Capture XML is per-channel and defaults off, so this is a per-channel
+decision, not a global one.
+
+**Capture XML turned off for Sysmon** (71.5% of volume, and the channel whose fields the
+message extractors fully cover). Security, PowerShell and Windows Defender keep it — low
+volume, and Security's XML is actually *smaller* than its rendered message. Verified live as
+agents rolled onto the new template, comparing Sysmon Event ID 1 rows with and without XML
+in the same window:
+
+| | with XML (35 rows) | without XML (52 rows) |
+|---|---|---|
+| process_image | 100% | 100% |
+| command_line | 100% | 100% |
+| parent_image | 100% | 94% |
+| file_hash | 100% | 100% |
+| command line median / max length | 536 / 1313 | 584 / 1420 |
+
+No truncation, and the parent_image gap is three events whose rendered `ParentImage` is the
+literal placeholder `-`, which both extractors reject identically. A new **Reducing Log
+Volume** section in Help documents this and the other levers, including what *not* to turn
+off — a disabled channel, or Capture XML removed from a channel whose rules read XML-only
+fields, leaves those rules looking enabled while they quietly stop matching.
 
 ### The manual log purge could never have worked at the size it was needed
 
