@@ -1121,6 +1121,21 @@ def run_detection_cycle():
             _record_engine_phase(f"detection:slow-rule:{(r['title'] or '')[:60]}:{rule_seconds:.0f}s")
 
     _record_engine_phase('detection:writes')
+    # End the read phase's transaction before writing anything. This is the fix for
+    # detection failing with "database is locked" on every single cycle for hours.
+    #
+    # _prepare_ioc_correlation populates its lookup tables with executemany(INSERT ...),
+    # and Python's sqlite3 issues an implicit BEGIN before any INSERT -- even into a TEMP
+    # table. That transaction then stayed open across the ENTIRE rule loop, which on this
+    # appliance runs for minutes, holding a read snapshot the whole time. By the time the
+    # write phase below reached its first INSERT into `alerts`, that INSERT had to upgrade
+    # a long-stale read transaction to a write, and WAL refuses that outright
+    # (SQLITE_BUSY_SNAPSHOT) once any other connection has committed since the snapshot was
+    # taken. Ingest commits continuously, so the upgrade never once succeeded -- and because
+    # that error bypasses the busy handler entirely, no timeout value could ever have fixed
+    # it. Committing here ends the stale snapshot so the writes below open a fresh
+    # transaction and take the lock normally.
+    conn.commit()
     if pending_agg_matches:
         cursor.executemany(
             "INSERT INTO sigma_aggregation_matches (rule_id, group_value) VALUES (?, ?)",
