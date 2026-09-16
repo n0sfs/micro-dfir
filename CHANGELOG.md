@@ -10,6 +10,44 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-16
 
+### 6.8M log rows purged, and why the vacuum reclaimed nothing
+
+Purged everything older than 8 days: **6,800,000 rows**, driven through the newly chunked
+endpoint in ~22 minutes while the appliance stayed up and kept ingesting. Verified by date:
+every day before the cutoff reports **zero** logs, every day after is intact at ~295k/day.
+(The residual counts those dates still show in Log Search are alerts, anomalies and agent
+commands — different tables, deliberately untouched.) Chunk throughput started at 100k/4s
+and settled to ~100k/min as the remaining old rows thinned out and each delete had six
+indexes to maintain.
+
+Then `Vacuum / Optimize DB` ran for thirteen minutes, reported success, and the audit row
+read **`22051.6MB -> 22051.6MB`**. Nothing reclaimed.
+
+The cause is not WAL mode by itself. Reproduced in isolation:
+
+| | result |
+|---|---|
+| bare VACUUM, no reader | 40 MB → 12 MB |
+| bare VACUUM, **one open read transaction** | 40 MB → 40 MB |
+| checkpoint + VACUUM + checkpoint, one open read transaction | 40 MB → 40 MB |
+
+A VACUUM in WAL mode only shrinks the file once a TRUNCATE checkpoint moves the rewritten
+pages back, and that checkpoint **cannot run while any connection holds a read
+transaction** — the closing pragma returns `busy=1, pages_checkpointed=0`. This appliance
+always has readers: three gunicorn workers, the sigma engine, the SOAR engine, the DNS
+server. So this endpoint can never reclaim space on its own, and no amount of fixing it
+from inside an HTTP request changes that.
+
+What changed is that it stops pretending. The endpoint now issues the checkpoints (free, and
+they work if the box happens to be quiet), reports `reclaimed_mb` and `checkpoint_blocked`,
+and the UI says *"Vacuum ran, but reclaimed no space… Reclaiming the space needs a
+maintenance window with the platform services stopped"* rather than a success the file size
+plainly contradicts.
+
+The deleted space is not lost, either way: SQLite keeps those pages free for reuse, so the
+database will not grow again until it has consumed roughly 17 GB of new logs. Actually
+returning the space to the filesystem needs the services stopped — see tasks.md.
+
 ### Multi-line command lines were being truncated at the first newline
 
 Asked whether the appliance parses well enough to ingest **without** `raw_xml` — the obvious

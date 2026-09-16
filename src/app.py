@@ -17595,15 +17595,49 @@ def api_settings_vacuum():
     try:
         before = os.path.getsize(DB_PATH)
         conn = sqlite3.connect(DB_PATH, timeout=120)
+        # Autocommit: VACUUM cannot run inside a transaction, and Python's sqlite3 opens
+        # one implicitly around DML under its default isolation_level.
+        conn.isolation_level = None
+        # This database runs in WAL mode, and a VACUUM here reclaims nothing unless the
+        # file can then be TRUNCATE-checkpointed -- which requires NO other connection to
+        # be holding a read transaction. Confirmed live on a 22 GB database that had just
+        # had 6.8M rows deleted: VACUUM ran for thirteen minutes, reported success, and the
+        # audit row read "22051.6MB -> 22051.6MB". Reproduced in isolation: the same VACUUM
+        # takes a file from 40 MB to 12 MB with no reader, and leaves it at 40 MB with a
+        # single open read transaction, the closing checkpoint returning busy=1.
+        #
+        # On this appliance something is ALWAYS reading -- three gunicorn workers, the sigma
+        # and SOAR engines, the DNS server. So this endpoint cannot be made to reclaim space
+        # on its own; a real reclaim needs the services stopped, which is a host-level
+        # maintenance window, not an HTTP request. The checkpoints are still issued (they
+        # cost nothing and do work when the appliance happens to be quiet), but the result
+        # is now reported honestly instead of as a bland success.
+        conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
         conn.execute('VACUUM')
+        # (busy, log_pages, pages_checkpointed) -- busy=1 means a reader blocked it.
+        checkpoint = conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
         conn.close()
+        # Measured AFTER the closing checkpoint: reading it before reports the pre-vacuum
+        # number and would make even a working vacuum look useless.
         after = os.path.getsize(DB_PATH)
+        blocked = bool(checkpoint and checkpoint[0])
+        reclaimed_mb = round((before - after) / (1024 * 1024), 1)
         before_mb, after_mb = round(before / (1024 * 1024), 1), round(after / (1024 * 1024), 1)
-        log_audit('db_vacuum', 'settings', None, f'{before_mb}MB -> {after_mb}MB')
+        log_audit('db_vacuum', 'settings', None,
+                  f'{before_mb}MB -> {after_mb}MB' + (' (checkpoint blocked by active readers)' if blocked else ''))
         return jsonify({
             'status': 'success',
             'before_mb': before_mb,
             'after_mb': after_mb,
+            'reclaimed_mb': reclaimed_mb,
+            'checkpoint_blocked': blocked,
+            # Surfaced so the UI can say why nothing shrank rather than reporting a success
+            # the file size plainly contradicts.
+            'note': (
+                'The database was rebuilt, but the file could not be truncated because other '
+                'services were reading from it. Reclaiming the space needs a maintenance '
+                'window with the platform services stopped.'
+            ) if blocked or reclaimed_mb <= 0 else None,
         })
     except Exception as e:
         return jsonify({'error': f'Vacuum failed: {e}'}), 500

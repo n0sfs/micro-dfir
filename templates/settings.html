@@ -1254,7 +1254,8 @@ async function vacuumDB() {
     fetch('/api/settings/vacuum', {method: 'POST'})
         .then(r => r.json().then(data => ({ok: r.ok, data})))
         .then(({ok, data}) => {
-            if (ok) toast(`Vacuum complete. Database size: ${data.before_mb} MB -> ${data.after_mb} MB.`, 'success');
+            if (ok && data.note) toast(`Vacuum ran, but reclaimed no space (${data.after_mb} MB). ${data.note}`, 'warning', {duration: 14000});
+            else if (ok) toast(`Vacuum complete. Database size: ${data.before_mb} MB -> ${data.after_mb} MB.`, 'success');
             else toast(data.error || 'Vacuum failed.', 'danger');
         }).catch(err => toast('Error running vacuum: ' + err, 'danger'));
 }
