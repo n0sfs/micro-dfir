@@ -17070,6 +17070,12 @@ def api_settings_backup():
     stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     return send_file(DB_PATH, mimetype='application/octet-stream', as_attachment=True, download_name=f'microdfir_backup_{stamp}.db')
 
+# Rows deleted per purge call. Sized to stay well inside gunicorn's 30s default worker
+# timeout on this appliance's hardware while still clearing millions of rows in a
+# reasonable number of round trips.
+PURGE_CHUNK_ROWS = 100000
+PURGE_CHUNK_MAX = 500000
+
 @app.route('/api/settings/purge', methods=['POST'])
 @login_required
 def api_settings_purge():
@@ -17086,13 +17092,34 @@ def api_settings_purge():
     except (TypeError, ValueError):
         return jsonify({'error': 'days must be a positive integer'}), 400
 
+    # Bounded per call, because this used to be one unbounded DELETE. gunicorn runs with no
+    # --timeout here, so the default 30s applies: a purge covering millions of rows (a real
+    # case -- this appliance reached 6.5M live_logs rows) cannot finish inside it. The worker
+    # gets killed mid-statement, the whole transaction rolls back so NOTHING is deleted, and
+    # the exclusive write lock it held the entire time blocked live ingest for nothing. The
+    # caller loops until `done`, which is this repo's established shape for an operation too
+    # slow for one request (see Log Import's normalize/commit phases, and CLAUDE.md).
+    max_rows = (request.json or {}).get('max_rows', PURGE_CHUNK_ROWS)
+    try:
+        max_rows = max(1, min(int(max_rows), PURGE_CHUNK_MAX))
+    except (TypeError, ValueError):
+        max_rows = PURGE_CHUNK_ROWS
+
     cutoff = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
     db = get_db()
-    cur = db.execute("DELETE FROM live_logs WHERE timestamp < ?", (cutoff,))
+    # No ORDER BY: every row older than the cutoff is going, so which slice this call takes
+    # doesn't matter and sorting millions of ids would just add cost. Repeated calls converge.
+    cur = db.execute(
+        "DELETE FROM live_logs WHERE id IN (SELECT id FROM live_logs WHERE timestamp < ? LIMIT ?)",
+        (cutoff, max_rows)
+    )
     deleted = cur.rowcount
     db.commit()
     log_audit('manual_log_purge', 'settings', None, f'deleted={deleted}, cutoff={cutoff}')
-    return jsonify({'status': 'success', 'deleted': deleted, 'cutoff': cutoff})
+    # A short chunk means nothing older than the cutoff is left -- the loop can stop without
+    # paying for an extra round trip just to discover that.
+    return jsonify({'status': 'success', 'deleted': deleted, 'cutoff': cutoff,
+                    'done': deleted < max_rows})
 
 @app.route('/api/settings/retention', methods=['GET', 'POST'])
 @login_required

@@ -1318,21 +1318,50 @@ function getSelectedRetentionDays() {
     return (v && v > 0) ? v : null;
 }
 
+// Drives the chunked purge endpoint in a loop until it reports done, rather than asking
+// for one unbounded DELETE. The server caps each call's row count so it finishes inside
+// gunicorn's 30s worker timeout; a single statement covering millions of rows would be
+// killed mid-transaction and roll back, deleting nothing while holding the write lock the
+// whole time. Same client-loop shape as Log Import's normalize/commit phases.
 async function purgeNow() {
     const days = getSelectedRetentionDays();
     if (!days) { toast('Enter a valid number of days.', 'warning'); return; }
     if (!(await confirmDialog(`Permanently delete all logs older than ${days} day(s)? This cannot be undone.`, {title: 'Purge logs', danger: true, confirmLabel: 'Purge'}))) return;
-    fetch('/api/settings/purge', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({days: days})
-    }).then(r => r.json()).then(res => {
-        if (res.status === 'success') {
-            toast(`Purged ${res.deleted} log(s) older than ${res.cutoff}. Run "Vacuum / Optimize DB" afterward to reclaim disk space.`, 'success', {duration: 8000});
-        } else {
-            toast(res.error || 'Purge failed.', 'danger');
+
+    const btn = document.querySelector('button[onclick="purgeNow()"]');
+    const origHtml = btn ? btn.innerHTML : null;
+    if (btn) { btn.disabled = true; }
+    let total = 0, cutoff = null, rounds = 0;
+    try {
+        while (true) {
+            if (btn) btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin me-1"></i> Purging&hellip; ${total.toLocaleString()}`;
+            const res = await fetch('/api/settings/purge', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({days: days})
+            }).then(r => r.json());
+            if (res.status !== 'success') {
+                toast(res.error || 'Purge failed.', 'danger');
+                return;
+            }
+            total += res.deleted;
+            cutoff = res.cutoff;
+            rounds++;
+            if (res.done) break;
+            // A runaway loop here would hammer the database indefinitely if the server ever
+            // stopped reporting done; this is a deliberate ceiling, not an expected exit.
+            if (rounds > 500) {
+                toast(`Stopped after ${total.toLocaleString()} log(s) — purge is taking an unusual number of rounds. Run it again to continue.`, 'warning', {duration: 10000});
+                return;
+            }
         }
-    }).catch(err => toast('Error purging logs: ' + err, 'danger'));
+        toast(`Purged ${total.toLocaleString()} log(s) older than ${cutoff}. Run "Vacuum / Optimize DB" afterward to reclaim disk space.`, 'success', {duration: 10000});
+        loadMetrics();
+    } catch (err) {
+        toast(`Error purging logs after ${total.toLocaleString()} deleted: ${err}`, 'danger');
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = origHtml; }
+    }
 }
 
 function saveRetentionPolicy() {
