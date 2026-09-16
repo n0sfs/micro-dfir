@@ -303,21 +303,10 @@
     </div>
 </div>
 
-<!-- Service Health -->
-<div class="row g-4 mb-4">
-    <div class="col-lg-12">
-        <div class="card bg-dark border-secondary">
-            <div class="card-body">
-                <div class="d-flex justify-content-between align-items-center mb-3">
-                    <h5 class="card-title text-light mb-0"><i class="fa-solid fa-server me-2"></i>Service Health</h5>
-                    <button class="btn btn-outline-secondary btn-sm" onclick="loadServiceHealth()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
-                </div>
-                <p class="text-muted small mb-3">Whether this appliance's own background services are running, and whether the detection engine's loop is actually completing cycles. A service can be "active" and still be getting every request it makes rejected -- the heartbeat is what tells those two apart.</p>
-                <div id="serviceHealthCard" class="small text-muted">Loading&hellip;</div>
-            </div>
-        </div>
-    </div>
-</div>
+<!-- Service Health lives on Settings -> System. It reports systemd unit state and the
+     detection engine's heartbeat -- appliance operations, nothing to do with parsing --
+     and only ended up here because it was added next to Pipeline Health, which is
+     genuinely a parser-tab concern (Vector config reload). -->
 
 <!-- Parser Catalog -->
 <div class="row g-4 mb-4">
@@ -1707,53 +1696,6 @@ function loadVectorStatus() {
         .catch(err => { card.innerHTML = `<span class="text-danger">Failed to load. <a href="#" onclick="loadVectorStatus(); return false;">Retry</a></span>`; console.error('Error loading Vector status:', err); });
 }
 
-// systemd's own vocabulary, mapped straight through -- "active" is the only healthy
-// answer; "unknown" means the check itself couldn't run, which is deliberately NOT
-// reported as a failure of the service.
-function unitStateBadge(state) {
-    if (state === 'active') return '<span class="badge bg-success">Active</span>';
-    if (state === 'unknown') return '<span class="badge bg-secondary">Unknown</span>';
-    return `<span class="badge bg-danger">${escHtml(state)}</span>`;
-}
-
-function engineAgeLabel(secs) {
-    if (secs === null || secs === undefined) return 'never';
-    if (secs < 90) return `${secs}s ago`;
-    if (secs < 5400) return `${Math.round(secs / 60)}m ago`;
-    return `${Math.round(secs / 3600)}h ago`;
-}
-
-function loadServiceHealth() {
-    const card = document.getElementById('serviceHealthCard');
-    fetch('/api/system/service-health')
-        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-        .then(d => {
-            const units = (d.units || []).map(u =>
-                `<tr><td>${escHtml(u.unit)}</td><td>${unitStateBadge(u.state)}</td></tr>`).join('');
-            const eng = d.sigma_engine || {};
-            const beat = eng.stale
-                ? `<span class="badge bg-danger">Stale</span>`
-                : `<span class="badge bg-success">Beating</span>`;
-            let pollBadge = '<span class="badge bg-secondary">Unknown</span>';
-            if (eng.poll_status === 'ok') pollBadge = '<span class="badge bg-success">OK</span>';
-            else if (eng.poll_status === 'error') pollBadge = '<span class="badge bg-danger">Failing</span>';
-            let html = `
-                <div class="table-responsive mb-3">
-                    <table class="table table-dark table-sm align-middle mb-0" style="max-width:420px;">
-                        <thead><tr><th>Unit</th><th>State</th></tr></thead>
-                        <tbody>${units}</tbody>
-                    </table>
-                </div>
-                <div>${beat} <span class="ms-2">Detection engine last completed a cycle ${escHtml(engineAgeLabel(eng.age_seconds))}${eng.heartbeat_at ? ' (' + escHtml(eng.heartbeat_at) + ' UTC)' : ''}.</span></div>
-                <div class="mt-2">${pollBadge} <span class="ms-2">Scheduled tasks (playbooks, agent sweeps, SLA and offline-agent notifications).</span></div>`;
-            if (eng.poll_error) {
-                html += `<pre class="bg-black border border-secondary rounded p-2 mt-2 mb-0 text-danger" style="white-space:pre-wrap;">${escHtml(eng.poll_error)}</pre>`;
-            }
-            card.innerHTML = html;
-        })
-        .catch(err => { card.innerHTML = `<span class="text-danger">Failed to load. <a href="#" onclick="loadServiceHealth(); return false;">Retry</a></span>`; console.error('Error loading service health:', err); });
-}
-
 function loadParserHealth() {
     const tbody = document.getElementById('parserCatalogBody');
     fetch('/api/log-pipeline/parser-health')
@@ -2428,7 +2370,6 @@ document.addEventListener("DOMContentLoaded", function() {
     loadLinuxChannelGroupsDropdown();
     loadLinuxChannels();
     loadVectorStatus();
-    loadServiceHealth();
     loadParserHealth();
     loadCustomParsers();
     loadIngestionHealth();

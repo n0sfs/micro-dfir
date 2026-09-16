@@ -1032,8 +1032,11 @@ def api_ingest():
                 # instead of inserting a new one every time -- see migrate_alerts_dedup_columns.
                 # rule_id IS NULL identifies this heuristic path's own rows (vs sigma_engine.py's
                 # rule_id-based alerts), so rule_name is the match key here instead.
+                # `host IS ?`, not `host = ?`: host is nullable and `NULL = NULL` is never
+                # true, so an event with no parsed host would never find its own previous
+                # alert. Same fix as sigma_engine.py's dedup lookup.
                 existing = db.execute(
-                    "SELECT id FROM alerts WHERE rule_id IS NULL AND rule_name = ? AND host = ? "
+                    "SELECT id FROM alerts WHERE rule_id IS NULL AND rule_name = ? AND host IS ? "
                     "AND effective_seen >= datetime('now', '-15 minutes') ORDER BY id DESC LIMIT 1",
                     (triggered_rule, hst)
                 ).fetchone()
@@ -1045,9 +1048,26 @@ def api_ingest():
                 else:
                     from geoip import lookup_country
                     country_code, country_name = lookup_country(sip)
+                    # last_seen is the SOC's OWN clock (datetime('now') -- UTC), not the
+                    # event's `ts`. This is what makes the dedup window above work at all.
+                    #
+                    # `ts` is whatever the agent reported (Windows sends TimeCreated: the
+                    # endpoint's LOCAL time). effective_seen is COALESCE(last_seen,
+                    # timestamp), so stamping last_seen with `ts` measured the alert's age
+                    # on one clock and the 15-minute window on another. At UTC-4 every new
+                    # alert was born already looking four hours old, the window could never
+                    # contain it, and EVERY heuristic match inserted a new row instead of
+                    # bumping occurrence_count -- for as long as this path has existed.
+                    # (sigma_engine.py's alert path always used datetime('now') here and
+                    # deduped correctly, which is why only these rows multiplied.)
+                    #
+                    # It also silently cut heuristic alerts out of the cross-rule
+                    # escalation sweep, which selects on the same 15-minute effective_seen
+                    # window. `timestamp` keeps the event's own reported time.
                     ins_cur = db.execute(
-                        "INSERT INTO alerts (timestamp, rule_name, severity, host, message, username, source_ip, occurrence_count, last_seen, country_code, country_name, file_hash) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
-                        (ts, triggered_rule, alert_sev, hst, msg, usr, sip, ts, country_code, country_name, file_hash)
+                        "INSERT INTO alerts (timestamp, rule_name, severity, host, message, username, source_ip, occurrence_count, last_seen, country_code, country_name, file_hash) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?, ?)",
+                        (ts, triggered_rule, alert_sev, hst, msg, usr, sip, country_code, country_name, file_hash)
                     )
                     new_alert_id = ins_cur.lastrowid
                     # See analyzers.auto_enrich_and_score_alert's own docstring. This
