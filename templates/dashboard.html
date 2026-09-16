@@ -1152,14 +1152,20 @@ function initChart() {
             maintainAspectRatio: false,
             plugins: {
                 // usePointStyle + pointStyle:'circle' renders the legend key as a round dot
-                // matching the line's own point markers, instead of Chart.js's default
-                // filled rectangle.
+                // instead of Chart.js's default filled rectangle. generateLabels then
+                // repaints each dot in the line's OWN colour: by default the swatch is
+                // filled with the dataset's backgroundColor, which here is the near-
+                // transparent area fill (rgba(...,0.1)), so the dots came out as hollow
+                // rings rather than dots.
                 legend: {
                     display: true,
                     labels: {
                         color: '#adb5bd', font: { size: 11 },
                         usePointStyle: true, pointStyle: 'circle',
-                        boxWidth: 8, boxHeight: 8
+                        boxWidth: 8, boxHeight: 8,
+                        generateLabels: (chart) =>
+                            Chart.defaults.plugins.legend.labels.generateLabels(chart)
+                                .map(l => ({ ...l, fillStyle: l.strokeStyle, lineWidth: 0 }))
                     }
                 },
                 tooltip: { mode: 'index', intersect: false }
