@@ -612,10 +612,21 @@ _CHANNEL_NAME_RE = re.compile(r'^[A-Za-z0-9 _\-/.]{1,255}$')
 # indent some renderers add; `ParentImage:`/`ParentCommandLine:` lines can't false-match
 # the bare `Image:`/`CommandLine:` patterns since those lines start with "Parent", not
 # "Image"/"Command".
+#
+# Each column gets ONE pattern, so a column with two real label spellings uses an
+# alternation. Sysmon's `Image:`/`CommandLine:`/`ParentImage:` are one spelling; the
+# Windows Security log's own process-creation event (4688) renders the identical
+# concepts as `New Process Name:`, `Process Command Line:` and `Creator Process Name:`,
+# and matched none of these patterns before. That left process_image/command_line/
+# parent_image NULL on every Security-channel process event -- so every Sigma rule
+# keyed on Image/CommandLine/NewProcessName (by far the most common category there is)
+# compared against an empty column and could only ever fire on Sysmon-sourced rows,
+# despite `security` being an ingested channel and 4688 being what a host without
+# Sysmon actually reports process creation with.
 _PROCESS_FIELD_PATTERNS = {
-    'process_image': re.compile(r'^[ \t]*Image:\s*(.+)$', re.MULTILINE),
-    'command_line': re.compile(r'^[ \t]*CommandLine:\s*(.+)$', re.MULTILINE),
-    'parent_image': re.compile(r'^[ \t]*ParentImage:\s*(.+)$', re.MULTILINE),
+    'process_image': re.compile(r'^[ \t]*(?:Image|New Process Name):\s*(.+)$', re.MULTILINE),
+    'command_line': re.compile(r'^[ \t]*(?:CommandLine|Process Command Line):\s*(.+)$', re.MULTILINE),
+    'parent_image': re.compile(r'^[ \t]*(?:ParentImage|Creator Process Name):\s*(.+)$', re.MULTILINE),
     'parent_command_line': re.compile(r'^[ \t]*ParentCommandLine:\s*(.+)$', re.MULTILINE),
     'original_file_name': re.compile(r'^[ \t]*OriginalFileName:\s*(.+)$', re.MULTILINE),
     # Sysmon Event ID 1's raw multi-hash string ("MD5=xxx,SHA256=yyy,IMPHASH=zzz") --
@@ -690,6 +701,38 @@ def _is_suspicious_lsass_process_access(msg_lower):
     m = _GRANTED_ACCESS_RE.search(msg_lower)
     return bool(m and m.group(1) in _SUSPICIOUS_LSASS_ACCESS_MASKS)
 
+# The two heuristics below got the same treatment as the lsass one above, for the same
+# reason: a bare `substring in msg_lower` test fires on any event whose text merely
+# MENTIONS the term, which on a real Windows fleet is constant.
+#
+# `"-enc" in msg_lower` was the worst of them -- it matches "-Encoding", a completely
+# ordinary PowerShell parameter (`Out-File -Encoding utf8`), so routine scripting raised
+# a HIGH "Suspicious PowerShell Execution" alert. powershell.exe's real encoded-command
+# flag is `-e`/`-enc`/`-EncodedCommand` (it accepts any unambiguous prefix, and `/` as
+# well as `-`), all of which end the parameter token -- `-Encoding` continues into more
+# letters, which is exactly what the trailing (?![\w]) rejects.
+_PS_ENCODED_CMD_RE = re.compile(r'(?<![\w-])[-/](?:e|en|enc|encodedcommand)(?![\w])', re.IGNORECASE)
+_PS_HIDDEN_WINDOW_RE = re.compile(r'(?<![\w-])[-/]w(?:indowstyle)?[\s:]+hidden\b', re.IGNORECASE)
+# `"ipconfig" in msg_lower` likewise fired on any log line containing the word, in any
+# channel, for any reason. Anchored to word boundaries and to the multi-word forms of
+# `net user`/`net group` that actually denote enumeration.
+_DISCOVERY_CMD_RE = re.compile(
+    r'\b(?:whoami|ipconfig|systeminfo|nltest|hostname)(?:\.exe)?\b'
+    r'|\bnet1?(?:\.exe)?\s+(?:user|group|localgroup|view|share|session)\b',
+    re.IGNORECASE
+)
+
+def _process_execution_subject(proc):
+    """The text a command-matching heuristic should actually inspect: the parsed process
+    image / command line / original filename when the event really is a process execution,
+    otherwise None. Falling back to the whole message (the caller's job) keeps detection on
+    channels this appliance can't structure, but preferring the parsed fields means a
+    genuine execution is judged on what ran, not on what the event text happens to say."""
+    subject = ' '.join(
+        v for v in (proc.get('process_image'), proc.get('original_file_name'), proc.get('command_line')) if v
+    )
+    return subject or None
+
 # Maps the same 5 target columns as _PROCESS_FIELD_PATTERNS above, but reads them from
 # a channel's raw event XML (captured when a channel has "Capture XML" enabled) instead
 # of guessing at the rendered Message text -- every <Data Name="..."> is explicit, so
@@ -698,6 +741,12 @@ _XML_PROCESS_FIELD_MAP = {
     'Image': 'process_image',
     'CommandLine': 'command_line',
     'ParentImage': 'parent_image',
+    # Security 4688's own <Data Name="..."> spellings for process image and parent --
+    # the same gap the rendered-message patterns above had, in the XML-capture path.
+    # (4688 already names its command line 'CommandLine', so that one was covered.)
+    # No event carries both spellings, so these can't collide with the Sysmon names.
+    'NewProcessName': 'process_image',
+    'ParentProcessName': 'parent_image',
     'ParentCommandLine': 'parent_command_line',
     'OriginalFileName': 'original_file_name',
     'Hashes': 'hashes_raw',
@@ -950,6 +999,11 @@ def api_ingest():
 
             # --- INLINE DETECTION ENGINE (fast keyword heuristics; sigma_engine.py runs the real Sigma-rule pipeline) ---
             msg_lower = msg.lower()
+            # What the command-matching heuristics below actually inspect: the parsed
+            # process image/command line when this event really is a process execution,
+            # the raw message otherwise (channels this appliance can't structure still
+            # get checked, just less precisely). See _process_execution_subject.
+            exec_subject = _process_execution_subject(proc) or msg
             triggered_rule = None
             alert_sev = "INFO"
 
@@ -964,10 +1018,11 @@ def api_ingest():
             elif "mimikatz" in msg_lower or (eid == '10' and _is_suspicious_lsass_process_access(msg_lower)):
                 triggered_rule = "Credential Dumping Activity"
                 alert_sev = "CRITICAL"
-            elif "powershell" in msg_lower and ("-enc" in msg_lower or "-w hidden" in msg_lower):
+            elif "powershell" in msg_lower and (
+                    _PS_ENCODED_CMD_RE.search(exec_subject) or _PS_HIDDEN_WINDOW_RE.search(exec_subject)):
                 triggered_rule = "Suspicious PowerShell Execution"
                 alert_sev = "HIGH"
-            elif "whoami" in msg_lower or "net user" in msg_lower or "ipconfig" in msg_lower:
+            elif _DISCOVERY_CMD_RE.search(exec_subject):
                 triggered_rule = "System Discovery Commands"
                 alert_sev = "LOW"
                 
@@ -5296,6 +5351,8 @@ def api_rules_dry_run():
 # volume; compilation alone is pure in-memory work and checks the same failure class
 # in a fraction of a second per rule. Only enabled rules are checked -- a disabled
 # rule failing to convert has no live impact until someone enables it.
+RULE_UNEVALUABLE_REPORT_CAP = 250
+
 @app.route('/api/rules/validate-all', methods=['POST'])
 @login_required
 def api_rules_validate_all():
@@ -5326,7 +5383,12 @@ def api_rules_validate_all():
     # Dead rules first, then by how much of the rule is affected -- the top of this list is
     # where an analyst's tuning time actually pays off.
     unevaluable.sort(key=lambda u: (not u['dead'], -len(u['dead']), -len(u['imprecise']), u['title']))
-    return jsonify({'checked': len(rules), 'failed': failed, 'unevaluable': unevaluable,
+    # Counts are reported in full, the list is not. With a few thousand imported SigmaHQ
+    # rules enabled this list can cover most of them, and a response carrying every title
+    # and field name is megabytes of JSON for a modal that shows the first hundred anyway.
+    return jsonify({'checked': len(rules), 'failed': failed,
+                    'unevaluable': unevaluable[:RULE_UNEVALUABLE_REPORT_CAP],
+                    'unevaluable_total': len(unevaluable),
                     'dead_count': sum(1 for u in unevaluable if u['dead'])})
 
 # The real, execute-against-logs dry run (see api_rules_dry_run() above) for a

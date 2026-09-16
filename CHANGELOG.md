@@ -8,6 +8,93 @@ a new feature, a real architectural decision, an incident and its fix. Routine p
 fixes don't need their own line; group them into the feature they support. Newest first.
 Full commit-level detail is always available via `git log`.
 
+## 2026-09-16
+
+### Detection review: six silent failures in the SIEM rule engine
+
+A two-pass review of the Sigma engine and the ingest-side detection path. Everything here
+shares one property, which is why none of it had ever been noticed: **nothing threw**. A
+rule showed as enabled, ran on every cycle, counted toward MITRE coverage, and detected
+nothing. `run_detection_cycle()` only logs rules that raise, so a rule that compiles to
+SQL which simply can't match is invisible by construction.
+
+**Keyword rules could never match.** A fieldless Sigma search — `keywords: ['whoami
+/priv']` — means "this text appears somewhere in the event". The field mapping correctly
+sent it to the `message` column but left the value a bare literal, so it compiled to
+`message = 'whoami /priv'`: an exact comparison against the *entire* rendered event text,
+which is never true for a real log line. Every keyword-style rule in the catalogue was
+structurally incapable of firing. Fieldless values are now wildcarded, giving the
+`message LIKE '%…%'` the spec actually calls for. Deliberately narrow: only fieldless
+items, only strings, only values that aren't already wildcarded — a bare number would
+become `%3%` and match everything.
+
+**MITRE tags were dropped from two of the three ways a rule can write them.** The
+extraction regex only understood indented block sequences with no trailing comment, so
+`tags: [attack.t1059.001]` and `- attack.t1003.001  # lsass` both yielded *no* techniques.
+Alerts from those rules were written with an empty `mitre_techniques` column, so the
+Coverage page's Validated tier counted the technique as never having fired. The same regex
+existed as **five byte-identical copies** — the engine, the rules cache, the log-source gap
+summary, the coverage snapshot, and the compliance report — all sharing both blind spots.
+Consolidated into `mitre_attack.tags_from_rule_yaml()`, beside the `techniques_for_tags()`
+it feeds; that module is already the shared Flask-free home for tag semantics, so this adds
+no new sharing mechanism, it just stops one bug from having five addresses. Zero-indent and
+CRLF rules now parse too.
+
+**Alert dedup wasn't null-safe on host.** The lookup keyed on `rule_id IS ? AND host = ?
+AND username IS ?`. Since `NULL = NULL` is never true and the host column is nullable, a
+rule matching events whose host never got parsed found nothing to merge into and created a
+brand-new alert *every cycle* instead of bumping one row's occurrence count — precisely the
+runaway the 15-minute dedup window exists to prevent. Fixed on the import-replay path too.
+
+**Aggregation bookkeeping was never deleted by anything.** Every raw per-event match of an
+aggregation rule writes a row that exists only so the threshold check can count it inside
+the rule's timeframe — typically 300 seconds — and every one of those rows was kept
+forever. On a rule like "failed logons `count() by user > 5`" against real authentication
+noise that's an unbounded write-only table. `run_due_aggregation_prune()` now runs on the
+same once-a-day, settings-tracked cadence as the log and IOC purges, with retention derived
+from the longest timeframe any rule actually configures, so a `timeframe: 7d` rule keeps
+counting correctly instead of being quietly broken by a fixed short window.
+
+**Windows Security 4688 process fields were never extracted.** The parsers only knew
+Sysmon's `Image:` / `CommandLine:` / `ParentImage:` spellings. The Security log renders the
+identical concepts as `New Process Name:`, `Process Command Line:` and `Creator Process
+Name:`, and matched none of them — so those columns stayed NULL on every Security-channel
+process event, and every rule keyed on Image/CommandLine/NewProcessName (the single largest
+rule category there is) compared against an empty column. Added to both the rendered-message
+patterns and the XML-capture map. This is what a host without Sysmon reports process
+creation with.
+
+**Two inline heuristics fired on any event that merely mentioned a word.** `"-enc" in
+message` also matches `-Encoding` — an entirely ordinary PowerShell parameter — so routine
+scripting like `Out-File -Encoding utf8` raised a HIGH "Suspicious PowerShell Execution"
+alert. Likewise `"ipconfig" in message` fired on any log line containing the word, in any
+channel, for any reason. Both now match anchored patterns against the *parsed* process
+image and command line when the event is a real execution, falling back to the message only
+for channels this appliance can't structure — the same treatment the LSASS heuristic already
+got for the same reason.
+
+### Making the remaining gap visible instead of silent
+
+`live_logs` is a flat table, so a Sigma field with no column falls back to `message`. With a
+wildcard that genuinely works (`message LIKE '%mimikatz%'`); with an exact comparison it
+silently becomes `message = 3`, which nothing can satisfy. That distinction decides whether
+a rule works imprecisely or not at all, and it was invisible either way.
+
+**Validate Rules** now reports it. Alongside genuine conversion failures it lists rules that
+can *never* match (an exact comparison on a field with no column) and, separately, rules
+that fall back to searching raw event text. The counts are the point: a few thousand
+imported rules can look like coverage while a meaningful share of them are structurally
+dead. Under-reports rather than over-reports by design — a field is only called dead when
+every value for it is an exact literal.
+
+### Permission gate on the rule-authoring preview
+
+`/api/rules/dry-run` compiles caller-supplied Sigma YAML into SQL and executes it against
+`live_logs`, and shipped with `@login_required` alone — so a role without permission to
+create a rule could still run one it invented. It and the two validate endpoints now require
+`rules.manage`, which every other rule-authoring route already did. Same recurring
+read-side-gate class noted in CLAUDE.md.
+
 ## 2026-09-15
 
 ### A PyInstaller bundle build for the Windows agent, and frozen-awareness

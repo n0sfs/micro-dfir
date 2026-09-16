@@ -114,9 +114,13 @@ class MapFieldsToColumns(FieldMappingTransformation):
     #     done the job) and aren't empty (`%%` matches everything).
     def apply_detection_item(self, detection_item):
         fieldless = detection_item.field is None
-        super().apply_detection_item(detection_item)
+        # The base class returns a replacement SigmaDetection when a field maps to several
+        # columns. get_mapping() above only ever returns one, so that can't happen here --
+        # but the return value is propagated rather than dropped, so this stays correct if
+        # the mapping ever does grow a 1:many entry.
+        result = super().apply_detection_item(detection_item)
         if not fieldless:
-            return
+            return result
         rewritten, modified = [], False
         for value in detection_item.value:
             if isinstance(value, SigmaString) and str(value) and not value.contains_special():
@@ -126,6 +130,7 @@ class MapFieldsToColumns(FieldMappingTransformation):
                 rewritten.append(value)
         if modified:
             detection_item.value = rewritten
+        return result
 
 # Many older SigmaHQ rules predate the spec settling on strict ISO 8601 (yyyy-mm-dd) for
 # date/modified fields and still use yyyy/mm/dd, which pysigma's SigmaRule validation
@@ -625,7 +630,14 @@ def analyze_rule_field_coverage(rule_yaml):
 def _analyze_parsed_field_coverage(collection):
     dead, imprecise = {}, {}
     for rule in collection.rules:
-        for detection in rule.detection.detections.values():
+        # A collection can also hold a Sigma correlation rule, which has no `detection`
+        # block at all. Skipping it here leaves the real, more informative error to
+        # backend.convert() (the sqlite backend has no correlation support) instead of
+        # masking it with an AttributeError raised from the field check.
+        detections = getattr(getattr(rule, 'detection', None), 'detections', None)
+        if not detections:
+            continue
+        for detection in detections.values():
             for item in _iter_detection_items(detection):
                 field = item.field
                 if not field or field.lower() in _FIELD_COLUMN_ALIASES:

@@ -3744,6 +3744,9 @@ function renderRuleValidationResults(data) {
     const summaryEl = document.getElementById('ruleValidationSummary');
     const listEl = document.getElementById('ruleValidationList');
     const unevaluable = data.unevaluable || [];
+    // The server caps the list it sends but always reports the true total, so the
+    // summary counts stay honest even when the table is showing a slice of them.
+    const unevaluableTotal = data.unevaluable_total != null ? data.unevaluable_total : unevaluable.length;
     const deadCount = data.dead_count || 0;
 
     const blocks = [];
@@ -3753,7 +3756,7 @@ function renderRuleValidationResults(data) {
     if (deadCount) {
         blocks.push(`<div class="alert alert-warning py-2 px-3 mb-2"><i class="fa-solid fa-ghost me-1"></i>${deadCount} enabled rule${deadCount === 1 ? '' : 's'} can never match: ${deadCount === 1 ? 'it compares a' : 'they compare'} field this appliance has no column for against the whole event text, exactly. ${deadCount === 1 ? 'It counts' : 'They count'} toward coverage and detect nothing.</div>`);
     }
-    const impreciseOnly = unevaluable.length - deadCount;
+    const impreciseOnly = unevaluableTotal - deadCount;
     if (impreciseOnly > 0) {
         blocks.push(`<div class="alert alert-secondary py-2 px-3 mb-2"><i class="fa-solid fa-circle-info me-1"></i>${impreciseOnly} further rule${impreciseOnly === 1 ? '' : 's'} fall back to searching the raw event text for fields with no column -- these still fire, but less precisely than the rule intends.</div>`);
     }
@@ -3791,8 +3794,8 @@ function renderRuleValidationResults(data) {
                     <td class="text-end"><button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="ruleValidationModal.hide(); openRuleModal(${u.id});">Open</button></td>
                 </tr>
             `).join('')}</tbody>
-        </table>${unevaluable.length > shown.length
-            ? `<div class="small text-muted mt-1">Showing the first ${shown.length} of ${unevaluable.length}, worst first.</div>` : ''}`);
+        </table>${unevaluableTotal > shown.length
+            ? `<div class="small text-muted mt-1">Showing the first ${shown.length} of ${unevaluableTotal}, worst first.</div>` : ''}`);
     }
     listEl.innerHTML = sections.join('');
 
