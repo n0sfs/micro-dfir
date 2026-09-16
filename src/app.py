@@ -623,11 +623,46 @@ _CHANNEL_NAME_RE = re.compile(r'^[A-Za-z0-9 _\-/.]{1,255}$')
 # compared against an empty column and could only ever fire on Sysmon-sourced rows,
 # despite `security` being an ingested channel and 4688 being what a host without
 # Sysmon actually reports process creation with.
+#
+# A command line can span MULTIPLE LINES in the rendered body -- an inline PowerShell
+# script block, a wrapped argument list -- and `(.+)$` stops at the first newline. Measured
+# against 400 real events on this appliance: where the message-derived and XML-derived
+# command lines disagreed, the message one was shorter EVERY time, by a median of ~1,400
+# characters. That is the whole payload of an encoded-command invocation, silently dropped
+# from the column every process-creation detection reads. It only stays hidden because
+# Capture XML is currently on for these channels, so _extract_process_fields_from_xml wins
+# and this extractor never runs -- turn XML capture off and the truncation becomes live.
+#
+# The two multi-line fields therefore run to the next KNOWN label rather than the next
+# newline. An allowlist, not a generic `\w+:`, because command-line content routinely
+# contains things that look like labels (`https://...`, a `param:` line in a script) and
+# stopping on those would reintroduce the same truncation it fixes.
+_PROCESS_MESSAGE_LABELS = (
+    # Sysmon process-creation body, in render order
+    'RuleName', 'UtcTime', 'ProcessGuid', 'ProcessId', 'Image', 'FileVersion', 'Description',
+    'Product', 'Company', 'OriginalFileName', 'CommandLine', 'CurrentDirectory', 'User',
+    'LogonGuid', 'LogonId', 'TerminalSessionId', 'IntegrityLevel', 'Hashes',
+    'ParentProcessGuid', 'ParentProcessId', 'ParentImage', 'ParentCommandLine', 'ParentUser',
+    # Windows Security 4688's own spellings for the same event
+    'New Process ID', 'New Process Name', 'Token Elevation Type', 'Mandatory Label',
+    'Creator Process ID', 'Creator Process Name', 'Process Command Line',
+    'Security ID', 'Account Name', 'Account Domain', 'Logon ID',
+)
+_NEXT_LABEL_BOUNDARY = (
+    r'(?=\r?\n[ \t]*(?:' + '|'.join(re.escape(l) for l in _PROCESS_MESSAGE_LABELS) + r'):|\Z)'
+)
+
 _PROCESS_FIELD_PATTERNS = {
     'process_image': re.compile(r'^[ \t]*(?:Image|New Process Name):\s*(.+)$', re.MULTILINE),
-    'command_line': re.compile(r'^[ \t]*(?:CommandLine|Process Command Line):\s*(.+)$', re.MULTILINE),
+    # `[ \t]*` after the colon, not `\s*`: `\s` matches newlines, so a greedy `\s*` on an
+    # empty value would skip the blank remainder of the line and capture the NEXT field.
+    'command_line': re.compile(
+        r'^[ \t]*(?:CommandLine|Process Command Line):[ \t]*(.+?)' + _NEXT_LABEL_BOUNDARY,
+        re.MULTILINE | re.DOTALL),
     'parent_image': re.compile(r'^[ \t]*(?:ParentImage|Creator Process Name):\s*(.+)$', re.MULTILINE),
-    'parent_command_line': re.compile(r'^[ \t]*ParentCommandLine:\s*(.+)$', re.MULTILINE),
+    'parent_command_line': re.compile(
+        r'^[ \t]*ParentCommandLine:[ \t]*(.+?)' + _NEXT_LABEL_BOUNDARY,
+        re.MULTILINE | re.DOTALL),
     'original_file_name': re.compile(r'^[ \t]*OriginalFileName:\s*(.+)$', re.MULTILINE),
     # Sysmon Event ID 1's raw multi-hash string ("MD5=xxx,SHA256=yyy,IMPHASH=zzz") --
     # collapsed to one canonical hash by _canonical_hash() below, not stored as-is.
