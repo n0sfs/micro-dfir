@@ -3782,11 +3782,11 @@ function renderRuleValidationResults(data) {
         blocks.push(`<div class="alert alert-danger py-2 px-3 mb-2"><i class="fa-solid fa-triangle-exclamation me-1"></i>${data.failed.length} of ${data.checked} enabled rules failed to convert or run -- these are silently doing nothing on every detection cycle.</div>`);
     }
     if (deadCount) {
-        blocks.push(`<div class="alert alert-warning py-2 px-3 mb-2"><i class="fa-solid fa-ghost me-1"></i>${deadCount} enabled rule${deadCount === 1 ? '' : 's'} can never match: ${deadCount === 1 ? 'it compares a field' : 'they compare fields'} this appliance has no column for against the whole event text, exactly. ${deadCount === 1 ? 'It counts toward coverage and detects' : 'They count toward coverage and detect'} nothing.</div>`);
+        blocks.push(`<div class="alert alert-warning py-2 px-3 mb-2"><i class="fa-solid fa-ghost me-1"></i>${deadCount} enabled rule${deadCount === 1 ? '' : 's'} contain${deadCount === 1 ? 's' : ''} a comparison that can never match -- a null test against a field this appliance has no column for. ${deadCount === 1 ? 'It counts toward coverage and detects' : 'They count toward coverage and detect'} nothing.</div>`);
     }
     const impreciseOnly = unevaluableTotal - deadCount;
     if (impreciseOnly > 0) {
-        blocks.push(`<div class="alert alert-secondary py-2 px-3 mb-2"><i class="fa-solid fa-circle-info me-1"></i>${impreciseOnly} further rule${impreciseOnly === 1 ? '' : 's'} fall back to searching the raw event text for fields with no column -- these still fire, but less precisely than the rule intends.</div>`);
+        blocks.push(`<div class="alert alert-secondary py-2 px-3 mb-2"><i class="fa-solid fa-circle-info me-1"></i>${impreciseOnly} rule${impreciseOnly === 1 ? '' : 's'} match against the raw event text for fields with no column. Exact comparisons are anchored to the field's own rendered label, so these do fire on Windows and Sysmon events -- but a rule whose log source isn't ingested at all still can't, and the MITRE Coverage page reports those separately.</div>`);
     }
     if (!blocks.length) {
         blocks.push(`<div class="alert alert-success py-2 px-3 mb-0"><i class="fa-solid fa-circle-check me-1"></i>All ${data.checked} enabled rule${data.checked === 1 ? '' : 's'} converted cleanly, and every field they match on maps to a real column.</div>`);
@@ -3817,7 +3817,7 @@ function renderRuleValidationResults(data) {
                     <td class="small">${escHtml(u.title)}</td>
                     <td class="small">${u.dead.length
                         ? '<span class="badge bg-warning text-dark">Never matches</span>'
-                        : '<span class="badge bg-secondary">Imprecise</span>'}</td>
+                        : '<span class="badge bg-secondary">Text-matched</span>'}</td>
                     <td class="small text-muted">${escHtml(u.dead.concat(u.imprecise).join(', '))}</td>
                     <td class="text-end"><button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="ruleValidationModal.hide(); openRuleModal(${u.id});">Open</button></td>
                 </tr>

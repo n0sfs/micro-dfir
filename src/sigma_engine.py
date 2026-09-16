@@ -90,6 +90,67 @@ _FIELD_COLUMN_ALIASES = {
     'filehashioc': 'file_hash', 'destinationdomainioc': 'query_name',
 }
 
+# Splits a Sigma field name into its rendered-label form: 'LogonType' -> 'Logon Type',
+# 'Provider_Name' -> 'Provider Name'. Windows' Security log renders what Sigma calls
+# LogonType as "Logon Type:"; Sysmon renders its own fields with the name unsplit
+# ("GrantedAccess:"). Both spellings are emitted, so neither channel is guessed at.
+_CAMEL_BOUNDARY_RE = re.compile(r'(?<=[a-z0-9])(?=[A-Z])')
+# Longest run of separator characters tolerated between a rendered label's colon and its
+# value. Windows indents with up to three tabs; Sysmon uses a single space.
+_MESSAGE_LABEL_MAX_GAP = 3
+
+def _spaced_field_label(field):
+    return _CAMEL_BOUNDARY_RE.sub(' ', (field or '').replace('_', ' ')).strip()
+
+# Turns an EXACT comparison on a field with no column into a field-anchored search of the
+# raw event text, instead of the nonsense it used to compile to.
+#
+# Windows and Sysmon both render an event body as one "Label: value" pair per line -- the
+# same convention this appliance's own ingest-time extractors already rely on (see
+# _PROCESS_FIELD_PATTERNS in app.py). So `GrantedAccess: 0x1410` on a rule with no
+# granted-access column becomes `message LIKE '%GrantedAccess:%0x1410%'`: scoped to that
+# field's own line rather than hunting the value anywhere in the event, and blind to
+# whether the renderer separated label from value with a space or tabs (Security uses
+# tabs, Sysmon a single space -- which is why the separator is a wildcard, not a literal).
+#
+# Returns a LIST because a detection item's values are OR'd: both the unsplit and the
+# space-split label spelling are tried, covering Sysmon and Security without needing a
+# per-field table of which renders which.
+#
+# Only for values that are exact literals. A value that already carries a wildcard
+# (|contains / |startswith / |endswith) is left completely alone: those rules DO match
+# against message text today, and re-anchoring them could silently stop a working rule
+# from firing on a channel that doesn't use the label convention. This only ever touches
+# comparisons that currently cannot match anything at all, so it has no way to take a
+# working detection away.
+def _message_anchored_values(field, value):
+    if isinstance(value, SigmaString):
+        if value.contains_special() or not str(value):
+            return None
+        literal = str(value)
+    elif isinstance(value, (SigmaNumber, SigmaBool)):
+        literal = str(value)
+    else:
+        return None  # regex, CIDR, null, comparison expressions -- not a plain literal
+    labels = {field}
+    spaced = _spaced_field_label(field)
+    if spaced and spaced != field:
+        labels.add(spaced)
+    # The separator between label and value is a bounded run of single-character wildcards,
+    # NOT an open '*'. An open wildcard lets a short value match something far later in the
+    # event: `LogonType: 3` compiled to `%Logon Type:%3%`, which happily matched a Logon
+    # Type 10 event because a Logon ID of 0x3E7 appears further down the same message.
+    # Renderers separate label from value by nothing, one space, or one to three tabs, so
+    # 0-3 wildcards covers every real form while keeping the value pinned to its own label.
+    # SigmaString parses '*'/'?' as wildcards, so patterns are assembled from parts rather
+    # than one escaped string -- the literal keeps whatever characters it had.
+    star, value_str = SigmaString('*'), SigmaString(literal)
+    return [
+        star + SigmaString(f'{label}:' + ('?' * gap)) + value_str + star
+        for label in sorted(labels)
+        for gap in range(_MESSAGE_LABEL_MAX_GAP + 1)
+    ]
+
 @dataclass
 class MapFieldsToColumns(FieldMappingTransformation):
     mapping: dict = dc_field(default_factory=dict)
@@ -113,23 +174,39 @@ class MapFieldsToColumns(FieldMappingTransformation):
     #   - only values that aren't already wildcarded (|contains/|startswith/|endswith have
     #     done the job) and aren't empty (`%%` matches everything).
     def apply_detection_item(self, detection_item):
-        fieldless = detection_item.field is None
+        field = detection_item.field
+        fieldless = field is None
+        # An unmapped field is one with no live_logs column -- it lands on `message`, the
+        # raw event text. Captured BEFORE super(), which rewrites the name to the column
+        # and loses the distinction.
+        unmapped = not fieldless and field.lower() not in _FIELD_COLUMN_ALIASES
         # The base class returns a replacement SigmaDetection when a field maps to several
         # columns. get_mapping() above only ever returns one, so that can't happen here --
         # but the return value is propagated rather than dropped, so this stays correct if
         # the mapping ever does grow a 1:many entry.
         result = super().apply_detection_item(detection_item)
-        if not fieldless:
+        if fieldless:
+            rewritten, modified = [], False
+            for value in detection_item.value:
+                if isinstance(value, SigmaString) and str(value) and not value.contains_special():
+                    rewritten.append(SigmaString('*') + value + SigmaString('*'))
+                    modified = True
+                else:
+                    rewritten.append(value)
+            if modified:
+                detection_item.value = rewritten
             return result
-        rewritten, modified = [], False
-        for value in detection_item.value:
-            if isinstance(value, SigmaString) and str(value) and not value.contains_special():
-                rewritten.append(SigmaString('*') + value + SigmaString('*'))
-                modified = True
-            else:
-                rewritten.append(value)
-        if modified:
-            detection_item.value = rewritten
+        if unmapped:
+            rewritten, modified = [], False
+            for value in detection_item.value:
+                anchored = _message_anchored_values(field, value)
+                if anchored:
+                    rewritten.extend(anchored)
+                    modified = True
+                else:
+                    rewritten.append(value)
+            if modified:
+                detection_item.value = rewritten
         return result
 
 # Many older SigmaHQ rules predate the spec settling on strict ISO 8601 (yyyy-mm-dd) for
@@ -583,20 +660,20 @@ def check_rule_converts(conn, rule_yaml, ioc_cache):
         _rewrite_ioc_lookups(q)
     return field_coverage
 
-# A rule can convert perfectly, run every cycle, and still be structurally incapable of
-# ever producing an alert -- which check_rule_converts() above cannot see, because nothing
-# throws. That happens because live_logs is a flat SIEM table: _FIELD_COLUMN_ALIASES maps
-# the field names it does have real columns for, and sends everything else to the free-text
-# `message` column. For a field with a wildcard comparison that fallback is what the module
-# docstring describes -- imprecise, but it works, since `message LIKE '%mimikatz%'` really
-# can hit. For an EXACT comparison it silently becomes nonsense: `LogonType: 3` compiles to
-# `message = 3`, and no log line's entire rendered text is ever the string "3". The rule
-# looks enabled, counts toward MITRE coverage, and detects nothing, forever.
+# Reports which of a rule's fields have no live_logs column, and what that costs.
 #
-# This reports both shapes so the Validate Rules health check can say so out loud:
-#   dead      -- an unmapped field compared for exact equality: can never match.
-#   imprecise -- an unmapped field compared with a wildcard/regex: matches against the raw
-#                event text instead of that field, so it can both miss and over-match.
+# live_logs is a flat SIEM table: _FIELD_COLUMN_ALIASES maps the field names there are real
+# columns for and sends everything else to the free-text `message` column. Since
+# _message_anchored_values started anchoring exact comparisons to the field's own rendered
+# label, that fallback genuinely matches for Windows/Sysmon events instead of compiling to
+# the `message = 3` nonsense it used to -- so these are no longer dead rules. They are still
+# worth reporting, because matching event TEXT is not the same as matching a real field:
+#   imprecise   -- matched against the raw event body rather than a column. Works where the
+#                  event renders "Field: value" (Windows, Sysmon); a rule whose log source
+#                  this appliance doesn't ingest at all is separately reported by
+#                  _log_source_gap_summary, and no field mapping can help there.
+#   unmatchable -- the comparison still cannot match anything: a null test against an
+#                  unmapped field becomes `message IS NULL`, and message is NOT NULL.
 # Fieldless keyword searches are deliberately NOT reported: a substring search over the
 # whole event IS their defined meaning, so `message` is the correct column for them.
 #
@@ -609,14 +686,12 @@ def _iter_detection_items(detection):
         else:
             yield item
 
-def _compiles_to_pattern_match(value):
-    """True when this value compiles to a LIKE/REGEXP pattern rather than a bare literal
-    comparison -- i.e. when a fallback onto the free-text `message` column can still
-    genuinely hit. A plain string, number, boolean or null all compile to an exact test
-    (`= 3`, `IS NULL`) that the whole rendered event text can never satisfy."""
-    if isinstance(value, SigmaString):
-        return value.contains_special()
-    return not isinstance(value, (SigmaNumber, SigmaBool, SigmaNull))
+def _is_unmatchable_on_message(value):
+    """True when this value, compared against the free-text `message` column, cannot match
+    any row at all. Only a null test qualifies now: it compiles to `message IS NULL`, and
+    live_logs.message is NOT NULL. Literals are field-anchored by _message_anchored_values,
+    and wildcards/regexes already searched the text, so both of those can genuinely hit."""
+    return isinstance(value, SigmaNull)
 
 def analyze_rule_field_coverage(rule_yaml):
     rule_yaml_text = _normalize_rule_dates(rule_yaml)
@@ -628,7 +703,7 @@ def analyze_rule_field_coverage(rule_yaml):
 # Operates on an ALREADY-PARSED, not-yet-converted collection so check_rule_converts can
 # share its single parse -- see its comment for why the ordering matters.
 def _analyze_parsed_field_coverage(collection):
-    dead, imprecise = {}, {}
+    unmatchable, imprecise = {}, {}
     for rule in collection.rules:
         # A collection can also hold a Sigma correlation rule, which has no `detection`
         # block at all. Skipping it here leaves the real, more informative error to
@@ -642,16 +717,16 @@ def _analyze_parsed_field_coverage(collection):
                 field = item.field
                 if not field or field.lower() in _FIELD_COLUMN_ALIASES:
                     continue
-                # Only call it dead when EVERY value for this field is an exact literal.
-                # A value list is OR'd by default, so one pattern-matching branch is enough
-                # for the item to be able to fire; under `|all` (AND) that makes this
-                # under-report rather than over-report, which is the right direction for a
-                # check whose output is "this rule is broken".
-                exact = not any(_compiles_to_pattern_match(v) for v in item.value) if item.value else False
-                (dead if exact else imprecise).setdefault(field, 0)
-                (dead if exact else imprecise)[field] += 1
+                # Only unmatchable when EVERY value is. A value list is OR'd by default, so
+                # one matchable branch is enough for the item to be able to fire; under
+                # `|all` (AND) that makes this under-report rather than over-report, the
+                # right direction for a check whose output is "this rule is broken".
+                bad = all(_is_unmatchable_on_message(v) for v in item.value) if item.value else False
+                bucket = unmatchable if bad else imprecise
+                bucket[field] = bucket.get(field, 0) + 1
     # A field used both ways in one rule is reported at its worse shape only.
-    return {'dead': sorted(dead), 'imprecise': sorted(f for f in imprecise if f not in dead)}
+    return {'dead': sorted(unmatchable),
+            'imprecise': sorted(f for f in imprecise if f not in unmatchable)}
 
 DRY_RUN_PREVIEW_FIELDS = ('id', 'timestamp', 'host', 'app', 'severity', 'event_id', 'username', 'message')
 
