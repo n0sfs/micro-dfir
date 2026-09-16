@@ -3732,15 +3732,40 @@ function validateAllRules() {
         .finally(() => { btn.disabled = false; btn.innerHTML = origHtml; });
 }
 
+// A rule can be broken in two unrelated ways, and only one of them throws. `failed` is a
+// rule that won't compile at all. `unevaluable` is a rule that compiles and runs every
+// cycle while referencing event fields live_logs has no column for -- 'dead' ones compare
+// the whole rendered message text for exact equality and so can never alert, 'imprecise'
+// ones search that text instead of the named field. Both were previously invisible: the
+// rule shows as enabled and counts toward MITRE coverage either way.
+const RULE_VALIDATION_LIST_CAP = 100;
+
 function renderRuleValidationResults(data) {
     const summaryEl = document.getElementById('ruleValidationSummary');
     const listEl = document.getElementById('ruleValidationList');
-    if (!data.failed.length) {
-        summaryEl.innerHTML = `<div class="alert alert-success py-2 px-3 mb-0"><i class="fa-solid fa-circle-check me-1"></i>All ${data.checked} enabled rule${data.checked === 1 ? '' : 's'} converted and ran cleanly against the last day of logs.</div>`;
-        listEl.innerHTML = '';
-    } else {
-        summaryEl.innerHTML = `<div class="alert alert-danger py-2 px-3 mb-0"><i class="fa-solid fa-triangle-exclamation me-1"></i>${data.failed.length} of ${data.checked} enabled rules failed to convert or run -- these are silently doing nothing on every detection cycle.</div>`;
-        listEl.innerHTML = `<table class="table table-dark table-sm align-middle mb-0">
+    const unevaluable = data.unevaluable || [];
+    const deadCount = data.dead_count || 0;
+
+    const blocks = [];
+    if (data.failed.length) {
+        blocks.push(`<div class="alert alert-danger py-2 px-3 mb-2"><i class="fa-solid fa-triangle-exclamation me-1"></i>${data.failed.length} of ${data.checked} enabled rules failed to convert or run -- these are silently doing nothing on every detection cycle.</div>`);
+    }
+    if (deadCount) {
+        blocks.push(`<div class="alert alert-warning py-2 px-3 mb-2"><i class="fa-solid fa-ghost me-1"></i>${deadCount} enabled rule${deadCount === 1 ? '' : 's'} can never match: ${deadCount === 1 ? 'it compares a' : 'they compare'} field this appliance has no column for against the whole event text, exactly. ${deadCount === 1 ? 'It counts' : 'They count'} toward coverage and detect nothing.</div>`);
+    }
+    const impreciseOnly = unevaluable.length - deadCount;
+    if (impreciseOnly > 0) {
+        blocks.push(`<div class="alert alert-secondary py-2 px-3 mb-2"><i class="fa-solid fa-circle-info me-1"></i>${impreciseOnly} further rule${impreciseOnly === 1 ? '' : 's'} fall back to searching the raw event text for fields with no column -- these still fire, but less precisely than the rule intends.</div>`);
+    }
+    if (!blocks.length) {
+        blocks.push(`<div class="alert alert-success py-2 px-3 mb-0"><i class="fa-solid fa-circle-check me-1"></i>All ${data.checked} enabled rule${data.checked === 1 ? '' : 's'} converted cleanly, and every field they match on maps to a real column.</div>`);
+    }
+    summaryEl.innerHTML = blocks.join('');
+
+    const sections = [];
+    if (data.failed.length) {
+        sections.push(`<h6 class="text-danger small text-uppercase mt-2 mb-1">Failed to convert</h6>
+        <table class="table table-dark table-sm align-middle mb-0">
             <thead><tr><th>Rule</th><th>Error</th><th></th></tr></thead>
             <tbody>${data.failed.map(f => `
                 <tr>
@@ -3749,8 +3774,28 @@ function renderRuleValidationResults(data) {
                     <td class="text-end"><button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="ruleValidationModal.hide(); openRuleModal(${f.id});">Open</button></td>
                 </tr>
             `).join('')}</tbody>
-        </table>`;
+        </table>`);
     }
+    if (unevaluable.length) {
+        const shown = unevaluable.slice(0, RULE_VALIDATION_LIST_CAP);
+        sections.push(`<h6 class="text-warning small text-uppercase mt-3 mb-1">Fields with no column</h6>
+        <table class="table table-dark table-sm align-middle mb-0">
+            <thead><tr><th>Rule</th><th>Verdict</th><th>Fields</th><th></th></tr></thead>
+            <tbody>${shown.map(u => `
+                <tr>
+                    <td class="small">${escHtml(u.title)}</td>
+                    <td class="small">${u.dead.length
+                        ? '<span class="badge bg-warning text-dark">Never matches</span>'
+                        : '<span class="badge bg-secondary">Imprecise</span>'}</td>
+                    <td class="small text-muted">${escHtml(u.dead.concat(u.imprecise).join(', '))}</td>
+                    <td class="text-end"><button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="ruleValidationModal.hide(); openRuleModal(${u.id});">Open</button></td>
+                </tr>
+            `).join('')}</tbody>
+        </table>${unevaluable.length > shown.length
+            ? `<div class="small text-muted mt-1">Showing the first ${shown.length} of ${unevaluable.length}, worst first.</div>` : ''}`);
+    }
+    listEl.innerHTML = sections.join('');
+
     if (!ruleValidationModal) ruleValidationModal = new bootstrap.Modal(document.getElementById('ruleValidationModal'));
     ruleValidationModal.show();
 }

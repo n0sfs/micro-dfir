@@ -5100,7 +5100,7 @@ def _log_source_gap_summary(db):
     now = time.time()
     if _LOG_SOURCE_GAP_CACHE['data'] is not None and (now - _LOG_SOURCE_GAP_CACHE['time']) < _LOG_SOURCE_GAP_CACHE_TTL:
         return _LOG_SOURCE_GAP_CACHE['data']
-    from mitre_attack import techniques_for_tags
+    from mitre_attack import techniques_for_tags, tags_from_rule_yaml
     groups = {}
     for r in db.execute("SELECT rule_yaml FROM sigma_rules WHERE enabled = 1").fetchall():
         ry = r['rule_yaml']
@@ -5122,9 +5122,7 @@ def _log_source_gap_summary(db):
         g = groups.setdefault(label, {'rule_count': 0, 'technique_ids': set()})
         g['rule_count'] += 1
         try:
-            t_match = re.search(r'^tags:\s*\n((\s+-\s*[^\n\r]+\n?)+)', ry, re.MULTILINE)
-            tags = [t.strip().strip('- ') for t in t_match.group(1).split('\n') if t.strip()] if t_match else []
-            for tech in techniques_for_tags(tags):
+            for tech in techniques_for_tags(tags_from_rule_yaml(ry)):
                 if tech['tactic'] != 'unmapped':
                     g['technique_ids'].add(tech['id'])
         except Exception:
@@ -5151,7 +5149,7 @@ def _get_rules_cache(db):
     ingested_apps = _get_ingested_apps(db)
 
     import re
-    from mitre_attack import techniques_for_tags
+    from mitre_attack import techniques_for_tags, tags_from_rule_yaml
     rules_out = []
     for r in db.execute(
         "SELECT id, title, rule_yaml, original_yaml, upstream_yaml, enabled, source, cloned_from, created_by, created_at, updated_by, updated_at, compliance_tags "
@@ -5166,8 +5164,7 @@ def _get_rules_cache(db):
             platform = (raw_product or 'Global').title()
             log_source_ingestible = _rule_log_source_ingestible(raw_product, raw_service, ingested_apps)
 
-            t_match = re.search(r'^tags:\s*\n((\s+-\s*[^\n\r]+\n?)+)', ry, re.MULTILINE)
-            tags = [t.strip().strip('- ') for t in t_match.group(1).split('\n') if t.strip()] if t_match else []
+            tags = tags_from_rule_yaml(ry)
 
             rule_type = "Generic"
             for t in tags:
@@ -5258,6 +5255,15 @@ SIGMA_DRY_RUN_WINDOWS = {'1d': 1, '7d': 7, '30d': 30, '90d': 90}
 @app.route('/api/rules/dry-run', methods=['POST'])
 @login_required
 def api_rules_dry_run():
+    # Same gate as POST /api/rules, because this is the same capability: the caller hands
+    # over arbitrary Sigma YAML which is compiled to SQL and executed against live_logs.
+    # Every other rule-authoring route already required rules.manage; this one -- the
+    # preview half of authoring -- shipped with @login_required alone, so a role without
+    # permission to create a rule could still run one it made up. (The toolbar button is
+    # visible to everyone, exactly like the already-gated Enable/Disable Selected beside
+    # it -- the server is the enforcement point, per the RBAC note in CLAUDE.md.)
+    err = require_permission('rules.manage')
+    if err: return err
     d = request.get_json() or {}
     rule_yaml = (d.get('rule_yaml') or '').strip()
     if not rule_yaml:
@@ -5293,18 +5299,35 @@ def api_rules_dry_run():
 @app.route('/api/rules/validate-all', methods=['POST'])
 @login_required
 def api_rules_validate_all():
+    err = require_permission('rules.manage')
+    if err: return err
     db = get_db()
     rules = db.execute("SELECT id, title, rule_yaml FROM sigma_rules WHERE enabled = 1 ORDER BY id").fetchall()
 
     from sigma_engine import check_rule_converts
     ioc_cache = {}
     failed = []
+    # Rules that convert and run fine but reference event fields live_logs has no column
+    # for. 'dead' can never produce an alert at all (an exact comparison against the whole
+    # message text); 'imprecise' matches that text instead of the named field, so it can
+    # both miss and over-match. Reported separately from `failed` because the remedy is
+    # different: a failure is a broken rule, this is a rule asking for data this appliance
+    # doesn't collect in structured form. See sigma_engine.analyze_rule_field_coverage.
+    unevaluable = []
     for r in rules:
         try:
-            check_rule_converts(db, r['rule_yaml'], ioc_cache)
+            coverage = check_rule_converts(db, r['rule_yaml'], ioc_cache)
         except Exception as e:
             failed.append({'id': r['id'], 'title': r['title'], 'error': str(e)})
-    return jsonify({'checked': len(rules), 'failed': failed})
+            continue
+        if coverage['dead'] or coverage['imprecise']:
+            unevaluable.append({'id': r['id'], 'title': r['title'],
+                                'dead': coverage['dead'], 'imprecise': coverage['imprecise']})
+    # Dead rules first, then by how much of the rule is affected -- the top of this list is
+    # where an analyst's tuning time actually pays off.
+    unevaluable.sort(key=lambda u: (not u['dead'], -len(u['dead']), -len(u['imprecise']), u['title']))
+    return jsonify({'checked': len(rules), 'failed': failed, 'unevaluable': unevaluable,
+                    'dead_count': sum(1 for u in unevaluable if u['dead'])})
 
 # The real, execute-against-logs dry run (see api_rules_dry_run() above) for a
 # hand-picked, bounded set of rules instead of one at a time -- e.g. the exact rules
@@ -5320,6 +5343,8 @@ SIGMA_VALIDATE_SELECTED_PREVIEW_LIMIT = 5
 @app.route('/api/rules/validate-selected', methods=['POST'])
 @login_required
 def api_rules_validate_selected():
+    err = require_permission('rules.manage')
+    if err: return err
     d = request.get_json() or {}
     rule_ids = d.get('rule_ids') or []
     if not isinstance(rule_ids, list) or not rule_ids:

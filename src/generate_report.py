@@ -702,8 +702,7 @@ def _framework_technique_ids(cursor, framework_key):
     for row in cursor.execute(
         "SELECT rule_yaml FROM sigma_rules WHERE compliance_tags LIKE ?", (like_pattern,)
     ).fetchall():
-        t_match = re.search(r'^tags:\s*\n((\s+-\s*[^\n\r]+\n?)+)', row['rule_yaml'], re.MULTILINE)
-        tags = [t.strip().strip('- ') for t in t_match.group(1).split('\n') if t.strip()] if t_match else []
+        tags = mitre_attack.tags_from_rule_yaml(row['rule_yaml'])
         technique_ids.update(t['id'] for t in mitre_attack.techniques_for_tags(tags))
     return technique_ids
 

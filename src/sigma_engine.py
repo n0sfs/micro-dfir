@@ -3,12 +3,13 @@ import analyzers
 import soar_alerts
 from warninglists import filter_warninglisted_ips
 from geoip import lookup_country
-from mitre_attack import techniques_for_tags
+from mitre_attack import techniques_for_tags, tags_from_rule_yaml
 from dataclasses import dataclass, field as dc_field
 from sigma.collection import SigmaCollection
 from sigma.backends.sqlite import sqliteBackend
 from sigma.processing.transformations import FieldMappingTransformation
 from sigma.processing.pipeline import ProcessingPipeline, ProcessingItem
+from sigma.types import SigmaString, SigmaNumber, SigmaBool, SigmaNull
 
 DB_PATH = "/opt/micro-dfir/siem.db"
 STATE_FILE = os.path.join(os.path.dirname(DB_PATH), "sigma_state.json")
@@ -95,6 +96,37 @@ class MapFieldsToColumns(FieldMappingTransformation):
     def get_mapping(self, field_name):
         return _FIELD_COLUMN_ALIASES.get((field_name or '').lower(), 'message')
 
+    # A FIELDLESS Sigma search -- `keywords: ['whoami /priv']`, the `|all`/plain-list form
+    # with no field name at all -- means "this text appears somewhere in the event" per the
+    # Sigma spec, not "a field equals this string". The field mapping above already sends it
+    # to `message` (field_name is None -> '' -> the default), but the VALUE was left as a
+    # bare literal, so pysigma compiled it to `message = 'whoami /priv'` -- an exact match
+    # against the entire rendered event text, which is never true for a real log line. Every
+    # keyword-style rule was therefore silently incapable of ever matching, on every cycle,
+    # with nothing anywhere reporting it (run_detection_cycle only logs rules that THROW).
+    # Wrapping the value in wildcards restores the spec meaning: `message LIKE '%...%'`.
+    #
+    # Deliberately narrow, because this rewrites what a rule means:
+    #   - only fieldless items (a real field name keeps exact-match semantics),
+    #   - only SigmaString values -- a regex (|re) is already a substring search by nature,
+    #     and a bare number would turn into `%3%`, matching essentially every event,
+    #   - only values that aren't already wildcarded (|contains/|startswith/|endswith have
+    #     done the job) and aren't empty (`%%` matches everything).
+    def apply_detection_item(self, detection_item):
+        fieldless = detection_item.field is None
+        super().apply_detection_item(detection_item)
+        if not fieldless:
+            return
+        rewritten, modified = [], False
+        for value in detection_item.value:
+            if isinstance(value, SigmaString) and str(value) and not value.contains_special():
+                rewritten.append(SigmaString('*') + value + SigmaString('*'))
+                modified = True
+            else:
+                rewritten.append(value)
+        if modified:
+            detection_item.value = rewritten
+
 # Many older SigmaHQ rules predate the spec settling on strict ISO 8601 (yyyy-mm-dd) for
 # date/modified fields and still use yyyy/mm/dd, which pysigma's SigmaRule validation
 # rejects outright — the rule fails to even parse. ~30% of the imported rule set is affected.
@@ -109,19 +141,13 @@ def _extract_level(rule_yaml):
     m = _LEVEL_RE.search(rule_yaml or '')
     return m.group(1).strip().strip('"\'').capitalize() if m else None
 
-# Same tag-block regex app.py's _get_rules_cache() uses to feed the MITRE coverage
-# heatmap -- duplicated here rather than imported, since that function lives in a
-# Flask-app-scoped module this standalone detection-engine process doesn't otherwise
-# depend on. Extracts the raw 'attack.txxxx'-style tag strings; techniques_for_tags()
-# (mitre_attack.py) resolves those to real technique IDs, dropping tactic-only tags.
-_TAGS_BLOCK_RE = re.compile(r'^tags:\s*\n((\s+-\s*[^\n\r]+\n?)+)', re.MULTILINE)
-
+# The comma-joined technique-ID string stamped onto every alert this engine creates
+# (alerts.mitre_techniques) -- the one signal that distinguishes "a rule is enabled for
+# this technique" from "this technique actually fired here", read back by the Coverage
+# page's Validated tier. Both halves live in mitre_attack.py, the Flask-free reference
+# module this standalone process can safely import.
 def _extract_mitre_technique_ids(rule_yaml):
-    m = _TAGS_BLOCK_RE.search(rule_yaml or '')
-    if not m:
-        return ''
-    tags = [t.strip().strip('- ') for t in m.group(1).split('\n') if t.strip()]
-    return ','.join(t['id'] for t in techniques_for_tags(tags))
+    return ','.join(t['id'] for t in techniques_for_tags(tags_from_rule_yaml(rule_yaml)))
 
 _AGG_CONDITION_RE = re.compile(
     r'condition:\s*(?P<base>\S+)\s*\|\s*count\(\)\s*(?:by\s+(?P<by>\w+)\s*)?(?P<op>==|!=|<=|>=|<|>)\s*(?P<threshold>\d+)',
@@ -532,15 +558,88 @@ def _rewrite_ioc_lookups(sql):
 # `ioc_cache` should be shared across every rule checked in one bulk pass (the same
 # restraint run_detection_cycle()'s own per-cycle cache uses), so the IOC lookup tables
 # are built at most once regardless of how many rules reference them.
+#
+# Also returns analyze_rule_field_coverage()'s verdict for the same rule (see below),
+# because the two checks answer the same question -- "is this rule actually doing
+# anything?" -- from opposite sides, and one parse can serve both. It has to be computed
+# BEFORE backend.convert(), which applies the field-mapping pipeline to the parsed
+# collection in place: afterwards every field name has already been rewritten to a column
+# and there's nothing left to tell whether it was mapped or fell back.
 def check_rule_converts(conn, rule_yaml, ioc_cache):
     cursor = conn.cursor()
     rule_yaml_text = _prepare_ioc_correlation(_normalize_rule_dates(rule_yaml), cursor, ioc_cache)
     agg = _extract_aggregation_condition(rule_yaml)
     if agg:
         rule_yaml_text = _strip_aggregation_condition(rule_yaml_text, agg)
+    collection = SigmaCollection.from_yaml(rule_yaml_text)
+    field_coverage = _analyze_parsed_field_coverage(collection)
     backend = _make_backend()
-    for q in backend.convert(SigmaCollection.from_yaml(rule_yaml_text)):
+    for q in backend.convert(collection):
         _rewrite_ioc_lookups(q)
+    return field_coverage
+
+# A rule can convert perfectly, run every cycle, and still be structurally incapable of
+# ever producing an alert -- which check_rule_converts() above cannot see, because nothing
+# throws. That happens because live_logs is a flat SIEM table: _FIELD_COLUMN_ALIASES maps
+# the field names it does have real columns for, and sends everything else to the free-text
+# `message` column. For a field with a wildcard comparison that fallback is what the module
+# docstring describes -- imprecise, but it works, since `message LIKE '%mimikatz%'` really
+# can hit. For an EXACT comparison it silently becomes nonsense: `LogonType: 3` compiles to
+# `message = 3`, and no log line's entire rendered text is ever the string "3". The rule
+# looks enabled, counts toward MITRE coverage, and detects nothing, forever.
+#
+# This reports both shapes so the Validate Rules health check can say so out loud:
+#   dead      -- an unmapped field compared for exact equality: can never match.
+#   imprecise -- an unmapped field compared with a wildcard/regex: matches against the raw
+#                event text instead of that field, so it can both miss and over-match.
+# Fieldless keyword searches are deliberately NOT reported: a substring search over the
+# whole event IS their defined meaning, so `message` is the correct column for them.
+#
+# Pure in-memory parsing, no live_logs access -- same cost profile as check_rule_converts,
+# which is what makes running it across every enabled rule in one request viable.
+def _iter_detection_items(detection):
+    for item in detection.detection_items:
+        if hasattr(item, 'detection_items'):
+            yield from _iter_detection_items(item)
+        else:
+            yield item
+
+def _compiles_to_pattern_match(value):
+    """True when this value compiles to a LIKE/REGEXP pattern rather than a bare literal
+    comparison -- i.e. when a fallback onto the free-text `message` column can still
+    genuinely hit. A plain string, number, boolean or null all compile to an exact test
+    (`= 3`, `IS NULL`) that the whole rendered event text can never satisfy."""
+    if isinstance(value, SigmaString):
+        return value.contains_special()
+    return not isinstance(value, (SigmaNumber, SigmaBool, SigmaNull))
+
+def analyze_rule_field_coverage(rule_yaml):
+    rule_yaml_text = _normalize_rule_dates(rule_yaml)
+    agg = _extract_aggregation_condition(rule_yaml)
+    if agg:
+        rule_yaml_text = _strip_aggregation_condition(rule_yaml_text, agg)
+    return _analyze_parsed_field_coverage(SigmaCollection.from_yaml(rule_yaml_text))
+
+# Operates on an ALREADY-PARSED, not-yet-converted collection so check_rule_converts can
+# share its single parse -- see its comment for why the ordering matters.
+def _analyze_parsed_field_coverage(collection):
+    dead, imprecise = {}, {}
+    for rule in collection.rules:
+        for detection in rule.detection.detections.values():
+            for item in _iter_detection_items(detection):
+                field = item.field
+                if not field or field.lower() in _FIELD_COLUMN_ALIASES:
+                    continue
+                # Only call it dead when EVERY value for this field is an exact literal.
+                # A value list is OR'd by default, so one pattern-matching branch is enough
+                # for the item to be able to fire; under `|all` (AND) that makes this
+                # under-report rather than over-report, which is the right direction for a
+                # check whose output is "this rule is broken".
+                exact = not any(_compiles_to_pattern_match(v) for v in item.value) if item.value else False
+                (dead if exact else imprecise).setdefault(field, 0)
+                (dead if exact else imprecise)[field] += 1
+    # A field used both ways in one rule is reported at its worse shape only.
+    return {'dead': sorted(dead), 'imprecise': sorted(f for f in imprecise if f not in dead)}
 
 DRY_RUN_PREVIEW_FIELDS = ('id', 'timestamp', 'host', 'app', 'severity', 'event_id', 'username', 'message')
 
@@ -746,7 +845,11 @@ def replay_import_chunk(conn, import_id, rule_offset, chunk_size, ioc_cache=None
                     # cycle's own 15-minute merge window), since "recent" is meaningless
                     # for a fixed, already-closed historical dataset.
                     existing = cursor.execute(
-                        "SELECT id FROM alerts WHERE rule_id = ? AND host = ? AND username IS ? AND import_id = ?",
+                        # `host IS ?` for the same null-safety reason as the live cycle's own
+                        # dedup lookup -- an imported log with no parsed host would otherwise
+                        # re-create its alert on every replay of the same import rather than
+                        # being recognised as already-seen.
+                        "SELECT id FROM alerts WHERE rule_id = ? AND host IS ? AND username IS ? AND import_id = ?",
                         (r['id'], host, username, import_id)
                     ).fetchone()
                     if existing:
@@ -906,7 +1009,15 @@ def run_detection_cycle():
             (_, event_id, severity, _, message, _, source_ip, destination_ip, log_event_id, log_app,
              file_hash, query_name) = g['latest']
             existing = cursor.execute(
-                "SELECT id, occurrence_count FROM alerts WHERE rule_id IS ? AND host = ? AND username IS ? "
+                # All three key columns use IS, not =, because all three are nullable and
+                # `NULL = NULL` is NULL in SQL, never true. rule_id and username already
+                # did; host did not -- so a rule matching events with no host at all (a
+                # relayed syslog line whose host field never got parsed, and live_logs.host
+                # has no NOT NULL constraint) found no existing row to merge into, and
+                # created a brand-new alert on every single cycle it kept matching instead
+                # of bumping one alert's occurrence_count. Exactly the runaway the 15-minute
+                # dedup window exists to prevent, for the one input shape it didn't cover.
+                "SELECT id, occurrence_count FROM alerts WHERE rule_id IS ? AND host IS ? AND username IS ? "
                 "AND effective_seen >= datetime('now', '-15 minutes') ORDER BY id DESC LIMIT 1",
                 (rule_id, host, username)
             ).fetchone()
@@ -1096,6 +1207,71 @@ def run_due_ioc_purge():
     if deleted:
         print(f"[+] Automatic IOC purge: deleted {deleted} stale indicator(s) older than {retention_days} day(s) (cutoff {cutoff}).", flush=True)
 
+# Aggregation bookkeeping has no natural end of life, and nothing was ever deleting it.
+#
+# Every raw per-event match of an aggregation rule writes a sigma_aggregation_matches row
+# (see run_detection_cycle) purely so _check_aggregation_thresholds can COUNT them inside
+# the rule's own timeframe window -- typically 300 seconds. A row is therefore useless the
+# moment it falls out of that window, but it stayed in the table forever. On a rule like
+# "failed logons count() by user > 5" against real authentication noise that is an
+# unbounded write-only table: it never changes what fires (the GROUP BY is time-bounded
+# and indexed), it just grows the database and every backup of it without limit.
+# sigma_aggregation_alerts, the per-group cooldown marker, has exactly the same shape.
+#
+# Retention is derived from the rules themselves rather than hardcoded -- a rule with
+# `timeframe: 7d` genuinely needs 7 days of matches to count correctly, so pruning to a
+# fixed short window would silently break it. Doubled for headroom and floored at a day;
+# rows belonging to a rule that no longer exists are dropped regardless of age, since
+# nothing can ever count them again. Same once-a-day, settings-tracked, piggybacks-on-the
+# -engine-loop shape as run_due_log_purge/run_due_ioc_purge above.
+AGGREGATION_PRUNE_MIN_RETENTION_SECONDS = 86400
+
+def run_due_aggregation_prune():
+    if not os.path.exists(DB_PATH):
+        return
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    now = datetime.datetime.now()
+    last_row = cursor.execute("SELECT value FROM settings WHERE key = 'sigma_aggregation_last_prune'").fetchone()
+    if last_row and last_row['value']:
+        try:
+            last_prune = datetime.datetime.strptime(last_row['value'], '%Y-%m-%d %H:%M:%S')
+            if (now - last_prune).total_seconds() < 24 * 3600:
+                conn.close()
+                return
+        except (ValueError, TypeError):
+            pass  # unparseable timestamp -- treat as due, same as never having run
+
+    # Every rule, not just enabled ones: a rule that's temporarily off should still find
+    # its accumulated window intact when it's switched back on.
+    windows = [
+        agg['window_seconds']
+        for r in cursor.execute("SELECT rule_yaml FROM sigma_rules").fetchall()
+        for agg in (_extract_aggregation_condition(r['rule_yaml']),)
+        if agg
+    ]
+    retention = max(max(windows) * 2 if windows else 0, AGGREGATION_PRUNE_MIN_RETENTION_SECONDS)
+
+    deleted = 0
+    for table, ts_col in (('sigma_aggregation_matches', 'matched_at'), ('sigma_aggregation_alerts', 'alerted_at')):
+        cursor.execute(
+            f"DELETE FROM {table} WHERE {ts_col} < datetime('now', ?) "
+            f"OR rule_id NOT IN (SELECT id FROM sigma_rules)",
+            (f'-{retention} seconds',)
+        )
+        deleted += cursor.rowcount
+    cursor.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('sigma_aggregation_last_prune', ?)",
+        (now.strftime('%Y-%m-%d %H:%M:%S'),)
+    )
+    conn.commit()
+    conn.close()
+    if deleted:
+        print(f"[+] Aggregation prune: deleted {deleted} expired aggregation row(s) "
+              f"(retention {retention}s).", flush=True)
+
 # Liveness + last-outcome stamp for this service, written once per loop iteration.
 #
 # There was no way to tell from the UI whether this engine was running at all. That
@@ -1145,6 +1321,10 @@ if __name__ == "__main__":
             run_due_ioc_purge()
         except Exception as e:
             print(f"[-] Automatic IOC purge check failed: {e}")
+        try:
+            run_due_aggregation_prune()
+        except Exception as e:
+            print(f"[-] Aggregation prune check failed: {e}")
         try:
             # 127.0.0.1 only works when gunicorn binds 0.0.0.0; Settings > Network's
             # dual-bind flow can bind ui_bind_ip to one specific IP instead (the exact

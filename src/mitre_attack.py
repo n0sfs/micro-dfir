@@ -968,6 +968,45 @@ def lookup(technique_id):
     return None, 'unmapped'
 
 
+# Pulls a rule's raw `tags:` list straight out of its YAML text, without a full YAML
+# parse -- the same speed/correctness trade the rest of this app's rule-metadata reading
+# makes (see _extract_yaml_field in app.py), since this runs once per rule across
+# thousands of rules per coverage request.
+#
+# Lives here, beside techniques_for_tags(), because this and that function are two halves
+# of one job and every caller of one calls the other. It previously existed as five
+# byte-identical copies of a regex + list comprehension (sigma_engine.py's alert
+# stamping, app.py's rules cache AND its log-source gap summary, coverage_snapshot.py,
+# generate_report.py's compliance framework mapping) -- all five sharing the same two
+# blind spots, so a rule written in either of the forms below counted as having NO
+# techniques in every MITRE surface this app has at once:
+#
+#   tags: [attack.t1059.001]     <- flow-style sequence, never matched at all
+#   - attack.t1003.001  # lsass  <- trailing comment left attached to the tag, so
+#                                   _TECH_TAG_RE's \Z-anchored match rejected it
+#
+# This module is already the shared, Flask-free home for technique-tag semantics that
+# both app.py and generate_report.py import (see CLAUDE.md), so consolidating here adds
+# no new sharing mechanism -- it just stops the same bug from having five addresses.
+_TAGS_BLOCK_RE = re.compile(
+    r'^tags:[ \t]*(?:\[(?P<flow>[^\]\n\r]*)\][ \t]*$|\r?\n(?P<block>(?:[ \t]*-[^\n\r]*\r?\n?)+))',
+    re.MULTILINE
+)
+
+def tags_from_rule_yaml(rule_yaml):
+    """The raw tag strings ('attack.t1059.001', 'compliance.pci', ...) from a Sigma
+    rule's YAML text, in rule order. Returns [] when the rule has no tags: block.
+    Handles both YAML sequence styles and strips inline `# ...` comments."""
+    m = _TAGS_BLOCK_RE.search(rule_yaml or '')
+    if not m:
+        return []
+    if m.group('flow') is not None:
+        raw = m.group('flow').split(',')
+    else:
+        raw = [line.strip().lstrip('-') for line in m.group('block').split('\n')]
+    return [t for t in (s.split('#', 1)[0].strip().strip('"\'') for s in raw) if t]
+
+
 def techniques_for_tags(tags):
     """Extract MITRE technique IDs from a Sigma rule's parsed tag list.
     Returns a list of {id, name, tactic} dicts, one per distinct technique

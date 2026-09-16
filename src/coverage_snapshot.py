@@ -13,18 +13,10 @@
 import sqlite3, sys, re
 from datetime import date
 
-from mitre_attack import TECHNIQUES, _display_id, techniques_for_tags
+from mitre_attack import TECHNIQUES, _display_id, techniques_for_tags, tags_from_rule_yaml
 
 DB_PATH = '/opt/micro-dfir/siem.db'
 VALIDATED_WINDOW_DAYS = 30  # matches the Coverage tab's default range selector
-
-_TAGS_RE = re.compile(r'^tags:\s*\n((\s+-\s*[^\n\r]+\n?)+)', re.MULTILINE)
-
-def _extract_tags(rule_yaml):
-    m = _TAGS_RE.search(rule_yaml)
-    if not m:
-        return []
-    return [t.strip().strip('- ') for t in m.group(1).split('\n') if t.strip()]
 
 def snapshot_coverage():
     conn = sqlite3.connect(DB_PATH, timeout=30)
@@ -33,7 +25,7 @@ def snapshot_coverage():
     enabled_counts = {}
     disabled_counts = {}
     for row in conn.execute("SELECT rule_yaml, enabled FROM sigma_rules").fetchall():
-        tags = _extract_tags(row['rule_yaml'] or '')
+        tags = tags_from_rule_yaml(row['rule_yaml'] or '')
         for tech in techniques_for_tags(tags):
             if tech['tactic'] == 'unmapped':
                 continue
