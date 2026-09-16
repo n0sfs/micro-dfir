@@ -1460,7 +1460,13 @@ if __name__ == "__main__":
         try:
             run_detection_cycle()
         except Exception as e:
-            cycle_error = f'{type(e).__name__}: {e}'
+            # The exception TYPE and message alone ("OperationalError: database is locked")
+            # do not say which statement raised, and on a headless appliance there is no
+            # other way to find out -- so the innermost frame goes with it.
+            import traceback
+            tb = traceback.extract_tb(e.__traceback__)
+            where = f' at {tb[-1].filename.rsplit("/", 1)[-1]}:{tb[-1].lineno} ({tb[-1].line})' if tb else ''
+            cycle_error = f'{type(e).__name__}: {e}{where}'[:400]
             print(f"[-] Detection cycle failed: {cycle_error}", flush=True)
         _record_engine_phase('ti_feed_sync')
         try:
