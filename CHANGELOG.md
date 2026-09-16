@@ -38,15 +38,22 @@ always has readers: three gunicorn workers, the sigma engine, the SOAR engine, t
 server. So this endpoint can never reclaim space on its own, and no amount of fixing it
 from inside an HTTP request changes that.
 
-What changed is that it stops pretending. The endpoint now issues the checkpoints (free, and
-they work if the box happens to be quiet), reports `reclaimed_mb` and `checkpoint_blocked`,
-and the UI says *"Vacuum ran, but reclaimed no space… Reclaiming the space needs a
-maintenance window with the platform services stopped"* rather than a success the file size
-plainly contradicts.
+**The remedy turned out to be far lighter than a maintenance window.** The next deploy
+restarted the platform services, every one of them dropped its read transaction, and the
+pending truncating checkpoint completed on its own:
 
-The deleted space is not lost, either way: SQLite keeps those pages free for reuse, so the
-database will not grow again until it has consumed roughly 17 GB of new logs. Actually
-returning the space to the filesystem needs the services stopped — see tasks.md.
+> **22,051 MB → 8,530 MB. 13.5 GB returned to the filesystem** (disk free 336.8 → 370.2 GB).
+
+So the VACUUM had done its work all along — the compacted content was already there, and the
+file was only waiting for the readers to let go. Restarting the services is enough; no
+stopping the platform, no host-level window.
+
+The endpoint now says so rather than reporting a bland success the file size contradicts: it
+issues the checkpoints, returns `reclaimed_mb` and `checkpoint_blocked`, records the blocked
+checkpoint in the audit row, and the UI explains that the space is already free for reuse and
+the file shrinks on the next service restart. Worth knowing in its own right: the freed pages
+are reusable immediately either way, so the database does not grow again until it has
+absorbed what was deleted — the file size is cosmetic by comparison.
 
 ### Multi-line command lines were being truncated at the first newline
 

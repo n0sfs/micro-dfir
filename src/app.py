@@ -17634,9 +17634,10 @@ def api_settings_vacuum():
             # Surfaced so the UI can say why nothing shrank rather than reporting a success
             # the file size plainly contradicts.
             'note': (
-                'The database was rebuilt, but the file could not be truncated because other '
-                'services were reading from it. Reclaiming the space needs a maintenance '
-                'window with the platform services stopped.'
+                'The database was rebuilt, but the file could not be truncated yet because '
+                'other services are holding it open. The space is already free for reuse, and '
+                'the file shrinks on its own the next time those services restart -- any '
+                'update, or a manual restart, completes it.'
             ) if blocked or reclaimed_mb <= 0 else None,
         })
     except Exception as e:
