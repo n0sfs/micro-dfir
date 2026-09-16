@@ -10,6 +10,25 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-16
 
+### The manual log purge could never have worked at the size it was needed
+
+`/api/settings/purge` was one unbounded `DELETE FROM live_logs WHERE timestamp < ?`.
+gunicorn runs here with **no `--timeout`**, so the 30-second default applies, and `live_logs`
+has reached ~6.5M rows. A purge covering millions of them cannot finish in that window: the
+worker is killed mid-statement, the entire transaction rolls back so **nothing is deleted**,
+and the exclusive write lock it held throughout blocked live ingest for no benefit. The
+failure mode scales with how much there is to delete — it breaks precisely when it's needed.
+
+Now bounded per call (100k rows, `done` flag) with the button driving a loop and showing a
+running count — the same chunked-endpoint shape Log Import already uses, and the one
+CLAUDE.md prescribes for work too slow for one request.
+
+Worth recording alongside it: **the database is 21.8 GB across ~6.5M rows — about 3.4 KB per
+row.** Volume is flat at 270k–420k logs/day across the whole retention window; there is no
+historical spike to blame. The per-row size is the actual driver, and `raw_xml` capture is
+most of it. Deleting history buys a one-off reduction; reducing what's stored per event is
+what changes the trajectory.
+
 ### Closing the "never matches" list: anchor unmapped fields to their rendered label
 
 **30 of 119 enabled rules → 2.** The 30 came from the review below: `live_logs` is a flat
