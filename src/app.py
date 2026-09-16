@@ -4354,7 +4354,8 @@ def api_system_service_health():
 
     rows = {r['key']: r['value'] for r in db.execute(
         "SELECT key, value FROM settings WHERE key IN "
-        "('engine_sigma_heartbeat_at', 'engine_sigma_poll_status', 'engine_sigma_poll_error')"
+        "('engine_sigma_heartbeat_at', 'engine_sigma_poll_status', 'engine_sigma_poll_error', "
+        "'engine_sigma_cycle_error', 'engine_sigma_phase', 'engine_sigma_phase_at')"
     ).fetchall()}
     beat = rows.get('engine_sigma_heartbeat_at')
     age_seconds = None
@@ -4378,6 +4379,14 @@ def api_system_service_health():
             'stale': (age_seconds is None or age_seconds > 360),
             'poll_status': rows.get('engine_sigma_poll_status'),
             'poll_error': rows.get('engine_sigma_poll_error') or None,
+            # When the heartbeat is stale these two are what say WHY. `phase` is the loop
+            # step the engine entered last: if it is stale and the phase has not moved,
+            # that step is where it is stuck. `cycle_error` is the detection pass throwing
+            # rather than hanging. Without them a stale heartbeat on an "active" unit is
+            # indistinguishable from a dead process, which is exactly the hole this filled.
+            'phase': rows.get('engine_sigma_phase') or None,
+            'phase_at': rows.get('engine_sigma_phase_at') or None,
+            'cycle_error': rows.get('engine_sigma_cycle_error') or None,
         },
     })
 

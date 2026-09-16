@@ -1366,12 +1366,33 @@ def run_due_aggregation_prune():
 # canary for the systemd confinement work -- a hardening directive that stops the unit
 # from starting would otherwise look exactly like a quiet day with no rule matches.
 # Stored in settings (same pattern as vector_config_status) rather than a new table.
-def _record_engine_status(poll_status, poll_error):
+# Which step of the loop the engine is currently in, stamped BEFORE that step runs.
+#
+# The heartbeat below only lands at the END of a full iteration, so a step that blocks
+# indefinitely -- a slow query, an unbounded DELETE, a lock held by something else --
+# leaves Service Health frozen on the last success with no indication of where. The unit
+# reads "active", detection is dead, and the only way to tell them apart was host log
+# access. This is the breadcrumb that makes a hang diagnosable from the UI.
+def _record_engine_phase(phase):
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('engine_sigma_phase', ?)", (phase,))
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('engine_sigma_phase_at', datetime('now'))")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass  # a breadcrumb must never be able to break the loop it describes
+
+def _record_engine_status(poll_status, poll_error, cycle_error=''):
     try:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('engine_sigma_heartbeat_at', datetime('now'))")
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('engine_sigma_poll_status', ?)", (poll_status,))
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('engine_sigma_poll_error', ?)", (poll_error or '',))
+        # Distinct from poll_error: that is the scheduled-task endpoint's health, this is
+        # whether the detection pass itself threw. Conflating them hid a dead detection
+        # engine behind a healthy-looking scheduled-task status.
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('engine_sigma_cycle_error', ?)", (cycle_error or '',))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -1395,23 +1416,43 @@ if __name__ == "__main__":
     from urllib3.exceptions import InsecureRequestWarning
     warnings.simplefilter('ignore', InsecureRequestWarning)
     while True:
-        run_detection_cycle()
+        # Guarded like every other call in this loop, which it uniquely was not. An
+        # exception here propagated out of the loop and killed the process -- so a
+        # transient "database is locked" (exactly what a long manual purge or vacuum
+        # produces) took the detection engine down instead of costing it one cycle.
+        # Worse, the heartbeat below is only written AFTER this call, so a cycle that
+        # keeps failing leaves Service Health frozen at the last success with no error
+        # anywhere: the unit reads "active" and detection is silently dead. Observed
+        # live, and unrecoverable without host log access, which is the whole reason
+        # the failure is now recorded where the UI can show it.
+        cycle_error = ''
+        _record_engine_phase('detection')
+        try:
+            run_detection_cycle()
+        except Exception as e:
+            cycle_error = f'{type(e).__name__}: {e}'
+            print(f"[-] Detection cycle failed: {cycle_error}", flush=True)
+        _record_engine_phase('ti_feed_sync')
         try:
             sync_due_feeds()
         except Exception as e:
             print(f"[-] TI feed auto-sync check failed: {e}")
+        _record_engine_phase('log_purge')
         try:
             run_due_log_purge()
         except Exception as e:
             print(f"[-] Automatic log purge check failed: {e}")
+        _record_engine_phase('ioc_purge')
         try:
             run_due_ioc_purge()
         except Exception as e:
             print(f"[-] Automatic IOC purge check failed: {e}")
+        _record_engine_phase('aggregation_prune')
         try:
             run_due_aggregation_prune()
         except Exception as e:
             print(f"[-] Aggregation prune check failed: {e}")
+        _record_engine_phase('scheduled_tasks')
         try:
             # 127.0.0.1 only works when gunicorn binds 0.0.0.0; Settings > Network's
             # dual-bind flow can bind ui_bind_ip to one specific IP instead (the exact
@@ -1438,10 +1479,11 @@ if __name__ == "__main__":
             # scheduled playbook, agent sweep, auto-revert and SLA notification stopped
             # firing with no error anywhere. Record the outcome either way.
             if resp.status_code == 200:
-                _record_engine_status('ok', '')
+                _record_engine_status('ok', '', cycle_error)
             else:
-                _record_engine_status('error', f'HTTP {resp.status_code} from the scheduled-task endpoint')
+                _record_engine_status('error', f'HTTP {resp.status_code} from the scheduled-task endpoint', cycle_error)
         except Exception as e:
             print(f"[-] Scheduled playbook check failed: {e}")
-            _record_engine_status('error', str(e)[:300])
+            _record_engine_status('error', str(e)[:300], cycle_error)
+        _record_engine_phase('idle')
         time.sleep(30)

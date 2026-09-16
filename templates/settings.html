@@ -1583,6 +1583,15 @@ function loadServiceHealth() {
                 </div>
                 <div>${beat} <span class="ms-2">Detection engine last completed a cycle ${escHtml(engineAgeLabel(eng.age_seconds))}${eng.heartbeat_at ? ' (' + escHtml(eng.heartbeat_at) + ' UTC)' : ''}.</span></div>
                 <div class="mt-2">${pollBadge} <span class="ms-2">Scheduled tasks (playbooks, agent sweeps, SLA and offline-agent notifications).</span></div>`;
+            // When the heartbeat is stale, the phase is the useful bit: it names the loop
+            // step the engine entered last and never came back from.
+            if (eng.stale && eng.phase) {
+                html += `<div class="mt-2"><span class="badge bg-warning text-dark">Stuck?</span> <span class="ms-2">Last entered the <code>${escHtml(eng.phase)}</code> step at ${escHtml(eng.phase_at || '?')} UTC and has not completed a cycle since.</span></div>`;
+            }
+            if (eng.cycle_error) {
+                html += `<div class="mt-2"><span class="badge bg-danger">Detection cycle failed</span></div>
+                         <pre class="bg-black border border-secondary rounded p-2 mt-1 mb-0 text-danger" style="white-space:pre-wrap;">${escHtml(eng.cycle_error)}</pre>`;
+            }
             if (eng.poll_error) {
                 html += `<pre class="bg-black border border-secondary rounded p-2 mt-2 mb-0 text-danger" style="white-space:pre-wrap;">${escHtml(eng.poll_error)}</pre>`;
             }
