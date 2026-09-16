@@ -10,6 +10,52 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-16
 
+### A detection engine that died silently, and the three bugs behind it
+
+The purge below put the database under sustained write load, and that exposed a chain of
+defects in the Sigma engine — one of which had been able to kill it silently all along.
+
+**The engine was crash-looping, and nothing could show it.** `run_detection_cycle()` was the
+only call in the engine's main loop with no `try/except`. An `OperationalError` there
+propagated out of the loop and killed the process; systemd restarted it; it hit the same
+error again before reaching the heartbeat write at the end of the iteration. So the heartbeat
+froze at the last success, the systemd unit still read **active**, ingest carried on
+normally, and detection was dead — with no error recorded anywhere. Diagnosing it needed host
+log access, which defeats the point of having a health card at all.
+
+So the loop now stamps the step it is entering (`detection`, `ti_feed_sync`, `log_purge`,
+`ioc_purge`, `aggregation_prune`, `scheduled_tasks`, `idle`) *before* running it, records a
+failing detection pass separately from the scheduled-task poll status — conflating those hid
+a dead engine behind a healthy-looking badge — captures the innermost traceback frame, and
+reports any single rule taking over 10s **by name, as it happens**, because a cycle that
+never finishes never reaches the end where a summary would be written. Service Health shows
+all of it.
+
+That instrumentation immediately named the rest:
+
+**A read→write upgrade that no timeout could fix.** The alert dedup lookup used
+`.fetchone()`. An unexhausted statement holds the connection's read transaction open, so the
+`INSERT INTO alerts` on the next line had to upgrade read→write — and in WAL mode SQLite
+refuses that outright with `SQLITE_BUSY_SNAPSHOT` the moment another connection has committed
+since the snapshot. **That error never reaches the busy handler**, which is why raising the
+timeout from 30s to 120s changed nothing at all, and why the failure was instant rather than
+slow. Fixed at all six read-then-write sites on that connection — the aggregation cooldown
+check, both escalation paths, and the import-replay dedup had the identical latent bug. The
+failure interval moved from instant to exactly 240s, which is the busy handler finally doing
+its job.
+
+**Network calls inside the write transaction.** `api_ingest` runs one transaction per posted
+batch and, when a heuristic fires, makes enrichment and SOAR webhook calls with 8-10s
+timeouts each without leaving it — holding SQLite's single write lock across all of it. It
+now commits first.
+
+**Still unresolved at time of writing:** something holds the write lock for over 120 seconds
+and detection alerts are not being written. `dns_server`, `soar_engine` and ingest are ruled
+out. The leading candidate is the engine itself doing exactly what `api_ingest` was doing —
+`executemany` into `sigma_aggregation_matches` opens a transaction that is then held through
+the whole grouped-alert loop, enrichment and SOAR calls included. See tasks.md; the remaining
+step needs host-level visibility into which process holds the lock.
+
 ### 6.8M log rows purged, and why the vacuum reclaimed nothing
 
 Purged everything older than 8 days: **6,800,000 rows**, driven through the newly chunked
