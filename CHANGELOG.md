@@ -10,6 +10,29 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-16
 
+### The alert dedup window never worked on the heuristic path — a timezone bug
+
+Found by watching the appliance immediately after deploying the review below: **30+
+identical "System Discovery Commands" alerts inside a single minute, every one with
+`occurrence_count: 1`**, against an alerts table that had reached ~882,000 rows.
+
+The inline heuristic path stamped a new alert's `last_seen` with the event's own `ts` —
+which for Windows is the agent's `TimeCreated`, the **endpoint's local time** — and then
+deduped against `effective_seen >= datetime('now', '-15 minutes')`, which SQLite evaluates
+in **UTC**. At UTC-4 every alert was born already looking four hours old, so the 15-minute
+window could never contain it, and every single heuristic match inserted a new row instead
+of bumping a counter. It also quietly cut heuristic alerts out of the cross-rule escalation
+sweep, which selects on that same window.
+
+`last_seen` is now `datetime('now')` on insert — the SOC's own clock, which is what this
+path's own UPDATE branch and `sigma_engine.py`'s alert path always used, and exactly why
+only these rows multiplied. `timestamp` still carries the event's reported time.
+
+Verified live: in the five minutes after the deploy the maximum alert id **did not move at
+all**, while two rows (one per host) climbed from 18 to 156 and 159 occurrences. The same
+315 events would previously have been 315 new rows. Existing rows were left alone —
+they're real alert history, and collapsing them is a data decision, not a code fix.
+
 ### Detection review: six silent failures in the SIEM rule engine
 
 A two-pass review of the Sigma engine and the ingest-side detection path. Everything here
@@ -94,6 +117,30 @@ every value for it is an exact literal.
 create a rule could still run one it invented. It and the two validate endpoints now require
 `rules.manage`, which every other rule-authoring route already did. Same recurring
 read-side-gate class noted in CLAUDE.md.
+
+### What Validate Rules actually reported
+
+First real run, on 119 enabled rules: **0 failed to convert, 30 can never match, 17 more
+match imprecisely.** A quarter of the enabled ruleset was doing nothing, and the old check —
+which only catches rules that throw — called all 119 healthy.
+
+Some of the 30 are honestly unreachable (`eventName`/`eventSource` on AWS rules, `c-uri` on
+proxy rules — there's no ingest path for those sources, which the log-source gap summary
+already reports separately). The rest are Windows data this appliance *does* collect and
+just has no column for, and they are not minor rules: LSASS credential-dumping detections on
+`GrantedAccess`/`CallTrace`, pass-the-hash on `LogonType`/`LogonProcessName`, Defender
+tamper detection on `Provider_Name`/`param1`. Closing those is the highest-value follow-up
+in the detection area, and it's now a measured list rather than a guess.
+
+### Log Search UI
+
+Chart legend keys are round dots in each line's own colour rather than filled rectangles;
+Export CSV and Export JSON merged into one Export dropdown; Saved Searches moved up beside
+the Search button, since loading a saved search and running the current one are the same
+action on the same controls. Service Health moved off Log Pipeline → Parsers to Settings →
+System — it reports systemd unit state and the engine heartbeat, which has nothing to do
+with parsing; it was only there because it had been added next to Pipeline Health, which
+genuinely belongs in that tab.
 
 ## 2026-09-15
 
