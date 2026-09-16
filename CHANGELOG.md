@@ -49,12 +49,33 @@ batch and, when a heuristic fires, makes enrichment and SOAR webhook calls with 
 timeouts each without leaving it — holding SQLite's single write lock across all of it. It
 now commits first.
 
-**Still unresolved at time of writing:** something holds the write lock for over 120 seconds
-and detection alerts are not being written. `dns_server`, `soar_engine` and ingest are ruled
-out. The leading candidate is the engine itself doing exactly what `api_ingest` was doing —
-`executemany` into `sigma_aggregation_matches` opens a transaction that is then held through
-the whole grouped-alert loop, enrichment and SOAR calls included. See tasks.md; the remaining
-step needs host-level visibility into which process holds the lock.
+**The actual cause: a read snapshot held open across the whole rule loop.**
+`_prepare_ioc_correlation` fills its lookup tables with `executemany(INSERT ...)`, and
+Python's `sqlite3` issues an implicit `BEGIN` before *any* INSERT — including into a TEMP
+table. That transaction then stayed open across the entire rule loop, which runs for minutes
+here, holding a read snapshot the whole time. By the time the write phase reached its first
+`INSERT INTO alerts`, that insert had to upgrade a long-stale read transaction to a write,
+and WAL refuses that outright with `SQLITE_BUSY_SNAPSHOT` once any other connection has
+committed since the snapshot was taken. Ingest commits continuously, so the upgrade never
+succeeded once in seven hours.
+
+Two things about that error made it misleading, and both cost time here. It is reported as
+"database is locked", which reads like contention — it isn't, it's a refused upgrade. And it
+**bypasses the busy handler**, which is why raising the timeout from 30s to 120s changed
+nothing whatsoever. What finally settled it was measuring the supposed contention: after
+instrumenting `api_ingest` to record any batch holding the write lock for 5s or more, the
+answer came back **empty** — no batch had ever been slow. With contention ruled out by
+measurement rather than argument, the only remaining explanation was the engine's own
+snapshot.
+
+Committing after the read phase ends that snapshot, so the writes open a fresh transaction.
+Verified live: cycles returned `OK` immediately, and new Sigma alerts were written within
+seconds — one with an occurrence count of 88 as it caught up on the backlog.
+
+Along the way this also picked up a WAL assertion on every cycle and after every VACUUM (a
+VACUUM writes a fresh database file, and `journal_mode` is a property of that file — silently
+losing WAL would put the whole appliance into exactly the blocking behaviour that was
+suspected here), and ingest batch-duration reporting. Both are surfaced in Service Health.
 
 ### 6.8M log rows purged, and why the vacuum reclaimed nothing
 
