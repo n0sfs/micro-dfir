@@ -1105,6 +1105,17 @@ def api_ingest():
                         (ts, triggered_rule, alert_sev, hst, msg, usr, sip, country_code, country_name, file_hash)
                     )
                     new_alert_id = ins_cur.lastrowid
+                    # Commit BEFORE the network calls below. Everything in this request runs
+                    # inside one transaction, and the two calls that follow reach out over
+                    # the network with 8-10s timeouts each -- so a batch that trips a
+                    # heuristic held SQLite's single write lock across all of that. The
+                    # detection engine, which needs the same lock to write its alerts, was
+                    # observed losing that race on every cycle for minutes at a time even
+                    # with a 120s busy timeout: "database is locked", and no detections.
+                    # Committing here bounds the lock to the rows actually written. The logs
+                    # already inserted stay inserted, which is the correct outcome for an
+                    # ingest batch anyway -- there is nothing to roll back to.
+                    db.commit()
                     # See analyzers.auto_enrich_and_score_alert's own docstring. This
                     # path has no destination_ip extracted at the top-level log/alert
                     # fields (only proc.get('destination_ip'), which isn't in scope by
