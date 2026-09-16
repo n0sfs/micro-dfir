@@ -29,6 +29,7 @@
         <a href="#cases">Cases</a>
         <a href="#siem">SIEM &amp; Detection Rules</a>
         <a href="#log-pipeline">Log Pipeline</a>
+        <a href="#log-volume">Reducing Log Volume</a>
         <a href="#edr">EDR / Agents</a>
         <a href="#ueba">UEBA</a>
         <a href="#threat-intel">Threat Intel &amp; Hunting</a>
@@ -88,6 +89,24 @@
                 <li><strong>Parsers</strong> — the field-extraction layer. Four built-in extractors always run (Windows Event XML, a Windows message-body regex fallback, Linux auditd, and the DNS query parser); admin-defined <strong>custom parsers</strong> fill gaps the built-ins don't cover, using named-group regex patterns. The parser editor shows a live preview of what a pattern would extract as you type it, and can pull a real recent log in to test against before you save.</li>
                 <li><strong>Import</strong> — bring a historical export from another SIEM (CSV, NDJSON, or a JSON array) into Log Search for investigation. A step-by-step wizard maps source fields to this appliance's own field names and previews a sample before committing; imported rows are searchable but never feed live detection rules or UEBA baselines.</li>
             </ul>
+        </div>
+
+        <div class="help-section" id="log-volume">
+            <h4>Reducing Log Volume</h4>
+            <p>A busy Windows fleet can push several hundred thousand events a day at this appliance, and the database grows accordingly. The levers below are ordered by how much they save for how little detection they cost. Check the effect on <strong>Log Pipeline</strong> (events/hour) and <strong>Settings &gt; System</strong> (database size) rather than guessing.</p>
+
+            <p><strong>1. Turn off Capture XML on high-volume channels.</strong> This is usually the single biggest saving, and the cheapest. With Capture XML enabled, each event stores the complete Windows Event XML <em>in addition to</em> the rendered message. On a Sysmon-heavy fleet the XML measures around 1,800 bytes per event against roughly 1,000 for the message — about 60% of the stored text per row, duplicating content the message already contains. The built-in extractors read the same fields (process image, command line, parent process, hashes, DNS query name) out of either one, so for Sysmon the two are equivalent.</p>
+            <p>Keep it on where the XML genuinely carries more: a handful of fields exist only in the XML, not in the rendered text — the provider name is an XML attribute, and a few Windows events carry their detail in unlabelled <code>param1</code>/<code>param2</code> data elements. If a detection rule you rely on matches on one of those, that rule needs the XML. Keep it on too if your process requires the original event artifact as evidence; a re-rendered summary is not the same thing in a forensic context. Capture XML is set per channel under <strong>Log Pipeline &gt; Windows Log Channels</strong> and is off by default.</p>
+
+            <p><strong>2. Tune the Sysmon configuration itself.</strong> The cheapest event is the one never generated. Sysmon's own config is the upstream filter, and registry/file-modification events (Event IDs 12–13, 11) from known-good software are usually the bulk of the noise. Excluding those at source beats filtering them here, because it also saves the endpoint's CPU and the network hop.</p>
+
+            <p><strong>3. Use Drop Rules for noise you can't filter upstream.</strong> <strong>Log Pipeline &gt; Drop Rules</strong> discards matching events before they're ever stored, and previews a rule against real recent traffic so you can see exactly what it would have removed before committing.</p>
+
+            <p><strong>4. Only collect the channels you use.</strong> A channel nobody searches and no rule reads is pure cost. <strong>Coverage</strong> shows which log sources your enabled rules actually depend on.</p>
+
+            <p><strong>5. Set retention and archiving.</strong> Neither reduces what arrives, but both bound what accumulates: retention deletes logs past a chosen age, archiving moves them out of the live search index into cold storage in the same database. Both are under <strong>Settings &gt; System</strong>. Note that deleting rows frees space <em>inside</em> the database file for reuse but does not shrink the file itself — run <strong>Vacuum / Optimize DB</strong> for that, and expect it to take a while on a large database.</p>
+
+            <p><strong>What not to turn off.</strong> Process creation (Sysmon Event ID 1, or Security 4688) is the most detection-relevant event this platform ingests and should survive any tuning. Before disabling a channel, check Coverage for rules that depend on it — a disabled source silently takes its detections with it, and the rules will still look enabled. The same applies to Capture XML on a channel whose rules reference XML-only fields: the rules keep running and quietly stop matching.</p>
         </div>
 
         <div class="help-section" id="edr">
