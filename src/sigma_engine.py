@@ -483,7 +483,12 @@ def _check_aggregation_thresholds(cursor, agg_by_rule, rule_titles, rule_severit
                 "SELECT 1 FROM sigma_aggregation_alerts WHERE rule_id = ? AND group_value = ? "
                 "AND alerted_at >= datetime('now', ?)",
                 (rule_id, g['group_value'], f"-{agg['window_seconds']} seconds")
-            ).fetchone()
+            # fetchall(), not fetchone() -- an unexhausted statement holds this
+            # connection's read transaction open, and the write that follows then has
+            # to upgrade read -> write, which WAL refuses outright (SQLITE_BUSY_SNAPSHOT,
+            # no busy-handler retry) once another connection has committed. Same fix as
+            # the alert-dedup lookup in run_detection_cycle.
+            ).fetchall()
             if already:
                 continue
             title = rule_titles.get(rule_id, 'Custom Rule')
@@ -517,7 +522,7 @@ def _escalate_host(cursor, host, rule_count, window_minutes):
     recent = cursor.execute(
         "SELECT 1 FROM alert_escalations WHERE host = ? AND escalated_at >= datetime('now', ?)",
         (host, f'-{window_minutes} minutes')
-    ).fetchone()
+    ).fetchall()
     if recent:
         return  # already flagged this host within the window -- one case per cluster, not one per cycle
     detail = f"{rule_count} distinct rules fired on {host} in the last {window_minutes} minutes."
@@ -525,7 +530,8 @@ def _escalate_host(cursor, host, rule_count, window_minutes):
         "SELECT ca.case_id FROM case_assets ca JOIN cases c ON ca.case_id = c.id "
         "WHERE ca.host = ? AND c.status = 'open' LIMIT 1",
         (host,)
-    ).fetchone()
+    ).fetchall()
+    open_case = open_case[0] if open_case else None
     if open_case:
         cursor.execute(
             "INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'system', 'escalation', ?)",
@@ -564,7 +570,7 @@ def _escalate_user(cursor, username, rule_count, window_minutes):
     recent = cursor.execute(
         "SELECT 1 FROM alert_escalations WHERE username = ? AND escalated_at >= datetime('now', ?)",
         (username, f'-{window_minutes} minutes')
-    ).fetchone()
+    ).fetchall()
     if recent:
         return
     detail = f"{rule_count} distinct rules fired against user '{username}' in the last {window_minutes} minutes."
@@ -572,7 +578,8 @@ def _escalate_user(cursor, username, rule_count, window_minutes):
         "SELECT DISTINCT c.id FROM case_items ci JOIN alerts a ON ci.item_type = 'alert' AND ci.item_id = CAST(a.id AS TEXT) "
         "JOIN cases c ON c.id = ci.case_id WHERE a.username = ? AND c.status = 'open' LIMIT 1",
         (username,)
-    ).fetchone()
+    ).fetchall()
+    open_case = open_case[0] if open_case else None
     if open_case:
         cursor.execute(
             "INSERT INTO case_events (case_id, actor, event_type, detail) VALUES (?, 'system', 'escalation', ?)",
@@ -948,7 +955,8 @@ def replay_import_chunk(conn, import_id, rule_offset, chunk_size, ioc_cache=None
                         # being recognised as already-seen.
                         "SELECT id FROM alerts WHERE rule_id = ? AND host IS ? AND username IS ? AND import_id = ?",
                         (r['id'], host, username, import_id)
-                    ).fetchone()
+                    ).fetchall()
+                    existing = existing[0] if existing else None
                     if existing:
                         cursor.execute(
                             "UPDATE alerts SET occurrence_count = occurrence_count + 1, last_seen = datetime('now'), event_id = ? WHERE id = ?",
@@ -1136,7 +1144,20 @@ def run_detection_cycle():
                 "SELECT id, occurrence_count FROM alerts WHERE rule_id IS ? AND host IS ? AND username IS ? "
                 "AND effective_seen >= datetime('now', '-15 minutes') ORDER BY id DESC LIMIT 1",
                 (rule_id, host, username)
-            ).fetchone()
+            # fetchall(), not fetchone(): fetchone() leaves the statement open, and an open
+            # statement keeps this connection's READ transaction open with it. The very next
+            # thing this loop does is INSERT into the same table, which then has to upgrade
+            # read -> write -- and in WAL mode SQLite refuses that upgrade outright with
+            # SQLITE_BUSY_SNAPSHOT if any other connection has committed since the snapshot
+            # was taken. That error does NOT go through the busy handler, so the 120s
+            # timeout never applies and the write fails instantly.
+            #
+            # Observed live: every detection cycle failing with "database is locked" at this
+            # INSERT while ingest committed continuously alongside it -- detection produced
+            # nothing for as long as it lasted. Exhausting the statement ends the read
+            # transaction, so the INSERT opens a clean write transaction and waits properly.
+            ).fetchall()
+            existing = existing[0] if existing else None
             if existing:
                 cursor.execute(
                     "UPDATE alerts SET occurrence_count = occurrence_count + ?, last_seen = datetime('now'), "
