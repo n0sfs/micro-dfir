@@ -3782,7 +3782,7 @@ function renderRuleValidationResults(data) {
         blocks.push(`<div class="alert alert-danger py-2 px-3 mb-2"><i class="fa-solid fa-triangle-exclamation me-1"></i>${data.failed.length} of ${data.checked} enabled rules failed to convert or run -- these are silently doing nothing on every detection cycle.</div>`);
     }
     if (deadCount) {
-        blocks.push(`<div class="alert alert-warning py-2 px-3 mb-2"><i class="fa-solid fa-ghost me-1"></i>${deadCount} enabled rule${deadCount === 1 ? '' : 's'} can never match: ${deadCount === 1 ? 'it compares a' : 'they compare'} field this appliance has no column for against the whole event text, exactly. ${deadCount === 1 ? 'It counts' : 'They count'} toward coverage and detect nothing.</div>`);
+        blocks.push(`<div class="alert alert-warning py-2 px-3 mb-2"><i class="fa-solid fa-ghost me-1"></i>${deadCount} enabled rule${deadCount === 1 ? '' : 's'} can never match: ${deadCount === 1 ? 'it compares a field' : 'they compare fields'} this appliance has no column for against the whole event text, exactly. ${deadCount === 1 ? 'It counts toward coverage and detects' : 'They count toward coverage and detect'} nothing.</div>`);
     }
     const impreciseOnly = unevaluableTotal - deadCount;
     if (impreciseOnly > 0) {
