@@ -889,10 +889,15 @@ def _run_custom_parsers(db, app_n, message):
                 out.setdefault(k, v.strip())
     return out
 
+# A batch slower than this held the write lock long enough to matter to the detection
+# engine, which shares it. Reported via Service Health.
+INGEST_SLOW_BATCH_SECONDS = 5
+
 @app.route('/api/ingest', methods=['POST'])
 def api_ingest():
     from flask import request, jsonify
-    import datetime
+    import datetime, time as _time
+    _ingest_started = _time.time()
     try:
         db = get_db()
         data = request.get_json()
@@ -1137,6 +1142,25 @@ def api_ingest():
                     }, run_case_playbooks_fn=lambda cid, qid, tlp, st, sev: _run_playbooks_for_case(db, cid, 'case_created', qid, tlp, st, sev))
             # -------------------------------
         db.commit()
+        # Everything above runs inside ONE transaction, so its duration is exactly how long
+        # this request held SQLite's single write lock. The detection engine needs that same
+        # lock and has been failing to get it within 120 seconds, which only makes sense if
+        # some writer holds it far longer than a batch of INSERTs should take -- and this is
+        # the only writer big enough to be a candidate. Recorded (slowest batch seen, and
+        # the most recent one) so the question is answered with a measurement instead of a
+        # guess. Cheap: two settings writes, and only when a batch is actually slow.
+        _ingest_seconds = _time.time() - _ingest_started
+        if _ingest_seconds >= INGEST_SLOW_BATCH_SECONDS:
+            try:
+                prev = db.execute("SELECT value FROM settings WHERE key = 'ingest_slowest_batch'").fetchone()
+                prev_seconds = float((prev['value'] or '0').split('s')[0]) if prev and prev['value'] else 0.0
+                stamp = f"{_ingest_seconds:.1f}s for {count} rows from {hst or '?'} at {datetime.datetime.utcnow():%Y-%m-%d %H:%M:%S}"
+                db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ingest_last_slow_batch', ?)", (stamp,))
+                if _ingest_seconds > prev_seconds:
+                    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ingest_slowest_batch', ?)", (stamp,))
+                db.commit()
+            except Exception:
+                pass  # diagnostics must never fail an ingest
         return jsonify({'status': 'success', 'ingested': count}), 200
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -4366,7 +4390,8 @@ def api_system_service_health():
     rows = {r['key']: r['value'] for r in db.execute(
         "SELECT key, value FROM settings WHERE key IN "
         "('engine_sigma_heartbeat_at', 'engine_sigma_poll_status', 'engine_sigma_poll_error', "
-        "'engine_sigma_cycle_error', 'engine_sigma_phase', 'engine_sigma_phase_at', 'engine_sigma_journal_mode')"
+        "'engine_sigma_cycle_error', 'engine_sigma_phase', 'engine_sigma_phase_at', 'engine_sigma_journal_mode', "
+        "'ingest_slowest_batch', 'ingest_last_slow_batch')"
     ).fetchall()}
     beat = rows.get('engine_sigma_heartbeat_at')
     age_seconds = None
@@ -4402,6 +4427,11 @@ def api_system_service_health():
             # default DELETE journal a writer's EXCLUSIVE lock blocks readers, and this
             # appliance's engine reads live_logs continuously while ingest writes to it.
             'journal_mode': rows.get('engine_sigma_journal_mode') or None,
+        },
+        # Who else competes for the single write lock this engine needs.
+        'ingest': {
+            'slowest_batch': rows.get('ingest_slowest_batch') or None,
+            'last_slow_batch': rows.get('ingest_last_slow_batch') or None,
         },
     })
 
