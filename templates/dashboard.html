@@ -242,6 +242,19 @@
     <div class="col-md-4 d-flex align-items-end gap-1">
         <button class="btn btn-primary btn-sm" onclick="loadDashboardData()" title="Execute search query"><i class="fa-solid fa-search me-1"></i>Search</button>
         <button id="streamToggleBtn" class="btn btn-outline-secondary btn-sm" title="Toggle Live Streaming Mode (Auto-refresh every 5s)" onclick="toggleStream()"><i class="fa-solid fa-play"></i></button>
+        <!-- Saved Searches sits with Search, not down in the export row: loading a saved
+             search and running the current one are the same action at the same moment,
+             and both write to the filter controls immediately above. -->
+        <div class="dropdown">
+            <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" title="Save the current filters as a reusable search, or load one you saved before">
+                <i class="fa-solid fa-bookmark me-1"></i> Saved Searches
+            </button>
+            <ul id="savedSearchMenu" class="dropdown-menu dropdown-menu-dark shadow p-2" style="min-width: 280px; max-height: 360px; overflow-y: auto;">
+                <li><button type="button" class="btn btn-sm btn-outline-primary w-100 mb-2" onclick="saveCurrentSearch()"><i class="fa-solid fa-plus me-1"></i>Save Current Search</button></li>
+                <li><hr class="dropdown-divider border-secondary"></li>
+                <li class="text-muted small px-2">No saved searches yet.</li>
+            </ul>
+        </div>
     </div>
     </div>
 </div>
@@ -271,23 +284,22 @@
         <i class="fa-solid fa-clock me-1"></i><span id="logTzToggleLabel">UTC</span>
     </button>
     <div class="dropdown">
-        <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" title="Save the current filters as a reusable search, or load one you saved before">
-            <i class="fa-solid fa-bookmark me-1"></i> Saved Searches
-        </button>
-        <ul id="savedSearchMenu" class="dropdown-menu dropdown-menu-dark dropdown-menu-end shadow p-2" style="min-width: 280px; max-height: 360px; overflow-y: auto;">
-            <li><button type="button" class="btn btn-sm btn-outline-primary w-100 mb-2" onclick="saveCurrentSearch()"><i class="fa-solid fa-plus me-1"></i>Save Current Search</button></li>
-            <li><hr class="dropdown-divider border-secondary"></li>
-            <li class="text-muted small px-2">No saved searches yet.</li>
-        </ul>
-    </div>
-    <div class="dropdown">
         <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" title="Choose which columns to show in the results table">
             <i class="fa-solid fa-table-columns me-1"></i> Columns
         </button>
         <ul id="columnPickerMenu" class="dropdown-menu dropdown-menu-dark dropdown-menu-end shadow" style="min-width: 220px; max-height: 320px; overflow-y: auto;"></ul>
     </div>
-    <button class="btn btn-outline-success btn-sm" onclick="exportCSV()" title="Export current filtered logs to CSV"><i class="fa-solid fa-file-excel me-1"></i> Export CSV</button>
-    <button class="btn btn-outline-info btn-sm" onclick="exportJSON()" title="Export current filtered logs to JSON"><i class="fa-solid fa-file-code me-1"></i> Export JSON</button>
+    <!-- One Export control -- the choice of format belongs inside the action, not as two
+         competing buttons sitting side by side in the toolbar. -->
+    <div class="dropdown">
+        <button class="btn btn-outline-success btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" title="Export the current filtered logs">
+            <i class="fa-solid fa-file-export me-1"></i> Export
+        </button>
+        <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end shadow">
+            <li><button class="dropdown-item" type="button" onclick="exportCSV()"><i class="fa-solid fa-file-excel text-success me-2"></i>Export as CSV</button></li>
+            <li><button class="dropdown-item" type="button" onclick="exportJSON()"><i class="fa-solid fa-file-code text-info me-2"></i>Export as JSON</button></li>
+        </ul>
+    </div>
     </div>
 </div>
 
@@ -1139,7 +1151,17 @@ function initChart() {
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
-                legend: { display: true, labels: { color: '#adb5bd', boxWidth: 12, font: { size: 11 } } },
+                // usePointStyle + pointStyle:'circle' renders the legend key as a round dot
+                // matching the line's own point markers, instead of Chart.js's default
+                // filled rectangle.
+                legend: {
+                    display: true,
+                    labels: {
+                        color: '#adb5bd', font: { size: 11 },
+                        usePointStyle: true, pointStyle: 'circle',
+                        boxWidth: 8, boxHeight: 8
+                    }
+                },
                 tooltip: { mode: 'index', intersect: false }
             },
             scales: {
