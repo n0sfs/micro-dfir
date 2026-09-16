@@ -10,6 +10,54 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-16
 
+### Multi-line command lines were being truncated at the first newline
+
+Asked whether the appliance parses well enough to ingest **without** `raw_xml` — the obvious
+lever against a 21.8 GB database. Measuring that turned up a bug rather than an answer.
+
+A command line can span several lines in a rendered event body (an inline PowerShell script
+block, a wrapped argument list), and the message extractor's `(.+)$` stopped at the first
+one. Against 400 real events here: wherever the message-derived and XML-derived command
+lines disagreed, the message one was shorter **every time**. That is the entire payload of
+an encoded-command invocation, missing from the column every process-creation detection
+reads.
+
+It stayed invisible only because Capture XML is currently on for these channels, so the XML
+extractor wins and this one never runs. Turning XML capture off — exactly what was being
+considered — would have made the truncation live, and silently: fewer characters in a column
+doesn't look like a failure.
+
+`CommandLine`/`ParentCommandLine` now run to the next **known** label rather than the next
+newline. An allowlist of real Sysmon/Security label spellings, not a generic `\w+:`, because
+command-line content routinely contains things that look like labels (`https://…`, a
+`param:` line inside a script) and stopping on those reintroduces the same truncation.
+
+Verified against 214 real command lines on this appliance:
+
+| | exact match vs XML | mismatches |
+|---|---|---|
+| before | 135 | 79 |
+| after | **214** | **0** |
+
+### Can this appliance ingest without raw_xml? Now yes — measured
+
+With the above fixed, message-only parsing is **equivalent to XML parsing for every field
+the ingest path extracts**: `process_image`, `parent_image`, `original_file_name` and
+`hashes` already agreed 100%, and command lines now do too.
+
+What that's worth, measured over 400 live events: `raw_xml` averages **1,795 bytes/row**
+against the message's ~1,000 — roughly 60% of the stored text per event, duplicating content
+already present in the message. At this appliance's ~330k events/day that is ~600 MB/day of
+duplication. By channel: Sysmon is 71.5% of volume at 1,727 XML bytes/event, PowerShell 23.5%
+at 2,039, Security 5% at 1,633 (the only channel whose XML is *smaller* than its message).
+
+Not removed automatically, because `raw_xml` still carries three things the message doesn't:
+fields outside the extract map (`Provider_Name` is an XML attribute, `param1`/`param2` are
+Data elements with no rendered label — both appear in real Sigma rules), the Raw XML view in
+Log Search, and the authoritative original artifact, which has evidentiary value in DFIR that
+a re-rendered summary does not. Capture XML is per-channel and defaults off, so this is a
+per-channel decision (Log Pipeline → Windows Log Channels), not a global one.
+
 ### The manual log purge could never have worked at the size it was needed
 
 `/api/settings/purge` was one unbounded `DELETE FROM live_logs WHERE timestamp < ?`.
