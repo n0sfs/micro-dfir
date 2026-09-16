@@ -4366,7 +4366,7 @@ def api_system_service_health():
     rows = {r['key']: r['value'] for r in db.execute(
         "SELECT key, value FROM settings WHERE key IN "
         "('engine_sigma_heartbeat_at', 'engine_sigma_poll_status', 'engine_sigma_poll_error', "
-        "'engine_sigma_cycle_error', 'engine_sigma_phase', 'engine_sigma_phase_at')"
+        "'engine_sigma_cycle_error', 'engine_sigma_phase', 'engine_sigma_phase_at', 'engine_sigma_journal_mode')"
     ).fetchall()}
     beat = rows.get('engine_sigma_heartbeat_at')
     age_seconds = None
@@ -4398,6 +4398,10 @@ def api_system_service_health():
             'phase': rows.get('engine_sigma_phase') or None,
             'phase_at': rows.get('engine_sigma_phase_at') or None,
             'cycle_error': rows.get('engine_sigma_cycle_error') or None,
+            # Anything other than 'wal' here is a live incident, not a detail: under the
+            # default DELETE journal a writer's EXCLUSIVE lock blocks readers, and this
+            # appliance's engine reads live_logs continuously while ingest writes to it.
+            'journal_mode': rows.get('engine_sigma_journal_mode') or None,
         },
     })
 
@@ -17634,6 +17638,13 @@ def api_settings_vacuum():
         # is now reported honestly instead of as a bland success.
         conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
         conn.execute('VACUUM')
+        # Re-assert WAL after the rebuild. A VACUUM writes a fresh database file, and the
+        # journal mode is a property OF that file -- losing it drops the whole appliance
+        # back to the default DELETE journal, where a writer's EXCLUSIVE lock blocks
+        # readers as well as writers. That is not a subtle regression: the detection
+        # engine reads live_logs continuously while ingest writes to it, so it means
+        # permanent "database is locked" failures rather than occasional contention.
+        conn.execute('PRAGMA journal_mode=WAL')
         # (busy, log_pages, pages_checkpointed) -- busy=1 means a reader blocked it.
         checkpoint = conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
         conn.close()

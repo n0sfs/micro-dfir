@@ -1003,6 +1003,22 @@ def run_detection_cycle():
     # cycle loses nothing by waiting: sigma_state.json's last_id is only advanced after a
     # successful pass, so a blocked cycle re-reads the same window rather than skipping it.
     conn = sqlite3.connect(DB_PATH, timeout=DETECTION_LOCK_TIMEOUT_SECONDS); conn.row_factory = sqlite3.Row
+    # Assert WAL, and record what we actually got.
+    #
+    # Everything in this appliance assumes WAL: readers not blocking writers is the whole
+    # basis for the engine scanning live_logs while ingest writes to it. Under the default
+    # DELETE journal a writer takes an EXCLUSIVE lock that blocks READERS too, which turns
+    # normal concurrency into exactly the symptom observed after a VACUUM here -- every
+    # detection cycle failing "database is locked", deterministically, for hours, on a
+    # SELECT. journal_mode is a persistent property of the database file, so setting it
+    # once repairs it; it is re-asserted every cycle because it costs nothing and the
+    # failure mode it prevents is silent. A busy database returns the current mode rather
+    # than switching, so this can never block the cycle.
+    try:
+        _journal_mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+    except Exception as e:
+        _journal_mode = f'unknown ({e})'
+    _record_engine_journal_mode(_journal_mode)
     conn.create_function('REGEXP', 2, _sqlite_regexp)
     cursor = conn.cursor()
     last_id = json.load(open(STATE_FILE)).get("last_id", 0) if os.path.exists(STATE_FILE) else 0
@@ -1424,6 +1440,15 @@ def run_due_aggregation_prune():
 # leaves Service Health frozen on the last success with no indication of where. The unit
 # reads "active", detection is dead, and the only way to tell them apart was host log
 # access. This is the breadcrumb that makes a hang diagnosable from the UI.
+def _record_engine_journal_mode(mode):
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('engine_sigma_journal_mode', ?)", (str(mode),))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def _record_engine_phase(phase):
     try:
         conn = sqlite3.connect(DB_PATH, timeout=5)
