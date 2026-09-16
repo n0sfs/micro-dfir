@@ -23,6 +23,12 @@ STATE_FILE = os.path.join(os.path.dirname(DB_PATH), "sigma_state.json")
 # externally) picks up right where this one left off instead of skipping ahead.
 DETECTION_BATCH_SIZE = 50000
 
+# A rule taking longer than this to convert and run against one batch is reported by name
+# (see run_detection_cycle). A healthy full cycle across every enabled rule measures in
+# single-digit seconds on this appliance, so any individual rule reaching this is already
+# the dominant cost of its cycle.
+SLOW_RULE_SECONDS = 10
+
 # pysigma's SQLite backend correctly translates a Sigma rule's |re field modifier into
 # SQLite's `value REGEXP 'pattern'` syntax -- but SQLite only recognizes REGEXP as sugar
 # for a registered function, it doesn't implement one itself, so every |re rule silently
@@ -1021,7 +1027,9 @@ def run_detection_cycle():
     pending_agg_matches = []
     agg_by_rule = {}
     ioc_cache = {}
+    _record_engine_phase('detection:rules')
     for r in rules:
+        rule_started = time.time()
         try:
             rule_exclusions = exclusions_by_rule.get(r['id'], [])
             severity = (r['severity_override'] or '').capitalize() or _extract_level(r['rule_yaml']) or 'High'
@@ -1067,7 +1075,16 @@ def run_detection_cycle():
                     ))
         except Exception as e:
             print(f"[-] Rule '{r['title']}' failed to convert/execute: {e}")
+        # A single pathological rule can hold up the whole cycle, and until this there was
+        # no way to find out which one without host log access -- the cycle simply never
+        # finished and the heartbeat froze. Recorded as it happens, not at the end of the
+        # cycle, because a cycle that never ends never reaches the end.
+        rule_seconds = time.time() - rule_started
+        if rule_seconds >= SLOW_RULE_SECONDS:
+            print(f"[-] Rule '{r['title']}' took {rule_seconds:.1f}s", flush=True)
+            _record_engine_phase(f"detection:slow-rule:{(r['title'] or '')[:60]}:{rule_seconds:.0f}s")
 
+    _record_engine_phase('detection:writes')
     if pending_agg_matches:
         cursor.executemany(
             "INSERT INTO sigma_aggregation_matches (rule_id, group_value) VALUES (?, ?)",
@@ -1158,6 +1175,7 @@ def run_detection_cycle():
     # pending_alerts, which only has this cycle's raw matches and is empty when nothing
     # new fired) so it sees a consistent, fully-written state. See _escalate_host's
     # comment for why this creates/annotates a case rather than mutating alert severity.
+    _record_engine_phase('detection:escalation')
     esc_threshold = _get_int_setting(cursor, 'alert_escalation_rule_threshold', 3)
     esc_window = _get_int_setting(cursor, 'alert_escalation_window_minutes', 15)
     escalated_hosts = cursor.execute(
