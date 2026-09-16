@@ -10,11 +10,49 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-16
 
+### Closing the "never matches" list: anchor unmapped fields to their rendered label
+
+**30 of 119 enabled rules → 2.** The 30 came from the review below: `live_logs` is a flat
+table, so a Sigma field with no column falls back to the free-text `message`, and an *exact*
+comparison compiled to `message = '0x1410'` — a test against the entire rendered event body,
+never true.
+
+Those comparisons are now anchored to the field's own rendered label. Windows and Sysmon
+both render an event as one `Label: value` pair per line — the same convention this app's
+ingest-time extractors already rely on — so `GrantedAccess: 0x1410` becomes
+`message LIKE '%GrantedAccess:_0x1410%'`, scoped to that field's own line instead of hunting
+the value anywhere in the event. Both label spellings are emitted, unsplit and space-split,
+so Sysmon's `GrantedAccess:` and Security's `Logon Type:` are both covered without a
+per-field table of which renderer does which.
+
+**The separator is a bounded run of single-character wildcards, not an open `*`, and that
+distinction is load-bearing.** The first version used `%Logon Type:%3%`, which matched a
+Logon Type **10** event — because a Logon ID of `0x3E7` appears further down the same
+message. Caught by testing against a real 4624 body rather than a convenient one. With the
+bounded gap, `LogonType: 10` matches and 3, 9 and 2 do not.
+
+Limited to exact literals on purpose. A value that already carries a wildcard
+(`|contains`/`|startswith`/`|endswith`) is untouched — those rules *do* match text today, and
+re-anchoring could silently stop one firing on a channel that doesn't use the label
+convention. This only ever touches comparisons that currently match nothing, so it cannot
+take a working detection away.
+
+The two rules still reported as never-matching are a different shape entirely: `SidHistory:
+null` and `LogonId: null` are *field-absence* tests, which become `message IS NULL` against a
+NOT NULL column. No field mapping fixes that; it needs a real column. The rest are now
+reported as **text-matched**, with the honest caveat that a rule whose log source isn't
+ingested at all still cannot fire — the Coverage page reports those separately.
+
 ### The alert dedup window never worked on the heuristic path — a timezone bug
 
 Found by watching the appliance immediately after deploying the review below: **30+
 identical "System Discovery Commands" alerts inside a single minute, every one with
-`occurrence_count: 1`**, against an alerts table that had reached ~882,000 rows.
+`occurrence_count: 1`**.
+
+(An earlier draft of this entry said the alerts table had "reached ~882,000 rows". That was
+wrong — 882,000 was the maximum `id`, and `alerts.id` is `AUTOINCREMENT`, which never reuses
+a value after a delete. The table actually holds ~33,000 rows. The bug and its fix are
+unaffected; the size claim was not.)
 
 The inline heuristic path stamped a new alert's `last_seen` with the event's own `ts` —
 which for Windows is the agent's `TimeCreated`, the **endpoint's local time** — and then
