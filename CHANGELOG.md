@@ -10,6 +10,35 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-16
 
+### Per-channel Event ID presets, so turning a channel on isn't all-or-nothing
+
+Enabling a Windows Event Log channel collects **everything** that channel emits unless an
+Event ID filter is set — which is why System and Application were simply switched off here,
+taking their detections with them. A recommended include-list existed for Security only, and
+was applied *only the first time a channel appeared*, so an appliance configured before a
+preset existed could never adopt one without typing the ID list by hand.
+
+Presets now cover all six channels, ride along with every channels fetch, and are one click
+per row with the rationale in the tooltip. Each is an include list chosen so the noisy
+high-frequency IDs are left out **by name**, not by accident:
+
+| Channel | Keeps | Deliberately omits |
+|---|---|---|
+| **System** | 7045 service installed, 104 log cleared, 5723/5805 Netlogon (Zerologon) | **7036** — routine service start/stop, the bulk of the channel |
+| **PowerShell** | 4104 script block, 4103 module logging | 4105/4106 — per-command start/stop |
+| **Sysmon** | process, network, registry, file, pipe, DNS | **7** image load, the noisiest Sysmon event |
+| **Application** | crashes and hangs | everything else — third-party chatter |
+| **Defender** | detections, remediation, 5001/5007/5010/5012 tamper | — |
+
+A filter is a real trade: an ID that isn't collected cannot be detected on, whatever rules are
+enabled. So each entry documents what it leaves behind, and applying one only fills the fields
+— nothing reaches an agent until Save & Push.
+
+**The System channel is now live fleet-wide** with `include 5723, 5805`, which buys Zerologon
+exploitation detection at effectively zero volume: those Netlogon failures don't occur in
+normal operation. Deliberately narrower than the full System preset — 7045 and 104 are worth
+adding next, but the point was to start at zero risk and measure.
+
 ### Turning a rule off shouldn't hide what turning its log source on would buy
 
 Disabling rules that can't match is good hygiene, but it had a perverse side effect: the
