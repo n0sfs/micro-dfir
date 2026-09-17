@@ -10,6 +10,32 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-16
 
+### Every Event ID, with what it actually means, and pick them one by one
+
+Applying a template loaded a row of bare numbers with no way to see what they were. `4662`
+tells an admin nothing about whether dropping it matters, so the only options were to trust
+the list or go and look every ID up.
+
+There is now a definition for **every Event ID any template can contain**, and a picker
+reached from the template dropdown: each ID with its meaning, a badge for the narrowest tier
+containing it, a high-volume warning where the definition says so, search across both number
+and meaning, and the tier shortcuts inside the modal — so "start from balanced, drop two" is
+three clicks. It opens seeded from whatever the channel currently has, and writes back to the
+same editable filter field the templates use.
+
+**The selection is collapsed back into ranges on apply, and that isn't cosmetic.** The server
+rejects a filter with more than 50 comma-separated entries, so hand-picking sixty individual
+IDs would have built a value that only failed at save time. Selecting all 66 catalogued
+Security IDs now collapses to well inside the cap, and the footer shows the entry count
+against it live.
+
+Two templates referenced IDs that couldn't be defined confidently — the Windows Update IDs in
+System/comprehensive, and the tail of the Defender `5000-5013` span. Both were narrowed to IDs
+with a real meaning rather than shipping a vague definition: an entry in this catalog is a
+claim about what Windows emits, and a wrong one is worse than a missing one. (That moves
+System's comprehensive tier from 27 IDs to 24 and Defender's from 36 to 31 — the table above
+is corrected.) A test asserts every templated ID has an entry, so it stays true.
+
 ### Pipeline Health moves to Drop Rules, and the template picker looks clickable
 
 Two placement/affordance fixes, both from the same observation — a thing being *present* is
@@ -52,10 +78,10 @@ promise each note makes:
 | Channel | essential → balanced → comprehensive | The line that matters |
 |---|---|---|
 | Security | 14 → 39 → 66 IDs | balanced omits logoff and object access; comprehensive adds them |
-| System | 6 → 18 → 27 | balanced omits **7036**; comprehensive adds it back |
+| System | 6 → 18 → 24 | balanced omits **7036**; comprehensive adds it back |
 | Sysmon | 7 → 23 → 30 | balanced omits **image loads (7)**; comprehensive is everything |
 | PowerShell | 1 → 5 → 8 | essential is 4104 alone; comprehensive adds per-command 4105/4106 |
-| Defender | 4 → 14 → 36 | comprehensive adds signature-update chatter |
+| Defender | 4 → 14 → 31 | comprehensive adds signature-update chatter |
 | Application | 2 → 4 → 7 | comprehensive adds the MSI install trail |
 
 `_CHANNEL_RECOMMENDED_FILTERS` — what a brand-new channel is created with — is now *derived*
