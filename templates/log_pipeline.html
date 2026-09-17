@@ -2,6 +2,37 @@
 
 {% block content %}
 
+<style>
+/* Event ID template picker (the wand on each Windows channel row).
+   The first version rendered the three tiers as plain dropdown text, which read as a
+   list of facts rather than three things you pick between -- so nothing said "click me".
+   These rules give each tier a real target: its own bordered block, a hover and keyboard
+   focus state, the entry count as a pill, and the rationale inline instead of hidden in
+   a tooltip. Everything resolves through the theme variables, so light mode follows. */
+.chan-tpl-menu{min-width:360px; max-width:400px; padding:6px;}
+.chan-tpl-head{font-size:.66rem; text-transform:uppercase; letter-spacing:.06em;
+  color:var(--text-muted); padding:4px 8px 6px;}
+.chan-tpl-item{display:block; width:100%; text-align:left; background:var(--bg-card-alt);
+  border:1px solid var(--border); border-radius:var(--radius); padding:8px 10px;
+  margin-bottom:6px; cursor:pointer; transition:border-color .12s, background .12s, transform .12s;}
+.chan-tpl-item:last-of-type{margin-bottom:0;}
+.chan-tpl-item:hover,.chan-tpl-item:focus-visible{background:var(--accent-dim);
+  border-color:var(--accent); outline:none; transform:translateX(2px);}
+.chan-tpl-item:hover .chan-tpl-name,.chan-tpl-item:focus-visible .chan-tpl-name{color:var(--accent-hover);}
+/* The recommended tier is the default answer, so it carries a standing accent rail
+   rather than only becoming visible on hover. */
+.chan-tpl-item.is-recommended{border-left:3px solid var(--warning);}
+.chan-tpl-row{display:flex; align-items:center; gap:8px;}
+.chan-tpl-name{font-size:.82rem; font-weight:600; color:var(--text-primary); flex:1 1 auto;}
+.chan-tpl-count{font-size:.66rem; font-weight:500; color:var(--text-secondary);
+  background:var(--bg-inset); border:1px solid var(--border); border-radius:999px;
+  padding:1px 7px; white-space:nowrap;}
+.chan-tpl-note{font-size:.7rem; line-height:1.35; color:var(--text-secondary); margin-top:4px;
+  display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;}
+.chan-tpl-foot{font-size:.68rem; color:var(--text-muted); padding:6px 8px 2px;
+  border-top:1px solid var(--border); margin-top:6px; white-space:normal;}
+</style>
+
 <div class="page-header">
     <h2><i class="fa-solid fa-filter me-2"></i>Log Pipeline</h2>
     <p>Configure ingestion drop rules, DNS query logging, and Windows log channels pushed to agents.</p>
@@ -115,6 +146,24 @@
                         </tbody>
                     </table>
                 </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Directly below the rule editor on purpose: saving a drop rule regenerates Vector's
+     config, and this is where you find out whether that regeneration actually validated
+     and reloaded. Cause above, effect below. -->
+<div class="row g-4 mb-4">
+    <div class="col-lg-12">
+        <div class="card bg-dark border-secondary">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="card-title text-light mb-0"><i class="fa-solid fa-heart-pulse me-2"></i>Pipeline Health</h5>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="loadVectorStatus()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
+                </div>
+                <p class="text-muted small mb-3">Whether the last Vector config regeneration (drop rules, network settings) actually validated and reloaded successfully -- a bad config used to fail silently, with Vector quietly still running its previous config and no signal anywhere that a change didn't take effect.</p>
+                <div id="vectorStatusCard" class="small text-muted">Loading&hellip;</div>
             </div>
         </div>
     </div>
@@ -287,26 +336,14 @@
 <!-- ============================= PARSERS PANE ============================= -->
 <div id="paneParsers" style="display: {{ 'block' if active_tab == 'parsers' else 'none' }};">
 
-<!-- Pipeline Health -->
-<div class="row g-4 mb-4">
-    <div class="col-lg-12">
-        <div class="card bg-dark border-secondary">
-            <div class="card-body">
-                <div class="d-flex justify-content-between align-items-center mb-3">
-                    <h5 class="card-title text-light mb-0"><i class="fa-solid fa-heart-pulse me-2"></i>Pipeline Health</h5>
-                    <button class="btn btn-outline-secondary btn-sm" onclick="loadVectorStatus()"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
-                </div>
-                <p class="text-muted small mb-3">Whether the last Vector config regeneration (drop rules, network settings) actually validated and reloaded successfully -- a bad config used to fail silently, with Vector quietly still running its previous config and no signal anywhere that a change didn't take effect.</p>
-                <div id="vectorStatusCard" class="small text-muted">Loading&hellip;</div>
-            </div>
-        </div>
-    </div>
-</div>
+<!-- Pipeline Health moved to the Drop Rules tab: it reports whether the last Vector config
+     REGENERATION validated and reloaded, and editing a drop rule is what triggers a
+     regeneration -- so it belongs beside the action that causes it, where an admin will
+     actually look after making a change. Nothing to do with parsing.
 
-<!-- Service Health lives on Settings -> System. It reports systemd unit state and the
-     detection engine's heartbeat -- appliance operations, nothing to do with parsing --
-     and only ended up here because it was added next to Pipeline Health, which is
-     genuinely a parser-tab concern (Vector config reload). -->
+     Service Health likewise moved to Settings -> System (systemd units + the detection
+     engine heartbeat). Both were only ever here because they were added next to each
+     other; this tab now holds parser content only. -->
 
 <!-- Parser Catalog -->
 <div class="row g-4 mb-4">
@@ -1027,21 +1064,29 @@ function presetFilterButton(name) {
     const tiers = channelTemplates[name];
     if (!tiers || !tiers.length) return '';
     const items = tiers.map((t, i) => {
-        const count = (t.filter_value || '').split(',').filter(x => x.trim()).length;
-        const star = t.recommended ? '<i class="fa-solid fa-star text-warning me-1" title="Recommended"></i>' : '';
-        return `<li><button class="dropdown-item small" type="button" title="${escAttr(t.note || '')}" onclick="applyChannelTemplate(this, '${escAttr(name)}', ${i})">
-            ${star}${escHtml(t.label)} <span class="text-muted">&middot; ${count} entr${count === 1 ? 'y' : 'ies'}</span>
+        // Count distinct event IDs, not tokens: "4722-4726" is one token but five IDs, and
+        // the number a reader wants is how much they're about to collect.
+        const count = (t.filter_value || '').split(',').reduce((n, tok) => {
+            const m = tok.trim().match(/^(\d+)(?:-(\d+))?$/);
+            return m ? n + (m[2] ? (+m[2] - +m[1] + 1) : 1) : n;
+        }, 0);
+        const star = t.recommended ? '<i class="fa-solid fa-star text-warning" title="Recommended"></i> ' : '';
+        return `<li><button class="chan-tpl-item${t.recommended ? ' is-recommended' : ''}" type="button" onclick="applyChannelTemplate(this, '${escAttr(name)}', ${i})">
+            <span class="chan-tpl-row">
+                <span class="chan-tpl-name">${star}${escHtml(t.label)}</span>
+                <span class="chan-tpl-count">${count} event ID${count === 1 ? '' : 's'}</span>
+            </span>
+            <span class="chan-tpl-note">${escHtml(t.note || '')}</span>
         </button></li>`;
     }).join('');
     return `<div class="dropdown d-inline-block">
         <button type="button" class="btn btn-sm btn-outline-info dropdown-toggle" data-bs-toggle="dropdown" title="Apply an Event ID template to this channel, then edit it to taste">
             <i class="fa-solid fa-wand-magic-sparkles"></i>
         </button>
-        <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end shadow" style="min-width: 260px;">
-            <li><h6 class="dropdown-header">Event ID template</h6></li>
+        <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end shadow chan-tpl-menu">
+            <li><div class="chan-tpl-head">Event ID template &mdash; pick one to start from</div></li>
             ${items}
-            <li><hr class="dropdown-divider border-secondary"></li>
-            <li><span class="dropdown-item-text text-muted small" style="white-space:normal;">Fills the filter field so you can edit it. Nothing is sent to agents until Save &amp; Push.</span></li>
+            <li><div class="chan-tpl-foot">Fills the filter field so you can edit it. Nothing is sent to agents until <strong>Save &amp; Push</strong>.</div></li>
         </ul>
     </div>`;
 }
