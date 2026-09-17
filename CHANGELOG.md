@@ -10,6 +10,39 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-16
 
+### Turning a rule off shouldn't hide what turning its log source on would buy
+
+Disabling rules that can't match is good hygiene, but it had a perverse side effect: the
+log-source gap report counted **only enabled rules**, so switching one off because its source
+isn't collected also removed it from the report explaining why. Tidying the rule list quietly
+shrank the stated upside of ever collecting that source — the tidier the list, the smaller
+the gap looked.
+
+Counts are now independent of enabled state, split into enabled and disabled. Disabling moves
+a rule into the disabled column of its source's entry instead of deleting the evidence it
+exists. Verified by doing exactly that: AWS CloudTrail read **66 rules / 41 techniques**
+before and after disabling its last two enabled rules, where the old logic would have dropped
+it to zero and hidden the entry entirely.
+
+**And the report was missing a whole category.** It only listed *hard* gaps — sources with no
+ingest path anywhere. A source with a perfectly good path that simply isn't producing anything
+was skipped, which hid the two cases that actually matter on this appliance. They're now
+reported separately, because the action differs:
+
+| | |
+|---|---|
+| **Collectable, nothing arriving** (one toggle away) | Linux 195 rules / 90 techniques · Linux auditd 61 / 49 · **Windows system 79 / 34** · Windows application 32 / 22 |
+| **No ingest path at all** (needs a collector built) | AWS 66 / 41 · Azure 139 / 36 · M365 21 / 15 · GCP 26 / 12 · Okta 23 / 9 · GitHub 15 / 12 |
+
+The standout is one that had been invisible: **enabling the Windows System channel activates
+79 rules covering 34 techniques**, including Zerologon exploitation and Defender tamper
+detection, on hosts that already run the agent. That is a checkbox, not a project.
+
+Alongside it, 15 rules that genuinely cannot match were disabled — 13 Linux (no Linux agent
+deployed) and 2 AWS. Three Windows rules were deliberately **left enabled**: they need the
+System channel, which exists and is merely switched off, so the right fix there is the
+channel, not deleting the detections.
+
 ### A detection engine that died silently, and the three bugs behind it
 
 The purge below put the database under sustained write load, and that exposed a chain of
