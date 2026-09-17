@@ -1003,7 +1003,7 @@ function renderChannelRow(name, setting, isPreset) {
                 <input type="text" class="form-control form-control-sm bg-dark text-light border-secondary chan-filter-value" placeholder="e.g. 4000-5000, 5200" value="${escAttr(setting.filter_value || '')}" ${filterMode === 'none' ? 'disabled' : ''}>
             </div>
             <div class="col-md-1 text-end">
-                ${isPreset ? '' : '<button type="button" class="btn btn-sm btn-outline-danger" onclick="this.closest(\'.channel-row\').remove()"><i class="fa-solid fa-trash"></i></button>'}
+                ${isPreset ? presetFilterButton(name) : '<button type="button" class="btn btn-sm btn-outline-danger" onclick="this.closest(\'.channel-row\').remove()"><i class="fa-solid fa-trash"></i></button>'}
             </div>
         </div>
     `;
@@ -1012,6 +1012,36 @@ function renderChannelRow(name, setting, isPreset) {
 function onChannelFilterModeChange(select) {
     let valInput = select.closest('.channel-row').querySelector('.chan-filter-value');
     valInput.disabled = (select.value === 'none');
+}
+
+// Server-supplied per-channel presets (see _CHANNEL_RECOMMENDED_FILTERS). Held here so a
+// re-render of the rows doesn't need to re-fetch them.
+let channelRecommended = {};
+
+// Enabling a Windows channel is all-or-nothing without an Event ID filter: collecting the
+// handful of events a detection needs also collects everything else that channel emits.
+// This fills in the curated list for that channel rather than making an admin look the
+// IDs up. It only sets the fields -- nothing is pushed to agents until Save & Push.
+function presetFilterButton(name) {
+    const rec = channelRecommended[name];
+    if (!rec) return '';
+    const note = `Recommended Event IDs for this channel.\n\n${rec.note || ''}\n\nSets the filter fields; nothing is sent to agents until you Save & Push.`;
+    return `<button type="button" class="btn btn-sm btn-outline-info" title="${escAttr(note)}" onclick="applyChannelPreset(this, '${escAttr(name)}')"><i class="fa-solid fa-wand-magic-sparkles"></i></button>`;
+}
+
+function applyChannelPreset(btn, name) {
+    const rec = channelRecommended[name];
+    if (!rec) return;
+    const row = btn.closest('.channel-row');
+    const mode = row.querySelector('.chan-filter-mode');
+    const val = row.querySelector('.chan-filter-value');
+    mode.value = rec.filter_mode || 'include';
+    onChannelFilterModeChange(mode);
+    val.value = rec.filter_value || '';
+    // The filter is pointless on a channel that isn't being collected, and an admin
+    // clicking "use the recommended set" plainly intends to collect it.
+    row.querySelector('.chan-enabled').checked = true;
+    toast(`Applied the recommended Event ID filter for ${name}. Review it, then Save & Push.`, 'info', {duration: 6000});
 }
 
 let currentChannelGroup = '';
@@ -1050,6 +1080,7 @@ function loadChannelSettings() {
         })
         .then(res => {
             const data = res.channels || {};
+            channelRecommended = res.recommended || {};
             let container = document.getElementById('channelsContainer');
             if (!container) return;
             let html = '';

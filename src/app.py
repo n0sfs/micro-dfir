@@ -19460,10 +19460,19 @@ def _resolve_channel_group_key(reserved_keys=frozenset()):
     return requested_group or '__default__', None
 
 def _channel_group_get_response(all_templates, group_key):
+    # The recommended presets ride along with every GET so the UI can offer them per
+    # channel. They were previously only ever applied to a channel the first time it
+    # appeared, which meant an appliance configured before a preset existed could never
+    # adopt it without someone typing the ID list by hand.
+    recommended = {
+        name: {**filt, 'note': _CHANNEL_RECOMMENDED_NOTES.get(name, '')}
+        for name, filt in _CHANNEL_RECOMMENDED_FILTERS.items()
+    }
     if group_key in all_templates:
         return jsonify({'channels': all_templates[group_key], 'group': group_key,
-                         'is_override': group_key != '__default__'})
-    return jsonify({'channels': all_templates['__default__'], 'group': group_key, 'is_override': False})
+                         'is_override': group_key != '__default__', 'recommended': recommended})
+    return jsonify({'channels': all_templates['__default__'], 'group': group_key,
+                     'is_override': False, 'recommended': recommended})
 
 def _delete_channel_group(group_key, get_all_fn, save_fn):
     if group_key == '__default__':
@@ -19499,12 +19508,73 @@ def _default_channel_setting(enabled=False):
 # actually being enabled on the endpoint (see reconcile_windows_audit_policy in
 # micro_agent_windows.py, computed from whether this channel ends up enabled) -- an
 # Event ID filter alone can't make Windows generate an event nobody turned on.
+# Per-channel "collect what detections actually use" presets.
+#
+# A Windows Event Log channel is all-or-nothing without one of these: enabling System or
+# Application to get a handful of real detections also brings in everything else that
+# channel emits. These are include-lists of the Event IDs that carry detection value,
+# chosen so the noisiest high-frequency IDs are left OUT by name rather than by accident.
+# Applied automatically to a channel the first time it appears (see
+# _recommended_channel_setting), and offered in the UI as a one-click preset so a channel
+# configured before these existed can adopt one too.
+#
+# A filter is a real trade: an ID that isn't collected cannot be detected on, whatever
+# rules are enabled. Each entry below says what it deliberately leaves behind.
 _CHANNEL_RECOMMENDED_FILTERS = {
     'Security': {
         'filter_mode': 'include',
         'filter_value': '4608,4609,1102,4624,4625,4634,4648,4672,4688,4698,4702,4719,'
                          '4720,4722,4724,4725,4726,4728,4729,4732,4733,4738,4740,4756,4757,4768,4769,4776',
     },
+    # 7036 (service entered running/stopped) is the one genuinely high-volume ID in this
+    # channel and is deliberately absent -- it fires on every service state change on every
+    # boot. 7045 (a service was INSTALLED) is the persistence signal worth having, and is
+    # rare. 5723/5805 are the Netlogon secure-channel failures Zerologon exploitation
+    # produces; they do not occur in normal operation.
+    'System': {
+        'filter_mode': 'include',
+        'filter_value': '104,1074,5723,5805,6005,6006,7024,7031,7034,7040,7045',
+    },
+    # Crash/hang telemetry only. Everything else in Application is third-party software
+    # chatter with no detection value and no upper bound on volume.
+    'Application': {
+        'filter_mode': 'include',
+        'filter_value': '1000,1001,1002',
+    },
+    # 4104 (script block logging) is the one that matters -- it captures deobfuscated
+    # script content. 4103 is module/pipeline logging. 4105/4106 (every command start and
+    # stop) are excluded: enormous volume, almost no marginal detection value over 4104.
+    'PowerShell': {
+        'filter_mode': 'include',
+        'filter_value': '400,403,600,4103,4104',
+    },
+    # Sysmon is better filtered in its own config (see Log Pipeline > Sysmon Configuration)
+    # -- that stops the event being generated at all, saving endpoint CPU and the network
+    # hop too, where this only discards it after collection. Offered anyway as a blunt
+    # second line. Event ID 7 (image loaded) is excluded: it is far and away the highest
+    # volume Sysmon event and is rarely what a rule keys on.
+    'Sysmon': {
+        'filter_mode': 'include',
+        'filter_value': '1,2,3,5,8,10,11,12,13,14,15,17,18,19,20,21,22,23,25,26',
+    },
+    # Detection, remediation and -- most importantly -- tamper events: 5001 real-time
+    # protection disabled, 5007 configuration changed, 5010/5012 scanning disabled.
+    'WindowsDefender': {
+        'filter_mode': 'include',
+        'filter_value': '1006,1007,1008,1009,1015,1116,1117,1118,1119,5001,5007,5010,5012,5013',
+    },
+}
+
+# Plain-language rationale shown next to the preset in the UI, so applying one is an
+# informed choice rather than a leap of faith. Kept separate from the catalog above
+# because that dict is spread directly into a saved channel setting.
+_CHANNEL_RECOMMENDED_NOTES = {
+    'Security': 'Logon, privilege, account/group changes, process creation, scheduled tasks and audit-log clearing.',
+    'System': 'Service installs and failures, event-log clearing, shutdowns, and the Netlogon failures Zerologon produces. Leaves out 7036 (routine service start/stop), which is the bulk of this channel.',
+    'Application': 'Application crashes and hangs only. The rest of this channel is third-party chatter.',
+    'PowerShell': 'Script block logging (4104) and module logging. Leaves out per-command start/stop, which is very high volume.',
+    'Sysmon': 'Process, network, registry, file, pipe and DNS events. Leaves out image loads (ID 7), the noisiest Sysmon event. Filtering in the Sysmon config itself is better still.',
+    'WindowsDefender': 'Malware detections, remediation outcomes, and tamper events such as real-time protection being switched off.',
 }
 
 def _recommended_channel_setting(name, enabled=False):
