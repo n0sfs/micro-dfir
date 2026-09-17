@@ -19540,8 +19540,8 @@ _CHANNEL_FILTER_TEMPLATES = {
         {'key': 'essential', 'label': 'Essential',
          'filter_value': '1102,4624,4625,4648,4672,4688,4697,4719,4720,4726,4728,4732,4740,4756',
          'note': 'Logon success/failure, explicit credentials, privilege assignment, process '
-                 'creation, service install, account and group changes, lockouts and audit-log '
-                 'clearing. The events an intrusion cannot avoid producing.'},
+                 'creation, service install, account and group changes, lockouts, and clearing of '
+                 'the Security log itself (1102). The events an intrusion cannot avoid producing.'},
         {'key': 'balanced', 'label': 'Balanced (recommended)',
          'filter_value': '1102,4608,4609,4624,4625,4648,4672,4688,4697-4702,4719,4720,4722-4726,'
                          '4728,4729,4732,4733,4738,4740,4756,4757,4767-4769,4771,4776,4778,4779,'
@@ -19561,9 +19561,10 @@ _CHANNEL_FILTER_TEMPLATES = {
     'System': [
         {'key': 'essential', 'label': 'Essential',
          'filter_value': '104,5723,5805,6005,6006,7045',
-         'note': 'Event-log clearing, boot and shutdown markers, service installation, and the '
-                 'Netlogon secure-channel failures Zerologon exploitation produces. Effectively '
-                 'zero volume in normal operation.'},
+         'note': 'Clearing of a non-Security event log (104 -- the Security log has its own, '
+                 '1102, in the Security channel), boot and shutdown markers, service '
+                 'installation, and the Netlogon secure-channel failures Zerologon exploitation '
+                 'produces. Effectively zero volume in normal operation.'},
         {'key': 'balanced', 'label': 'Balanced (recommended)',
          'filter_value': '104,1074,5723,5805,6005,6006,6008,7000,7001,7022-7024,7026,7031,7032,'
                          '7034,7040,7045',
