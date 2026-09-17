@@ -10,6 +10,27 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-16
 
+### Pipeline Health moves to Drop Rules, and the template picker looks clickable
+
+Two placement/affordance fixes, both from the same observation — a thing being *present* is
+not the same as it being *findable* or *obviously actionable*.
+
+The template picker rendered its three tiers as plain dropdown text, which read as a list of
+facts rather than three things you choose between: nothing said "click me". Each tier is now
+its own bordered block with hover and keyboard-focus states, the event-ID count as a pill,
+and the rationale **inline** rather than hidden in a tooltip, so the choice is informed
+without hovering. The recommended tier carries a standing accent rail instead of only
+revealing itself on hover. The count also now reports distinct event IDs rather than tokens —
+`4722-4726` is one token but five IDs, and how much you're about to collect is the number a
+reader actually wants.
+
+**Pipeline Health moves from Parsers to Drop Rules**, directly below the rule editor. It
+reports whether the last Vector config *regeneration* validated and reloaded — and editing a
+drop rule is what triggers a regeneration. It belongs beside the action that causes it: cause
+above, effect below. It was only ever on Parsers because it had been added next to Service
+Health, which moved to Settings → System earlier today. That tab now holds parser content
+only, which is what its name promises.
+
 ### Three Event ID template tiers per Windows channel
 
 Extended the single preset per channel into **essential / balanced / comprehensive**, picked
