@@ -446,7 +446,7 @@ function renderCoverageHero() {
     const logSources = coverageData && coverageData.log_sources;
     const linkEl = document.getElementById('covLogSourcesLink');
     if (logSources) {
-        const gapCount = logSources.gaps.length;
+        const gapCount = logSources.gaps.length + (logSources.dormant || []).length;
         document.getElementById('covLogSourcesSummary').textContent =
             `${logSources.ingested_apps.length} log source${logSources.ingested_apps.length === 1 ? '' : 's'} ingested${gapCount ? ` · ${gapCount} gap${gapCount === 1 ? '' : 's'}` : ''}`;
         linkEl.classList.toggle('has-gaps', gapCount > 0);
@@ -497,16 +497,30 @@ function logSourcesPopoverHtml() {
             return `<div class="cov-logsrc-gap-item"><span class="cov-logsrc-gap-label">${escHtml(g.label)}</span><span class="cov-logsrc-gap-count">${detail} &middot; ${g.technique_count} technique${g.technique_count === 1 ? '' : 's'}</span></div>`;
           }).join('')
         : `<div class="text-muted small">No hard gaps -- every rule's log source is either ingested or unknown.</div>`;
-    const totalWaiting = ls.gaps.reduce((n, g) => n + g.rule_count, 0);
-    const totalDisabled = ls.gaps.reduce((n, g) => n + (g.disabled_rule_count || 0), 0);
+    const dormant = ls.dormant || [];
+    const dormantHtml = dormant.length
+        ? dormant.map(g => {
+            const disabled = g.disabled_rule_count || 0;
+            const detail = disabled
+                ? `${g.rule_count} rule${g.rule_count === 1 ? '' : 's'} ready (${disabled} disabled)`
+                : `${g.rule_count} rule${g.rule_count === 1 ? '' : 's'} ready`;
+            return `<div class="cov-logsrc-gap-item"><span class="cov-logsrc-gap-label">${escHtml(g.label)}</span><span class="cov-logsrc-gap-count">${detail} &middot; ${g.technique_count} technique${g.technique_count === 1 ? '' : 's'}</span></div>`;
+          }).join('')
+        : '';
+    const all = ls.gaps.concat(dormant);
+    const totalWaiting = all.reduce((n, g) => n + g.rule_count, 0);
+    const totalDisabled = all.reduce((n, g) => n + (g.disabled_rule_count || 0), 0);
     return `
         <div class="cov-tier-pop-header"><i class="fa-solid fa-tower-broadcast"></i> Log Sources</div>
         <div class="cov-tier-pop-list">
             <div class="small text-muted mb-1">Currently ingesting (${ls.ingested_apps.length}):</div>
             ${appsHtml}
-            <div class="small text-muted mb-1" style="margin-top:6px;">Not collected at all. Wire one of these up and its rules start working &mdash; nothing they match on reaches this appliance today, so they can't fire however noisy the environment gets:</div>
+            ${dormant.length ? `
+            <div class="small text-muted mb-1" style="margin-top:6px;">Collectable, but nothing is arriving &mdash; an agent that was never deployed, or a channel switched off. Usually one toggle away:</div>
+            ${dormantHtml}` : ''}
+            <div class="small text-muted mb-1" style="margin-top:6px;">No ingest path at all. These need a collector built, not a switch flipped:</div>
             ${gapsHtml}
-            ${totalWaiting ? `<div class="small text-muted" style="margin-top:6px;">${totalWaiting} rule${totalWaiting === 1 ? '' : 's'} in total are waiting on a log source${totalDisabled ? `, ${totalDisabled} of which ${totalDisabled === 1 ? 'is' : 'are'} also switched off &mdash; those need re-enabling once the source is ingested.` : '.'}</div>` : ''}
+            ${totalWaiting ? `<div class="small text-muted" style="margin-top:6px;">${totalWaiting} rule${totalWaiting === 1 ? '' : 's'} in total are waiting on a log source${totalDisabled ? `, ${totalDisabled} of which ${totalDisabled === 1 ? 'is' : 'are'} also switched off &mdash; those need re-enabling once the source arrives.` : '.'}</div>` : ''}
         </div>`;
 }
 

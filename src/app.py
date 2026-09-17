@@ -5273,6 +5273,7 @@ def _log_source_gap_summary(db):
     if _LOG_SOURCE_GAP_CACHE['data'] is not None and (now - _LOG_SOURCE_GAP_CACHE['time']) < _LOG_SOURCE_GAP_CACHE_TTL:
         return _LOG_SOURCE_GAP_CACHE['data']
     from mitre_attack import techniques_for_tags, tags_from_rule_yaml
+    ingested_apps = _get_ingested_apps(db)
     groups = {}
     for r in db.execute("SELECT rule_yaml, enabled FROM sigma_rules").fetchall():
         ry = r['rule_yaml']
@@ -5288,10 +5289,32 @@ def _log_source_gap_summary(db):
         if expected is None:
             key = (raw_product, None)
             expected = SIGMA_LOGSOURCE_INGESTED_APPS.get(key)
-        if expected is None or expected:
-            continue  # unknown combo, or a real (possibly-satisfied) ingest path -- not a hard gap
-        label = _LOG_SOURCE_GAP_LABELS.get(key, key[0].title())
-        g = groups.setdefault(label, {'rule_count': 0, 'enabled_rule_count': 0,
+        if expected is None:
+            continue  # combo not in the curated table -- "unknown", never reported as a gap
+        # Two distinct reasons a rule's source isn't reaching it, and they need different
+        # actions, so they're reported separately rather than lumped together:
+        #
+        #   no_ingest_path  -- an empty expected set: nothing in this appliance can produce
+        #                      that app value at all. Closing it means building an ingest
+        #                      path (a collector, a connector), not flipping a switch.
+        #   not_reporting   -- a real ingest path exists, but nothing has arrived through it.
+        #                      An agent that was never deployed, or a channel switched off.
+        #                      Usually one toggle away.
+        #
+        # The second used to be skipped entirely, which hid exactly the case that prompted
+        # this: Linux rules with no Linux agent deployed, and Windows rules needing the
+        # System channel while that channel is turned off. Both look like "we don't collect
+        # that" to a reader, and neither appeared anywhere.
+        if expected:
+            if expected & ingested_apps:
+                continue  # satisfied -- the source really is arriving
+            kind = 'not_reporting'
+            label = _LOG_SOURCE_GAP_LABELS.get(key) or (
+                f"{key[0].title()} {key[1]}" if key[1] else key[0].title())
+        else:
+            kind = 'no_ingest_path'
+            label = _LOG_SOURCE_GAP_LABELS.get(key, key[0].title())
+        g = groups.setdefault(label, {'kind': kind, 'rule_count': 0, 'enabled_rule_count': 0,
                                       'disabled_rule_count': 0, 'technique_ids': set()})
         g['rule_count'] += 1
         g['enabled_rule_count' if r['enabled'] else 'disabled_rule_count'] += 1
@@ -5301,15 +5324,19 @@ def _log_source_gap_summary(db):
                     g['technique_ids'].add(tech['id'])
         except Exception:
             pass
+    entries = [
+        {'label': label, 'kind': g['kind'], 'rule_count': g['rule_count'],
+         'enabled_rule_count': g['enabled_rule_count'],
+         'disabled_rule_count': g['disabled_rule_count'],
+         'technique_count': len(g['technique_ids'])}
+        for label, g in sorted(groups.items(), key=lambda kv: -len(kv[1]['technique_ids']))
+    ]
     result = {
-        'ingested_apps': sorted(_get_ingested_apps(db)),
-        'gaps': [
-            {'label': label, 'rule_count': g['rule_count'],
-             'enabled_rule_count': g['enabled_rule_count'],
-             'disabled_rule_count': g['disabled_rule_count'],
-             'technique_count': len(g['technique_ids'])}
-            for label, g in sorted(groups.items(), key=lambda kv: -len(kv[1]['technique_ids']))
-        ],
+        'ingested_apps': sorted(ingested_apps),
+        # `gaps` keeps its original meaning (no ingest path exists) so nothing reading it
+        # changes behaviour; `dormant` is the new, separately-actionable category.
+        'gaps': [e for e in entries if e['kind'] == 'no_ingest_path'],
+        'dormant': [e for e in entries if e['kind'] == 'not_reporting'],
     }
     _LOG_SOURCE_GAP_CACHE['data'] = result
     _LOG_SOURCE_GAP_CACHE['time'] = now
