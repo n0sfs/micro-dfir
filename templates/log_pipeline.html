@@ -1190,11 +1190,6 @@ function openEventIdPicker(btn, name) {
     };
     document.getElementById('evidChannelName').textContent = CHANNEL_PRESET_LABELS[name] || name;
     document.getElementById('evidSearch').value = '';
-    // Tier shortcuts inside the modal, so "start from balanced then remove two" is one
-    // click plus two, rather than a trip back out to the dropdown.
-    document.getElementById('evidTierButtons').innerHTML = (channelTemplates[name] || []).map((t, i) =>
-        `<button type="button" class="btn btn-outline-info" onclick="evidLoadTier(${i})">${escHtml(t.label.replace(' (recommended)', ''))}</button>`
-    ).join('');
     renderEventIdPicker();
     bootstrap.Modal.getOrCreateInstance(document.getElementById('eventIdPickerModal')).show();
 }
@@ -1227,8 +1222,28 @@ function evidTierFor(id) {
     return null;
 }
 
+// Which tier the current selection EXACTLY matches, or -1 for a custom set. Derived from
+// the selection rather than remembered from the last button pressed, so the highlight stays
+// honest: pick Balanced and it lights up, untick one ID and it stops claiming to be
+// Balanced, because it isn't any more.
+function evidMatchingTierIndex() {
+    const tiers = channelTemplates[evidState.channel] || [];
+    const sel = evidState.selected;
+    for (let i = 0; i < tiers.length; i++) {
+        const t = expandEventIdValue(tiers[i].filter_value);
+        if (t.length === sel.size && t.every(id => sel.has(id))) return i;
+    }
+    return -1;
+}
+
 function renderEventIdPicker() {
     const cat = channelEventCatalog[evidState.channel] || {};
+    // Rebuilt on every render, not just on open, so the active state tracks the selection.
+    const activeTier = evidMatchingTierIndex();
+    document.getElementById('evidTierButtons').innerHTML = (channelTemplates[evidState.channel] || []).map((t, i) =>
+        `<button type="button" class="btn btn-outline-info${i === activeTier ? ' active' : ''}"
+                 aria-pressed="${i === activeTier}" onclick="evidLoadTier(${i})">${escHtml(t.label.replace(' (recommended)', ''))}</button>`
+    ).join('');
     const q = (document.getElementById('evidSearch').value || '').toLowerCase().trim();
     const ids = Object.keys(cat).map(Number).sort((a, b) => a - b)
         .filter(id => !q || String(id).includes(q) || cat[id].toLowerCase().includes(q));
@@ -1250,8 +1265,15 @@ function renderEventIdPicker() {
     const value = collapseEventIds([...evidState.selected]);
     const tokens = value ? value.split(',').length : 0;
     const over = tokens > 50;
+    const tiers = channelTemplates[evidState.channel] || [];
+    // Name the set in the footer too -- the button highlight alone is easy to miss, and
+    // "Custom" is the useful word when a selection has drifted off a template.
+    const which = activeTier >= 0
+        ? `<span class="text-info">${escHtml(tiers[activeTier].label.replace(' (recommended)', ''))}</span>`
+        : (n ? '<span class="text-muted">Custom</span>' : '<span class="text-muted">Nothing selected</span>');
     document.getElementById('evidSummary').innerHTML =
-        `${n} event ID${n === 1 ? '' : 's'} selected &middot; <span class="${over ? 'text-danger' : 'text-muted'}">${tokens}/50 filter entries</span>` +
+        `${which} &middot; ${n} event ID${n === 1 ? '' : 's'} &middot; ` +
+        `<span class="${over ? 'text-danger' : 'text-muted'}">${tokens}/50 filter entries</span>` +
         (over ? ' &mdash; too many, deselect some' : '');
 }
 
