@@ -31,6 +31,24 @@
   display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;}
 .chan-tpl-foot{font-size:.68rem; color:var(--text-muted); padding:6px 8px 2px;
   border-top:1px solid var(--border); margin-top:6px; white-space:normal;}
+
+/* Event ID picker modal -- the same template content, but every ID shown with what it
+   actually means, so a selection is made on meaning rather than on trusting the list. */
+.evid-row{display:flex; align-items:flex-start; gap:10px; padding:6px 8px; border-radius:6px;
+  border:1px solid transparent; cursor:pointer;}
+.evid-row:hover{background:var(--bg-card-alt); border-color:var(--border);}
+.evid-row.is-on{background:var(--accent-dim); border-color:var(--accent);}
+.evid-cb{margin-top:2px; flex-shrink:0;}
+.evid-id{font-family:var(--font-mono); font-size:.76rem; color:var(--text-primary);
+  min-width:52px; flex-shrink:0;}
+.evid-desc{font-size:.76rem; color:var(--text-secondary); line-height:1.35;}
+.evid-tier{font-size:.6rem; text-transform:uppercase; letter-spacing:.05em; border-radius:999px;
+  padding:1px 6px; border:1px solid var(--border); color:var(--text-muted);
+  background:var(--bg-inset); white-space:nowrap; flex-shrink:0; margin-left:auto;}
+.evid-tier.t-essential{color:var(--success); border-color:var(--success);}
+.evid-tier.t-balanced{color:var(--warning); border-color:var(--warning);}
+.evid-tier.t-comprehensive{color:var(--info); border-color:var(--info);}
+.evid-noisy{color:var(--danger); font-size:.62rem; margin-left:6px; white-space:nowrap;}
 </style>
 
 <div class="page-header">
@@ -793,6 +811,38 @@
 <!-- =========================== END LINUX CHANNELS PANE =========================== -->
 {% endif %}
 
+<!-- Event ID picker: the template content with every ID's meaning spelled out, so a
+     filter is chosen on what the events ARE rather than on trusting a list of numbers. -->
+<div class="modal fade" id="eventIdPickerModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title"><i class="fa-solid fa-list-check me-2"></i>Event IDs &mdash; <span id="evidChannelName"></span></h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+          <div class="btn-group btn-group-sm" role="group" id="evidTierButtons"></div>
+          <button type="button" class="btn btn-sm btn-outline-secondary" onclick="evidSelectAll(true)">Select all</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary" onclick="evidSelectAll(false)">Clear</button>
+          <input type="text" id="evidSearch" class="form-control form-control-sm bg-dark text-light border-secondary ms-auto"
+                 style="max-width:220px;" placeholder="Filter by ID or meaning..." oninput="renderEventIdPicker()">
+        </div>
+        <div id="evidList"></div>
+      </div>
+      <div class="modal-footer border-secondary d-flex justify-content-between">
+        <div class="small text-muted" id="evidSummary"></div>
+        <div>
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-sm btn-primary" onclick="applyEventIdSelection()">
+            <i class="fa-solid fa-check me-1"></i>Use these IDs
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 function escHtml(s) {
     return (s === null || s === undefined) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1054,6 +1104,8 @@ function onChannelFilterModeChange(select) {
 // Server-supplied per-channel templates (see _CHANNEL_FILTER_TEMPLATES): three nested
 // tiers each. Held here so re-rendering the rows doesn't re-fetch them.
 let channelTemplates = {};
+// {channel: {eventId: 'what it means'}} -- see _WINDOWS_EVENT_ID_CATALOG.
+let channelEventCatalog = {};
 
 // Enabling a Windows channel is all-or-nothing without an Event ID filter: collecting the
 // handful of events a detection needs also collects everything else that channel emits.
@@ -1086,9 +1138,142 @@ function presetFilterButton(name) {
         <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end shadow chan-tpl-menu">
             <li><div class="chan-tpl-head">Event ID template &mdash; pick one to start from</div></li>
             ${items}
+            <li><button class="chan-tpl-item" type="button" onclick="openEventIdPicker(this, '${escAttr(name)}')">
+                <span class="chan-tpl-row">
+                    <span class="chan-tpl-name"><i class="fa-solid fa-list-check me-1"></i>Browse &amp; choose IDs&hellip;</span>
+                </span>
+                <span class="chan-tpl-note">See every event ID with what it means, and pick exactly the ones you want.</span>
+            </button></li>
             <li><div class="chan-tpl-foot">Fills the filter field so you can edit it. Nothing is sent to agents until <strong>Save &amp; Push</strong>.</div></li>
         </ul>
     </div>`;
+}
+
+// ---- Event ID picker -------------------------------------------------------------
+// The tier dropdown answers "give me a sensible set"; this answers "show me exactly what
+// that set contains, and let me change it". Both write to the same editable filter field.
+let evidState = { channel: null, selected: new Set(), row: null };
+
+function expandEventIdValue(value) {
+    const out = [];
+    (value || '').split(',').forEach(tok => {
+        const m = tok.trim().match(/^(\d+)(?:-(\d+))?$/);
+        if (!m) return;
+        const lo = +m[1], hi = m[2] ? +m[2] : lo;
+        for (let i = lo; i <= hi && i - lo < 5000; i++) out.push(i);
+    });
+    return out;
+}
+
+// Collapse a selection back into ranges. Not cosmetic: the server rejects a filter with
+// more than 50 comma-separated entries, and hand-picking sixty individual IDs would other-
+// wise produce a value that only fails at save time.
+function collapseEventIds(ids) {
+    const sorted = [...new Set(ids)].sort((a, b) => a - b);
+    const parts = [];
+    let i = 0;
+    while (i < sorted.length) {
+        let j = i;
+        while (j + 1 < sorted.length && sorted[j + 1] === sorted[j] + 1) j++;
+        parts.push(j - i >= 2 ? `${sorted[i]}-${sorted[j]}` : sorted.slice(i, j + 1).join(','));
+        i = j + 1;
+    }
+    return parts.join(',');
+}
+
+function openEventIdPicker(btn, name) {
+    const row = btn.closest('.channel-row');
+    evidState = {
+        channel: name,
+        row: row,
+        selected: new Set(expandEventIdValue(row.querySelector('.chan-filter-value').value)),
+    };
+    document.getElementById('evidChannelName').textContent = CHANNEL_PRESET_LABELS[name] || name;
+    document.getElementById('evidSearch').value = '';
+    // Tier shortcuts inside the modal, so "start from balanced then remove two" is one
+    // click plus two, rather than a trip back out to the dropdown.
+    document.getElementById('evidTierButtons').innerHTML = (channelTemplates[name] || []).map((t, i) =>
+        `<button type="button" class="btn btn-outline-info" onclick="evidLoadTier(${i})">${escHtml(t.label.replace(' (recommended)', ''))}</button>`
+    ).join('');
+    renderEventIdPicker();
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('eventIdPickerModal')).show();
+}
+
+function evidLoadTier(index) {
+    const t = (channelTemplates[evidState.channel] || [])[index];
+    if (!t) return;
+    evidState.selected = new Set(expandEventIdValue(t.filter_value));
+    renderEventIdPicker();
+}
+
+function evidSelectAll(on) {
+    const cat = channelEventCatalog[evidState.channel] || {};
+    evidState.selected = on ? new Set(Object.keys(cat).map(Number)) : new Set();
+    renderEventIdPicker();
+}
+
+function evidToggle(id) {
+    if (evidState.selected.has(id)) evidState.selected.delete(id); else evidState.selected.add(id);
+    renderEventIdPicker();
+}
+
+// Which tiers contain an ID, so the list shows why an event is (or isn't) in the set --
+// the narrowest tier wins the badge, since that's the strongest statement about it.
+function evidTierFor(id) {
+    const tiers = channelTemplates[evidState.channel] || [];
+    for (const t of tiers) {
+        if (expandEventIdValue(t.filter_value).includes(id)) return t.key;
+    }
+    return null;
+}
+
+function renderEventIdPicker() {
+    const cat = channelEventCatalog[evidState.channel] || {};
+    const q = (document.getElementById('evidSearch').value || '').toLowerCase().trim();
+    const ids = Object.keys(cat).map(Number).sort((a, b) => a - b)
+        .filter(id => !q || String(id).includes(q) || cat[id].toLowerCase().includes(q));
+    document.getElementById('evidList').innerHTML = ids.length ? ids.map(id => {
+        const on = evidState.selected.has(id);
+        const tier = evidTierFor(id);
+        const badge = tier ? `<span class="evid-tier t-${tier}">${tier}</span>` : '';
+        // Call the high-volume ones out where they are, not only in the tier note.
+        const noisy = /very high volume|high volume/i.test(cat[id]) ? '<span class="evid-noisy">high volume</span>' : '';
+        return `<div class="evid-row${on ? ' is-on' : ''}" onclick="evidToggle(${id})">
+            <input type="checkbox" class="form-check-input evid-cb" ${on ? 'checked' : ''} onclick="event.stopPropagation(); evidToggle(${id});">
+            <span class="evid-id">${id}</span>
+            <span class="evid-desc">${escHtml(cat[id])}${noisy}</span>
+            ${badge}
+        </div>`;
+    }).join('') : '<div class="text-muted small p-2">Nothing matches that filter.</div>';
+
+    const n = evidState.selected.size;
+    const value = collapseEventIds([...evidState.selected]);
+    const tokens = value ? value.split(',').length : 0;
+    const over = tokens > 50;
+    document.getElementById('evidSummary').innerHTML =
+        `${n} event ID${n === 1 ? '' : 's'} selected &middot; <span class="${over ? 'text-danger' : 'text-muted'}">${tokens}/50 filter entries</span>` +
+        (over ? ' &mdash; too many, deselect some' : '');
+}
+
+function applyEventIdSelection() {
+    const value = collapseEventIds([...evidState.selected]);
+    if (value && value.split(',').length > 50) {
+        toast('That selection needs more than the 50 filter entries the agent config allows. Deselect a few IDs.', 'warning', {duration: 8000});
+        return;
+    }
+    const row = evidState.row;
+    const mode = row.querySelector('.chan-filter-mode');
+    if (value) {
+        mode.value = 'include';
+        row.querySelector('.chan-enabled').checked = true;
+    } else {
+        mode.value = 'none';
+    }
+    onChannelFilterModeChange(mode);
+    row.querySelector('.chan-filter-value').value = value;
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('eventIdPickerModal')).hide();
+    toast(value ? `Set ${evidState.selected.size} event ID(s) on ${evidState.channel}. Save & Push to apply.`
+                : `Cleared the filter on ${evidState.channel}. Save & Push to apply.`, 'info', {duration: 7000});
 }
 
 function applyChannelTemplate(btn, name, index) {
@@ -1143,6 +1328,7 @@ function loadChannelSettings() {
         .then(res => {
             const data = res.channels || {};
             channelTemplates = res.templates || {};
+            channelEventCatalog = res.event_catalog || {};
             let container = document.getElementById('channelsContainer');
             if (!container) return;
             let html = '';

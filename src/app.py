@@ -19468,7 +19468,13 @@ def _channel_group_get_response(all_templates, group_key):
         name: [{**t, 'recommended': t['key'] == _CHANNEL_DEFAULT_TEMPLATE_KEY} for t in tiers]
         for name, tiers in _CHANNEL_FILTER_TEMPLATES.items()
     }
-    payload = {'group': group_key, 'templates': templates}
+    # Keys are stringified because JSON object keys always are -- doing it here rather than
+    # letting the client discover it keeps the contract explicit.
+    catalog = {
+        name: {str(eid): desc for eid, desc in sorted(ids.items())}
+        for name, ids in _WINDOWS_EVENT_ID_CATALOG.items()
+    }
+    payload = {'group': group_key, 'templates': templates, 'event_catalog': catalog}
     if group_key in all_templates:
         payload.update({'channels': all_templates[group_key], 'is_override': group_key != '__default__'})
     else:
@@ -19509,6 +19515,199 @@ def _default_channel_setting(enabled=False):
 # actually being enabled on the endpoint (see reconcile_windows_audit_policy in
 # micro_agent_windows.py, computed from whether this channel ends up enabled) -- an
 # Event ID filter alone can't make Windows generate an event nobody turned on.
+# What each Windows Event ID actually means, per channel.
+#
+# A filter expressed as bare numbers is unreviewable -- "4662" tells an admin nothing about
+# whether dropping it matters. This is what lets the channel row offer a real picker: every
+# ID a template can contain, with a one-line definition, so a selection is made on meaning
+# rather than on trusting the list.
+#
+# Deliberately covers exactly the IDs the templates reference and no more. An entry here is
+# a claim about what Windows emits, and a wrong one is worse than a missing one -- so where
+# an ID could not be stated confidently it was removed from the template instead of being
+# given a vague definition (the Windows Update IDs in System, and the tail of the Defender
+# 5000-5013 span, both went that way). A test asserts every templated ID has an entry.
+_WINDOWS_EVENT_ID_CATALOG = {
+    'Security': {
+        1102: 'The Security audit log was cleared',
+        4608: 'Windows is starting up',
+        4609: 'Windows is shutting down',
+        4616: 'System time was changed',
+        4624: 'An account was successfully logged on',
+        4625: 'An account failed to log on',
+        4634: 'An account was logged off',
+        4647: 'User-initiated logoff',
+        4648: 'Logon attempted using explicit credentials (runas)',
+        4649: 'A replay attack was detected',
+        4656: 'A handle to an object was requested',
+        4657: 'A registry value was modified',
+        4660: 'An object was deleted',
+        4663: 'An attempt was made to access an object',
+        4670: 'Permissions on an object were changed',
+        4672: 'Special privileges assigned to new logon (administrative)',
+        4673: 'A privileged service was called',
+        4674: 'An operation was attempted on a privileged object',
+        4688: 'A new process has been created',
+        4692: 'Backup of data protection master key was attempted (DPAPI)',
+        4693: 'Recovery of data protection master key was attempted (DPAPI)',
+        4697: 'A service was installed in the system',
+        4698: 'A scheduled task was created',
+        4699: 'A scheduled task was deleted',
+        4700: 'A scheduled task was enabled',
+        4701: 'A scheduled task was disabled',
+        4702: 'A scheduled task was updated',
+        4719: 'System audit policy was changed',
+        4720: 'A user account was created',
+        4722: 'A user account was enabled',
+        4723: 'An attempt was made to change an account password',
+        4724: 'An attempt was made to reset an account password',
+        4725: 'A user account was disabled',
+        4726: 'A user account was deleted',
+        4728: 'A member was added to a security-enabled global group',
+        4729: 'A member was removed from a security-enabled global group',
+        4732: 'A member was added to a security-enabled local group',
+        4733: 'A member was removed from a security-enabled local group',
+        4738: 'A user account was changed',
+        4740: 'A user account was locked out',
+        4741: 'A computer account was created',
+        4742: 'A computer account was changed',
+        4743: 'A computer account was deleted',
+        4756: 'A member was added to a security-enabled universal group',
+        4757: 'A member was removed from a security-enabled universal group',
+        4767: 'A user account was unlocked',
+        4768: 'A Kerberos authentication ticket (TGT) was requested',
+        4769: 'A Kerberos service ticket was requested',
+        4771: 'Kerberos pre-authentication failed',
+        4776: 'The domain controller attempted to validate credentials (NTLM)',
+        4778: 'A session was reconnected to a Window Station (RDP)',
+        4779: 'A session was disconnected from a Window Station (RDP)',
+        4798: "A user's local group membership was enumerated",
+        4799: 'A security-enabled local group membership was enumerated',
+        4964: 'A special group has been assigned to a new logon',
+        5024: 'The Windows Firewall service started successfully',
+        5025: 'The Windows Firewall service was stopped',
+        5030: 'The Windows Firewall service failed to start',
+        5136: 'A directory service object was modified',
+        5137: 'A directory service object was created',
+        5140: 'A network share object was accessed',
+        5141: 'A directory service object was deleted',
+        5142: 'A network share object was added',
+        5143: 'A network share object was modified',
+        5144: 'A network share object was deleted',
+        5145: 'A network share object was checked for client access',
+    },
+    'System': {
+        1: 'Kernel-General: the system time was changed',
+        12: 'Kernel-General: the operating system started',
+        13: 'Kernel-General: the operating system is shutting down',
+        41: 'Kernel-Power: the system rebooted without a clean shutdown',
+        104: 'An event log was cleared (any log other than Security -- see 1102 there)',
+        219: 'Kernel-PnP: a driver was loaded for a device',
+        1074: 'A system shutdown or restart was initiated by a process or user',
+        5723: 'Netlogon: secure channel setup failed',
+        5805: 'Netlogon: session setup from a computer failed authentication',
+        6005: 'The Event Log service was started (boot marker)',
+        6006: 'The Event Log service was stopped (clean shutdown marker)',
+        6008: 'The previous system shutdown was unexpected',
+        7000: 'A service failed to start',
+        7001: 'A service depends on another service that failed to start',
+        7022: 'A service hung on starting',
+        7023: 'A service terminated with an error',
+        7024: 'A service terminated with a service-specific error',
+        7026: 'Boot-start or system-start driver(s) failed to load',
+        7031: 'A service terminated unexpectedly (recovery action taken)',
+        7032: 'The Service Control Manager failed to take a recovery action',
+        7034: 'A service terminated unexpectedly',
+        7036: 'A service entered the running or stopped state (very high volume)',
+        7040: 'The start type of a service was changed',
+        7045: 'A service was installed in the system',
+    },
+    'Application': {
+        1000: 'Application error (a program crashed)',
+        1001: 'Windows Error Reporting record for a fault',
+        1002: 'Application hang (a program stopped responding)',
+        1026: '.NET Runtime unhandled exception',
+        11707: 'MsiInstaller: product installed successfully',
+        11708: 'MsiInstaller: product installation failed',
+        11724: 'MsiInstaller: product removed successfully',
+    },
+    'PowerShell': {
+        400: 'Engine state changed to Available (a PowerShell session started)',
+        403: 'Engine state changed to Stopped (a PowerShell session ended)',
+        600: 'A provider lifecycle event (provider started or stopped)',
+        800: 'Pipeline execution details',
+        4103: 'Module/pipeline logging -- command invocation and parameters',
+        4104: 'Script block logging -- the script text as executed, deobfuscated',
+        4105: 'A command was started',
+        4106: 'A command completed',
+    },
+    'Sysmon': {
+        1: 'Process creation',
+        2: 'A process changed a file creation time',
+        3: 'Network connection',
+        4: 'Sysmon service state changed',
+        5: 'Process terminated',
+        6: 'Driver loaded',
+        7: 'Image (DLL) loaded -- very high volume',
+        8: 'CreateRemoteThread (thread injected into another process)',
+        9: 'RawAccessRead (raw disk read)',
+        10: 'ProcessAccess (a process opened a handle to another)',
+        11: 'File created',
+        12: 'Registry object added or deleted',
+        13: 'Registry value set',
+        14: 'Registry object renamed',
+        15: 'File stream created (alternate data stream)',
+        16: 'Sysmon configuration changed',
+        17: 'Named pipe created',
+        18: 'Named pipe connected',
+        19: 'WMI event filter activity',
+        20: 'WMI event consumer activity',
+        21: 'WMI event consumer-to-filter binding',
+        22: 'DNS query',
+        23: 'File deleted and archived',
+        24: 'Clipboard contents changed',
+        25: 'Process tampering (image replaced or hollowed)',
+        26: 'File deleted (not archived)',
+        27: 'File block executable',
+        28: 'File block shredding',
+        29: 'File executable detected',
+        255: 'Sysmon internal error',
+    },
+    'WindowsDefender': {
+        1000: 'An antimalware scan started',
+        1001: 'An antimalware scan finished',
+        1002: 'An antimalware scan was stopped before completion',
+        1005: 'An antimalware scan failed',
+        1006: 'Malware or other potentially unwanted software was detected',
+        1007: 'Action was taken to protect the system from malware',
+        1008: 'An action against malware failed',
+        1009: 'An item was restored from quarantine',
+        1010: 'Failed to restore an item from quarantine',
+        1011: 'An item was deleted from quarantine',
+        1012: 'Failed to delete an item from quarantine',
+        1013: 'Malware history was deleted',
+        1014: 'Failed to delete malware history',
+        1015: 'Suspicious behaviour was detected',
+        1116: 'Malware or other potentially unwanted software was detected',
+        1117: 'Action was taken to protect the system',
+        1118: 'Action to protect the system failed',
+        1119: 'A critical error occurred taking action on malware',
+        2000: 'Antimalware definitions were updated',
+        2001: 'Antimalware definition update failed',
+        2002: 'The antimalware engine was updated',
+        3002: 'Real-time protection encountered an error and failed',
+        5000: 'Real-time protection is enabled',
+        5001: 'Real-time protection is DISABLED',
+        5004: 'The real-time protection configuration changed',
+        5007: 'Antimalware configuration was changed',
+        5008: 'The antimalware engine encountered an error and failed',
+        5010: 'Antispyware scanning is DISABLED',
+        5011: 'Antispyware scanning is enabled',
+        5012: 'Antivirus scanning is DISABLED',
+        5013: 'Tamper protection blocked a change to Defender',
+    },
+}
+
 # Per-channel Event ID templates: three tiers per channel, as a starting point to edit.
 #
 # A Windows Event Log channel is all-or-nothing without a filter -- enabling System to get
@@ -19572,11 +19771,10 @@ _CHANNEL_FILTER_TEMPLATES = {
                  'changes, boot-driver load failures and unexpected shutdowns. Deliberately omits '
                  '7036 (service entered running/stopped), which is the bulk of this channel.'},
         {'key': 'comprehensive', 'label': 'Comprehensive',
-         'filter_value': '1,12,13,20,24,25,41,104,219,1074,5723,5805,6005,6006,6008,7000,7001,'
+         'filter_value': '1,12,13,41,104,219,1074,5723,5805,6005,6006,6008,7000,7001,'
                          '7022-7024,7026,7031,7032,7034,7036,7040,7045',
          'note': 'Adds 7036 service state changes, kernel time changes, OS start/stop, unexpected '
-                 'reboots, driver loads and Windows Update activity. 7036 alone accounts for most '
-                 'of the added volume.'},
+                 'reboots and driver loads. 7036 alone accounts for most of the added volume.'},
     ],
     'Application': [
         {'key': 'essential', 'label': 'Essential',
@@ -19631,7 +19829,8 @@ _CHANNEL_FILTER_TEMPLATES = {
          'note': 'Adds remediation outcomes, suspicious behaviour detections and the remaining '
                  'tamper events -- configuration changed, scanning disabled.'},
         {'key': 'comprehensive', 'label': 'Comprehensive',
-         'filter_value': '1000-1002,1005-1015,1116-1119,2000-2002,3002,5000-5013',
+         'filter_value': '1000-1002,1005-1015,1116-1119,2000-2002,3002,5000,5001,5004,5007,'
+                         '5008,5010,5011,5012,5013',
          'note': 'Adds scan start/stop, signature update success and failure, and engine errors. '
                  'Signature updates are frequent and rarely interesting.'},
     ],
