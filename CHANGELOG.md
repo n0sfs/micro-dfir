@@ -10,6 +10,37 @@ Full commit-level detail is always available via `git log`.
 
 ## 2026-09-16
 
+### Three Event ID template tiers per Windows channel
+
+Extended the single preset per channel into **essential / balanced / comprehensive**, picked
+from a dropdown on each row with the rationale and entry count shown before applying. The
+value lands in the editable filter field — a starting point to trim or extend, not a
+lock-in — and nothing reaches an agent until Save & Push.
+
+Written with **ranges** wherever a contiguous block is wanted (`4722-4726`, `1-29`). Partly
+because the validator caps a filter at 50 entries and a comprehensive Security list would
+blow straight past that spelled out; mostly because `4722-4726` reads as an intent where
+thirty comma-separated numbers read as noise. Sysmon's balanced tier is 5 tokens covering 23
+event IDs.
+
+The tiers are **strictly nested** — essential ⊂ balanced ⊂ comprehensive — so moving up a
+tier only ever adds collection and can never silently drop an ID the previous tier had. That
+is enforced by test rather than merely intended, along with the token cap and the specific
+promise each note makes:
+
+| Channel | essential → balanced → comprehensive | The line that matters |
+|---|---|---|
+| Security | 14 → 39 → 66 IDs | balanced omits logoff and object access; comprehensive adds them |
+| System | 6 → 18 → 27 | balanced omits **7036**; comprehensive adds it back |
+| Sysmon | 7 → 23 → 30 | balanced omits **image loads (7)**; comprehensive is everything |
+| PowerShell | 1 → 5 → 8 | essential is 4104 alone; comprehensive adds per-command 4105/4106 |
+| Defender | 4 → 14 → 36 | comprehensive adds signature-update chatter |
+| Application | 2 → 4 → 7 | comprehensive adds the MSI install trail |
+
+`_CHANNEL_RECOMMENDED_FILTERS` — what a brand-new channel is created with — is now *derived*
+from the balanced tier rather than duplicating it, so the default and the template it claims
+to be cannot drift apart.
+
 ### Per-channel Event ID presets, so turning a channel on isn't all-or-nothing
 
 Enabling a Windows Event Log channel collects **everything** that channel emits unless an
