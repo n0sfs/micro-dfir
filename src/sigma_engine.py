@@ -105,9 +105,21 @@ _FIELD_COLUMN_ALIASES = {
 # LogonType as "Logon Type:"; Sysmon renders its own fields with the name unsplit
 # ("GrantedAccess:"). Both spellings are emitted, so neither channel is guessed at.
 _CAMEL_BOUNDARY_RE = re.compile(r'(?<=[a-z0-9])(?=[A-Z])')
-# Longest run of separator characters tolerated between a rendered label's colon and its
-# value. Windows indents with up to three tabs; Sysmon uses a single space.
-_MESSAGE_LABEL_MAX_GAP = 3
+# Separator widths tolerated between a rendered label's colon and its value: Sysmon uses a
+# single space, Windows indents with up to three tabs. Zero is not included -- no renderer
+# emits "Label:value" with nothing between, and every variant costs a full scan.
+_MESSAGE_LABEL_GAPS = (1, 2, 3)
+
+# Ceiling on how many values a single unmapped field may have before anchoring is skipped.
+#
+# Each value expands to len(_MESSAGE_LABEL_GAPS) x 2 label spellings = 6 LIKE patterns, and
+# every one of them is a leading-wildcard scan of the `message` column for each row in the
+# batch. That is fine for the single-valued comparisons this was built for
+# (GrantedAccess: '0x1410'), and pathological for a list: a real rule here matched six ports
+# against an unmapped dst_port, which became ~48 scans and took 16-23 SECONDS of every
+# detection cycle on its own. Past this ceiling the values are left alone -- the rule stays
+# as cheap as it was before anchoring existed, and Validate Rules still reports it.
+_MESSAGE_ANCHOR_MAX_VALUES = 2
 
 def _spaced_field_label(field):
     return _CAMEL_BOUNDARY_RE.sub(' ', (field or '').replace('_', ' ')).strip()
@@ -158,7 +170,7 @@ def _message_anchored_values(field, value):
     return [
         star + SigmaString(f'{label}:' + ('?' * gap)) + value_str + star
         for label in sorted(labels)
-        for gap in range(_MESSAGE_LABEL_MAX_GAP + 1)
+        for gap in _MESSAGE_LABEL_GAPS
     ]
 
 @dataclass
@@ -206,7 +218,7 @@ class MapFieldsToColumns(FieldMappingTransformation):
             if modified:
                 detection_item.value = rewritten
             return result
-        if unmapped:
+        if unmapped and len(detection_item.value) <= _MESSAGE_ANCHOR_MAX_VALUES:
             rewritten, modified = [], False
             for value in detection_item.value:
                 anchored = _message_anchored_values(field, value)
