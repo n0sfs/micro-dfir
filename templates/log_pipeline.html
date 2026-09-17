@@ -1014,34 +1014,51 @@ function onChannelFilterModeChange(select) {
     valInput.disabled = (select.value === 'none');
 }
 
-// Server-supplied per-channel presets (see _CHANNEL_RECOMMENDED_FILTERS). Held here so a
-// re-render of the rows doesn't need to re-fetch them.
-let channelRecommended = {};
+// Server-supplied per-channel templates (see _CHANNEL_FILTER_TEMPLATES): three nested
+// tiers each. Held here so re-rendering the rows doesn't re-fetch them.
+let channelTemplates = {};
 
 // Enabling a Windows channel is all-or-nothing without an Event ID filter: collecting the
 // handful of events a detection needs also collects everything else that channel emits.
-// This fills in the curated list for that channel rather than making an admin look the
-// IDs up. It only sets the fields -- nothing is pushed to agents until Save & Push.
+// These fill in a curated list rather than making an admin look the IDs up -- and they are
+// a STARTING POINT, not a lock-in: the value lands in the editable field, so it can be
+// trimmed or extended before saving. Nothing reaches an agent until Save & Push.
 function presetFilterButton(name) {
-    const rec = channelRecommended[name];
-    if (!rec) return '';
-    const note = `Recommended Event IDs for this channel.\n\n${rec.note || ''}\n\nSets the filter fields; nothing is sent to agents until you Save & Push.`;
-    return `<button type="button" class="btn btn-sm btn-outline-info" title="${escAttr(note)}" onclick="applyChannelPreset(this, '${escAttr(name)}')"><i class="fa-solid fa-wand-magic-sparkles"></i></button>`;
+    const tiers = channelTemplates[name];
+    if (!tiers || !tiers.length) return '';
+    const items = tiers.map((t, i) => {
+        const count = (t.filter_value || '').split(',').filter(x => x.trim()).length;
+        const star = t.recommended ? '<i class="fa-solid fa-star text-warning me-1" title="Recommended"></i>' : '';
+        return `<li><button class="dropdown-item small" type="button" title="${escAttr(t.note || '')}" onclick="applyChannelTemplate(this, '${escAttr(name)}', ${i})">
+            ${star}${escHtml(t.label)} <span class="text-muted">&middot; ${count} entr${count === 1 ? 'y' : 'ies'}</span>
+        </button></li>`;
+    }).join('');
+    return `<div class="dropdown d-inline-block">
+        <button type="button" class="btn btn-sm btn-outline-info dropdown-toggle" data-bs-toggle="dropdown" title="Apply an Event ID template to this channel, then edit it to taste">
+            <i class="fa-solid fa-wand-magic-sparkles"></i>
+        </button>
+        <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end shadow" style="min-width: 260px;">
+            <li><h6 class="dropdown-header">Event ID template</h6></li>
+            ${items}
+            <li><hr class="dropdown-divider border-secondary"></li>
+            <li><span class="dropdown-item-text text-muted small" style="white-space:normal;">Fills the filter field so you can edit it. Nothing is sent to agents until Save &amp; Push.</span></li>
+        </ul>
+    </div>`;
 }
 
-function applyChannelPreset(btn, name) {
-    const rec = channelRecommended[name];
-    if (!rec) return;
+function applyChannelTemplate(btn, name, index) {
+    const tier = (channelTemplates[name] || [])[index];
+    if (!tier) return;
     const row = btn.closest('.channel-row');
     const mode = row.querySelector('.chan-filter-mode');
     const val = row.querySelector('.chan-filter-value');
-    mode.value = rec.filter_mode || 'include';
+    mode.value = 'include';
     onChannelFilterModeChange(mode);
-    val.value = rec.filter_value || '';
-    // The filter is pointless on a channel that isn't being collected, and an admin
-    // clicking "use the recommended set" plainly intends to collect it.
+    val.value = tier.filter_value || '';
+    // A filter is pointless on a channel that isn't collected, and choosing a template
+    // plainly means "collect this". Still only a form change until Save & Push.
     row.querySelector('.chan-enabled').checked = true;
-    toast(`Applied the recommended Event ID filter for ${name}. Review it, then Save & Push.`, 'info', {duration: 6000});
+    toast(`Applied the ${tier.label.replace(' (recommended)', '')} template to ${name}. Edit if you want, then Save & Push.`, 'info', {duration: 7000});
 }
 
 let currentChannelGroup = '';
@@ -1080,7 +1097,7 @@ function loadChannelSettings() {
         })
         .then(res => {
             const data = res.channels || {};
-            channelRecommended = res.recommended || {};
+            channelTemplates = res.templates || {};
             let container = document.getElementById('channelsContainer');
             if (!container) return;
             let html = '';

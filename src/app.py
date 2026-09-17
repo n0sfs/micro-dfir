@@ -19460,19 +19460,20 @@ def _resolve_channel_group_key(reserved_keys=frozenset()):
     return requested_group or '__default__', None
 
 def _channel_group_get_response(all_templates, group_key):
-    # The recommended presets ride along with every GET so the UI can offer them per
-    # channel. They were previously only ever applied to a channel the first time it
-    # appeared, which meant an appliance configured before a preset existed could never
-    # adopt it without someone typing the ID list by hand.
-    recommended = {
-        name: {**filt, 'note': _CHANNEL_RECOMMENDED_NOTES.get(name, '')}
-        for name, filt in _CHANNEL_RECOMMENDED_FILTERS.items()
+    # The full template catalog rides along with every GET so the UI can offer all three
+    # tiers per channel. These were previously only ever applied to a channel the first
+    # time it appeared, which meant an appliance configured before a template existed could
+    # never adopt one without someone typing the ID list by hand.
+    templates = {
+        name: [{**t, 'recommended': t['key'] == _CHANNEL_DEFAULT_TEMPLATE_KEY} for t in tiers]
+        for name, tiers in _CHANNEL_FILTER_TEMPLATES.items()
     }
+    payload = {'group': group_key, 'templates': templates}
     if group_key in all_templates:
-        return jsonify({'channels': all_templates[group_key], 'group': group_key,
-                         'is_override': group_key != '__default__', 'recommended': recommended})
-    return jsonify({'channels': all_templates['__default__'], 'group': group_key,
-                     'is_override': False, 'recommended': recommended})
+        payload.update({'channels': all_templates[group_key], 'is_override': group_key != '__default__'})
+    else:
+        payload.update({'channels': all_templates['__default__'], 'is_override': False})
+    return jsonify(payload)
 
 def _delete_channel_group(group_key, get_all_fn, save_fn):
     if group_key == '__default__':
@@ -19508,73 +19509,149 @@ def _default_channel_setting(enabled=False):
 # actually being enabled on the endpoint (see reconcile_windows_audit_policy in
 # micro_agent_windows.py, computed from whether this channel ends up enabled) -- an
 # Event ID filter alone can't make Windows generate an event nobody turned on.
-# Per-channel "collect what detections actually use" presets.
+# Per-channel Event ID templates: three tiers per channel, as a starting point to edit.
 #
-# A Windows Event Log channel is all-or-nothing without one of these: enabling System or
-# Application to get a handful of real detections also brings in everything else that
-# channel emits. These are include-lists of the Event IDs that carry detection value,
-# chosen so the noisiest high-frequency IDs are left OUT by name rather than by accident.
-# Applied automatically to a channel the first time it appears (see
-# _recommended_channel_setting), and offered in the UI as a one-click preset so a channel
-# configured before these existed can adopt one too.
+# A Windows Event Log channel is all-or-nothing without a filter -- enabling System to get
+# a handful of real detections also brings in everything else that channel emits. These are
+# include-lists, expressed with RANGES wherever a whole contiguous block is wanted
+# (4722-4726), both because the validator caps a filter at _EVENT_ID_MAX_TOKENS entries and
+# because a range reads as an intent ("the account-lifecycle events") where thirty
+# comma-separated numbers read as noise.
 #
-# A filter is a real trade: an ID that isn't collected cannot be detected on, whatever
-# rules are enabled. Each entry below says what it deliberately leaves behind.
-_CHANNEL_RECOMMENDED_FILTERS = {
-    'Security': {
-        'filter_mode': 'include',
-        'filter_value': '4608,4609,1102,4624,4625,4634,4648,4672,4688,4698,4702,4719,'
-                         '4720,4722,4724,4725,4726,4728,4729,4732,4733,4738,4740,4756,4757,4768,4769,4776',
-    },
-    # 7036 (service entered running/stopped) is the one genuinely high-volume ID in this
-    # channel and is deliberately absent -- it fires on every service state change on every
-    # boot. 7045 (a service was INSTALLED) is the persistence signal worth having, and is
-    # rare. 5723/5805 are the Netlogon secure-channel failures Zerologon exploitation
-    # produces; they do not occur in normal operation.
-    'System': {
-        'filter_mode': 'include',
-        'filter_value': '104,1074,5723,5805,6005,6006,7024,7031,7034,7040,7045',
-    },
-    # Crash/hang telemetry only. Everything else in Application is third-party software
-    # chatter with no detection value and no upper bound on volume.
-    'Application': {
-        'filter_mode': 'include',
-        'filter_value': '1000,1001,1002',
-    },
-    # 4104 (script block logging) is the one that matters -- it captures deobfuscated
-    # script content. 4103 is module/pipeline logging. 4105/4106 (every command start and
-    # stop) are excluded: enormous volume, almost no marginal detection value over 4104.
-    'PowerShell': {
-        'filter_mode': 'include',
-        'filter_value': '400,403,600,4103,4104',
-    },
-    # Sysmon is better filtered in its own config (see Log Pipeline > Sysmon Configuration)
-    # -- that stops the event being generated at all, saving endpoint CPU and the network
-    # hop too, where this only discards it after collection. Offered anyway as a blunt
-    # second line. Event ID 7 (image loaded) is excluded: it is far and away the highest
-    # volume Sysmon event and is rarely what a rule keys on.
-    'Sysmon': {
-        'filter_mode': 'include',
-        'filter_value': '1,2,3,5,8,10,11,12,13,14,15,17,18,19,20,21,22,23,25,26',
-    },
-    # Detection, remediation and -- most importantly -- tamper events: 5001 real-time
-    # protection disabled, 5007 configuration changed, 5010/5012 scanning disabled.
-    'WindowsDefender': {
-        'filter_mode': 'include',
-        'filter_value': '1006,1007,1008,1009,1015,1116,1117,1118,1119,5001,5007,5010,5012,5013',
-    },
+# The tiers are strictly nested -- essential within balanced within comprehensive -- so
+# moving up a tier only ever ADDS collection and can never silently drop an ID the previous
+# tier had. That invariant is enforced by test, not merely intended.
+#
+#   essential      the smallest set worth running: high-signal, low-volume, the events an
+#                  intrusion cannot avoid producing. Safe on a volume-constrained appliance.
+#   balanced       the recommended default, and what a brand-new channel is created with.
+#   comprehensive  broad coverage for hunting and forensics, including the high-frequency
+#                  IDs the other tiers deliberately omit. Expect real volume.
+#
+# A filter is a real trade: an ID that isn't collected cannot be detected on, whatever rules
+# are enabled. Each tier's note says what it leaves behind, and the UI shows that before the
+# template is applied.
+#
+# Every ID here still depends on the matching Advanced Audit Policy subcategory being enabled
+# on the endpoint (see reconcile_windows_audit_policy in micro_agent_windows.py) -- a filter
+# cannot make Windows generate an event nobody turned on.
+_CHANNEL_FILTER_TEMPLATES = {
+    'Security': [
+        {'key': 'essential', 'label': 'Essential',
+         'filter_value': '1102,4624,4625,4648,4672,4688,4697,4719,4720,4726,4728,4732,4740,4756',
+         'note': 'Logon success/failure, explicit credentials, privilege assignment, process '
+                 'creation, service install, account and group changes, lockouts and audit-log '
+                 'clearing. The events an intrusion cannot avoid producing.'},
+        {'key': 'balanced', 'label': 'Balanced (recommended)',
+         'filter_value': '1102,4608,4609,4624,4625,4648,4672,4688,4697-4702,4719,4720,4722-4726,'
+                         '4728,4729,4732,4733,4738,4740,4756,4757,4767-4769,4771,4776,4778,4779,'
+                         '4798,4799,4964',
+         'note': 'Adds the full account and group lifecycle, scheduled tasks, Kerberos and NTLM '
+                 'authentication, RDP session reconnects and user/group enumeration. Still omits '
+                 'logoff and object-access auditing, which are the bulk of Security-log volume.'},
+        {'key': 'comprehensive', 'label': 'Comprehensive',
+         'filter_value': '1102,4608,4609,4616,4624,4625,4634,4647,4648,4649,4656,4657,4660,4663,'
+                         '4670,4672-4674,4688,4692,4693,4697-4702,4719,4720,4722-4726,4728,4729,'
+                         '4732,4733,4738,4740-4743,4756,4757,4767-4769,4771,4776,4778,4779,4798,'
+                         '4799,4964,5024,5025,5030,5136,5137,5140-5145',
+         'note': 'Adds logoff, object and registry access, permission changes, DPAPI, computer '
+                 'account changes, directory-service changes and file-share access. Thorough, and '
+                 'by far the highest volume of the three.'},
+    ],
+    'System': [
+        {'key': 'essential', 'label': 'Essential',
+         'filter_value': '104,5723,5805,6005,6006,7045',
+         'note': 'Event-log clearing, boot and shutdown markers, service installation, and the '
+                 'Netlogon secure-channel failures Zerologon exploitation produces. Effectively '
+                 'zero volume in normal operation.'},
+        {'key': 'balanced', 'label': 'Balanced (recommended)',
+         'filter_value': '104,1074,5723,5805,6005,6006,6008,7000,7001,7022-7024,7026,7031,7032,'
+                         '7034,7040,7045',
+         'note': 'Adds service start failures, crashes and recovery actions, service start-type '
+                 'changes, boot-driver load failures and unexpected shutdowns. Deliberately omits '
+                 '7036 (service entered running/stopped), which is the bulk of this channel.'},
+        {'key': 'comprehensive', 'label': 'Comprehensive',
+         'filter_value': '1,12,13,20,24,25,41,104,219,1074,5723,5805,6005,6006,6008,7000,7001,'
+                         '7022-7024,7026,7031,7032,7034,7036,7040,7045',
+         'note': 'Adds 7036 service state changes, kernel time changes, OS start/stop, unexpected '
+                 'reboots, driver loads and Windows Update activity. 7036 alone accounts for most '
+                 'of the added volume.'},
+    ],
+    'Application': [
+        {'key': 'essential', 'label': 'Essential',
+         'filter_value': '1000,1002',
+         'note': 'Application crashes and hangs only.'},
+        {'key': 'balanced', 'label': 'Balanced (recommended)',
+         'filter_value': '1000,1001,1002,1026',
+         'note': 'Adds Windows Error Reporting and .NET runtime faults -- useful for spotting an '
+                 'exploit attempt that crashes its target.'},
+        {'key': 'comprehensive', 'label': 'Comprehensive',
+         'filter_value': '1000,1001,1002,1026,11707,11708,11724',
+         'note': 'Adds MSI installer success, failure and removal, which doubles as a software '
+                 'install trail. The rest of this channel is third-party chatter with no detection '
+                 'value.'},
+    ],
+    'PowerShell': [
+        {'key': 'essential', 'label': 'Essential',
+         'filter_value': '4104',
+         'note': 'Script block logging only -- the one event that captures deobfuscated script '
+                 'content, and the highest-value PowerShell event there is.'},
+        {'key': 'balanced', 'label': 'Balanced (recommended)',
+         'filter_value': '400,403,600,4103,4104',
+         'note': 'Adds module/pipeline logging and classic engine lifecycle, which catch provider '
+                 'use and downgrade attacks to PowerShell v2.'},
+        {'key': 'comprehensive', 'label': 'Comprehensive',
+         'filter_value': '400,403,600,800,4103-4106',
+         'note': 'Adds per-command start/stop (4105/4106) and pipeline execution detail. Very high '
+                 'volume for little beyond what 4104 already gives you.'},
+    ],
+    'Sysmon': [
+        {'key': 'essential', 'label': 'Essential',
+         'filter_value': '1,3,8,10,11,22,25',
+         'note': 'Process creation, network connections, remote threads, process access, file '
+                 'creation, DNS queries and process tampering -- the core attack-technique events.'},
+        {'key': 'balanced', 'label': 'Balanced (recommended)',
+         'filter_value': '1-5,8,10-15,17-23,25-28',
+         'note': 'Adds registry, named pipes, WMI subscriptions, file streams and file deletion. '
+                 'Omits image loads (ID 7), the noisiest Sysmon event by a wide margin.'},
+        {'key': 'comprehensive', 'label': 'Comprehensive',
+         'filter_value': '1-29,255',
+         'note': 'Everything Sysmon emits, image and driver loads included. Prefer filtering in the '
+                 'Sysmon configuration itself where you can -- that stops the event being generated '
+                 'at all, saving endpoint CPU and the network hop, where this only discards it '
+                 'after collection.'},
+    ],
+    'WindowsDefender': [
+        {'key': 'essential', 'label': 'Essential',
+         'filter_value': '1006,1116,1117,5001',
+         'note': 'Malware detected, action taken, and real-time protection being switched off.'},
+        {'key': 'balanced', 'label': 'Balanced (recommended)',
+         'filter_value': '1006-1009,1015,1116-1119,5001,5007,5010,5012,5013',
+         'note': 'Adds remediation outcomes, suspicious behaviour detections and the remaining '
+                 'tamper events -- configuration changed, scanning disabled.'},
+        {'key': 'comprehensive', 'label': 'Comprehensive',
+         'filter_value': '1000-1002,1005-1015,1116-1119,2000-2002,3002,5000-5013',
+         'note': 'Adds scan start/stop, signature update success and failure, and engine errors. '
+                 'Signature updates are frequent and rarely interesting.'},
+    ],
 }
 
-# Plain-language rationale shown next to the preset in the UI, so applying one is an
-# informed choice rather than a leap of faith. Kept separate from the catalog above
-# because that dict is spread directly into a saved channel setting.
-_CHANNEL_RECOMMENDED_NOTES = {
-    'Security': 'Logon, privilege, account/group changes, process creation, scheduled tasks and audit-log clearing.',
-    'System': 'Service installs and failures, event-log clearing, shutdowns, and the Netlogon failures Zerologon produces. Leaves out 7036 (routine service start/stop), which is the bulk of this channel.',
-    'Application': 'Application crashes and hangs only. The rest of this channel is third-party chatter.',
-    'PowerShell': 'Script block logging (4104) and module logging. Leaves out per-command start/stop, which is very high volume.',
-    'Sysmon': 'Process, network, registry, file, pipe and DNS events. Leaves out image loads (ID 7), the noisiest Sysmon event. Filtering in the Sysmon config itself is better still.',
-    'WindowsDefender': 'Malware detections, remediation outcomes, and tamper events such as real-time protection being switched off.',
+# The tier a brand-new channel is created with, and the one the UI marks as recommended.
+_CHANNEL_DEFAULT_TEMPLATE_KEY = 'balanced'
+
+def _channel_template(name, key=_CHANNEL_DEFAULT_TEMPLATE_KEY):
+    for t in _CHANNEL_FILTER_TEMPLATES.get(name, []):
+        if t['key'] == key:
+            return t
+    return None
+
+# Derived, never duplicated: the filter a newly-created channel gets IS the balanced tier,
+# so the two cannot drift apart. Shape is {filter_mode, filter_value} because this dict gets
+# spread straight into a saved channel setting by _recommended_channel_setting below.
+_CHANNEL_RECOMMENDED_FILTERS = {
+    name: {'filter_mode': 'include', 'filter_value': _channel_template(name)['filter_value']}
+    for name in _CHANNEL_FILTER_TEMPLATES
+    if _channel_template(name)
 }
 
 def _recommended_channel_setting(name, enabled=False):
