@@ -5256,17 +5256,25 @@ def _log_source_gap_summary(db):
     ingested right now (_get_ingested_apps -- ground truth from live_logs.app), plus
     which Sigma log-source categories are a HARD gap (SIGMA_LOGSOURCE_INGESTED_APPS
     maps them to an empty app set -- no ingest path exists at all, not just "not seen
-    yet"), each counted by how many currently-enabled rules and curated MITRE
-    techniques are stuck behind it. A rule counted here can never leave 'active' by
-    construction (see log_source_gap in _build_mitre_coverage) until that source is
-    wired into ingestion -- these are the highest-leverage gaps to close."""
+    yet"), each counted by how many rules and curated MITRE techniques are stuck behind
+    it. A rule counted here can never leave 'active' by construction (see log_source_gap
+    in _build_mitre_coverage) until that source is wired into ingestion -- these are the
+    highest-leverage gaps to close.
+
+    Counts EVERY rule for the gapped source, enabled or not, split into enabled_rule_count
+    and disabled_rule_count. It used to count only enabled ones, which had a perverse
+    result: turning off a rule because its log source isn't collected also removed it from
+    the report that explains why. Tidying the rule list quietly shrank the stated upside of
+    ever wiring that source up. The honest question this answers is "what would I get if I
+    ingested this?", and the answer does not depend on whether the rule is switched on
+    today -- a disabled rule is one toggle away, an un-ingested source is not."""
     import time
     now = time.time()
     if _LOG_SOURCE_GAP_CACHE['data'] is not None and (now - _LOG_SOURCE_GAP_CACHE['time']) < _LOG_SOURCE_GAP_CACHE_TTL:
         return _LOG_SOURCE_GAP_CACHE['data']
     from mitre_attack import techniques_for_tags, tags_from_rule_yaml
     groups = {}
-    for r in db.execute("SELECT rule_yaml FROM sigma_rules WHERE enabled = 1").fetchall():
+    for r in db.execute("SELECT rule_yaml, enabled FROM sigma_rules").fetchall():
         ry = r['rule_yaml']
         try:
             raw_product = (_extract_yaml_field('product', ry) or '').strip().lower() or None
@@ -5283,8 +5291,10 @@ def _log_source_gap_summary(db):
         if expected is None or expected:
             continue  # unknown combo, or a real (possibly-satisfied) ingest path -- not a hard gap
         label = _LOG_SOURCE_GAP_LABELS.get(key, key[0].title())
-        g = groups.setdefault(label, {'rule_count': 0, 'technique_ids': set()})
+        g = groups.setdefault(label, {'rule_count': 0, 'enabled_rule_count': 0,
+                                      'disabled_rule_count': 0, 'technique_ids': set()})
         g['rule_count'] += 1
+        g['enabled_rule_count' if r['enabled'] else 'disabled_rule_count'] += 1
         try:
             for tech in techniques_for_tags(tags_from_rule_yaml(ry)):
                 if tech['tactic'] != 'unmapped':
@@ -5294,7 +5304,10 @@ def _log_source_gap_summary(db):
     result = {
         'ingested_apps': sorted(_get_ingested_apps(db)),
         'gaps': [
-            {'label': label, 'rule_count': g['rule_count'], 'technique_count': len(g['technique_ids'])}
+            {'label': label, 'rule_count': g['rule_count'],
+             'enabled_rule_count': g['enabled_rule_count'],
+             'disabled_rule_count': g['disabled_rule_count'],
+             'technique_count': len(g['technique_ids'])}
             for label, g in sorted(groups.items(), key=lambda kv: -len(kv[1]['technique_ids']))
         ],
     }

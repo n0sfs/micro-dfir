@@ -483,16 +483,30 @@ function logSourcesPopoverHtml() {
     const appsHtml = ls.ingested_apps.length
         ? `<div class="cov-logsrc-apps">${ls.ingested_apps.map(a => `<span class="cov-logsrc-app-chip">${escHtml(a)}</span>`).join('')}</div>`
         : `<div class="text-muted small mb-2">Nothing ingested yet.</div>`;
+    // Counts cover every rule for the source, switched on or not. A rule turned off
+    // BECAUSE its log source isn't collected is still coverage this appliance would gain
+    // by collecting it -- so it belongs in the upside, not hidden because someone tidied
+    // the rule list. The disabled tail is called out separately since wiring up the
+    // source is only half the job for those: they also need switching back on.
     const gapsHtml = ls.gaps.length
-        ? ls.gaps.map(g => `<div class="cov-logsrc-gap-item"><span class="cov-logsrc-gap-label">${escHtml(g.label)}</span><span class="cov-logsrc-gap-count">${g.rule_count} rule${g.rule_count === 1 ? '' : 's'} &middot; ${g.technique_count} technique${g.technique_count === 1 ? '' : 's'}</span></div>`).join('')
-        : `<div class="text-muted small">No hard gaps -- every enabled rule's log source is either ingested or unknown.</div>`;
+        ? ls.gaps.map(g => {
+            const disabled = g.disabled_rule_count || 0;
+            const detail = disabled
+                ? `${g.rule_count} rule${g.rule_count === 1 ? '' : 's'} ready (${disabled} disabled)`
+                : `${g.rule_count} rule${g.rule_count === 1 ? '' : 's'} ready`;
+            return `<div class="cov-logsrc-gap-item"><span class="cov-logsrc-gap-label">${escHtml(g.label)}</span><span class="cov-logsrc-gap-count">${detail} &middot; ${g.technique_count} technique${g.technique_count === 1 ? '' : 's'}</span></div>`;
+          }).join('')
+        : `<div class="text-muted small">No hard gaps -- every rule's log source is either ingested or unknown.</div>`;
+    const totalWaiting = ls.gaps.reduce((n, g) => n + g.rule_count, 0);
+    const totalDisabled = ls.gaps.reduce((n, g) => n + (g.disabled_rule_count || 0), 0);
     return `
         <div class="cov-tier-pop-header"><i class="fa-solid fa-tower-broadcast"></i> Log Sources</div>
         <div class="cov-tier-pop-list">
             <div class="small text-muted mb-1">Currently ingesting (${ls.ingested_apps.length}):</div>
             ${appsHtml}
-            <div class="small text-muted mb-1" style="margin-top:6px;">Never wired up -- these rules can't reach Validated no matter what fires, until the source itself is ingested:</div>
+            <div class="small text-muted mb-1" style="margin-top:6px;">Not collected at all. Wire one of these up and its rules start working &mdash; nothing they match on reaches this appliance today, so they can't fire however noisy the environment gets:</div>
             ${gapsHtml}
+            ${totalWaiting ? `<div class="small text-muted" style="margin-top:6px;">${totalWaiting} rule${totalWaiting === 1 ? '' : 's'} in total are waiting on a log source${totalDisabled ? `, ${totalDisabled} of which ${totalDisabled === 1 ? 'is' : 'are'} also switched off &mdash; those need re-enabling once the source is ingested.` : '.'}</div>` : ''}
         </div>`;
 }
 
